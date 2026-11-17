@@ -6,7 +6,8 @@ final class Segmenter {
     struct Config {
         var sensitivityDB: Float = 12     // 高于环境噪声多少 dB 算说话（越小越灵敏）
         var silenceMs: Int = 700          // 停顿多久算一句话结束
-        var maxSeconds: Double = 20       // 单句最长时长
+        var maxSeconds: Double = 15       // 单句最长时长
+        var partialEvery: Double = 0.7    // 说话中每隔多久给一次中间结果（秒）
         var minSpeechMs: Int = 350        // 太短的声音忽略
     }
 
@@ -29,7 +30,7 @@ final class Segmenter {
     private var voicedRun = 0
     private var silentRun = 0
     private var voicedFrames = 0
-    private var noiseDB: Float = -60
+    private var history: [Float] = []     // 最近约 3 秒每帧的音量，用来估计环境噪声
     private var segID = 0
     private var lastPartialAt = 0
     private var frameCounter = 0
@@ -66,7 +67,10 @@ final class Segmenter {
             onEvent?(.level(min(1, max(0, (db + 60) / 50))))
         }
 
-        let threshold = max(noiseDB + config.sensitivityDB, -55)
+        history.append(db)
+        if history.count > 100 { history.removeFirst(history.count - 100) }
+        let noise = noiseFloor()
+        let threshold = max(noise + config.sensitivityDB, -50)
 
         if !inSpeech {
             preroll.append(contentsOf: f)
@@ -77,7 +81,6 @@ final class Segmenter {
                 voicedRun += 1
             } else {
                 voicedRun = 0
-                noiseDB = min(-25, max(-80, noiseDB * 0.95 + db * 0.05))
             }
             if voicedRun >= 3 {
                 inSpeech = true
@@ -91,7 +94,8 @@ final class Segmenter {
             }
         } else {
             speech.append(contentsOf: f)
-            if db > threshold - 3 {
+            // 说话中音量回落到“噪声 + 灵敏度的一半”以下，就算停顿
+            if db > noise + config.sensitivityDB * 0.5 {
                 silentRun = 0
                 voicedFrames += 1
             } else {
@@ -101,11 +105,18 @@ final class Segmenter {
             let maxed = speech.count >= Int(config.maxSeconds * Double(sr))
             if silentMs >= config.silenceMs || maxed {
                 finish()
-            } else if speech.count - lastPartialAt >= sr {
+            } else if speech.count - lastPartialAt >= Int(config.partialEvery * Double(sr)) {
                 lastPartialAt = speech.count
                 onEvent?(.partial(segID, speech))
             }
         }
+    }
+
+    /// 环境噪声 = 最近 3 秒音量的第 10 百分位（会随环境自动调整，说话中也会更新）
+    private func noiseFloor() -> Float {
+        guard history.count >= 10 else { return -50 }
+        let sorted = history.sorted()
+        return min(-25, max(-75, sorted[sorted.count / 10]))
     }
 
     private func finish() {

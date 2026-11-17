@@ -35,8 +35,8 @@ struct Language: Identifiable, Hashable, Codable {
 }
 
 /// 一条翻译记录
-struct TranslationItem: Identifiable, Equatable {
-    let id = UUID()
+struct TranslationItem: Identifiable, Equatable, Codable {
+    var id = UUID()
     let source: Language
     let target: Language
     var sourceText: String

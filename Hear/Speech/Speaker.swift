@@ -103,12 +103,13 @@ final class Speaker: NSObject {
         player.pan = currentPan
         if !engine.isRunning {
             engine.prepare()
-            try? engine.start()
+            do { try engine.start() } catch { hearLog("朗读：音频引擎启动失败 \(error)", .error) }
         }
     }
 
     private func checkDone() {
         guard finished, played >= scheduled else { return }
+        if scheduled == 0 { hearLog("朗读：系统语音没有生成声音（可能没有安装该语言的语音）", .warning) }
         let c = continuation
         continuation = nil
         c?.resume()

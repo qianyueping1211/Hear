@@ -1,0 +1,183 @@
+import Foundation
+
+/// 某个模板生成的总结
+struct SummaryRecord: Codable, Equatable {
+    enum Status: String, Codable { case generating, done, failed }
+
+    var status: Status
+    var content: String = ""
+    var error: String? = nil
+    var model: String? = nil
+    var edited = false
+    var updatedAt = Date()
+}
+
+/// 一次完整的对话（一页）
+struct Conversation: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var title: String
+    var createdAt = Date()
+    var updatedAt = Date()
+    var langA: Language
+    var langB: Language
+    var items: [TranslationItem] = []
+    /// 每个模板各自的总结结果，key 是模板 id。切换模板不会覆盖别的模板的结果
+    var summaries: [String: SummaryRecord] = [:]
+    /// 总结页当前选中的模板
+    var activeTemplateID: String = SummaryTemplate.defaultID
+
+    static func defaultTitle(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "M月d日 HH:mm 的对话"
+        return f.string(from: date)
+    }
+}
+
+/// 历史列表用的轻量信息（存在 index.json 里，不用打开每个对话文件）
+struct ConversationMeta: Codable, Identifiable, Equatable {
+    var id: UUID
+    var title: String
+    var createdAt: Date
+    var updatedAt: Date
+    var itemCount: Int
+    var preview: String
+    var langs: String
+    var summaryStatus: SummaryRecord.Status?
+}
+
+/// 本地存储：
+/// Application Support/Conversations/<id>.json   每个对话一个文件（原文、译文、各模板总结）
+/// Application Support/Conversations/index.json  历史列表索引
+@MainActor
+final class ConversationStore: ObservableObject {
+    static let shared = ConversationStore()
+
+    @Published private(set) var metas: [ConversationMeta] = []
+    /// 任意对话保存后加一，打开的页面据此刷新
+    @Published private(set) var revision = 0
+
+    private let dir: URL
+    private let indexURL: URL
+    private let encoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.dateEncodingStrategy = .iso8601
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return e
+    }()
+    private let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }()
+
+    private init() {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        dir = base.appendingPathComponent("Conversations", isDirectory: true)
+        indexURL = dir.appendingPathComponent("index.json")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        if let data = try? Data(contentsOf: indexURL),
+           let list = try? decoder.decode([ConversationMeta].self, from: data) {
+            metas = list
+        } else {
+            rebuildIndex()
+        }
+        recoverInterrupted()
+    }
+
+    private func fileURL(_ id: UUID) -> URL { dir.appendingPathComponent("\(id.uuidString).json") }
+
+    // MARK: 读写
+
+    func load(_ id: UUID) -> Conversation? {
+        guard let data = try? Data(contentsOf: fileURL(id)) else { return nil }
+        return try? decoder.decode(Conversation.self, from: data)
+    }
+
+    func save(_ conversation: Conversation) {
+        var c = conversation
+        c.updatedAt = Date()
+        do {
+            let data = try encoder.encode(c)
+            try data.write(to: fileURL(c.id), options: .atomic)
+        } catch {
+            hearLog("保存对话失败：\(error)", .error)
+            return
+        }
+        let meta = Self.meta(of: c)
+        if let i = metas.firstIndex(where: { $0.id == c.id }) { metas[i] = meta } else { metas.append(meta) }
+        metas.sort { $0.updatedAt > $1.updatedAt }
+        writeIndex()
+        revision += 1
+    }
+
+    func delete(_ id: UUID) {
+        try? FileManager.default.removeItem(at: fileURL(id))
+        metas.removeAll { $0.id == id }
+        writeIndex()
+        revision += 1
+        hearLog("删除对话 \(id.uuidString.prefix(8))")
+    }
+
+    func rename(_ id: UUID, to title: String) {
+        guard var c = load(id) else { return }
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        c.title = t
+        save(c)
+    }
+
+    func setActiveTemplate(_ id: UUID, templateID: String) {
+        guard var c = load(id) else { return }
+        c.activeTemplateID = templateID
+        save(c)
+    }
+
+    func updateSummary(_ id: UUID, templateID: String, _ record: SummaryRecord) {
+        guard var c = load(id) else { return }
+        c.summaries[templateID] = record
+        save(c)
+    }
+
+    // MARK: 索引
+
+    private static func meta(of c: Conversation) -> ConversationMeta {
+        let first = c.items.first.map { $0.sourceText } ?? ""
+        return ConversationMeta(
+            id: c.id, title: c.title, createdAt: c.createdAt, updatedAt: c.updatedAt,
+            itemCount: c.items.count, preview: String(first.prefix(60)),
+            langs: "\(c.langA.name) ⇄ \(c.langB.name)",
+            summaryStatus: c.summaries[c.activeTemplateID]?.status
+                ?? c.summaries[SummaryTemplate.defaultID]?.status
+        )
+    }
+
+    private func writeIndex() {
+        if let data = try? encoder.encode(metas) { try? data.write(to: indexURL, options: .atomic) }
+    }
+
+    /// 索引丢失或损坏时，从对话文件重新生成
+    private func rebuildIndex() {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        metas = files
+            .filter { $0.pathExtension == "json" && $0.lastPathComponent != "index.json" }
+            .compactMap { (try? Data(contentsOf: $0)).flatMap { try? decoder.decode(Conversation.self, from: $0) } }
+            .map(Self.meta(of:))
+            .sorted { $0.updatedAt > $1.updatedAt }
+        writeIndex()
+    }
+
+    /// App 被关掉时还在生成的总结，标记为失败，方便用户重试
+    private func recoverInterrupted() {
+        for m in metas where m.summaryStatus == .generating {
+            guard var c = load(m.id) else { continue }
+            for (k, r) in c.summaries where r.status == .generating {
+                var r2 = r
+                r2.status = .failed
+                r2.error = "上次生成时 App 被关闭，请重试"
+                c.summaries[k] = r2
+            }
+            save(c)
+        }
+    }
+}

@@ -35,6 +35,9 @@ targets:
         LSSupportsOpeningDocumentsInPlace: true
         UIBackgroundModes:
           - audio
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: 用于连接你在局域网内自建的大模型服务（例如 Ollama）。
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ${BUNDLE_ID}
