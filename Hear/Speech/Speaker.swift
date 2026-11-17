@@ -198,15 +198,29 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
-    static var hasAnyPersonalVoice: Bool {
-        AVSpeechSynthesisVoice.speechVoices().contains { $0.voiceTraits.contains(.isPersonalVoice) }
+    static var hasAnyPersonalVoice: Bool { !personalVoices.isEmpty }
+
+    static var personalVoices: [AVSpeechSynthesisVoice] {
+        AVSpeechSynthesisVoice.speechVoices().filter { $0.voiceTraits.contains(.isPersonalVoice) }
     }
 
+    /// 已经授权就直接返回，不再弹窗；否则请求授权
     static func requestPersonalVoiceAccess() async -> Bool {
-        await withCheckedContinuation { c in
-            AVSpeechSynthesizer.requestPersonalVoiceAuthorization { status in
-                c.resume(returning: status == .authorized)
-            }
+        if AVSpeechSynthesizer.personalVoiceAuthorizationStatus == .authorized { return true }
+        let status: AVSpeechSynthesizer.PersonalVoiceAuthorizationStatus = await withCheckedContinuation { c in
+            AVSpeechSynthesizer.requestPersonalVoiceAuthorization { c.resume(returning: $0) }
         }
+        hearLog("个人声音授权结果：\(status.rawValue)")
+        return status == .authorized
+    }
+
+    /// 刚授权时系统的声音列表可能还没刷新：最多等 3 秒再找
+    static func findPersonalVoices() async -> [AVSpeechSynthesisVoice] {
+        for _ in 0..<10 {
+            let v = personalVoices
+            if !v.isEmpty { return v }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        return personalVoices
     }
 }

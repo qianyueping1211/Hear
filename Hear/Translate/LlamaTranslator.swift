@@ -13,8 +13,22 @@ enum TranslatorError: LocalizedError {
     }
 }
 
+/// 线程安全的“停止”标记：翻译进行中也能从外面让它马上停下
+final class CancelFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.lock(); value = true; lock.unlock() }
+    func reset() { lock.lock(); value = false; lock.unlock() }
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+}
+
 /// 用 llama.cpp（Metal GPU）在本机运行 Hy-MT2 GGUF 翻译模型
 actor LlamaTranslator {
+    private let stopFlag = CancelFlag()
+
+    /// 立刻停止正在进行的翻译（不用等 actor 空闲）
+    nonisolated func cancelCurrent() { stopFlag.set() }
+
     private var model: OpaquePointer?
     private var ctx: OpaquePointer?
     private var vocab: OpaquePointer?
@@ -80,6 +94,7 @@ actor LlamaTranslator {
                    maxNewTokens: Int = 512,
                    onUpdate: @escaping @Sendable (String) -> Void) throws -> String {
         guard let ctx, let vocab, let sampler else { throw TranslatorError.notLoaded }
+        stopFlag.reset()
 
         let prompt = applyChatTemplate(userPrompt)
         var tokens = tokenize(prompt)
@@ -97,7 +112,7 @@ actor LlamaTranslator {
         var pending: [UInt8] = []
 
         for _ in 0..<maxNewTokens {
-            if Task.isCancelled { break }
+            if Task.isCancelled || stopFlag.isSet { break }
             var tok = llama_sampler_sample(sampler, ctx, -1)
             if llama_vocab_is_eog(vocab, tok) { break }
 
