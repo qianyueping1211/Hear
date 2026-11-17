@@ -11,10 +11,10 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                TopBar(onNew: newTapped,
+                       onHistory: { showHistory = true },
+                       onSettings: { showSettings = true })
                 LanguageBar()
-                if session.outputMode == .headphones {
-                    EarBar()
-                }
                 Divider()
                 Group {
                     if session.phase == .ready {
@@ -27,25 +27,7 @@ struct ContentView: View {
                 Divider()
                 ControlBar()
             }
-            .navigationTitle("听见")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { session.clearPage() } label: { Image(systemName: "trash") }
-                        .accessibilityLabel("清空")
-                        .disabled(session.items.isEmpty && session.partial.isEmpty)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button { newTapped() } label: { Label("新建", systemImage: "square.and.pencil") }
-                        Button { showHistory = true } label: { Label("历史", systemImage: "clock.arrow.circlepath") }
-                        Button { showSettings = true } label: { Label("设置", systemImage: "gearshape") }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    .accessibilityLabel("更多")
-                }
-            }
+            .toolbar(.hidden, for: .navigationBar)
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showHistory) { HistoryView() }
             .confirmationDialog("是否需要把本页内容进行后台总结？", isPresented: $askNew, titleVisibility: .visible) {
@@ -78,6 +60,63 @@ struct ContentView: View {
         } else {
             session.newConversation(summarize: false)
         }
+    }
+}
+
+// MARK: - 顶部栏：左边清空，中间标题，右边 ⋯ 菜单（新建 / 历史 / 设置）
+
+struct TopBar: View {
+    @EnvironmentObject var session: LiveSession
+    var onNew: () -> Void
+    var onHistory: () -> Void
+    var onSettings: () -> Void
+
+    var body: some View {
+        HStack {
+            Button { session.clearPage() } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 19, weight: .medium))
+                    .frame(width: 44, height: 44)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .foregroundStyle(.primary)
+            .disabled(session.items.isEmpty && session.partial.isEmpty)
+            .accessibilityLabel("清空")
+
+            Spacer()
+
+            Menu {
+                Button(action: onNew) { Label("新建", systemImage: "square.and.pencil") }
+                Button(action: onHistory) { Label("历史", systemImage: "clock.arrow.circlepath") }
+                Button(action: onSettings) { Label("设置", systemImage: "gearshape") }
+            } label: {
+                MoreDots()
+            }
+            .accessibilityLabel("更多")
+        }
+        .overlay {
+            Text("听见").font(.headline)
+        }
+        .padding(.horizontal)
+        .padding(.top, 6)
+        .padding(.bottom, 2)
+    }
+}
+
+/// 右上角按钮：只有一圈 44pt 的圆框（深色模式是白框），中间三个大圆点
+struct MoreDots: View {
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(Color.primary, lineWidth: 2)
+            HStack(spacing: 5) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Circle().fill(Color.primary).frame(width: 6, height: 6)
+                }
+            }
+        }
+        .frame(width: 44, height: 44)
+        .contentShape(Circle())
     }
 }
 
@@ -190,27 +229,36 @@ struct BubbleView: View {
     var reading: Bool = false
     var onSpeak: () -> Void
 
+    /// 左侧气泡国旗在前，右侧气泡国旗在后（靠外侧）
+    private func flagged(_ flag: String, _ text: String) -> Text {
+        leading ? Text("\(flag) \(text)") : Text("\(text) \(flag)")
+    }
+
+    private var readingIcon: some View {
+        Image(systemName: "speaker.wave.2.fill")
+            .symbolEffect(.variableColor.iterative)
+            .foregroundStyle(Color.accentColor)
+    }
+
     var body: some View {
         HStack {
             if !leading { Spacer(minLength: 40) }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("\(item.source.flag) \(item.sourceText)")
+            VStack(alignment: leading ? .leading : .trailing, spacing: 6) {
+                flagged(item.source.flag, item.sourceText)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 if item.translated.isEmpty {
                     ProgressView().controlSize(.small)
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("\(item.target.flag) \(item.translated)")
+                        if reading && !leading { readingIcon }
+                        flagged(item.target.flag, item.translated)
                             .font(.title3.weight(.medium))
-                        if reading {
-                            Image(systemName: "speaker.wave.2.fill")
-                                .symbolEffect(.variableColor.iterative)
-                                .foregroundStyle(Color.accentColor)
-                        }
+                        if reading && leading { readingIcon }
                     }
                 }
             }
+            .multilineTextAlignment(leading ? .leading : .trailing)
             .padding(12)
             .background(leading ? Color(.secondarySystemBackground) : Color.accentColor.opacity(0.15),
                         in: RoundedRectangle(cornerRadius: 16))
@@ -304,6 +352,7 @@ struct ControlBar: View {
 
 struct SpeakToggle: View {
     @EnvironmentObject var session: LiveSession
+    @State private var showEars = false
 
     private var icon: String {
         if !session.speakOutput { return "speaker.slash.fill" }
@@ -311,8 +360,8 @@ struct SpeakToggle: View {
     }
 
     private var label: String {
-        let where_ = session.outputMode == .headphones ? "耳机" : "朗读"
-        return session.speakOutput ? "\(where_)开" : "\(where_)关"
+        guard session.speakOutput else { return "播报关" }
+        return session.outputMode == .headphones ? "耳机播报" : "扬声器播报"
     }
 
     var body: some View {
@@ -320,57 +369,90 @@ struct SpeakToggle: View {
             Image(systemName: icon).font(.title2)
             Text(label).font(.caption2)
         }
-        .frame(width: 70, height: 56)
+        .frame(width: 76, height: 56)
         .foregroundStyle(Color.accentColor)
         .contentShape(Rectangle())
         .onTapGesture { session.speakOutput.toggle() }
-        .onLongPressGesture(minimumDuration: 2) { session.cycleOutput() }
-        .accessibilityLabel("朗读")
-        .accessibilityHint("点按开关朗读，按住两秒切换扬声器或耳机")
+        // 按住 2 秒：耳机播报时弹出左右耳设置；扬声器播报时切换到耳机（没连耳机不切换）
+        .onLongPressGesture(minimumDuration: 2) {
+            if session.outputMode == .headphones {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                showEars = true
+            } else {
+                session.cycleOutput()
+            }
+        }
+        .sheet(isPresented: $showEars) {
+            EarSheet()
+                .presentationDetents([.height(330)])
+                .presentationDragIndicator(.visible)
+        }
+        .accessibilityLabel("播报")
+        .accessibilityHint("点按开关播报；按住两秒设置耳机左右耳，或切换到耳机")
     }
 }
 
-// MARK: - 耳机模式：左右耳分别听哪种语言
+// MARK: - 耳机播报：左右耳分别听哪种语言（长按播报按钮弹出）
 
-struct EarBar: View {
+struct EarSheet: View {
     @EnvironmentObject var session: LiveSession
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        HStack(spacing: 10) {
-            EarMenu(title: "左耳", symbol: "l.circle.fill", selection: $session.leftEar)
-            EarMenu(title: "右耳", symbol: "r.circle.fill", selection: $session.rightEar)
+        VStack(spacing: 20) {
+            Text("耳机播报").font(.headline).padding(.top, 22)
+
+            HStack(spacing: 0) {
+                EarColumn(title: "左耳", symbol: "airpod.left", selection: $session.leftEar)
+                Divider().frame(height: 120)
+                EarColumn(title: "右耳", symbol: "airpod.right", selection: $session.rightEar)
+            }
+            .padding(.horizontal, 24)
+
+            Button {
+                session.cycleOutput()
+                dismiss()
+            } label: {
+                Label("改用手机扬声器播报", systemImage: "speaker.wave.2")
+                    .font(.subheadline)
+            }
+            .padding(.bottom, 8)
         }
-        .padding(.horizontal)
-        .padding(.bottom, 8)
+        .frame(maxWidth: .infinity)
     }
 }
 
-struct EarMenu: View {
+private struct EarColumn: View {
     @EnvironmentObject var session: LiveSession
     let title: String
     let symbol: String
     @Binding var selection: String
 
     var body: some View {
-        Menu {
-            Picker(title, selection: $selection) {
-                Text(session.langA.name).tag("A")
-                Text(session.langB.name).tag("B")
-                Text("不播放").tag("off")
+        VStack(spacing: 10) {
+            Image(systemName: symbol)
+                .font(.system(size: 44))
+                .foregroundStyle(selection == "off" ? Color.secondary : Color.accentColor)
+                .frame(height: 56)
+            Text(title).font(.subheadline).foregroundStyle(.secondary)
+            Menu {
+                Picker(title, selection: $selection) {
+                    Text("\(session.langA.flag) \(session.langA.name)").tag("A")
+                    Text("\(session.langB.flag) \(session.langB.name)").tag("B")
+                    Text("不播放").tag("off")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(session.earLabel(selection)).fontWeight(.medium).lineLimit(1)
+                    Image(systemName: "chevron.down").font(.caption2)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Color.accentColor.opacity(0.12), in: Capsule())
             }
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: symbol)
-                Text(title).foregroundStyle(.secondary)
-                Text(session.earLabel(selection)).fontWeight(.medium)
-                Image(systemName: "chevron.down").font(.caption2)
-            }
-            .font(.footnote)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
-            .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+            .foregroundStyle(.primary)
         }
-        .foregroundStyle(.primary)
+        .frame(maxWidth: .infinity)
     }
 }
 

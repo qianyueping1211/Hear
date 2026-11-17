@@ -54,6 +54,10 @@ final class LiveSession: ObservableObject {
     @Published var mySide: String { didSet { save("mySide", mySide) } }
     // 语音识别用 GPU（加载快）还是神经引擎（省电，首次编译慢）
     @Published var asrUseGPU: Bool { didSet { save("asrUseGPU", asrUseGPU) } }
+    // 语音增强：系统的降噪 + 回声消除 + 自动增益
+    @Published var voiceProcessing: Bool {
+        didSet { save("voiceProcessing", voiceProcessing); capture.voiceProcessing = voiceProcessing }
+    }
 
     private let capture = AudioCapture()
     private let asr = SpeechRecognizer()
@@ -97,6 +101,8 @@ final class LiveSession: ObservableObject {
         usePersonalVoice = d.object(forKey: "usePersonalVoice") as? Bool ?? false
         mySide = d.string(forKey: "mySide") ?? "A"
         asrUseGPU = d.object(forKey: "asrUseGPU") as? Bool ?? true
+        voiceProcessing = d.object(forKey: "voiceProcessing") as? Bool ?? true
+        capture.voiceProcessing = voiceProcessing
 
         capture.segmenter.onEvent = { [weak self] e in
             Task { @MainActor in self?.handle(e) }
@@ -575,7 +581,7 @@ final class LiveSession: ObservableObject {
         let t0 = Date()
         let r: (String, String)
         do {
-            r = try await asr.recognize(samples, candidates: [a.id, b.id], fallback: fallback)
+            r = try await asr.recognize(samples, candidates: [a.id, b.id], fallback: fallback, preview: true)
         } catch {
             hearLog("实时识别失败：\(error)", .error)
             return
@@ -612,10 +618,12 @@ final class LiveSession: ObservableObject {
         let fallback = (lastLangID == b.id) ? b.id : a.id
         let detected: String
         let text: String
+        let t0 = Date()
         do {
             let r = try await asr.recognize(samples, candidates: [a.id, b.id], fallback: fallback)
             detected = r.0
             text = r.1
+            hearLog("整句识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(text.prefix(40))")
         } catch {
             hearLog("识别失败：\(error)", .error)
             activity = "识别失败"; partial = ""; return
