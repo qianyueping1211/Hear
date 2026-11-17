@@ -17,8 +17,14 @@ struct ContentView: View {
                 LanguageBar()
                 Divider()
                 Group {
-                    if session.phase == .ready {
+                    if session.phase == .ready || session.isLoadingPhase {
+                        // 加载模型时也显示对话页，顶部一行小字提示，不挡住内容
                         TranscriptView()
+                            .overlay(alignment: .top) {
+                                if let msg = session.loadingText {
+                                    LoadingPill(text: msg).padding(.top, 8)
+                                }
+                            }
                     } else {
                         SetupView()
                     }
@@ -103,20 +109,32 @@ struct TopBar: View {
     }
 }
 
-/// 右上角按钮：只有一圈 44pt 的圆框（深色模式是白框），中间三个大圆点
+/// 右上角按钮：和左边清空按钮一样大的 44pt 圆框，中间三个点和垃圾桶图标一样大
 struct MoreDots: View {
     var body: some View {
         ZStack {
             Circle()
-                .strokeBorder(Color.primary, lineWidth: 2)
-            HStack(spacing: 5) {
-                ForEach(0..<3, id: \.self) { _ in
-                    Circle().fill(Color.primary).frame(width: 6, height: 6)
-                }
-            }
+                .strokeBorder(Color.primary, lineWidth: 1.5)
+            Image(systemName: "ellipsis")
+                .font(.system(size: 19, weight: .bold))
         }
+        .foregroundStyle(.primary)
         .frame(width: 44, height: 44)
         .contentShape(Circle())
+    }
+}
+
+/// 加载模型时顶部的小提示
+struct LoadingPill: View {
+    let text: String
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text(text).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
     }
 }
 
@@ -324,8 +342,8 @@ struct ControlBar: View {
                     .frame(width: 140, height: 140)
                     .animation(.easeOut(duration: 0.12), value: session.level)
                 }
-                .disabled(session.phase != .ready)
-                .opacity(session.phase == .ready ? 1 : 0.4)
+                .disabled(!(session.phase == .ready || session.isLoadingPhase))
+                .opacity(session.phase == .ready || session.isLoadingPhase ? 1 : 0.4)
 
                 Spacer()
 

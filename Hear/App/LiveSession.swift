@@ -74,6 +74,7 @@ final class LiveSession: ObservableObject {
     private let speaker = Speaker()
 
     private var queue: [[Float]] = []
+    private var runGen = 0                // 每次停止 +1：停止前排队/进行中的识别和翻译全部作废
     private var working = false
     private var partialBusy = false
     private var currentSeg = 0
@@ -351,41 +352,54 @@ final class LiveSession: ObservableObject {
         guard let gguf = ModelManager.currentGGUF(), let wf = ModelManager.whisperFolder() else {
             phase = .needsModels; return
         }
-        do {
-            if !(await asr.isLoaded) {
-                let start = Date()
-                let gpu = asrUseGPU
-                // 每秒刷新一次：已用时间 + 当前阶段，让用户知道没有卡死
-                let ticker = Task { @MainActor in
-                    var warned = false
-                    while !Task.isCancelled {
-                        let secs = Int(Date().timeIntervalSince(start))
-                        if secs > 120 && !warned {
-                            warned = true
-                            hearLog("语音识别模型加载已超过 2 分钟（\(ASRProgress.shared.description)）", .warning)
-                        }
-                        var msg = "正在加载语音识别模型（\(gpu ? "GPU" : "神经引擎")）\n\(ASRProgress.shared.description) · 已用 \(secs) 秒"
-                        if !gpu { msg += "\n神经引擎第一次需要编译，可能要 3–10 分钟" }
-                        if secs > 120 { msg += "\n等太久？可以在 设置 → 语音识别 改为 GPU" }
-                        if case .loading = phase { phase = .loading(msg) }
-                        try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    }
+        let start = Date()
+        let gpu = asrUseGPU
+        let needASR = !(await asr.isLoaded)
+        let needMT = !(await translator.isLoaded)
+        if !needASR && !needMT { phase = .ready; return }
+        // 每秒刷新一次已用时间，让用户知道没有卡死
+        let ticker = Task { @MainActor in
+            var warned = false
+            while !Task.isCancelled {
+                let secs = Int(Date().timeIntervalSince(start))
+                if secs > 120 && !warned {
+                    warned = true
+                    hearLog("模型加载已超过 2 分钟（\(ASRProgress.shared.description)）", .warning)
                 }
-                phase = .loading("正在加载语音识别模型…")
-                defer { ticker.cancel() }
-                try await asr.load(folder: wf, useGPU: gpu)
+                var msg = "正在准备模型 · \(secs) 秒"
+                if needASR && !gpu && secs > 20 { msg += " · 神经引擎第一次要编译，可能要几分钟" }
+                if case .loading = phase { phase = .loading(msg) }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
-            phase = .loading("正在加载翻译模型…")
-            let t0 = Date()
-            hearLog("翻译模型：开始加载 \(gguf.lastPathComponent)")
-            try await translator.load(path: gguf.path)
-            hearLog("翻译模型：加载完成，用时 \(Int(Date().timeIntervalSince(t0)))s")
+        }
+        defer { ticker.cancel() }
+        phase = .loading("正在准备模型…")
+        do {
+            // 语音识别和翻译模型同时加载，缩短等待
+            async let asrDone: Void = loadASRIfNeeded(needASR, folder: wf, gpu: gpu)
+            async let mtDone: Void = loadMTIfNeeded(needMT, path: gguf.path)
+            try await asrDone
+            try await mtDone
             phase = .ready
-            hearLog("全部就绪")
+            hearLog("全部就绪，用时 \(Int(Date().timeIntervalSince(start)))s")
         } catch {
             hearLog("模型加载失败：\(error)", .error)
+            if isRunning { stop() }
             phase = .failed("模型加载失败：\(error.localizedDescription)\n可以在 设置 → 运行日志 查看详情。")
         }
+    }
+
+    private nonisolated func loadASRIfNeeded(_ need: Bool, folder: URL, gpu: Bool) async throws {
+        guard need else { return }
+        try await asr.load(folder: folder, useGPU: gpu)
+    }
+
+    private nonisolated func loadMTIfNeeded(_ need: Bool, path: String) async throws {
+        guard need else { return }
+        let t0 = Date()
+        hearLog("翻译模型：开始加载 \((path as NSString).lastPathComponent)")
+        try await translator.load(path: path)
+        hearLog("翻译模型：加载完成，用时 \(Int(Date().timeIntervalSince(t0)))s")
     }
 
     /// 切换语音识别的运行方式后重新加载
@@ -411,7 +425,8 @@ final class LiveSession: ObservableObject {
 
     func toggle() async {
         if isRunning { stop(); return }
-        guard phase == .ready else { return }
+        // 模型还在加载时也可以先开始收音：说的话先排队，加载好马上识别
+        guard phase == .ready || isLoadingPhase else { return }
         guard await AudioCapture.requestPermission() else {
             activity = "请在 设置 → 听见 里允许使用麦克风"
             return
@@ -451,7 +466,25 @@ final class LiveSession: ObservableObject {
         level = 0
         activity = ""
         UIApplication.shared.isIdleTimerDisabled = false
+        // 停止收音 = 立刻停止所有识别和翻译：清空排队的句子，打断正在生成的译文
+        runGen += 1
+        queue.removeAll()
+        translator.cancelCurrent()
+        finishedSeg = max(finishedSeg, currentSeg)
+        partial = ""; partialTranslation = ""; partialSource = nil
+        dropUnfinished()
         if wasRunning { kickReader() }        // 停止聆听后，从上次没读完的地方接着读
+    }
+
+    /// 停止时还没翻译完的句子：有部分译文就保留，没有就删掉
+    private func dropUnfinished() {
+        var changed = false
+        for i in items.indices.reversed() where !items[i].done {
+            if items[i].translated.isEmpty { items.remove(at: i) } else { items[i].done = true }
+            changed = true
+        }
+        if readIndex > items.count { readIndex = items.count }
+        if changed { persist() }
     }
 
     func swapLanguages() {
@@ -598,6 +631,13 @@ final class LiveSession: ObservableObject {
     // MARK: - 流水线
 
     private func handle(_ e: Segmenter.Event) {
+        // 已经停止：停止前还没送到的断句事件一律丢弃
+        if !isRunning {
+            switch e {
+            case .started, .partial, .ended: return
+            default: break
+            }
+        }
         switch e {
         case .level(let l):
             level = l
@@ -626,6 +666,8 @@ final class LiveSession: ObservableObject {
     /// 实时预览：识别 + 翻译当前这句话说到目前为止的内容
     private func livePreview(id: Int, samples: [Float]) async {
         defer { partialBusy = false }
+        guard phase == .ready else { return }          // 模型还在准备：先不做实时预览
+        let gen = runGen
         let a = langA, b = langB
         let fallback = (lastLangID == b.id) ? b.id : a.id
         let t0 = Date()
@@ -637,7 +679,7 @@ final class LiveSession: ObservableObject {
             return
         }
         hearLog("实时识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(r.1.prefix(30))")
-        guard id == currentSeg, id > finishedSeg, SpeechRecognizer.isMeaningful(r.1) else { return }
+        guard gen == runGen, isRunning, id == currentSeg, id > finishedSeg, SpeechRecognizer.isMeaningful(r.1) else { return }
         let src = (r.0 == b.id) ? b : a
         let tgt = (src == a) ? b : a
         partialSource = src
@@ -647,22 +689,33 @@ final class LiveSession: ObservableObject {
                                          glossary: PromptBuilder.parseGlossary(glossary))
         let out = try? await translator.translate(prompt: prompt, maxNewTokens: 256) { p in
             Task { @MainActor in
-                if id == self.currentSeg, id > self.finishedSeg { self.partialTranslation = p }
+                if gen == self.runGen, id == self.currentSeg, id > self.finishedSeg { self.partialTranslation = p }
             }
         }
-        if let out, !out.isEmpty, id == currentSeg, id > finishedSeg { partialTranslation = out }
+        if let out, !out.isEmpty, gen == runGen, id == currentSeg, id > finishedSeg { partialTranslation = out }
     }
 
     private func drain() async {
         working = true
         while !queue.isEmpty {
             let s = queue.removeFirst()
-            await process(s)
+            await process(s, gen: runGen)
         }
         working = false
     }
 
-    private func process(_ samples: [Float]) async {
+    var isLoadingPhase: Bool { if case .loading = phase { return true }; return false }
+    var loadingText: String? { if case .loading(let m) = phase { return m }; return nil }
+
+    private func process(_ samples: [Float], gen: Int) async {
+        // 模型还在加载：先把这句话留着，加载好马上识别
+        if phase != .ready {
+            activity = "模型准备好后马上识别"
+            while isLoadingPhase, gen == runGen {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+        guard gen == runGen, phase == .ready else { return }
         let a = langA, b = langB
         activity = "识别中…"
         let fallback = (lastLangID == b.id) ? b.id : a.id
@@ -676,8 +729,10 @@ final class LiveSession: ObservableObject {
             hearLog("整句识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(text.prefix(40))")
         } catch {
             hearLog("识别失败：\(error)", .error)
-            activity = "识别失败"; partial = ""; return
+            if gen == runGen { activity = "识别失败"; partial = "" }
+            return
         }
+        guard gen == runGen else { return }              // 已经停止：结果丢弃
         let src = (detected == b.id) ? b : a
         let tgt = (src == a) ? b : a
         lastLangID = src.id
@@ -693,6 +748,7 @@ final class LiveSession: ObservableObject {
             item.speakerF0 = await Task.detached(priority: .utility) {
                 VoiceAnalyzer.estimateF0(samples)
             }.value
+            guard gen == runGen else { return }
         }
         // 先把实时预览的译文放进去，最终译文出来后再替换，避免闪烁
         let preview = partialTranslation
@@ -721,6 +777,7 @@ final class LiveSession: ObservableObject {
             kickReader()
             return
         }
+        guard gen == runGen else { return }              // 翻译中途被停止：stop() 已经收尾
         update(id, result, done: true)
         persist()
         activity = isRunning ? "正在聆听" : ""
