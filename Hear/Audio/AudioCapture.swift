@@ -28,10 +28,7 @@ final class AudioCapture {
     }
 
     func start() throws {
-        let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playAndRecord, mode: .default,
-                                options: [.defaultToSpeaker, .allowBluetoothA2DP])
-        try session.setActive(true)
+        try AudioRoute.activate()
 
         let input = engine.inputNode
         let inFormat = input.outputFormat(forBus: 0)

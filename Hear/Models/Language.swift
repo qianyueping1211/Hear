@@ -38,4 +38,5 @@ struct TranslationItem: Identifiable, Equatable {
     var sourceText: String
     var translated: String = ""
     var done = false
+    var speakerF0: Float? = nil   // 说话人音高（Hz），用于“接近说话人音色”
 }
