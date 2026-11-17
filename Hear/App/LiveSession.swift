@@ -64,7 +64,72 @@ final class LiveSession: ObservableObject {
         pushConfig()
     }
 
-    var currentModelName: String { ModelManager.currentGGUF()?.lastPathComponent ?? "未安装" }
+    // MARK: - 模型状态（设置页显示）
+
+    enum ModelKind { case translation, speech }
+
+    struct ModelStatus {
+        let name: String
+        let detail: String
+        let installed: Bool
+    }
+
+    /// 模型文件变动后加一，让设置页刷新
+    @Published private(set) var modelsRevision = 0
+
+    var translationStatus: ModelStatus {
+        _ = modelsRevision
+        if let u = ModelManager.currentGGUF() {
+            return .init(name: u.lastPathComponent,
+                         detail: ModelManager.format(ModelManager.fileSize(u)), installed: true)
+        }
+        return .init(name: "Hy-MT2-1.8B", detail: "未下载", installed: false)
+    }
+
+    var speechStatus: ModelStatus {
+        _ = modelsRevision
+        if let f = ModelManager.whisperFolder() {
+            return .init(name: "Whisper large-v3 turbo",
+                         detail: ModelManager.format(ModelManager.folderSize(f)), installed: true)
+        }
+        return .init(name: "Whisper large-v3 turbo", detail: "未下载", installed: false)
+    }
+
+    var installedGGUFs: [URL] {
+        _ = modelsRevision
+        return ModelManager.installedGGUFs()
+    }
+
+    var isBusyWithModels: Bool {
+        switch phase {
+        case .downloading, .loading, .checking: return true
+        default: return false
+        }
+    }
+
+    func selectGGUF(_ url: URL) async {
+        if isRunning { stop() }
+        ModelManager.select(url)
+        await translator.unload()
+        modelsRevision += 1
+        await loadModels()
+    }
+
+    /// 删除某个模型并重新下载
+    func redownload(_ kind: ModelKind) async {
+        if isRunning { stop() }
+        switch kind {
+        case .translation:
+            await translator.unload()
+            ModelManager.deleteCurrentGGUF()
+        case .speech:
+            await asr.unload()
+            ModelManager.deleteWhisper()
+        }
+        modelsRevision += 1
+        await downloadModels(forceTranslation: kind == .translation)
+        modelsRevision += 1
+    }
 
     // MARK: - 模型
 
@@ -79,12 +144,12 @@ final class LiveSession: ObservableObject {
 
     private var phaseIsFailed: Bool { if case .failed = phase { return true }; return false }
 
-    func downloadModels() async {
+    func downloadModels(forceTranslation: Bool = false) async {
         UIApplication.shared.isIdleTimerDisabled = true
         defer { UIApplication.shared.isIdleTimerDisabled = isRunning }
         let host = hfHost
         do {
-            if ModelManager.currentGGUF() == nil {
+            if forceTranslation || ModelManager.currentGGUF() == nil {
                 phase = .downloading("翻译模型 Hy-MT2", 0)
                 _ = try await ModelManager.downloadGGUF(host: host) { p in
                     Task { @MainActor in self.setProgress("翻译模型 Hy-MT2", p) }
@@ -126,8 +191,10 @@ final class LiveSession: ObservableObject {
 
     func importModel(_ url: URL) async {
         do {
+            if isRunning { stop() }
             _ = try ModelManager.importGGUF(from: url)
             await translator.unload()
+            modelsRevision += 1
             await loadModels()
         } catch {
             phase = .failed("导入失败：\(error.localizedDescription)")

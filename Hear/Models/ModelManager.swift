@@ -89,7 +89,36 @@ enum ModelManager {
         return dst
     }
 
+    /// 删除当前使用的翻译模型文件（用于重新下载）
+    static func deleteCurrentGGUF() {
+        if let u = currentGGUF() { try? FileManager.default.removeItem(at: u) }
+        UserDefaults.standard.removeObject(forKey: "ggufName")
+    }
+
+    // MARK: 大小统计
+
+    static func fileSize(_ url: URL) -> Int64 {
+        Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+    }
+
+    static func folderSize(_ url: URL) -> Int64 {
+        guard let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else { return 0 }
+        var total: Int64 = 0
+        for case let f as URL in e { total += fileSize(f) }
+        return total
+    }
+
+    static func format(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+    }
+
     // MARK: 语音模型
+
+    /// 删除语音模型（用于重新下载）
+    static func deleteWhisper() {
+        if let f = whisperFolder() { try? FileManager.default.removeItem(at: f) }
+        UserDefaults.standard.removeObject(forKey: "whisperRelPath")
+    }
 
     /// 相对路径保存在 UserDefaults，因为重新安装后 App 沙盒的绝对路径会变
     static func whisperFolder() -> URL? {

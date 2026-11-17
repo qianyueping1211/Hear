@@ -17,6 +17,11 @@ actor SpeechRecognizer {
 
     var isLoaded: Bool { pipe != nil }
 
+    func unload() {
+        pipe = nil
+        zhPromptTokens = nil
+    }
+
     func load(folder: URL) async throws {
         let config = WhisperKitConfig()
         config.modelFolder = folder.path
