@@ -71,8 +71,10 @@ struct SetupView: View {
     /// 最近几行日志 + 查看全部
     private var recentLog: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(log.lines.suffix(3).enumerated()), id: \.offset) { _, line in
-                Text(line).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(2)
+            ForEach(log.entries.suffix(3)) { e in
+                Text(e.line).font(.caption2.monospaced())
+                    .foregroundStyle(e.level == .error ? Color.red : (e.level == .warning ? Color.orange : Color.secondary))
+                    .lineLimit(2)
             }
             Button("查看运行日志") { showLog = true }.font(.footnote)
         }
