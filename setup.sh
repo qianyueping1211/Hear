@@ -18,6 +18,7 @@ if ! command -v xcodegen >/dev/null 2>&1; then
 fi
 
 [ -d Frameworks/llama.xcframework ] || bash scripts/fetch_llama.sh
+bash scripts/prepare_assets.sh
 
 # 免费 Apple ID 要求 Bundle ID 全球唯一，这里用你的 Mac 用户名生成一个
 USER_SAFE=$(echo "${USER:-me}" | tr -cd 'a-zA-Z0-9' | tr 'A-Z' 'a-z')

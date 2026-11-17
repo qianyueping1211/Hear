@@ -7,3 +7,4 @@ Frameworks/llama.xcframework/
 Frameworks/LLAMA_VERSION
 *.ipa
 Payload/
+Hear/Assets.xcassets/AppIcon.appiconset/AppIcon.png

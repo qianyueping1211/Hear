@@ -32,6 +32,9 @@ jobs:
       - name: Fetch llama.xcframework
         run: bash scripts/fetch_llama.sh
 
+      - name: Prepare app icon
+        run: bash scripts/prepare_assets.sh
+
       - name: Generate project
         run: xcodegen generate
 
@@ -62,11 +65,6 @@ jobs:
           zip -qry Hear.ipa Payload
           ls -lh Hear.ipa
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Hear-ipa
-          path: Hear.ipa
-
       - name: Publish release
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
@@ -89,8 +87,9 @@ jobs:
             --notes-file notes.md \
             --latest
 
+      # 只在失败时上传编译日志，方便排查；安装包只发布到 Releases
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: failure()
         with:
           name: build-log
           path: build.log
