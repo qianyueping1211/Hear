@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
@@ -179,7 +180,12 @@ struct SettingsView: View {
                     Text("日志")
                 }
             }
-            .onAppear { session.refreshHeadset() }
+            .onAppear {
+                session.refreshHeadset()
+                if session.usePersonalVoice {
+                    personalVoiceNote = Self.personalVoiceDescription(Speaker.personalVoices)
+                }
+            }
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -252,21 +258,31 @@ struct SettingsView: View {
         Binding(
             get: { session.usePersonalVoice },
             set: { on in
-                guard on else { session.usePersonalVoice = false; return }
+                guard on else { session.usePersonalVoice = false; personalVoiceNote = nil; return }
                 Task {
                     let ok = await Speaker.requestPersonalVoiceAccess()
-                    if ok && Speaker.hasAnyPersonalVoice {
-                        session.usePersonalVoice = true
-                        personalVoiceNote = nil
-                    } else {
+                    guard ok else {
                         session.usePersonalVoice = false
-                        personalVoiceNote = ok
-                            ? "还没有录制个人声音：请先到 iPhone 设置 → 辅助功能 → 个人声音 里创建，并打开“允许 App 请求使用”。"
-                            : "没有获得个人声音的使用权限，可以在 iPhone 设置 → 辅助功能 → 个人声音 里允许。"
+                        personalVoiceNote = "没有获得个人声音的使用权限，可以在 iPhone 设置 → 辅助功能 → 个人声音 里允许。"
+                        return
                     }
+                    // 已授权就打开；找不到对应语言的个人声音时会自动用普通声音
+                    session.usePersonalVoice = true
+                    let voices = await Speaker.findPersonalVoices()
+                    let names = voices.map { $0.name + "(" + $0.language + ")" }.joined(separator: ", ")
+                    hearLog("个人声音：找到 \(voices.count) 个 \(names)")
+                    personalVoiceNote = Self.personalVoiceDescription(voices)
                 }
             }
         )
+    }
+
+    static func personalVoiceDescription(_ voices: [AVSpeechSynthesisVoice]) -> String {
+        if voices.isEmpty {
+            return "已允许使用，但暂时读不到个人声音。如果是刚刚才允许，把 App 从后台完全划掉后重新打开再试。"
+        }
+        let langs = Set(voices.map { Locale.current.localizedString(forIdentifier: $0.language) ?? $0.language })
+        return "已找到个人声音（\(langs.sorted().joined(separator: "、"))）。个人声音只能说录制时的语言，只有译文是这种语言时才会用它，其他语言用普通声音。"
     }
 
     private var confirmTitle: String {
