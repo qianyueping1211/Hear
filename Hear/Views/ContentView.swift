@@ -30,13 +30,20 @@ struct ContentView: View {
             .navigationTitle("听见")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button { newTapped() } label: { Image(systemName: "square.and.pencil") }
-                        .accessibilityLabel("新建")
-                    Button { showHistory = true } label: { Image(systemName: "clock.arrow.circlepath") }
-                        .accessibilityLabel("历史")
-                    Button { showSettings = true } label: { Image(systemName: "gearshape") }
-                        .accessibilityLabel("设置")
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { session.clearPage() } label: { Image(systemName: "trash") }
+                        .accessibilityLabel("清空")
+                        .disabled(session.items.isEmpty && session.partial.isEmpty)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button { newTapped() } label: { Label("新建", systemImage: "square.and.pencil") }
+                        Button { showHistory = true } label: { Label("历史", systemImage: "clock.arrow.circlepath") }
+                        Button { showSettings = true } label: { Label("设置", systemImage: "gearshape") }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("更多")
                 }
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
@@ -111,14 +118,11 @@ struct LanguageMenu: View {
         } label: {
             HStack(spacing: 6) {
                 Text(selection.flag)
-                VStack(spacing: 0) {
-                    Text(selection.name).fontWeight(.semibold).lineLimit(1)
-                    Text(selection.country).font(.caption2).foregroundStyle(.secondary)
-                }
+                Text(selection.name).fontWeight(.semibold).lineLimit(1)
                 Image(systemName: "chevron.down").font(.caption)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
+            .padding(.vertical, 10)
             .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
         }
         .foregroundStyle(.primary)
@@ -138,8 +142,9 @@ struct TranscriptView: View {
                         EmptyHint().padding(.top, 60)
                     }
                     ForEach(session.items) { item in
-                        BubbleView(item: item, leading: item.source == session.langA) {
-                            session.replay(item)
+                        BubbleView(item: item, leading: item.source == session.langA,
+                                   reading: session.readingID == item.id) {
+                            session.tapRead(item)
                         }
                         .id(item.id)
                     }
@@ -182,6 +187,7 @@ struct EmptyHint: View {
 struct BubbleView: View {
     let item: TranslationItem
     let leading: Bool
+    var reading: Bool = false
     var onSpeak: () -> Void
 
     var body: some View {
@@ -194,13 +200,24 @@ struct BubbleView: View {
                 if item.translated.isEmpty {
                     ProgressView().controlSize(.small)
                 } else {
-                    Text("\(item.target.flag) \(item.translated)")
-                        .font(.title3.weight(.medium))
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("\(item.target.flag) \(item.translated)")
+                            .font(.title3.weight(.medium))
+                        if reading {
+                            Image(systemName: "speaker.wave.2.fill")
+                                .symbolEffect(.variableColor.iterative)
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
                 }
             }
             .padding(12)
             .background(leading ? Color(.secondarySystemBackground) : Color.accentColor.opacity(0.15),
                         in: RoundedRectangle(cornerRadius: 16))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(reading ? Color.accentColor : Color.clear, lineWidth: 1.5)
+            )
             .contentShape(RoundedRectangle(cornerRadius: 16))
             .onTapGesture { if !item.translated.isEmpty { onSpeak() } }   // 点句子朗读译文
             .contextMenu {
@@ -222,6 +239,16 @@ struct BubbleView: View {
 struct ControlBar: View {
     @EnvironmentObject var session: LiveSession
 
+    private var mainColor: Color { session.isRunning ? Color.red : Color.accentColor }
+    private var mainIcon: String { session.isRunning ? "stop.fill" : "mic.fill" }
+    private var mainHint: String {
+        guard session.isRunning else { return "点击开始实时翻译" }
+        if session.speakOutput && session.outputMode == .speaker {
+            return "实时翻译中 · 点击停止后朗读"
+        }
+        return "实时翻译中 · 点击停止"
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             Text(session.activity.isEmpty ? " " : session.activity)
@@ -237,12 +264,12 @@ struct ControlBar: View {
                 Button { Task { await session.toggle() } } label: {
                     ZStack {
                         Circle()
-                            .fill((session.isRunning ? Color.red : Color.accentColor).opacity(0.18))
+                            .fill(mainColor.opacity(0.18))
                             .frame(width: 92 + CGFloat(session.isRunning ? session.level : 0) * 44)
                         Circle()
-                            .fill(session.isRunning ? Color.red : Color.accentColor)
+                            .fill(mainColor)
                             .frame(width: 78)
-                        Image(systemName: session.isRunning ? "stop.fill" : "mic.fill")
+                        Image(systemName: mainIcon)
                             .font(.system(size: 30, weight: .bold))
                             .foregroundStyle(.white)
                     }
@@ -265,7 +292,7 @@ struct ControlBar: View {
             }
             .padding(.horizontal, 24)
 
-            Text(session.isRunning ? "实时翻译中 · 点击停止" : "点击开始实时翻译")
+            Text(mainHint)
                 .font(.callout.weight(.medium))
                 .padding(.bottom, 8)
         }

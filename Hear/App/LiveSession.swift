@@ -30,7 +30,13 @@ final class LiveSession: ObservableObject {
     @Published var activity = ""
 
     // 设置
-    @Published var speakOutput: Bool { didSet { save("speakOutput", speakOutput) } }
+    @Published var speakOutput: Bool {
+        didSet {
+            save("speakOutput", speakOutput)
+            if speakOutput { readIndex = items.count }   // 重新打开时不补读之前的
+            else { stopReading() }
+        }
+    }
     @Published var useContext: Bool { didSet { save("useContext", useContext) } }
     @Published var sensitivity: Double { didSet { save("sensitivity", sensitivity); pushConfig() } }
     @Published var silenceMs: Double { didSet { save("silenceMs", silenceMs); pushConfig() } }
@@ -62,6 +68,14 @@ final class LiveSession: ObservableObject {
     private var lastLangID: String?
     private var swapping = false
 
+    // 朗读队列：readIndex 指向下一句要读的译文
+    @Published private(set) var readingID: UUID?
+    private var readIndex = 0
+    private var readerTask: Task<Void, Never>?
+    private var readerGen = 0
+    private var oneShot = false
+    private var manualSpeaker = false     // 戴着耳机时用户手动切到了扬声器
+
     // 当前这一页对话（自动保存到历史）
     private(set) var conversationID = UUID()
     private var conversationCreated = Date()
@@ -89,23 +103,58 @@ final class LiveSession: ObservableObject {
         }
         pushConfig()
 
-        // 耳机拔掉 / 断开时自动改回扬声器
+        // 插上耳机：自动改为耳机朗读；拔掉：改回扬声器（正在聆听时先暂停朗读）
         NotificationCenter.default.addObserver(
             forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
         ) { [weak self] note in
             guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
-                  AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
+            Task { @MainActor in self?.routeChanged(reason) }
+        }
+
+        // 来电、Siri 等打断音频时停止
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
             Task { @MainActor in
-                guard let self, self.outputMode == .headphones else { return }
-                self.outputMode = .speaker
-                AudioRoute.apply(.speaker)
-                self.activity = "耳机已断开，改为扬声器朗读"
-                hearLog("耳机已断开，朗读改为扬声器", .warning)
+                guard let self else { return }
+                hearLog("音频被系统打断（来电等）", .warning)
+                self.stopReading()
+                if self.isRunning { self.stop() }
             }
         }
     }
 
     // MARK: - 朗读输出（扬声器 / 耳机）
+
+    private func routeChanged(_ reason: AVAudioSession.RouteChangeReason) {
+        switch reason {
+        case .newDeviceAvailable:
+            guard outputMode == .speaker else { return }
+            // 蓝牙耳机在扬声器模式下不一定看得到，所以再临时取消强制扬声器检查一次
+            guard AudioRoute.headphonesLikelyConnected() || AudioRoute.detectHeadphones() else {
+                AudioRoute.apply(.speaker); return
+            }
+            outputMode = .headphones
+            manualSpeaker = false
+            AudioRoute.apply(.headphones)
+            activity = "已连接耳机，改为耳机朗读"
+            hearLog("检测到耳机，朗读改为耳机")
+            kickReader()
+        case .oldDeviceUnavailable:
+            manualSpeaker = false
+            guard outputMode == .headphones, !AudioRoute.headphonesLikelyConnected() else { return }
+            outputMode = .speaker
+            AudioRoute.apply(.speaker)
+            if isRunning { stopReading() }      // 扬声器 + 聆听中：先不读，停止后从这句接着读
+            activity = "耳机已断开，改为扬声器朗读"
+            hearLog("耳机已断开，朗读改为扬声器", .warning)
+        default:
+            break
+        }
+    }
 
     /// 长按“朗读”按钮 2 秒：在扬声器和耳机之间切换。没连耳机时不切换。
     func cycleOutput() {
@@ -120,12 +169,16 @@ final class LiveSession: ObservableObject {
                 return
             }
             outputMode = .headphones
+            manualSpeaker = false
             activity = "改为耳机朗读"
         } else {
             outputMode = .speaker
+            manualSpeaker = true
+            if isRunning { stopReading() }
             activity = "改为扬声器朗读"
         }
         AudioRoute.apply(outputMode)
+        kickReader()
         hearLog("朗读输出切换为\(outputMode == .speaker ? "扬声器" : "耳机")")
         haptic.notificationOccurred(.success)
     }
@@ -316,6 +369,16 @@ final class LiveSession: ObservableObject {
             activity = "请在 设置 → 听见 里允许使用麦克风"
             return
         }
+        // 已经插着耳机就用耳机朗读（除非用户手动选了扬声器）；耳机已拔掉就改回扬声器
+        try? AudioRoute.activate()
+        let hasHeadphones = AudioRoute.headphonesLikelyConnected() || AudioRoute.detectHeadphones()
+        if outputMode == .speaker, hasHeadphones, !manualSpeaker {
+            outputMode = .headphones
+            hearLog("检测到耳机，朗读改为耳机")
+        }
+        if outputMode == .headphones, !hasHeadphones { outputMode = .speaker }
+        // 用扬声器时实时翻译优先：立即暂停朗读，停止聆听后从这句接着读
+        if outputMode == .speaker { stopReading() }
         do {
             try capture.start()
             AudioRoute.apply(outputMode)
@@ -330,14 +393,15 @@ final class LiveSession: ObservableObject {
     }
 
     func stop() {
-        if isRunning { hearLog("停止实时翻译") }
+        let wasRunning = isRunning
+        if wasRunning { hearLog("停止实时翻译") }
         capture.stop()
-        speaker.stop()
         capture.muted = false
         isRunning = false
         level = 0
         activity = ""
         UIApplication.shared.isIdleTimerDisabled = false
+        if wasRunning { kickReader() }        // 停止聆听后，从上次没读完的地方接着读
     }
 
     func swapLanguages() {
@@ -349,7 +413,21 @@ final class LiveSession: ObservableObject {
         save("langA", langA.id); save("langB", langB.id)
     }
 
-    func clear() { items.removeAll(); partial = ""; partialTranslation = ""; partialSource = nil }
+    func clear() {
+        stopReading()
+        items.removeAll(); partial = ""; partialTranslation = ""; partialSource = nil
+        readIndex = 0
+    }
+
+    /// 左上角“清空”：清掉当前屏幕（内容已自动保存在历史里），正在聆听时继续聆听，记到新的一页
+    func clearPage() {
+        persist()
+        clear()
+        conversationID = UUID()
+        conversationCreated = Date()
+        lastLangID = nil
+        hearLog("清空当前页")
+    }
 
     // MARK: - 对话保存 / 新建
 
@@ -383,8 +461,82 @@ final class LiveSession: ObservableObject {
         }
     }
 
+    // MARK: - 朗读队列
+    //
+    // 戴耳机：译文出来就从耳机读，边听边读，麦克风不暂停（耳机声音不会被录进去）。
+    // 扬声器：聆听中不读；停止实时翻译后，从上次没读完的那句开始往后读；
+    //        再点开始实时翻译，立刻停止朗读（实时翻译优先），下次从被打断的那句重新读。
+    // 点某一句：从这句开始往后读；之后的自动朗读也从这句往后接着读。
+
+    /// 现在能不能自动朗读
+    private var autoReadAllowed: Bool {
+        speakOutput && (outputMode == .headphones || !isRunning)
+    }
+
+    /// 有新译文或状态变化时调用：能读就从 readIndex 开始往后读
+    private func kickReader() {
+        guard readerTask == nil, autoReadAllowed, readIndex < items.count else { return }
+        startReader(oneShot: false)
+    }
+
+    private func startReader(oneShot single: Bool) {
+        readerTask?.cancel()
+        readerGen += 1
+        let g = readerGen
+        oneShot = single
+        readerTask = Task { [weak self] in await self?.readLoop(g) }
+    }
+
+    private func readLoop(_ g: Int) async {
+        defer {
+            if g == readerGen { readerTask = nil; readingID = nil }
+        }
+        while !Task.isCancelled, g == readerGen, readIndex < items.count {
+            let item = items[readIndex]
+            guard item.done else { break }                  // 还在翻译，翻译完会再叫醒
+            if !oneShot && !autoReadAllowed { break }
+            let usable = !item.translated.isEmpty && !item.translated.hasPrefix("（翻译失败")
+            if usable {
+                readingID = item.id
+                await speak(item)
+                if Task.isCancelled || g != readerGen { return }   // 被打断：这句下次从头读
+            }
+            readIndex += 1
+            if oneShot { break }
+        }
+    }
+
+    /// 停止朗读。readIndex 不动，下次从被打断的这句开始读
+    func stopReading() {
+        readerGen += 1
+        readerTask?.cancel()
+        readerTask = nil
+        readingID = nil
+        speaker.stop()
+        capture.muted = false
+    }
+
+    /// 点某一句：从这句开始往后读；正在读这句时再点一下就停止
+    func tapRead(_ item: TranslationItem) {
+        guard let i = items.firstIndex(where: { $0.id == item.id }) else { replay(item); return }
+        if readingID == item.id { stopReading(); return }
+        stopReading()
+        readIndex = i
+        // 能连续读（戴耳机，或已停止聆听）就一直往后读；否则只读这一句
+        startReader(oneShot: !autoReadAllowed)
+    }
+
+    /// 只读一句，不影响朗读进度（历史记录里用）
     func replay(_ item: TranslationItem) {
-        Task { await speak(item) }
+        stopReading()
+        readerGen += 1
+        let g = readerGen
+        readerTask = Task { [weak self] in
+            guard let self else { return }
+            self.readingID = item.id
+            await self.speak(item)
+            if g == self.readerGen { self.readerTask = nil; self.readingID = nil }
+        }
     }
 
     // MARK: - 流水线
@@ -396,6 +548,7 @@ final class LiveSession: ObservableObject {
         case .started(let id):
             currentSeg = id
             if partial.isEmpty { partial = "…" }
+            hearLog("断句：检测到说话（第 \(id) 句）")
         case .partial(let id, let samples):
             // 说话过程中：识别到目前为止的内容并马上翻译，后面的内容会更正前面的
             guard !working, !partialBusy else { return }
@@ -406,6 +559,11 @@ final class LiveSession: ObservableObject {
             hearLog("断句：一句话结束，时长 \(String(format: "%.1f", Double(samples.count) / 16000)) 秒")
             queue.append(samples)
             if !working { Task { await drain() } }
+        case .discarded(let id):
+            finishedSeg = max(finishedSeg, id)
+            if !working && queue.isEmpty { partial = ""; partialTranslation = ""; partialSource = nil }
+        case .noise(let n, let t):
+            if isRunning { hearLog(String(format: "环境噪声 %.0f dB，说话触发阈值 %.0f dB", n, t)) }
         }
     }
 
@@ -414,7 +572,15 @@ final class LiveSession: ObservableObject {
         defer { partialBusy = false }
         let a = langA, b = langB
         let fallback = (lastLangID == b.id) ? b.id : a.id
-        guard let r = try? await asr.recognize(samples, candidates: [a.id, b.id], fallback: fallback) else { return }
+        let t0 = Date()
+        let r: (String, String)
+        do {
+            r = try await asr.recognize(samples, candidates: [a.id, b.id], fallback: fallback)
+        } catch {
+            hearLog("实时识别失败：\(error)", .error)
+            return
+        }
+        hearLog("实时识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(r.1.prefix(30))")
         guard id == currentSeg, id > finishedSeg, SpeechRecognizer.isMeaningful(r.1) else { return }
         let src = (r.0 == b.id) ? b : a
         let tgt = (src == a) ? b : a
@@ -494,16 +660,14 @@ final class LiveSession: ObservableObject {
         } catch {
             hearLog("翻译失败：\(error)", .error)
             update(id, "（翻译失败：\(error.localizedDescription)）", done: true)
+            kickReader()
             return
         }
         update(id, result, done: true)
         persist()
-
-        if speakOutput, !result.isEmpty,
-           let done = items.first(where: { $0.id == id }) {
-            await speak(done)
-        }
         activity = isRunning ? "正在聆听" : ""
+        // 朗读在单独的队列里进行，不会挡住后面的识别和翻译
+        kickReader()
     }
 
     /// 朗读一条译文：决定左右耳、声音和音高
@@ -534,8 +698,8 @@ final class LiveSession: ObservableObject {
         }
 
         AudioRoute.apply(outputMode)
-        // 扬声器朗读时暂停麦克风，避免把喇叭声音再识别一遍；戴耳机时不用
-        let mute = outputMode == .speaker
+        // 聆听中用扬声器读（只有点句子时才会）：暂停麦克风，避免把喇叭声音再识别一遍
+        let mute = outputMode == .speaker && isRunning
         hearLog("朗读：\(item.target.displayName)，\(outputMode == .speaker ? "扬声器" : (pan < 0 ? "左耳" : (pan > 0 ? "右耳" : "双耳")))，声音 \(voice?.name ?? "默认")")
         activity = "朗读中…"
         if mute { capture.muted = true }
@@ -545,6 +709,7 @@ final class LiveSession: ObservableObject {
             try? await Task.sleep(nanoseconds: 300_000_000)
             capture.muted = false
         }
+        if activity == "朗读中…" { activity = isRunning ? "正在聆听" : "" }
     }
 
     private func update(_ id: UUID, _ text: String, done: Bool) {
