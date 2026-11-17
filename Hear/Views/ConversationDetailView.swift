@@ -80,7 +80,8 @@ struct ConversationDetailView: View {
                     Text("这段对话没有内容").foregroundStyle(.secondary).padding(.top, 40)
                 }
                 ForEach(c.items) { item in
-                    BubbleView(item: item, leading: item.source == c.langA) {
+                    BubbleView(item: item, leading: item.source == c.langA,
+                               reading: session.readingID == item.id) {
                         session.replay(item)
                     }
                 }

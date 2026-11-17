@@ -269,7 +269,7 @@ struct SettingsView: View {
 }
 
 /// 一行模型状态：名称、文件名、大小、是否已下载
-​struct ModelRow: View {
+struct ModelRow: View {
     let title: String
     let icon: String
     let status: LiveSession.ModelStatus
