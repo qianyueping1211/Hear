@@ -63,13 +63,19 @@ struct MarkdownView: View {
             ?? AttributedString(s)
     }
 
+    private static func headingFont(_ level: Int) -> Font {
+        if level <= 1 { return Font.title2.bold() }
+        if level == 2 { return Font.title3.bold() }
+        return Font.headline
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ForEach(blocks) { b in
                 switch b {
                 case .heading(let level, let s, _):
                     Text(inline(s))
-                        .font(level <= 1 ? .title2.bold() : (level == 2 ? .title3.bold() : .headline))
+                        .font(Self.headingFont(level))
                         .padding(.top, level <= 2 ? 6 : 2)
                 case .bullet(let mark, let s, _):
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -83,7 +89,7 @@ struct MarkdownView: View {
                                 GridRow {
                                     ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
                                         Text(inline(cell))
-                                            .font(r == 0 ? .subheadline.bold() : .subheadline)
+                                            .font(r == 0 ? Font.subheadline.bold() : Font.subheadline)
                                             .frame(minWidth: 60, maxWidth: 220, alignment: .leading)
                                     }
                                 }

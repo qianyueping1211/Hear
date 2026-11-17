@@ -36,7 +36,7 @@ struct ConversationDetailView: View {
         .navigationTitle(conv?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if tab == 1, record?.status == .done {
+            if tab == 1, record?.status == SummaryRecord.Status.done {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button { draft = record?.content ?? ""; editing = true } label: { Label("编辑", systemImage: "pencil") }
@@ -124,7 +124,7 @@ struct ConversationDetailView: View {
             .frame(maxWidth: .infinity)
             .padding(.top, 20)
 
-        case .generating:
+        case .some(.generating):
             VStack(spacing: 10) {
                 ProgressView()
                 Text("正在后台生成总结… 可以离开这个页面，完成后会自动保存。")
@@ -133,7 +133,7 @@ struct ConversationDetailView: View {
             .frame(maxWidth: .infinity)
             .padding(.top, 20)
 
-        case .failed:
+        case .some(.failed):
             VStack(alignment: .leading, spacing: 10) {
                 Label("总结失败", systemImage: "exclamationmark.triangle").foregroundStyle(.red)
                 Text(record?.error ?? "").font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
@@ -143,7 +143,7 @@ struct ConversationDetailView: View {
                 .buttonStyle(.borderedProminent)
             }
 
-        case .done:
+        case .some(.done):
             if editing {
                 VStack(alignment: .leading, spacing: 10) {
                     TextEditor(text: $draft)

@@ -84,11 +84,11 @@ struct HistoryRow: View {
 
     @ViewBuilder private var statusBadge: some View {
         switch meta.summaryStatus {
-        case .generating:
+        case .some(.generating):
             Label("总结中", systemImage: "hourglass").font(.caption).foregroundStyle(.orange)
-        case .done:
+        case .some(.done):
             Label("已总结", systemImage: "doc.text").font(.caption).foregroundStyle(.green)
-        case .failed:
+        case .some(.failed):
             Label("总结失败", systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.red)
         case .none:
             EmptyView()
