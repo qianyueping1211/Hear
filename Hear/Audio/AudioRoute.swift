@@ -30,21 +30,23 @@ enum AudioRoute {
     /// 输出被强制到扬声器时，当前路由里看不到耳机，所以临时取消强制再检查一次。
     static func detectHeadphones() -> Bool {
         if routeHasHeadphones() { return true }
-        let s = AVAudioSession.sharedInstance()
-        try? s.overrideOutputAudioPort(.none)
-        lastOverride = AVAudioSession.PortOverride.none
+        try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.none)
         return routeHasHeadphones()
     }
 
-    private static var lastOverride: AVAudioSession.PortOverride?
-
-    /// 按选择的输出方式切换路由。只在需要改变时才调用系统接口，
-    /// 因为每次改路由都会让正在播放的声音中断。
+    /// 按选择的输出方式切换路由。按当前实际路由判断，已经是想要的就不动，
+    /// 因为每次改路由都会打断正在播放的声音、让麦克风重新连接。
     static func apply(_ output: AudioOutput) {
-        let want: AVAudioSession.PortOverride = output == .speaker ? .speaker : .none
-        guard want != lastOverride else { return }
-        lastOverride = want
-        try? AVAudioSession.sharedInstance().overrideOutputAudioPort(want)
+        let s = AVAudioSession.sharedInstance()
+        let onSpeaker = s.currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+        switch output {
+        case .speaker:
+            guard !onSpeaker else { return }
+            try? s.overrideOutputAudioPort(.speaker)
+        case .headphones:
+            guard onSpeaker else { return }
+            try? s.overrideOutputAudioPort(.none)
+        }
     }
 
     /// 不改路由的情况下判断是否连着耳机（输出或可用输入里有耳机/蓝牙设备）

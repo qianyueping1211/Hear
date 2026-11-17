@@ -17,11 +17,20 @@ final class SummaryService {
         guard let conv = store.load(conversationID) else { return }
         let template = SummaryTemplate.find(templateID)
 
-        guard let provider = settings.active, !provider.selectedModel.isEmpty,
-              let apiKey = settings.key(for: provider), !apiKey.isEmpty else {
+        let problem: String?
+        if settings.active == nil {
+            problem = "还没有添加大模型 API：请到 设置 → 大模型 API 添加"
+        } else if settings.active!.selectedModel.isEmpty {
+            problem = "「\(settings.active!.name)」还没有选择模型：请到 设置 → 大模型 API 里选择"
+        } else if (settings.key(for: settings.active!) ?? "").isEmpty {
+            problem = "「\(settings.active!.name)」没有读到 API Key：请到 设置 → 大模型 API 左滑编辑，重新填写 Key 后保存"
+        } else {
+            problem = nil
+        }
+        guard problem == nil, let provider = settings.active, let apiKey = settings.key(for: provider) else {
             store.updateSummary(conversationID, templateID: templateID,
-                                SummaryRecord(status: .failed, error: "还没有配置大模型 API：请到 设置 → 大模型 API 添加并选择模型"))
-            hearLog("总结失败：未配置大模型 API", .warning)
+                                SummaryRecord(status: .failed, error: problem ?? "大模型 API 配置不完整"))
+            hearLog("总结失败：\(problem ?? "配置不完整")", .warning)
             return
         }
         guard !conv.items.isEmpty else {

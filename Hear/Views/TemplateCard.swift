@@ -26,7 +26,7 @@ struct TemplateCard: View {
                 .font(.title3.weight(.bold))
                 .foregroundStyle(.primary)
 
-            Text(LocalizedStringKey(template.description))
+            Text(BoldText.make(template.description, bold: Font.subheadline.bold()))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -49,6 +49,25 @@ struct TemplateCard: View {
             RoundedRectangle(cornerRadius: 20)
                 .stroke(inUse ? Color.primary : Color(.separator), lineWidth: inUse ? 1.5 : 0.5)
         )
+    }
+}
+
+/// 把 **文字** 变成加粗。系统自带的 Markdown 在中文引号、书名号旁边经常认不出 **，所以自己处理
+enum BoldText {
+    static func make(_ s: String, bold: Font? = nil) -> AttributedString {
+        var out = AttributedString()
+        for (i, part) in s.components(separatedBy: "**").enumerated() {
+            var a = (try? AttributedString(markdown: part,
+                                           options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                ?? AttributedString(part)
+            if i % 2 == 1 {
+                a.inlinePresentationIntent = .stronglyEmphasized
+                if let bold { a.font = bold }
+                a.foregroundColor = Color.primary
+            }
+            out += a
+        }
+        return out
     }
 }
 

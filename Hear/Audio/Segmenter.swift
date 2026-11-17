@@ -8,7 +8,7 @@ final class Segmenter {
         var silenceMs: Int = 700          // 停顿多久算一句话结束
         var maxSeconds: Double = 15       // 单句最长时长
         var partialEvery: Double = 0.7    // 说话中每隔多久给一次中间结果（秒）
-        var minSpeechMs: Int = 350        // 太短的声音忽略
+        var minSpeechMs: Int = 400        // 太短的声音忽略（咳嗽、碰撞声等）
     }
 
     enum Event {
@@ -87,7 +87,7 @@ final class Segmenter {
             } else {
                 voicedRun = 0
             }
-            if voicedRun >= 3 {
+            if voicedRun >= 5 {           // 连续 150ms 都高于阈值才算开始说话，减少误触发
                 inSpeech = true
                 segID += 1
                 speech = preroll

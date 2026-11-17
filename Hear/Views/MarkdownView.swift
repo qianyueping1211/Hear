@@ -59,8 +59,7 @@ struct MarkdownView: View {
     }
 
     private func inline(_ s: String) -> AttributedString {
-        (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(s)
+        BoldText.make(s)
     }
 
     private static func headingFont(_ level: Int) -> Font {
