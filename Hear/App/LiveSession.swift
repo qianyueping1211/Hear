@@ -54,6 +54,15 @@ final class LiveSession: ObservableObject {
     @Published var mySide: String { didSet { save("mySide", mySide) } }
     // 语音识别用 GPU（加载快）还是神经引擎（省电，首次编译慢）
     @Published var asrUseGPU: Bool { didSet { save("asrUseGPU", asrUseGPU) } }
+    // 声音来源："phone" 手机麦克风（默认）/ "headset" 耳机麦克风（只在连着耳机时可选）
+    @Published var inputSource: String {
+        didSet {
+            save("inputSource", inputSource)
+            guard inputSource != oldValue else { return }
+            applyInputSource()
+        }
+    }
+    @Published private(set) var headsetConnected = false
     // 语音增强：系统的降噪 + 回声消除 + 自动增益
     @Published var voiceProcessing: Bool {
         didSet { save("voiceProcessing", voiceProcessing); capture.voiceProcessing = voiceProcessing }
@@ -102,7 +111,9 @@ final class LiveSession: ObservableObject {
         mySide = d.string(forKey: "mySide") ?? "A"
         asrUseGPU = d.object(forKey: "asrUseGPU") as? Bool ?? true
         voiceProcessing = d.object(forKey: "voiceProcessing") as? Bool ?? true
+        inputSource = d.string(forKey: "inputSource") ?? "phone"
         capture.voiceProcessing = voiceProcessing
+        AudioRoute.useHeadsetMic = inputSource == "headset"
 
         capture.segmenter.onEvent = { [weak self] e in
             Task { @MainActor in self?.handle(e) }
@@ -135,7 +146,37 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 朗读输出（扬声器 / 耳机）
 
+    /// 刷新“是否连着耳机”（设置页用来决定能不能选耳机麦克风）
+    func refreshHeadset() {
+        headsetConnected = outputMode == .headphones || AudioRoute.headphonesLikelyConnected()
+    }
+
+    /// 切换声音来源；正在聆听时马上重新接麦克风
+    private func applyInputSource() {
+        AudioRoute.useHeadsetMic = inputSource == "headset"
+        hearLog("声音来源切换为\(inputSource == "headset" ? "耳机麦克风" : "手机麦克风")")
+        guard isRunning else { return }
+        capture.stop()
+        do {
+            try capture.start()
+            AudioRoute.apply(outputMode)
+        } catch {
+            hearLog("切换声音来源后麦克风启动失败：\(error)", .error)
+        }
+    }
+
     private func routeChanged(_ reason: AVAudioSession.RouteChangeReason) {
+        if reason == .newDeviceAvailable { headsetConnected = true }
+        if reason == .oldDeviceUnavailable {
+            refreshHeadset()
+            // 耳机断开（关蓝牙、拿下耳机）：声音来源自动改回手机
+            if inputSource == "headset", !AudioRoute.headphonesLikelyConnected() {
+                headsetConnected = false
+                inputSource = "phone"
+                activity = "耳机已断开，改用手机麦克风"
+                hearLog("耳机已断开，声音来源改回手机麦克风", .warning)
+            }
+        }
         switch reason {
         case .newDeviceAvailable:
             guard outputMode == .speaker else { return }
@@ -383,6 +424,8 @@ final class LiveSession: ObservableObject {
             hearLog("检测到耳机，朗读改为耳机")
         }
         if outputMode == .headphones, !hasHeadphones { outputMode = .speaker }
+        headsetConnected = hasHeadphones
+        if inputSource == "headset", !hasHeadphones { inputSource = "phone" }   // 没耳机就用手机麦克风
         // 用扬声器时实时翻译优先：立即暂停朗读，停止聆听后从这句接着读
         if outputMode == .speaker { stopReading() }
         do {

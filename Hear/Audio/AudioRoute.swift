@@ -12,14 +12,42 @@ enum AudioRoute {
         .headphones, .bluetoothA2DP, .bluetoothHFP, .bluetoothLE, .usbAudio,
     ]
 
-    /// 设置为“可录音 + 可播放”，蓝牙耳机用高音质 A2DP 输出
+    /// 声音来源：false = 手机麦克风（默认），true = 耳机麦克风
+    static var useHeadsetMic = false
+
+    /// 设置为“可录音 + 可播放”。
+    /// 用手机麦克风时，蓝牙耳机走高音质 A2DP（只播放）；
+    /// 用耳机麦克风时，需要蓝牙通话模式（HFP），耳机播放会变成单声道通话音质。
     static func activate() throws {
         let s = AVAudioSession.sharedInstance()
-        if s.category != .playAndRecord {
-            try s.setCategory(.playAndRecord, mode: .default,
-                              options: [.defaultToSpeaker, .allowBluetoothA2DP])
+        var opts: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
+        if useHeadsetMic { opts.insert(.allowBluetooth) }
+        if s.category != .playAndRecord || s.categoryOptions != opts {
+            try s.setCategory(.playAndRecord, mode: .default, options: opts)
         }
         try s.setActive(true)
+        applyInput()
+    }
+
+    /// 按“声音来源”选择麦克风（已经是想要的就不动）
+    static func applyInput() {
+        let s = AVAudioSession.sharedInstance()
+        let headsetPorts: Set<AVAudioSession.Port> = [.bluetoothHFP, .headsetMic, .usbAudio]
+        let inputs = s.availableInputs ?? []
+        let want: AVAudioSessionPortDescription?
+        if useHeadsetMic {
+            want = inputs.first { headsetPorts.contains($0.portType) }
+        } else {
+            want = inputs.first { $0.portType == .builtInMic }
+        }
+        guard let want else { return }
+        if s.currentRoute.inputs.first?.uid == want.uid { return }
+        do {
+            try s.setPreferredInput(want)
+            hearLog("声音来源：\(want.portName)")
+        } catch {
+            hearLog("切换声音来源失败：\(error)", .warning)
+        }
     }
 
     private static func routeHasHeadphones() -> Bool {
