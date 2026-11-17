@@ -6,12 +6,30 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var importing = false
     @State private var confirmKind: LiveSession.ModelKind?
+    @ObservedObject private var log = AppLog.shared
+    @ObservedObject private var llm = LLMSettings.shared
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("翻译") {
                     Toggle("结合上文翻译（更连贯）", isOn: $session.useContext)
+                }
+
+                // MARK: 大模型 API（用于总结）
+                Section {
+                    NavigationLink {
+                        LLMSettingsView()
+                    } label: {
+                        LabeledContent("大模型 API") {
+                            Text(llm.active.map { "\($0.name) · \($0.selectedModel.isEmpty ? "未选模型" : $0.selectedModel)" } ?? "未配置")
+                                .lineLimit(1)
+                        }
+                    }
+                } header: {
+                    Text("总结")
+                } footer: {
+                    Text("新建对话时可以用大模型在后台总结上一页。翻译本身仍在手机本地离线完成。")
                 }
 
                 // MARK: 朗读
@@ -56,6 +74,18 @@ struct SettingsView: View {
                     Text("音色")
                 } footer: {
                     Text(personalVoiceNote ?? "“接近说话人”会根据说话人的音高自动选男声或女声，并调高低音，不是完全复刻。“个人声音”需要先在 iPhone 设置 → 辅助功能 → 个人声音 里录制，只能用于它支持的语言。")
+                }
+
+                // MARK: 语音识别
+                Section {
+                    Picker("语音识别运行在", selection: asrBinding) {
+                        Text("GPU（加载快，推荐）").tag(true)
+                        Text("神经引擎（省电）").tag(false)
+                    }
+                } header: {
+                    Text("语音识别")
+                } footer: {
+                    Text("神经引擎更省电，但第一次加载要先编译模型，可能需要好几分钟。切换后会重新加载语音识别模型。")
                 }
 
                 Section {
@@ -123,6 +153,26 @@ struct SettingsView: View {
                 } footer: {
                     Text("模型文件损坏、翻译异常或想换下载源时，可以重新下载。也可以通过电脑的“访达/iTunes 文件共享”把 .gguf 拷进“听见”。")
                 }
+
+                // MARK: 日志
+                Section {
+                    Toggle("开启日志", isOn: $log.enabled)
+                    Picker("最大日志文件大小", selection: $log.maxMB) {
+                        ForEach(AppLog.sizeOptions, id: \.self) { mb in
+                            Text("\(mb) MB").tag(mb)
+                        }
+                    }
+                    LabeledContent("当前占用", value: ModelManager.format(log.totalBytes))
+                    NavigationLink {
+                        LogView()
+                    } label: {
+                        Label("查看日志", systemImage: "doc.text.magnifyingglass")
+                    }
+                } header: {
+                    Text("日志")
+                } footer: {
+                    Text("记录加载、识别、翻译、朗读的过程和报错，可按信息/警告/错误筛选和搜索。超过上限时会自动删除最早的日志。")
+                }
             }
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
@@ -156,6 +206,18 @@ struct SettingsView: View {
     }
 
     @State private var personalVoiceNote: String?
+
+    private var asrBinding: Binding<Bool> {
+        Binding(
+            get: { session.asrUseGPU },
+            set: { gpu in
+                guard gpu != session.asrUseGPU else { return }
+                session.asrUseGPU = gpu
+                Task { await session.reloadASR() }
+                dismiss()
+            }
+        )
+    }
 
     private var outputBinding: Binding<AudioOutput> {
         Binding(
