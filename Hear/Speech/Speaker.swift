@@ -10,24 +10,29 @@ struct SpeakRequest {
 }
 
 /// 朗读译文。
-/// 用 AVSpeechSynthesizer 生成语音数据，再通过 AVAudioEngine 播放，
-/// 这样可以把声音放到左耳或右耳（pan）。
-final class Speaker: NSObject {
+/// - 两耳都播（pan = 0）：直接用 AVSpeechSynthesizer.speak，最稳定
+/// - 只在左耳或右耳（pan ≠ 0）：先生成语音数据，再用 AVAudioEngine 按左右声道播放
+/// 两种方式都有超时保护：系统语音没有回调时也会结束，不会卡住后面的流程。
+final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     private let synth = AVSpeechSynthesizer()
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let queue = DispatchQueue(label: "hear.speaker")
 
+    // 以下状态只在 queue 上读写
     private var continuation: CheckedContinuation<Void, Never>?
     private var generation = 0
     private var scheduled = 0
     private var played = 0
     private var finished = false
+    private var usingEngine = false
+    private var current: AVSpeechUtterance?
     private var connectedFormat: AVAudioFormat?
     private var currentPan: Float = 0
 
     override init() {
         super.init()
+        synth.delegate = self
         engine.attach(player)
         NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
@@ -36,46 +41,89 @@ final class Speaker: NSObject {
         }
     }
 
+    /// 朗读一段文字，读完（或被 stop 打断）后返回
     func speak(_ req: SpeakRequest) async {
         stop()
         try? AudioRoute.activate()
+        let u = AVSpeechUtterance(string: req.text)
+        u.voice = req.voice ?? Self.bestVoice(for: req.locale)
+        u.pitchMultiplier = req.pitch
+        u.rate = AVSpeechUtteranceDefaultSpeechRate
+        let engineMode = req.pan != 0
+
         let gen: Int = queue.sync {
             generation += 1
             scheduled = 0; played = 0; finished = false
             currentPan = req.pan
+            usingEngine = engineMode
+            current = u
             return generation
         }
+        // 超时：按字数估一个很宽松的时长
+        let limit = 5 + Double(req.text.count) * 0.45
+
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             queue.sync { continuation = c }
-            let u = AVSpeechUtterance(string: req.text)
-            u.voice = req.voice ?? Self.bestVoice(for: req.locale)
-            u.pitchMultiplier = req.pitch
-            u.rate = AVSpeechUtteranceDefaultSpeechRate
-            synth.write(u) { [weak self] buffer in
-                self?.receive(buffer, gen: gen)
+            if engineMode {
+                synth.write(u) { [weak self] buffer in
+                    self?.receive(buffer, gen: gen)
+                }
+            } else {
+                synth.speak(u)
+            }
+            queue.asyncAfter(deadline: .now() + limit) { [weak self] in
+                guard let self, gen == self.generation, self.continuation != nil else { return }
+                hearLog("朗读：超过 \(Int(limit)) 秒没有结束，自动跳过", .warning)
+                self.resume(gen)
             }
         }
     }
 
+    /// 立即停止当前朗读
     func stop() {
         if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
         player.stop()
         queue.sync {
             generation += 1
+            current = nil
             let c = continuation
             continuation = nil
             c?.resume()
         }
     }
 
-    // MARK: - 播放
+    /// 在 queue 上调用
+    private func resume(_ gen: Int) {
+        guard gen == generation else { return }
+        let c = continuation
+        continuation = nil
+        c?.resume()
+    }
+
+    // MARK: - speak() 方式的回调
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
+        queue.async { [self] in
+            guard !usingEngine, utterance === current else { return }
+            resume(generation)
+        }
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
+        queue.async { [self] in
+            guard !usingEngine, utterance === current else { return }
+            resume(generation)
+        }
+    }
+
+    // MARK: - write() 方式：按左右声道播放
 
     private func receive(_ buffer: AVAudioBuffer, gen: Int) {
         queue.async { [self] in
             guard gen == generation, let pcm = buffer as? AVAudioPCMBuffer else { return }
             if pcm.frameLength == 0 {          // 生成结束
                 finished = true
-                checkDone()
+                checkDone(gen)
                 return
             }
             guard let f = Self.toFloat(pcm) else { return }
@@ -85,7 +133,7 @@ final class Speaker: NSObject {
                 self?.queue.async {
                     guard let self, gen == self.generation else { return }
                     self.played += 1
-                    self.checkDone()
+                    self.checkDone(gen)
                 }
             }
             if !player.isPlaying { player.play() }
@@ -107,12 +155,10 @@ final class Speaker: NSObject {
         }
     }
 
-    private func checkDone() {
+    private func checkDone(_ gen: Int) {
         guard finished, played >= scheduled else { return }
         if scheduled == 0 { hearLog("朗读：系统语音没有生成声音（可能没有安装该语言的语音）", .warning) }
-        let c = continuation
-        continuation = nil
-        c?.resume()
+        resume(gen)
     }
 
     /// 语音合成输出可能是 Int16，播放器需要 Float32

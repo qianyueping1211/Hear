@@ -24,7 +24,9 @@ struct LLMProvider: Codable, Identifiable, Equatable {
         .init(name: "OpenAI", kind: .openai, baseURL: "https://api.openai.com/v1"),
         .init(name: "Anthropic", kind: .anthropic, baseURL: "https://api.anthropic.com"),
         .init(name: "DeepSeek", kind: .openai, baseURL: "https://api.deepseek.com/v1"),
-        .init(name: "通义千问", kind: .openai, baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        .init(name: "Qwen", kind: .openai, baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        .init(name: "MiniMax", kind: .openai, baseURL: "https://api.minimaxi.com/v1"),
+        .init(name: "MiniMax (International)", kind: .openai, baseURL: "https://api.minimax.io/v1"),
         .init(name: "Kimi", kind: .openai, baseURL: "https://api.moonshot.cn/v1"),
         .init(name: "OpenRouter", kind: .openai, baseURL: "https://openrouter.ai/api/v1"),
         .init(name: "Ollama（局域网）", kind: .openai, baseURL: "http://192.168.1.100:11434/v1"),
@@ -74,7 +76,11 @@ final class LLMSettings: ObservableObject {
     private init() {
         if let data = UserDefaults.standard.data(forKey: "llmProviders"),
            let list = try? JSONDecoder().decode([LLMProvider].self, from: data) {
-            providers = list
+            providers = list.map { item in
+                var p = item
+                if p.name == "通义千问" { p.name = "Qwen" }   // 旧名称改为英文
+                return p
+            }
         }
         if let s = UserDefaults.standard.string(forKey: "llmActiveID") { activeID = UUID(uuidString: s) }
         if activeID == nil { activeID = providers.first?.id }
@@ -197,7 +203,22 @@ enum LLMClient {
                 .compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
                 .joined()
         }
-        guard let t = text?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { throw LLMError.empty }
+        guard let raw = text else { throw LLMError.empty }
+        let t = stripThinking(raw).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { throw LLMError.empty }
         return t
+    }
+
+    /// 推理模型可能把思考过程放在 <think>…</think> 里，总结里不需要
+    static func stripThinking(_ s: String) -> String {
+        var out = s
+        while let a = out.range(of: "<think>") {
+            if let b = out.range(of: "</think>", range: a.upperBound..<out.endIndex) {
+                out.removeSubrange(a.lowerBound..<b.upperBound)
+            } else {
+                out.removeSubrange(a.lowerBound..<out.endIndex)
+            }
+        }
+        return out
     }
 }

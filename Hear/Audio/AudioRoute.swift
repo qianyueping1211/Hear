@@ -32,12 +32,26 @@ enum AudioRoute {
         if routeHasHeadphones() { return true }
         let s = AVAudioSession.sharedInstance()
         try? s.overrideOutputAudioPort(.none)
+        lastOverride = AVAudioSession.PortOverride.none
         return routeHasHeadphones()
     }
 
-    /// 按选择的输出方式切换路由
+    private static var lastOverride: AVAudioSession.PortOverride?
+
+    /// 按选择的输出方式切换路由。只在需要改变时才调用系统接口，
+    /// 因为每次改路由都会让正在播放的声音中断。
     static func apply(_ output: AudioOutput) {
+        let want: AVAudioSession.PortOverride = output == .speaker ? .speaker : .none
+        guard want != lastOverride else { return }
+        lastOverride = want
+        try? AVAudioSession.sharedInstance().overrideOutputAudioPort(want)
+    }
+
+    /// 不改路由的情况下判断是否连着耳机（输出或可用输入里有耳机/蓝牙设备）
+    static func headphonesLikelyConnected() -> Bool {
         let s = AVAudioSession.sharedInstance()
-        try? s.overrideOutputAudioPort(output == .speaker ? .speaker : .none)
+        if routeHasHeadphones() { return true }
+        let inputs: Set<AVAudioSession.Port> = [.headsetMic, .bluetoothHFP, .usbAudio]
+        return (s.availableInputs ?? []).contains { inputs.contains($0.portType) }
     }
 }

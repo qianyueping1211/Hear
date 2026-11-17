@@ -16,6 +16,8 @@ final class Segmenter {
         case started(Int)
         case partial(Int, [Float])
         case ended(Int, [Float])
+        case discarded(Int)               // 声音太短，不算一句话
+        case noise(Float, Float)          // 环境噪声、触发阈值（dB），每隔几秒报告一次，写日志用
     }
 
     var config = Config()
@@ -34,8 +36,10 @@ final class Segmenter {
     private var segID = 0
     private var lastPartialAt = 0
     private var frameCounter = 0
+    private var voicedLevel: Float = -40  // 这句话说话声的平均音量，用来判断停顿
 
     func reset() {
+        if inSpeech { onEvent?(.discarded(segID)) }
         carry.removeAll(); preroll.removeAll(); speech.removeAll()
         inSpeech = false; voicedRun = 0; silentRun = 0; voicedFrames = 0
     }
@@ -71,6 +75,7 @@ final class Segmenter {
         if history.count > 100 { history.removeFirst(history.count - 100) }
         let noise = noiseFloor()
         let threshold = max(noise + config.sensitivityDB, -50)
+        if frameCounter % 167 == 0 { onEvent?(.noise(noise, threshold)) }   // 约 5 秒一次
 
         if !inSpeech {
             preroll.append(contentsOf: f)
@@ -89,15 +94,19 @@ final class Segmenter {
                 preroll.removeAll()
                 silentRun = 0
                 voicedFrames = voicedRun
+                voicedLevel = db
                 lastPartialAt = speech.count
                 onEvent?(.started(segID))
             }
         } else {
             speech.append(contentsOf: f)
-            // 说话中音量回落到“噪声 + 灵敏度的一半”以下，就算停顿
-            if db > noise + config.sensitivityDB * 0.5 {
+            // 停顿：音量回落到“噪声 + 灵敏度的一半”以下，或比这句话的说话音量低 18 dB 以上
+            // （第二条让嘈杂环境里也能断句）
+            let pauseLevel = max(noise + config.sensitivityDB * 0.5, voicedLevel - 18)
+            if db > pauseLevel {
                 silentRun = 0
                 voicedFrames += 1
+                voicedLevel = voicedLevel * 0.97 + db * 0.03
             } else {
                 silentRun += 1
             }
@@ -126,6 +135,8 @@ final class Segmenter {
         let audio = Array(speech.prefix(speech.count - cut))
         if voicedFrames * 30 >= config.minSpeechMs {
             onEvent?(.ended(segID, audio))
+        } else {
+            onEvent?(.discarded(segID))
         }
         inSpeech = false
         speech.removeAll()

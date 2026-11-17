@@ -54,7 +54,7 @@ struct SettingsView: View {
                 } header: {
                     Text("朗读")
                 } footer: {
-                    Text("主界面按住“朗读”按钮 2 秒也可以切换扬声器/耳机（没连耳机时不会切换）。戴耳机时朗读不会暂停麦克风，对话更连贯。两个人各戴一只耳机时，可以让左耳只听一种语言、右耳只听另一种。")
+                    Text("戴耳机：译文出来就从耳机朗读，边听边读，不会被麦克风录进去。插上耳机会自动切到耳机。\n扬声器：聆听时不朗读；停止实时翻译后，从上次没读完的那句开始往后读；再开始实时翻译会立刻停止朗读。\n点某一句：从这句开始往后读，再点一下停止。\n按住“朗读”按钮 2 秒可以切换扬声器/耳机（没连耳机时不切换）。耳机模式下可以让左右耳各听一种语言。")
                 }
 
                 // MARK: 音色
@@ -269,7 +269,7 @@ struct SettingsView: View {
 }
 
 /// 一行模型状态：名称、文件名、大小、是否已下载
-struct ModelRow: View {
+​struct ModelRow: View {
     let title: String
     let icon: String
     let status: LiveSession.ModelStatus
