@@ -40,8 +40,8 @@ struct SettingsView: View {
 
                 // MARK: 模型状态
                 Section {
-                    ModelRow(title: "翻译模型", icon: "character.book.closed", status: session.translationStatus)
-                    ModelRow(title: "语音识别模型", icon: "waveform", status: session.speechStatus)
+                    ModelRow(title: "翻译模型（MT）", icon: "character.book.closed", status: session.translationStatus)
+                    ModelRow(title: "语音识别模型（ASR）", icon: "waveform", status: session.speechStatus)
 
                     if session.installedGGUFs.count > 1 {
                         Picker("使用的翻译模型", selection: ggufSelection) {
@@ -62,17 +62,17 @@ struct SettingsView: View {
                         Text("hf-mirror（国内镜像）").tag("hf-mirror.com")
                     }
                     Button { confirmKind = .translation } label: {
-                        Label(session.translationStatus.installed ? "重新下载翻译模型" : "下载翻译模型",
+                        Label(session.translationStatus.installed ? "重新下载翻译模型（MT）" : "下载翻译模型（MT）",
                               systemImage: "arrow.clockwise")
                     }
                     .disabled(session.isBusyWithModels)
                     Button { confirmKind = .speech } label: {
-                        Label(session.speechStatus.installed ? "重新下载语音识别模型" : "下载语音识别模型",
+                        Label(session.speechStatus.installed ? "重新下载语音识别模型（ASR）" : "下载语音识别模型（ASR）",
                               systemImage: "arrow.clockwise")
                     }
                     .disabled(session.isBusyWithModels)
                     Button { importing = true } label: {
-                        Label("从“文件”导入 GGUF 翻译模型…", systemImage: "folder")
+                        Label("从“文件”导入 GGUF 翻译模型（MT）…", systemImage: "folder")
                     }
                     .disabled(session.isBusyWithModels)
                 } header: {
@@ -99,8 +99,8 @@ struct SettingsView: View {
                 Button("取消", role: .cancel) {}
             } message: { kind in
                 Text(kind == .translation
-                     ? "翻译模型约 2 GB，请连接 Wi‑Fi。"
-                     : "语音识别模型约 1.6 GB，请连接 Wi‑Fi。下载后首次加载需要编译 1–3 分钟。")
+                     ? "翻译模型（MT）约 2 GB，请连接 Wi‑Fi。"
+                     : "语音识别模型（ASR）约 1.6 GB，请连接 Wi‑Fi。下载后首次加载需要编译 1–3 分钟。")
             }
             .fileImporter(isPresented: $importing,
                           allowedContentTypes: [UTType(filenameExtension: "gguf") ?? .data, .data]) { result in
@@ -114,7 +114,7 @@ struct SettingsView: View {
 
     private var confirmTitle: String {
         guard let k = confirmKind else { return "" }
-        return k == .translation ? "翻译模型" : "语音识别模型"
+        return k == .translation ? "翻译模型（MT）" : "语音识别模型（ASR）"
     }
 
     private func isInstalled(_ kind: LiveSession.ModelKind) -> Bool {

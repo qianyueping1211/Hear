@@ -14,7 +14,7 @@ struct SetupView: View {
             case .needsModels:
                 Image(systemName: "arrow.down.circle").font(.system(size: 54)).foregroundStyle(.tint)
                 Text("首次使用需要下载模型").font(.title3.weight(.semibold))
-                Text("翻译模型 Hy-MT2-1.8B（约 2 GB）\n语音识别 Whisper large-v3 turbo（约 1.6 GB）\n\n只需下载一次。之后完全离线运行。\n请连接 Wi‑Fi，下载时保持 App 在前台。")
+                Text("翻译模型（MT）Hy-MT2-1.8B，约 2 GB\n语音识别模型（ASR）Whisper large-v3 turbo，约 1.6 GB\n\n只需下载一次。之后完全离线运行。\n请连接 Wi‑Fi，下载时保持 App 在前台。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
