@@ -2,7 +2,7 @@ import Foundation
 import WhisperKit
 import CoreML
 
-/// 本地语音识别（WhisperKit）
+/// 本地语音识别（WhisperKit，跑在神经网络引擎上）
 actor SpeechRecognizer {
     static let modelVariant = "openai_whisper-large-v3-v20240930_turbo"
 
@@ -45,7 +45,7 @@ actor SpeechRecognizer {
         do {
             p = try await WhisperKit(config)
         } catch {
-            hearLog("语音识别：初始化失败 \(error)")
+            hearLog("语音识别：初始化失败 \(error)", .error)
             throw error
         }
         hearLog("语音识别：初始化完成（\(Int(Date().timeIntervalSince(t0)))s），开始载入模型")
@@ -55,7 +55,7 @@ actor SpeechRecognizer {
             try await p.loadModels()
         } catch {
             ASRProgress.shared.set(stage: "失败", pipe: nil)
-            hearLog("语音识别：载入模型失败 \(error)")
+            hearLog("语音识别：载入模型失败 \(error)", .error)
             throw error
         }
         pipe = p
@@ -71,16 +71,23 @@ actor SpeechRecognizer {
 
     /// 识别一句话：先让 Whisper 自动判断语种；如果判断结果不在两种候选语言里，再用 fallback 语言重识别。
     /// 返回 (语言代码, 文字)
-    func recognize(_ samples: [Float], candidates: [String], fallback: String) async throws -> (String, String) {
+    /// preview = true：说话过程中的实时预览，只识别一遍、不重试，速度优先
+    func recognize(_ samples: [Float], candidates: [String], fallback: String,
+                   preview: Bool = false) async throws -> (String, String) {
         guard let pipe else { return (fallback, "") }
         await acquire(); defer { release() }
 
-        let auto = try await pipe.transcribe(audioArray: samples, decodeOptions: options(language: nil))
+        let auto = try await pipe.transcribe(audioArray: samples,
+                                             decodeOptions: options(language: nil, preview: preview))
         let detected = auto.first?.language ?? ""
         if candidates.contains(detected) {
             return (detected, Self.joinText(auto, language: detected))
         }
-        let forced = try await pipe.transcribe(audioArray: samples, decodeOptions: options(language: fallback))
+        if preview {
+            return (fallback, Self.joinText(auto, language: fallback))
+        }
+        let forced = try await pipe.transcribe(audioArray: samples,
+                                               decodeOptions: options(language: fallback, preview: false))
         return (fallback, Self.joinText(forced, language: fallback))
     }
 
@@ -92,7 +99,7 @@ actor SpeechRecognizer {
         return Self.joinText(results, language: language ?? results.first?.language)
     }
 
-    private func options(language: String?) -> DecodingOptions {
+    private func options(language: String?, preview: Bool = false) -> DecodingOptions {
         var opts = DecodingOptions()
         opts.verbose = false
         opts.task = .transcribe
@@ -100,7 +107,14 @@ actor SpeechRecognizer {
         opts.detectLanguage = (language == nil)
         opts.usePrefillPrompt = (language != nil)
         opts.temperature = 0
-        opts.temperatureFallbackCount = 2
+        // 噪声或半句话时 Whisper 容易“复读”很长的内容并反复重试，非常慢：
+        // 预览不重试、限制长度；整句最多重试一次
+        opts.temperatureFallbackCount = preview ? 0 : 1
+        opts.sampleLength = preview ? 96 : 224
+        opts.compressionRatioThreshold = 2.4
+        opts.logProbThreshold = -1.0
+        opts.firstTokenLogProbThreshold = -1.5
+        opts.noSpeechThreshold = 0.6          // 判断为“没人说话”的片段直接丢掉
         opts.skipSpecialTokens = true
         opts.withoutTimestamps = true
         opts.suppressBlank = true
@@ -125,6 +139,11 @@ actor SpeechRecognizer {
                     "Thank you for watching", "Thanks for watching", "Subtitles by", "明镜", "请不吝"]
         if junk.contains(where: { t.localizedCaseInsensitiveContains($0) }) { return false }
         if t.hasPrefix("[") || t.hasPrefix("(") || t.hasPrefix("（") { return false }
+        // 背景声的描述，例如 *Humming*、♪音乐♪、(笑声)
+        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.hasPrefix("*") || raw.hasPrefix("♪") || raw.hasPrefix("[") || raw.hasPrefix("(") || raw.hasPrefix("（") {
+            return false
+        }
         return true
     }
 }

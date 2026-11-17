@@ -26,7 +26,6 @@ struct LLMProvider: Codable, Identifiable, Equatable {
         .init(name: "DeepSeek", kind: .openai, baseURL: "https://api.deepseek.com/v1"),
         .init(name: "Qwen", kind: .openai, baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         .init(name: "MiniMax", kind: .openai, baseURL: "https://api.minimaxi.com/v1"),
-        .init(name: "MiniMax (International)", kind: .openai, baseURL: "https://api.minimax.io/v1"),
         .init(name: "Kimi", kind: .openai, baseURL: "https://api.moonshot.cn/v1"),
         .init(name: "OpenRouter", kind: .openai, baseURL: "https://openrouter.ai/api/v1"),
         .init(name: "Ollama（局域网）", kind: .openai, baseURL: "http://192.168.1.100:11434/v1"),
@@ -34,7 +33,9 @@ struct LLMProvider: Codable, Identifiable, Equatable {
     ]
 }
 
-/// API Key 存在钥匙串里，不写进普通文件
+/// API Key 优先存在钥匙串里。
+/// 自签名安装的 App 有时没有钥匙串权限（保存会失败），这时改存到 App 自己的加密文件里，
+/// 文件只在手机解锁后可读，不会进入 iCloud 备份。
 enum Keychain {
     private static let service = "com.hear.llm"
 
@@ -43,26 +44,64 @@ enum Keychain {
                                    kSecAttrService as String: service,
                                    kSecAttrAccount as String: account]
         SecItemDelete(base as CFDictionary)
-        guard !value.isEmpty else { return }
+        guard !value.isEmpty else { FileKeyStore.set(nil, account: account); return }
         var add = base
         add[kSecValueData as String] = Data(value.utf8)
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(add as CFDictionary, nil)
+        let status = SecItemAdd(add as CFDictionary, nil)
+        if status == errSecSuccess, get(account: account, keychainOnly: true) == value {
+            FileKeyStore.set(nil, account: account)
+            hearLog("API Key 已保存到钥匙串")
+        } else {
+            FileKeyStore.set(value, account: account)
+            hearLog("钥匙串不可用（\(status)），API Key 改为保存在 App 的加密文件里", .warning)
+        }
     }
 
-    static func get(account: String) -> String? {
+    static func get(account: String, keychainOnly: Bool = false) -> String? {
         let q: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                 kSecAttrService as String: service,
                                 kSecAttrAccount as String: account,
                                 kSecReturnData as String: true,
                                 kSecMatchLimit as String: kSecMatchLimitOne]
         var out: AnyObject?
-        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
-              let data = out as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        if SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+           let data = out as? Data, let s = String(data: data, encoding: .utf8), !s.isEmpty {
+            return s
+        }
+        return keychainOnly ? nil : FileKeyStore.get(account: account)
     }
 
     static func delete(account: String) { set("", account: account) }
+}
+
+/// 钥匙串不可用时的备用存储
+enum FileKeyStore {
+    private static var url: URL {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("llm-keys.json")
+    }
+
+    private static func load() -> [String: String] {
+        guard let d = try? Data(contentsOf: url),
+              let m = try? JSONDecoder().decode([String: String].self, from: d) else { return [:] }
+        return m
+    }
+
+    static func get(account: String) -> String? { load()[account] }
+
+    static func set(_ value: String?, account: String) {
+        var m = load()
+        guard m[account] != value else { return }
+        m[account] = value
+        guard let d = try? JSONEncoder().encode(m) else { return }
+        try? d.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        var u = url
+        var rv = URLResourceValues()
+        rv.isExcludedFromBackup = true
+        try? u.setResourceValues(rv)
+    }
 }
 
 /// 大模型配置（保存在 UserDefaults，Key 在钥匙串）
