@@ -1,0 +1,9 @@
+.DS_Store
+build/
+DerivedData/
+*.xcodeproj/
+Hear/Info.plist
+Frameworks/llama.xcframework/
+Frameworks/LLAMA_VERSION
+*.ipa
+Payload/

@@ -1,0 +1,56 @@
+name: Hear
+options:
+  bundleIdPrefix: com.hear
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+
+packages:
+  WhisperKit:
+    url: https://github.com/argmaxinc/WhisperKit
+    from: 0.12.0
+
+targets:
+  Hear:
+    type: application
+    platform: iOS
+    sources:
+      - path: Hear
+    dependencies:
+      - package: WhisperKit
+        product: WhisperKit
+      - framework: Frameworks/llama.xcframework
+        embed: true
+    info:
+      path: Hear/Info.plist
+      properties:
+        CFBundleDisplayName: 听见
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSMicrophoneUsageDescription: 需要使用麦克风来识别你说的话并实时翻译（全部在本机完成）。
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UIBackgroundModes:
+          - audio
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ${BUNDLE_ID}
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ${TEAM_ID}
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+
+schemes:
+  Hear:
+    build:
+      targets:
+        Hear: all
+    run:
+      config: Debug
+    archive:
+      config: Release
