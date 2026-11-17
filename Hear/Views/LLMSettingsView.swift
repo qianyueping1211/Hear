@@ -39,8 +39,6 @@ struct LLMSettingsView: View {
                 }
             } header: {
                 Text("已添加")
-            } footer: {
-                Text("点一下设为当前使用的 API；左滑可以编辑或删除。用于对话总结，翻译仍在本机离线完成。")
             }
 
             Section("添加") {
@@ -74,6 +72,8 @@ struct ProviderEditView: View {
     @State private var loading = false
     @State private var message = ""
     @State private var manualModel = ""
+    @State private var keyLoaded = false     // Key 只在第一次打开时读一次，避免从选模型页返回时被覆盖
+    @State private var savedOnce = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -136,18 +136,34 @@ struct ProviderEditView: View {
                 ToolbarItem(placement: .topBarLeading) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("保存") {
-                        LLMSettings.shared.upsert(provider, key: apiKey)
-                        if isNew { LLMSettings.shared.activeID = provider.id }
-                        hearLog("大模型 API 已保存：\(provider.name) / \(provider.selectedModel)")
+                        saveNow()
                         dismiss()
                     }
                     .disabled(provider.name.isEmpty || provider.baseURL.isEmpty)
                 }
             }
             .onAppear {
+                guard !keyLoaded else { return }
+                keyLoaded = true
                 if !isNew { apiKey = LLMSettings.shared.key(for: provider) ?? "" }
             }
+            // 选好模型后自动保存（获取过模型列表之后）
+            .onChange(of: provider.selectedModel) { _, _ in
+                if savedOnce { saveNow() }
+            }
         }
+    }
+
+    /// 保存名称、地址、Key、模型列表和选中的模型。Key 输入框为空时保留原来保存的 Key
+    private func saveNow() {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalKey = key.isEmpty ? (LLMSettings.shared.key(for: provider) ?? "") : key
+        LLMSettings.shared.upsert(provider, key: finalKey)
+        if isNew && !savedOnce { LLMSettings.shared.activeID = provider.id }
+        savedOnce = true
+        let ok = !(LLMSettings.shared.key(for: provider) ?? "").isEmpty
+        hearLog("大模型 API 已保存：\(provider.name) / \(provider.selectedModel)，Key \(ok ? "已保存" : "为空")",
+                ok ? .info : .warning)
     }
 
     private func fetchModels() async {
@@ -158,8 +174,9 @@ struct ProviderEditView: View {
             let list = try await LLMClient.listModels(provider, key: apiKey)
             provider.models = list
             if !list.contains(provider.selectedModel) { provider.selectedModel = list.first ?? "" }
-            message = "获取到 \(list.count) 个模型"
+            message = "获取到 \(list.count) 个模型，已连同 API Key 一起保存"
             hearLog("获取模型列表成功：\(provider.name)，\(list.count) 个")
+            saveNow()      // 获取成功说明地址和 Key 都对，马上一起保存
         } catch {
             message = "获取失败：\(error.localizedDescription)"
             hearLog("获取模型列表失败：\(provider.name) \(error)", .error)

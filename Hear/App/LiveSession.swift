@@ -417,8 +417,9 @@ final class LiveSession: ObservableObject {
             return
         }
         // 已经插着耳机就用耳机朗读（除非用户手动选了扬声器）；耳机已拔掉就改回扬声器
+        // 注意：这里不强制改输出路由，避免开始聆听时麦克风被重新配置
         try? AudioRoute.activate()
-        let hasHeadphones = AudioRoute.headphonesLikelyConnected() || AudioRoute.detectHeadphones()
+        let hasHeadphones = AudioRoute.headphonesLikelyConnected()
         if outputMode == .speaker, hasHeadphones, !manualSpeaker {
             outputMode = .headphones
             hearLog("检测到耳机，朗读改为耳机")
@@ -426,11 +427,11 @@ final class LiveSession: ObservableObject {
         if outputMode == .headphones, !hasHeadphones { outputMode = .speaker }
         headsetConnected = hasHeadphones
         if inputSource == "headset", !hasHeadphones { inputSource = "phone" }   // 没耳机就用手机麦克风
-        // 用扬声器时实时翻译优先：立即暂停朗读，停止聆听后从这句接着读
+        // 扬声器模式：聆听期间完全不播放、不改输出路由，停止后再从没读的那句开始读
         if outputMode == .speaker { stopReading() }
         do {
             try capture.start()
-            AudioRoute.apply(outputMode)
+            if outputMode == .headphones { AudioRoute.apply(.headphones) }
             isRunning = true
             hearLog("开始实时翻译：\(langA.displayName) ⇄ \(langB.displayName)，朗读\(outputMode == .speaker ? "扬声器" : "耳机")")
             activity = "正在聆听"
@@ -557,11 +558,12 @@ final class LiveSession: ObservableObject {
 
     /// 停止朗读。readIndex 不动，下次从被打断的这句开始读
     func stopReading() {
+        let wasReading = readerTask != nil || readingID != nil
         readerGen += 1
         readerTask?.cancel()
         readerTask = nil
         readingID = nil
-        speaker.stop()
+        if wasReading { speaker.stop() }
         capture.muted = false
     }
 
@@ -571,6 +573,11 @@ final class LiveSession: ObservableObject {
         if readingID == item.id { stopReading(); return }
         stopReading()
         readIndex = i
+        // 扬声器模式 + 正在聆听：不出声，只记住从这句开始，停止实时翻译后再读
+        if outputMode == .speaker && isRunning {
+            activity = "停止实时翻译后从这句开始朗读"
+            return
+        }
         // 能连续读（戴耳机，或已停止聆听）就一直往后读；否则只读这一句
         startReader(oneShot: !autoReadAllowed)
     }
