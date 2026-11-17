@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import AVFoundation
 
 /// 整个实时翻译流程的调度中心：
 /// 麦克风 → 断句 → 判断语种 → 识别 → 翻译（流式显示）→ 朗读
@@ -34,6 +35,16 @@ final class LiveSession: ObservableObject {
     @Published var glossary: String { didSet { save("glossary", glossary) } }
     @Published var hfHost: String { didSet { save("hfHost", hfHost) } }
 
+    // 朗读输出：扬声器 / 耳机；耳机时左右耳各播哪种语言（"A" / "B" / "off"）
+    @Published var outputMode: AudioOutput { didSet { save("outputMode", outputMode.rawValue) } }
+    @Published var leftEar: String { didSet { save("leftEar", leftEar) } }
+    @Published var rightEar: String { didSet { save("rightEar", rightEar) } }
+    // 音色："system" 系统默认 / "match" 接近说话人（性别 + 音高）
+    @Published var voiceStyle: String { didSet { save("voiceStyle", voiceStyle) } }
+    // 用我的“个人声音”朗读我说的话；mySide 表示我说的是语言 A 还是 B
+    @Published var usePersonalVoice: Bool { didSet { save("usePersonalVoice", usePersonalVoice) } }
+    @Published var mySide: String { didSet { save("mySide", mySide) } }
+
     private let capture = AudioCapture()
     private let asr = SpeechRecognizer()
     private let translator = LlamaTranslator()
@@ -57,11 +68,62 @@ final class LiveSession: ObservableObject {
         silenceMs = d.object(forKey: "silenceMs") as? Double ?? 700
         glossary = d.string(forKey: "glossary") ?? ""
         hfHost = d.string(forKey: "hfHost") ?? "huggingface.co"
+        outputMode = AudioOutput(rawValue: d.string(forKey: "outputMode") ?? "") ?? .speaker
+        leftEar = d.string(forKey: "leftEar") ?? "A"
+        rightEar = d.string(forKey: "rightEar") ?? "B"
+        voiceStyle = d.string(forKey: "voiceStyle") ?? "system"
+        usePersonalVoice = d.object(forKey: "usePersonalVoice") as? Bool ?? false
+        mySide = d.string(forKey: "mySide") ?? "A"
 
         capture.segmenter.onEvent = { [weak self] e in
             Task { @MainActor in self?.handle(e) }
         }
         pushConfig()
+
+        // 耳机拔掉 / 断开时自动改回扬声器
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
+            Task { @MainActor in
+                guard let self, self.outputMode == .headphones else { return }
+                self.outputMode = .speaker
+                AudioRoute.apply(.speaker)
+                self.activity = "耳机已断开，改为扬声器朗读"
+            }
+        }
+    }
+
+    // MARK: - 朗读输出（扬声器 / 耳机）
+
+    /// 长按“朗读”按钮 2 秒：在扬声器和耳机之间切换。没连耳机时不切换。
+    func cycleOutput() {
+        let haptic = UINotificationFeedbackGenerator()
+        if outputMode == .speaker {
+            try? AudioRoute.activate()
+            guard AudioRoute.detectHeadphones() else {
+                AudioRoute.apply(.speaker)
+                haptic.notificationOccurred(.warning)
+                activity = "未连接耳机"
+                return
+            }
+            outputMode = .headphones
+            activity = "改为耳机朗读"
+        } else {
+            outputMode = .speaker
+            activity = "改为扬声器朗读"
+        }
+        AudioRoute.apply(outputMode)
+        haptic.notificationOccurred(.success)
+    }
+
+    func earLabel(_ slot: String) -> String {
+        switch slot {
+        case "A": return langA.name
+        case "B": return langB.name
+        default: return "不播放"
+        }
     }
 
     // MARK: - 模型状态（设置页显示）
@@ -212,6 +274,7 @@ final class LiveSession: ObservableObject {
         }
         do {
             try capture.start()
+            AudioRoute.apply(outputMode)
             isRunning = true
             activity = "正在聆听"
             UIApplication.shared.isIdleTimerDisabled = true
@@ -242,7 +305,7 @@ final class LiveSession: ObservableObject {
     func clear() { items.removeAll(); partial = "" }
 
     func replay(_ item: TranslationItem) {
-        Task { await speakTranslation(item.translated, locale: item.target.tts) }
+        Task { await speak(item) }
     }
 
     // MARK: - 流水线
@@ -302,7 +365,12 @@ final class LiveSession: ObservableObject {
             return
         }
 
-        let item = TranslationItem(source: src, target: tgt, sourceText: text)
+        var item = TranslationItem(source: src, target: tgt, sourceText: text)
+        if voiceStyle == "match" {
+            item.speakerF0 = await Task.detached(priority: .utility) {
+                VoiceAnalyzer.estimateF0(samples)
+            }.value
+        }
         partial = ""
         items.append(item)
         let id = item.id
@@ -325,18 +393,51 @@ final class LiveSession: ObservableObject {
         }
         update(id, result, done: true)
 
-        if speakOutput, !result.isEmpty, isRunning {
-            await speakTranslation(result, locale: tgt.tts)
+        if speakOutput, !result.isEmpty, isRunning,
+           let done = items.first(where: { $0.id == id }) {
+            await speak(done)
         }
         activity = isRunning ? "正在聆听" : ""
     }
 
-    private func speakTranslation(_ text: String, locale: String) async {
+    /// 朗读一条译文：决定左右耳、声音和音高
+    private func speak(_ item: TranslationItem) async {
+        let text = item.translated
+        guard !text.isEmpty, !text.hasPrefix("（翻译失败") else { return }
+
+        // 译文是 A 语言还是 B 语言
+        let slot = item.target == langA ? "A" : (item.target == langB ? "B" : "?")
+        var pan: Float = 0
+        if outputMode == .headphones, slot != "?" {
+            let l = leftEar == slot, r = rightEar == slot
+            if !l && !r { return }                       // 两耳都不播这种语言
+            pan = (l && r) ? 0 : (l ? -1 : 1)
+        }
+
+        // 音色
+        var voice: AVSpeechSynthesisVoice?
+        var pitch: Float = 1
+        let fromSlot = item.source == langA ? "A" : "B"
+        if usePersonalVoice, fromSlot == mySide, let pv = Speaker.personalVoice(for: item.target.tts) {
+            voice = pv
+        } else if voiceStyle == "match", let f0 = item.speakerF0 {
+            let male = f0 < 165
+            voice = Speaker.bestVoice(for: item.target.tts, gender: male ? .male : .female)
+            let base: Float = male ? 120 : 210
+            pitch = min(1.4, max(0.75, f0 / base))
+        }
+
+        AudioRoute.apply(outputMode)
+        // 扬声器朗读时暂停麦克风，避免把喇叭声音再识别一遍；戴耳机时不用
+        let mute = outputMode == .speaker
         activity = "朗读中…"
-        capture.muted = true
-        await speaker.speak(text, locale: locale)
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        capture.muted = false
+        if mute { capture.muted = true }
+        await speaker.speak(SpeakRequest(text: text, locale: item.target.tts,
+                                         voice: voice, pitch: pitch, pan: pan))
+        if mute {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            capture.muted = false
+        }
     }
 
     private func update(_ id: UUID, _ text: String, done: Bool) {

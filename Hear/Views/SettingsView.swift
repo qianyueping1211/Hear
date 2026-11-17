@@ -11,8 +11,51 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section("翻译") {
-                    Toggle("朗读译文", isOn: $session.speakOutput)
                     Toggle("结合上文翻译（更连贯）", isOn: $session.useContext)
+                }
+
+                // MARK: 朗读
+                Section {
+                    Toggle("朗读译文", isOn: $session.speakOutput)
+                    Picker("朗读从哪里出声", selection: outputBinding) {
+                        Text("手机扬声器").tag(AudioOutput.speaker)
+                        Text("耳机").tag(AudioOutput.headphones)
+                    }
+                    if session.outputMode == .headphones {
+                        Picker("左耳听", selection: $session.leftEar) {
+                            Text(session.langA.name).tag("A")
+                            Text(session.langB.name).tag("B")
+                            Text("不播放").tag("off")
+                        }
+                        Picker("右耳听", selection: $session.rightEar) {
+                            Text(session.langA.name).tag("A")
+                            Text(session.langB.name).tag("B")
+                            Text("不播放").tag("off")
+                        }
+                    }
+                } header: {
+                    Text("朗读")
+                } footer: {
+                    Text("主界面按住“朗读”按钮 2 秒也可以切换扬声器/耳机（没连耳机时不会切换）。戴耳机时朗读不会暂停麦克风，对话更连贯。两个人各戴一只耳机时，可以让左耳只听一种语言、右耳只听另一种。")
+                }
+
+                // MARK: 音色
+                Section {
+                    Picker("朗读音色", selection: $session.voiceStyle) {
+                        Text("系统默认").tag("system")
+                        Text("接近说话人（性别和音高）").tag("match")
+                    }
+                    Toggle("用我的“个人声音”朗读我说的话", isOn: personalVoiceBinding)
+                    if session.usePersonalVoice {
+                        Picker("我说的语言", selection: $session.mySide) {
+                            Text(session.langA.name).tag("A")
+                            Text(session.langB.name).tag("B")
+                        }
+                    }
+                } header: {
+                    Text("音色")
+                } footer: {
+                    Text(personalVoiceNote ?? "“接近说话人”会根据说话人的音高自动选男声或女声，并调高低音，不是完全复刻。“个人声音”需要先在 iPhone 设置 → 辅助功能 → 个人声音 里录制，只能用于它支持的语言。")
                 }
 
                 Section {
@@ -110,6 +153,36 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    @State private var personalVoiceNote: String?
+
+    private var outputBinding: Binding<AudioOutput> {
+        Binding(
+            get: { session.outputMode },
+            set: { new in if new != session.outputMode { session.cycleOutput() } }
+        )
+    }
+
+    private var personalVoiceBinding: Binding<Bool> {
+        Binding(
+            get: { session.usePersonalVoice },
+            set: { on in
+                guard on else { session.usePersonalVoice = false; return }
+                Task {
+                    let ok = await Speaker.requestPersonalVoiceAccess()
+                    if ok && Speaker.hasAnyPersonalVoice {
+                        session.usePersonalVoice = true
+                        personalVoiceNote = nil
+                    } else {
+                        session.usePersonalVoice = false
+                        personalVoiceNote = ok
+                            ? "还没有录制个人声音：请先到 iPhone 设置 → 辅助功能 → 个人声音 里创建，并打开“允许 App 请求使用”。"
+                            : "没有获得个人声音的使用权限，可以在 iPhone 设置 → 辅助功能 → 个人声音 里允许。"
+                    }
+                }
+            }
+        )
     }
 
     private var confirmTitle: String {

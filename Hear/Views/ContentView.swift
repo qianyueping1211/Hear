@@ -8,6 +8,9 @@ struct ContentView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 LanguageBar()
+                if session.outputMode == .headphones {
+                    EarBar()
+                }
                 Divider()
                 Group {
                     if session.phase == .ready {
@@ -193,14 +196,8 @@ struct ControlBar: View {
                 .foregroundStyle(.secondary)
 
             HStack {
-                Button { session.speakOutput.toggle() } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: session.speakOutput ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                            .font(.title2)
-                        Text(session.speakOutput ? "朗读开" : "朗读关").font(.caption2)
-                    }
-                    .frame(width: 70)
-                }
+                // 点一下：朗读开/关；按住 2 秒：扬声器 ⇄ 耳机
+                SpeakToggle()
 
                 Spacer()
 
@@ -240,5 +237,79 @@ struct ControlBar: View {
                 .padding(.bottom, 8)
         }
         .padding(.top, 6)
+    }
+}
+
+// MARK: - 朗读按钮（点按开关，长按 2 秒切换扬声器/耳机）
+
+struct SpeakToggle: View {
+    @EnvironmentObject var session: LiveSession
+
+    private var icon: String {
+        if !session.speakOutput { return "speaker.slash.fill" }
+        return session.outputMode == .headphones ? "headphones" : "speaker.wave.2.fill"
+    }
+
+    private var label: String {
+        let where_ = session.outputMode == .headphones ? "耳机" : "朗读"
+        return session.speakOutput ? "\(where_)开" : "\(where_)关"
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon).font(.title2)
+            Text(label).font(.caption2)
+        }
+        .frame(width: 70, height: 56)
+        .foregroundStyle(Color.accentColor)
+        .contentShape(Rectangle())
+        .onTapGesture { session.speakOutput.toggle() }
+        .onLongPressGesture(minimumDuration: 2) { session.cycleOutput() }
+        .accessibilityLabel("朗读")
+        .accessibilityHint("点按开关朗读，按住两秒切换扬声器或耳机")
+    }
+}
+
+// MARK: - 耳机模式：左右耳分别听哪种语言
+
+struct EarBar: View {
+    @EnvironmentObject var session: LiveSession
+
+    var body: some View {
+        HStack(spacing: 10) {
+            EarMenu(title: "左耳", symbol: "l.circle.fill", selection: $session.leftEar)
+            EarMenu(title: "右耳", symbol: "r.circle.fill", selection: $session.rightEar)
+        }
+        .padding(.horizontal)
+        .padding(.bottom, 8)
+    }
+}
+
+struct EarMenu: View {
+    @EnvironmentObject var session: LiveSession
+    let title: String
+    let symbol: String
+    @Binding var selection: String
+
+    var body: some View {
+        Menu {
+            Picker(title, selection: $selection) {
+                Text(session.langA.name).tag("A")
+                Text(session.langB.name).tag("B")
+                Text("不播放").tag("off")
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: symbol)
+                Text(title).foregroundStyle(.secondary)
+                Text(session.earLabel(selection)).fontWeight(.medium)
+                Image(systemName: "chevron.down").font(.caption2)
+            }
+            .font(.footnote)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+        }
+        .foregroundStyle(.primary)
     }
 }
