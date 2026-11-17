@@ -4,7 +4,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 REPO="ggml-org/llama.cpp"
-TAG="${LLAMA_TAG:-}"
+# 固定一个已验证带 iOS 框架的版本；想升级时改这里或设置环境变量 LLAMA_TAG
+TAG="${LLAMA_TAG:-b12474}"
 TMP=$(mktemp -d)
 
 if command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]; then
