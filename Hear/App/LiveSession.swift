@@ -282,14 +282,19 @@ final class LiveSession: ObservableObject {
     private func process(_ samples: [Float]) async {
         let a = langA, b = langB
         activity = "识别中…"
-        let detected = await asr.detect(samples, candidates: [a.id, b.id]) ?? lastLangID ?? a.id
+        let fallback = (lastLangID == b.id) ? b.id : a.id
+        let detected: String
+        let text: String
+        do {
+            let r = try await asr.recognize(samples, candidates: [a.id, b.id], fallback: fallback)
+            detected = r.0
+            text = r.1
+        } catch {
+            activity = "识别失败"; partial = ""; return
+        }
         let src = (detected == b.id) ? b : a
         let tgt = (src == a) ? b : a
         lastLangID = src.id
-
-        let text: String
-        do { text = try await asr.transcribe(samples, language: src.id) }
-        catch { activity = "识别失败"; partial = ""; return }
 
         guard SpeechRecognizer.isMeaningful(text) else {
             partial = ""

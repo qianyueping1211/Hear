@@ -48,9 +48,8 @@ actor LlamaTranslator {
             throw TranslatorError.loadFailed("context")
         }
 
-        // Hy-MT 官方推荐采样参数：top_k 20, top_p 0.6, repetition_penalty 1.05, temperature 0.7
+        // Hy-MT 官方推荐采样参数：top_k 20, top_p 0.6, temperature 0.7
         let s = llama_sampler_chain_init(llama_sampler_chain_default_params())
-        llama_sampler_chain_add(s, llama_sampler_init_penalties(64, 1.05, 0, 0))
         llama_sampler_chain_add(s, llama_sampler_init_top_k(20))
         llama_sampler_chain_add(s, llama_sampler_init_top_p(0.6, 1))
         llama_sampler_chain_add(s, llama_sampler_init_temp(0.7))

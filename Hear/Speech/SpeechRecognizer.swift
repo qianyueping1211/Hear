@@ -39,19 +39,30 @@ actor SpeechRecognizer {
         }
     }
 
-    /// 在两种候选语言里判断说的是哪一种
-    func detect(_ samples: [Float], candidates: [String]) async -> String? {
-        guard let pipe else { return nil }
+    /// 识别一句话：先让 Whisper 自动判断语种；如果判断结果不在两种候选语言里，再用 fallback 语言重识别。
+    /// 返回 (语言代码, 文字)
+    func recognize(_ samples: [Float], candidates: [String], fallback: String) async throws -> (String, String) {
+        guard let pipe else { return (fallback, "") }
         await acquire(); defer { release() }
-        guard let r = try? await pipe.detectLanguage(audioArray: samples) else { return nil }
-        let probs = r.langProbs
-        if probs.isEmpty { return candidates.contains(r.language) ? r.language : nil }
-        return candidates.max { (probs[$0] ?? 0) < (probs[$1] ?? 0) }
+
+        let auto = try await pipe.transcribe(audioArray: samples, decodeOptions: options(language: nil))
+        let detected = auto.first?.language ?? ""
+        if candidates.contains(detected) {
+            return (detected, Self.joinText(auto, language: detected))
+        }
+        let forced = try await pipe.transcribe(audioArray: samples, decodeOptions: options(language: fallback))
+        return (fallback, Self.joinText(forced, language: fallback))
     }
 
+    /// 指定语言识别（用于说话过程中的实时预览）
     func transcribe(_ samples: [Float], language: String?) async throws -> String {
         guard let pipe else { return "" }
         await acquire(); defer { release() }
+        let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options(language: language))
+        return Self.joinText(results, language: language ?? results.first?.language)
+    }
+
+    private func options(language: String?) -> DecodingOptions {
         var opts = DecodingOptions()
         opts.verbose = false
         opts.task = .transcribe
@@ -64,11 +75,13 @@ actor SpeechRecognizer {
         opts.withoutTimestamps = true
         opts.suppressBlank = true
         if language == "zh", let t = zhPromptTokens { opts.promptTokens = t }
+        return opts
+    }
 
-        let results = try await pipe.transcribe(audioArray: samples, decodeOptions: opts)
+    private static func joinText(_ results: [TranscriptionResult], language: String?) -> String {
         var text = results.map(\.text).joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if language == "zh" || language == nil {
+        if language == "zh" {
             text = text.applyingTransform(StringTransform("Hant-Hans"), reverse: false) ?? text
         }
         return text

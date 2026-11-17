@@ -46,7 +46,11 @@ jobs:
             -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build | tee build.log | grep -E "error:|warning: .*deprecated|BUILD" || true
-          test -d build/Build/Products/Release-iphoneos/Hear.app
+          if ! test -f build/Build/Products/Release-iphoneos/Hear.app/Hear; then
+            echo "::error::编译失败，错误如下："
+            grep -E "error:" build.log | sed 's|.*/Hear/Hear/||' | sort -u | head -40
+            exit 1
+          fi
 
       - name: Package IPA
         run: |
