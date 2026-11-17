@@ -15,17 +15,17 @@ iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话
 
 不需要付费开发者账号。免费 Apple ID 签名的 App 有效期 7 天，到期后**覆盖安装**一次即可。不要先删除 App，模型和设置都会保留，不用重新下载。
 
-### 方法 A：用 GitHub 自动打包 + Sideloadly 安装（不用学 Xcode，Windows 也行）
+### 方法 A：直接下载安装包 + Sideloadly 安装（不用学 Xcode，Windows 也行）
 
-1. 打开本仓库 → **Actions** → 左侧 **Build IPA (unsigned)** → 右侧 **Run workflow**。
-   （每次推送代码也会自动打包。）
-2. 等 10～20 分钟变成绿色 ✅，点进去，在 **Artifacts** 里下载 `Hear-ipa`，解压得到 `Hear.ipa`。
+1. 打开本仓库右侧的 **Releases（发行版）**，进入最新版本，下载 `Hear.ipa`。不用登录。
+   （每次更新代码后，GitHub 会自动打包并发布一个新版本，大约 3～15 分钟。）
+2. 如果想手动重新打包：**Actions** → **Build IPA (unsigned)** → **Run workflow**。
 3. 在电脑上安装 [Sideloadly](https://sideloadly.io)（Mac / Windows 都有）。Windows 还需要装 iTunes 和 iCloud 的官网版本。
 4. 用数据线连接 iPhone，把 `Hear.ipa` 拖进 Sideloadly，填你的 Apple ID，点 **Start**。
 5. 在 iPhone 上：
    - **设置 → 隐私与安全性 → 开发者模式** → 打开（会重启）。
    - **设置 → 通用 → VPN 与设备管理** → 点你的 Apple ID → **信任**。
-6. 7 天后过期：重复第 4 步即可（同一个 ipa 就行）。
+6. 7 天后过期：重复第 4 步即可（同一个 ipa 就行，也可以顺便下载最新版）。
 
 ### 方法 B：有 Mac，用 Xcode 直接装
 

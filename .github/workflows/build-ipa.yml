@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15
@@ -63,6 +66,28 @@ jobs:
         with:
           name: Hear-ipa
           path: Hear.ipa
+
+      - name: Publish release
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          {
+            echo "## 听见 第 ${{ github.run_number }} 版"
+            echo ""
+            echo "**更新内容：** $(printf '%s' "${COMMIT_MSG:-手动打包}" | head -1)"
+            echo ""
+            echo "llama.cpp：$(cat Frameworks/LLAMA_VERSION)"
+            echo ""
+            echo "### 安装"
+            echo "1. 下载下面的 \`Hear.ipa\`"
+            echo "2. 用 [Sideloadly](https://sideloadly.io) + 你的 Apple ID 安装到 iPhone"
+            echo "3. 已安装过的直接覆盖安装，模型不用重新下载"
+          } > notes.md
+          gh release create "$TAG" Hear.ipa \
+            --title "听见 第 ${{ github.run_number }} 版" \
+            --notes-file notes.md \
+            --latest
 
       - uses: actions/upload-artifact@v4
         if: always()
