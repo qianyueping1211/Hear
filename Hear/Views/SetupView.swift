@@ -3,6 +3,8 @@ import SwiftUI
 /// 首次启动：下载 / 加载模型
 struct SetupView: View {
     @EnvironmentObject var session: LiveSession
+    @ObservedObject private var log = AppLog.shared
+    @State private var showLog = false
 
     var body: some View {
         VStack(spacing: 18) {
@@ -34,6 +36,7 @@ struct SetupView: View {
             case .loading(let msg):
                 ProgressView()
                 Text(msg).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                recentLog
 
             case .failed(let msg):
                 Image(systemName: "exclamationmark.triangle").font(.system(size: 44)).foregroundStyle(.orange)
@@ -48,6 +51,7 @@ struct SetupView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
+                recentLog
 
             case .ready:
                 EmptyView()
@@ -55,5 +59,24 @@ struct SetupView: View {
             Spacer()
         }
         .padding()
+        .sheet(isPresented: $showLog) {
+            NavigationStack {
+                LogView().toolbar {
+                    ToolbarItem(placement: .topBarLeading) { Button("关闭") { showLog = false } }
+                }
+            }
+        }
+    }
+
+    /// 最近几行日志 + 查看全部
+    private var recentLog: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(log.lines.suffix(3).enumerated()), id: \.offset) { _, line in
+                Text(line).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Button("查看运行日志") { showLog = true }.font(.footnote)
+        }
+        .padding(.top, 8)
+        .frame(maxWidth: 320, alignment: .leading)
     }
 }

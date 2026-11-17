@@ -12,4 +12,4 @@ else
   base64 -D -i "$TMP" -o "$DST"
 fi
 rm -f "$TMP"
-echo "✅ App 图标已生成：$DST（$(wc -c < "$DST") 字节）"
+echo "✅ App 图标已生成：${DST}（$(wc -c < "${DST}") 字节）"
