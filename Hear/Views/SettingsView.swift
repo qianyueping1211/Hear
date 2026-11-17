@@ -28,8 +28,19 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("总结")
+                }
+
+                // MARK: 收音
+                Section {
+                    Picker("声音来源", selection: inputBinding) {
+                        Text("手机麦克风").tag("phone")
+                        Text("耳机麦克风").tag("headset")
+                    }
+                    Toggle("语音增强（降噪、消除回声）", isOn: $session.voiceProcessing)
+                } header: {
+                    Text("收音")
                 } footer: {
-                    Text("新建对话时可以用大模型在后台总结上一页。翻译本身仍在手机本地离线完成。")
+                    Text((inputNote.map { $0 + "\n" } ?? "") + "使用 iPhone 自带的通话级降噪：压低空调、风扇、人群等背景声，只突出说话的人，也能减少没说话时被误识别。下次开始实时翻译时生效。开启后，还可以在聆听时从控制中心的“麦克风模式”里选择“语音突显”，降噪更强。")
                 }
 
                 // MARK: 朗读
@@ -53,8 +64,6 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("朗读")
-                } footer: {
-                    Text("戴耳机：译文出来就从耳机朗读，边听边读，不会被麦克风录进去。插上耳机会自动切到耳机。\n扬声器：聆听时不朗读；停止实时翻译后，从上次没读完的那句开始往后读；再开始实时翻译会立刻停止朗读。\n点某一句：从这句开始往后读，再点一下停止。\n主界面按住“播报”按钮 2 秒：耳机播报时弹出左右耳设置；扬声器播报时切换到耳机（没连耳机时不切换）。")
                 }
 
                 // MARK: 音色
@@ -73,16 +82,7 @@ struct SettingsView: View {
                 } header: {
                     Text("音色")
                 } footer: {
-                    Text(personalVoiceNote ?? "“接近说话人”会根据说话人的音高自动选男声或女声，并调高低音，不是完全复刻。“个人声音”需要先在 iPhone 设置 → 辅助功能 → 个人声音 里录制，只能用于它支持的语言。")
-                }
-
-                // MARK: 语音增强
-                Section {
-                    Toggle("语音增强（降噪、消除回声）", isOn: $session.voiceProcessing)
-                } header: {
-                    Text("收音")
-                } footer: {
-                    Text("使用 iPhone 自带的通话级降噪：压低空调、风扇、人群等背景声，只突出说话的人，也能减少没说话时被误识别。下次开始实时翻译时生效。开启后，还可以在聆听时从控制中心的“麦克风模式”里选择“语音突显”，降噪更强。")
+                    if let personalVoiceNote { Text(personalVoiceNote) }
                 }
 
                 // MARK: 语音识别
@@ -134,8 +134,6 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("已下载的模型")
-                } footer: {
-                    Text(session.isBusyWithModels ? "模型正在下载或加载中…" : "模型保存在本机，覆盖安装 App 不会丢失。")
                 }
 
                 Section {
@@ -179,10 +177,9 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("日志")
-                } footer: {
-                    Text("记录加载、识别、翻译、朗读的过程和报错，可按信息/警告/错误筛选和搜索。超过上限时会自动删除最早的日志。")
                 }
             }
+            .onAppear { session.refreshHeadset() }
             .navigationTitle("设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -215,6 +212,22 @@ struct SettingsView: View {
     }
 
     @State private var personalVoiceNote: String?
+    @State private var inputNote: String?
+
+    private var inputBinding: Binding<String> {
+        Binding(
+            get: { session.inputSource },
+            set: { v in
+                session.refreshHeadset()
+                if v == "headset" && !session.headsetConnected {
+                    inputNote = "没有检测到耳机，请先连接耳机再切换。"
+                    return
+                }
+                inputNote = nil
+                session.inputSource = v
+            }
+        )
+    }
 
     private var asrBinding: Binding<Bool> {
         Binding(
