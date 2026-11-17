@@ -2,7 +2,11 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var session: LiveSession
+    @ObservedObject private var llm = LLMSettings.shared
     @State private var showSettings = false
+    @State private var showHistory = false
+    @State private var askNew = false
+    @State private var noLLMAlert = false
 
     var body: some View {
         NavigationStack {
@@ -26,17 +30,47 @@ struct ContentView: View {
             .navigationTitle("听见")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { session.clear() } label: { Image(systemName: "trash") }
-                        .disabled(session.items.isEmpty)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button { newTapped() } label: { Image(systemName: "square.and.pencil") }
+                        .accessibilityLabel("新建")
+                    Button { showHistory = true } label: { Image(systemName: "clock.arrow.circlepath") }
+                        .accessibilityLabel("历史")
                     Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                        .accessibilityLabel("设置")
                 }
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
+            .sheet(isPresented: $showHistory) { HistoryView() }
+            .confirmationDialog("是否需要把本页内容进行后台总结？", isPresented: $askNew, titleVisibility: .visible) {
+                Button("总结并新建") {
+                    if llm.isReady {
+                        session.newConversation(summarize: true)
+                    } else {
+                        session.newConversation(summarize: false)
+                        noLLMAlert = true
+                    }
+                }
+                Button("不总结，直接新建") { session.newConversation(summarize: false) }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("会用默认模板「高效会议纪要」生成报告，可以在 历史 → 总结 中查看和修改。本页内容都会保存在历史里。")
+            }
+            .alert("还没有配置大模型 API", isPresented: $noLLMAlert) {
+                Button("去设置") { showSettings = true }
+                Button("好", role: .cancel) {}
+            } message: {
+                Text("本页已保存到历史。配置好 API 后，可以在 历史 → 总结 里随时生成。")
+            }
         }
         .task { await session.bootstrap() }
+    }
+
+    private func newTapped() {
+        if session.items.contains(where: { $0.done }) {
+            askNew = true
+        } else {
+            session.newConversation(summarize: false)
+        }
     }
 }
 
@@ -68,20 +102,23 @@ struct LanguageMenu: View {
             ForEach(Language.all) { lang in
                 Button { selection = lang } label: {
                     if lang == selection {
-                        Label("\(lang.flag) \(lang.name)", systemImage: "checkmark")
+                        Label("\(lang.flag) \(lang.displayName)", systemImage: "checkmark")
                     } else {
-                        Text("\(lang.flag) \(lang.name)")
+                        Text("\(lang.flag) \(lang.displayName)")
                     }
                 }
             }
         } label: {
-            HStack {
+            HStack(spacing: 6) {
                 Text(selection.flag)
-                Text(selection.name).fontWeight(.semibold)
+                VStack(spacing: 0) {
+                    Text(selection.name).fontWeight(.semibold).lineLimit(1)
+                    Text(selection.country).font(.caption2).foregroundStyle(.secondary)
+                }
                 Image(systemName: "chevron.down").font(.caption)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 12)
+            .padding(.vertical, 6)
             .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
         }
         .foregroundStyle(.primary)
@@ -107,16 +144,7 @@ struct TranscriptView: View {
                         .id(item.id)
                     }
                     if !session.partial.isEmpty {
-                        HStack {
-                            Text(session.partial)
-                                .italic()
-                                .foregroundStyle(.secondary)
-                                .padding(12)
-                                .background(Color(.tertiarySystemBackground),
-                                            in: RoundedRectangle(cornerRadius: 16))
-                            Spacer(minLength: 40)
-                        }
-                        .id("partial")
+                        LiveBubble().id("partial")
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
@@ -126,6 +154,9 @@ struct TranscriptView: View {
                 withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: session.partial) { _, _ in
+                proxy.scrollTo("bottom", anchor: .bottom)
+            }
+            .onChange(of: session.partialTranslation) { _, _ in
                 proxy.scrollTo("bottom", anchor: .bottom)
             }
         }
@@ -170,6 +201,8 @@ struct BubbleView: View {
             .padding(12)
             .background(leading ? Color(.secondarySystemBackground) : Color.accentColor.opacity(0.15),
                         in: RoundedRectangle(cornerRadius: 16))
+            .contentShape(RoundedRectangle(cornerRadius: 16))
+            .onTapGesture { if !item.translated.isEmpty { onSpeak() } }   // 点句子朗读译文
             .contextMenu {
                 Button { UIPasteboard.general.string = item.translated } label: {
                     Label("复制译文", systemImage: "doc.on.doc")
@@ -311,5 +344,37 @@ struct EarMenu: View {
             .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
         }
         .foregroundStyle(.primary)
+    }
+}
+
+// MARK: - 说话中的实时气泡（识别和译文会不断更正）
+
+struct LiveBubble: View {
+    @EnvironmentObject var session: LiveSession
+
+    var body: some View {
+        let leading = session.partialSource.map { $0 == session.langA } ?? true
+        HStack {
+            if !leading { Spacer(minLength: 40) }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "waveform").symbolEffect(.variableColor.iterative)
+                    Text(session.partial).italic()
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                if !session.partialTranslation.isEmpty {
+                    Text(session.partialTranslation)
+                        .font(.title3.weight(.medium))
+                        .foregroundStyle(Color.primary.opacity(0.75))
+                }
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(Color.accentColor.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+            )
+            if leading { Spacer(minLength: 40) }
+        }
     }
 }
