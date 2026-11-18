@@ -8,6 +8,8 @@ struct ContentView: View {
     @State private var showHistory = false
     @State private var askNew = false
     @State private var noLLMAlert = false
+    @State private var editingID: UUID?          // 正在修改原文的那一条
+    @State private var draft = ""
 
     var body: some View {
         NavigationStack {
@@ -20,7 +22,10 @@ struct ContentView: View {
                 Group {
                     if session.phase == .ready || session.isLoadingPhase {
                         // 加载模型时也显示对话页，顶部一行小字提示，不挡住内容
-                        TranscriptView()
+                        TranscriptView(onEdit: { item in
+                            draft = item.sourceText
+                            editingID = item.id
+                        })
                             .overlay(alignment: .top) {
                                 VStack(spacing: 6) {
                                     if let msg = session.loadingText {
@@ -41,6 +46,14 @@ struct ContentView: View {
                 ControlBar()
             }
             .toolbar(.hidden, for: .navigationBar)
+            .overlay {
+                if let id = editingID, let item = session.items.first(where: { $0.id == id }) {
+                    SourceEditor(text: $draft, flag: item.source.flag) {
+                        session.editSource(id, to: draft)
+                        editingID = nil
+                    }
+                }
+            }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showHistory) { HistoryView() }
             .confirmationDialog("是否需要把本页内容进行后台总结？", isPresented: $askNew, titleVisibility: .visible) {
@@ -247,6 +260,7 @@ struct LanguageMenu: View {
 
 struct TranscriptView: View {
     @EnvironmentObject var session: LiveSession
+    var onEdit: (TranslationItem) -> Void = { _ in }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -257,7 +271,8 @@ struct TranscriptView: View {
                     }
                     ForEach(session.items) { item in
                         BubbleView(item: item, leading: item.source == session.langA,
-                                   reading: session.readingID == item.id) {
+                                   reading: session.readingID == item.id,
+                                   onEdit: { if item.done { onEdit(item) } }) {
                             session.tapRead(item)
                         }
                         .id(item.id)
@@ -302,6 +317,7 @@ struct BubbleView: View {
     let item: TranslationItem
     let leading: Bool
     var reading: Bool = false
+    var onEdit: (() -> Void)? = nil      // 有值时：长按修改原文（对话页）；没有时：长按弹出复制菜单（历史页）
     var onSpeak: () -> Void
 
     /// 左侧气泡国旗在前，右侧气泡国旗在后（靠外侧）
@@ -343,7 +359,27 @@ struct BubbleView: View {
             )
             .contentShape(RoundedRectangle(cornerRadius: 16))
             .onTapGesture { if !item.translated.isEmpty { onSpeak() } }   // 点句子朗读译文
-            .contextMenu {
+            .modifier(BubbleLongPress(item: item, onEdit: onEdit, onSpeak: onSpeak))
+            if leading { Spacer(minLength: 40) }
+        }
+    }
+}
+
+/// 气泡的长按：对话页是修改原文，历史页是复制菜单
+private struct BubbleLongPress: ViewModifier {
+    let item: TranslationItem
+    let onEdit: (() -> Void)?
+    let onSpeak: () -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let onEdit {
+            content.onLongPressGesture(minimumDuration: 0.4) {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                onEdit()
+            }
+        } else {
+            content.contextMenu {
                 Button { UIPasteboard.general.string = item.translated } label: {
                     Label("复制译文", systemImage: "doc.on.doc")
                 }
@@ -352,8 +388,38 @@ struct BubbleView: View {
                 }
                 Button(action: onSpeak) { Label("朗读译文", systemImage: "speaker.wave.2") }
             }
-            if leading { Spacer(minLength: 40) }
         }
+    }
+}
+
+/// 修改原文的编辑框：点编辑框以外的地方就保存，并重新翻译
+struct SourceEditor: View {
+    @Binding var text: String
+    let flag: String
+    let onDone: () -> Void
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { onDone() }
+            VStack(alignment: .leading, spacing: 10) {
+                Text("\(flag) 修改原文").font(.headline)
+                TextField("原文", text: $text, axis: .vertical)
+                    .lineLimit(2...8)
+                    .focused($focused)
+                    .padding(10)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                Text("点空白处保存，并重新翻译").font(.footnote).foregroundStyle(.secondary)
+            }
+            .padding(16)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+            .padding(.horizontal, 16)
+            .padding(.top, 110)
+        }
+        .onAppear { focused = true }
     }
 }
 
