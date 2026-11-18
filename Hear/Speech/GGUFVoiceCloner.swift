@@ -179,7 +179,9 @@ actor GGUFVoiceCloner {
     private var mctx: OpaquePointer?           // mtmd_context
     private var gen: OpaquePointer?            // mtmd_helper_gen_audio
 
-    private(set) var isLoaded: Bool { gen != nil }
+    var isLoaded: Bool { gen != nil }
+    /// 正在加载（模型文件较大，加载时要几秒）
+    var isLoading: Bool { loading }
     private var loading = false
 
     /// 加载骨架模型 + mmproj
@@ -321,7 +323,7 @@ actor GGUFVoiceCloner {
         }
 
         // 3) 处理提示词（把文字喂进骨架模型）
-        let batch = llama_n_batch(ctx)
+        let batch = Int32(llama_n_batch(ctx))
         while true {
             let r = mtmd_helper_gen_audio_step_prompt(gen, batch)
             if r < 0 { throw VoiceCloneGGUFError.generateFailed("step_prompt") }
@@ -333,10 +335,10 @@ actor GGUFVoiceCloner {
         var nFrames = 0
         var stop = false
         var sampled = llama_token(-1)
-        var hState = llama_get_embeddings_ith(ctx, -1)
+        var hState: UnsafeMutablePointer<Float> = llama_get_embeddings_ith(ctx, -1)
 
         while !stop && nFrames < maxFrames {
-            var hNext: UnsafePointer<Float>?
+            var hNext: UnsafeMutablePointer<Float>?
             let rc2 = mtmd_helper_gen_audio_step_gen(gen, sampled, hState, &hNext, &stop)
             guard rc2 == 0 else {
                 throw VoiceCloneGGUFError.generateFailed("step_gen")
@@ -360,7 +362,7 @@ actor GGUFVoiceCloner {
         // WAV 是 16-bit LE，转换成 F32
         let pcm = Self.wavToFloat32(data: data, byteCount: dataLen)
         let t0 = Date()
-        let secs = Double(pcm.count) / Double(max(sampleRate, 1))
+        let secs = Double(pcm.count) / Double(max(Int(sampleRate), 1))
         hearLog("声音克隆（GGUF）：生成 \(String(format: "%.1f", secs)) 秒声音，用时 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
         return pcm
     }
@@ -389,8 +391,8 @@ actor GGUFVoiceCloner {
         let byteRate = UInt32(sampleRate * 2)
         let blockAlign = UInt16(2)
         let bits = UInt16(16)
-        func u32(_ v: UInt32) -> Data { var x = v.littleEndian; return Data(bytes: &x, count: 4) }
-        func u16(_ v: UInt16) -> Data { var x = v.littleEndian; return Data(bytes: &x, count: 2) }
+        func u32(_ v: UInt32) -> Data { var x = v.littleEndian; return withUnsafeBytes(of: &x) { Data($0) } }
+        func u16(_ v: UInt16) -> Data { var x = v.littleEndian; return withUnsafeBytes(of: &x) { Data($0) } }
         data.append(contentsOf: Array("RIFF".utf8))
         data.append(u32(UInt32(36 + samples.count * 2)))
         data.append(contentsOf: Array("WAVE".utf8))
@@ -407,7 +409,8 @@ actor GGUFVoiceCloner {
         for s in samples {
             let clamped = max(-1.0, min(1.0, s))
             var v = Int16(clamped * 32767)
-            withUnsafeBytes(of: &v.littleEndian) { data.append(contentsOf: $0) }
+            var le = v.littleEndian
+            withUnsafeBytes(of: &le) { data.append(contentsOf: $0) }
         }
         try data.write(to: URL(fileURLWithPath: path))
         return path
@@ -421,7 +424,7 @@ actor GGUFVoiceCloner {
         var dataStart = 44
         var dataSize = byteCount - 44
         while pos + 8 <= byteCount {
-            let id = String(bytes: bytes + pos, count: 4, encoding: .ascii) ?? ""
+            let id = String(decoding: UnsafeBufferPointer(start: bytes + pos, count: 4), as: UTF8.self)
             let size = Int(UInt32(bytes[pos + 4]) | UInt32(bytes[pos + 5]) << 8
                            | UInt32(bytes[pos + 6]) << 16 | UInt32(bytes[pos + 7]) << 24)
             if id == "data" {

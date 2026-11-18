@@ -1859,7 +1859,7 @@ final class LiveSession: ObservableObject {
         hearLog("朗读：\(item.target.displayName)，\(outputMode == .speaker ? "扬声器" : (pan < 0 ? "左耳" : (pan > 0 ? "右耳" : "双耳")))，\(cloned != nil ? "克隆原声" : "系统声音")")
         if mute { capture.muted = true }
         if let cloned {
-            await speaker.play(samples: cloned, sampleRate: Double(GGUFVoiceCloner.sampleRate), pan: pan)
+            await speaker.play(samples: cloned, sampleRate: Double(VoiceCloneGGUF.sampleRate), pan: pan)
         } else {
             await speaker.speak(SpeakRequest(text: text, locale: item.target.tts, pan: pan))
         }
