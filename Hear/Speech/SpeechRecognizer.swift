@@ -87,14 +87,14 @@ actor SpeechRecognizer {
                                              decodeOptions: options(language: nil, preview: preview))
         let detected = auto.first?.language ?? ""
         if candidates.contains(detected) {
-            return (detected, Self.joinText(auto, language: detected))
+            return (detected, Self.confident(auto) ? Self.joinText(auto, language: detected) : "")
         }
         if preview {
-            return (fallback, Self.joinText(auto, language: fallback))
+            return (fallback, Self.confident(auto) ? Self.joinText(auto, language: fallback) : "")
         }
         let forced = try await pipe.transcribe(audioArray: samples,
                                                decodeOptions: options(language: fallback, preview: false))
-        return (fallback, Self.joinText(forced, language: fallback))
+        return (fallback, Self.confident(forced) ? Self.joinText(forced, language: fallback) : "")
     }
 
     /// 指定语言识别（用于说话过程中的实时预览）
@@ -137,13 +137,67 @@ actor SpeechRecognizer {
         return Fillers.clean(text)          // 去掉单独的语气词（嗯、啊、um…）
     }
 
+    /// Whisper 自己都没把握的结果（多半是在噪声、咳嗽、碰撞声里“听”出来的），直接丢掉
+    private static func confident(_ results: [TranscriptionResult]) -> Bool {
+        let segs = results.flatMap(\.segments)
+        guard !segs.isEmpty else { return true }
+        let n = Double(segs.count)
+        let noSpeech = segs.reduce(0.0) { $0 + Double($1.noSpeechProb) } / n
+        let logProb = segs.reduce(0.0) { $0 + Double($1.avgLogprob) } / n
+        if logProb < -1.0 { return false }                     // 整体很没把握
+        if noSpeech > 0.5 && logProb < -0.6 { return false }   // 像是没人说话，又识别得很勉强
+        return true
+    }
+
+    /// 文字是不是这种语言写的：例如选的是英语，结果却是俄文“Продолжение следует…”，就是识别错了。
+    /// 中日韩里夹的英文单词按一个字算，不会因为“我用 iPhone”这种句子误判。
+    static func matchesLanguage(_ text: String, _ lang: String) -> Bool {
+        var total = 0, hit = 0
+        var inLatinRun = false
+        let cjkLang = ["zh", "ja", "ko"].contains(lang)
+        for s in text.unicodeScalars {
+            guard s.properties.isAlphabetic else { inLatinRun = false; continue }
+            let latin = isLatin(s.value)
+            if cjkLang && latin {
+                if inLatinRun { continue }      // 一串英文字母只算一个
+                inLatinRun = true
+            } else {
+                inLatinRun = false
+            }
+            total += 1
+            if inScript(s.value, lang) { hit += 1 }
+        }
+        guard total > 0 else { return false }
+        return Double(hit) / Double(total) >= 0.6
+    }
+
+    private static func isLatin(_ v: UInt32) -> Bool {
+        (0x41...0x5A).contains(v) || (0x61...0x7A).contains(v) ||
+        (0xC0...0x24F).contains(v) || (0x1E00...0x1EFF).contains(v)
+    }
+
+    private static func inScript(_ v: UInt32, _ lang: String) -> Bool {
+        let han = (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v)
+        switch lang {
+        case "zh": return han
+        case "ja": return han || (0x3040...0x30FF).contains(v)
+        case "ko": return (0xAC00...0xD7AF).contains(v) || (0x1100...0x11FF).contains(v) || (0x3130...0x318F).contains(v)
+        case "ru": return (0x0400...0x04FF).contains(v)
+        case "ar": return (0x0600...0x06FF).contains(v) || (0x0750...0x077F).contains(v)
+        case "th": return (0x0E00...0x0E7F).contains(v)
+        default:   return isLatin(v)            // 英、法、德、西、葡、意、越 等拉丁字母语言
+        }
+    }
+
     /// 过滤 Whisper 在噪声/静音上常见的“幻觉”句子
     static func isMeaningful(_ text: String) -> Bool {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
         if t.count < 1 { return false }
         if Fillers.isOnlyFillers(t) { return false }        // 只有「嗯」「啊」这类语气词
         let junk = ["字幕", "订阅", "點贊", "点赞", "打赏", "Amara", "谢谢观看", "感谢观看",
-                    "Thank you for watching", "Thanks for watching", "Subtitles by", "明镜", "请不吝"]
+                    "Thank you for watching", "Thanks for watching", "Subtitles by", "明镜", "请不吝",
+                    "Продолжение следует", "Субтитры", "Редактор субтитров", "ご視聴ありがとうございました",
+                    "MBC 뉴스", "시청해주셔서"]
         if junk.contains(where: { t.localizedCaseInsensitiveContains($0) }) { return false }
         if t.hasPrefix("[") || t.hasPrefix("(") || t.hasPrefix("（") { return false }
         // 背景声的描述，例如 *Humming*、♪音乐♪、(笑声)
@@ -151,6 +205,7 @@ actor SpeechRecognizer {
         if raw.hasPrefix("*") || raw.hasPrefix("♪") || raw.hasPrefix("[") || raw.hasPrefix("(") || raw.hasPrefix("（") {
             return false
         }
+        if raw.contains("*") || raw.contains("♪") { return false }      // 例如 “Burz*.”
         return true
     }
 }
