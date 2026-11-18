@@ -17,7 +17,7 @@ iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话
 
 ### 方法 A：直接下载安装包 + Sideloadly 安装（不用学 Xcode，Windows 也行）
 
-1. 打开本仓库右侧的 **Releases（发行版）**，进入最新版本，下载 `Hear-版本号.ipa`（例如 `Hear-3.6.ipa`）。不用登录。
+1. 打开本仓库右侧的 **Releases（发行版）**，进入最新版本，下载 `Hear-版本号.ipa`（例如 `Hear-3.7.ipa`）。不用登录。
    （每次更新代码后，GitHub 会自动打包并发布一个新版本，大约 3～15 分钟。）
 2. 如果想手动重新打包：**Actions** → **Build IPA (unsigned)** → **Run workflow**。
 3. 在电脑上安装 [Sideloadly](https://sideloadly.io)（Mac / Windows 都有）。Windows 还需要装 iTunes 和 iCloud 的官网版本。
