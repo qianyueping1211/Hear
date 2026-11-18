@@ -139,12 +139,8 @@ struct TopBar: View {
                 .accessibilityLabel("更多")
         }
         .overlay {
-            VStack(spacing: 0) {
-                Text("听见").font(.headline)
-                Text(session.talkMode ? "对话翻译模式" : "实时翻译模式")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
+            Text("听见：\(session.talkMode ? "对话翻译模式" : "实时翻译模式")")
+                .font(.headline)
         }
         .padding(.horizontal)
         .padding(.top, 6)
