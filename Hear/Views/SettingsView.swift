@@ -27,8 +27,10 @@ struct SettingsView: View {
                     Text(engineFooter)
                 }
 
-                // MARK: 模型（状态 / 下载 / 导入）
+                // MARK: 模型管理（语音识别 → 翻译 → 下载源）
                 Section {
+                    modelRow(.speech, title: "语音识别模型（ASR）", icon: "waveform",
+                             status: session.speechStatus)
                     modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
                              status: session.translationStatus)
                     if session.installedGGUFs.count > 1 {
@@ -38,34 +40,23 @@ struct SettingsView: View {
                             }
                         }
                     }
-                    modelRow(.speech, title: "语音识别模型（ASR）", icon: "waveform",
-                             status: session.speechStatus)
-                    Picker("下载源", selection: $session.hfHost) {
+                    Picker(selection: $session.hfHost) {
                         Text("Hugging Face 官方").tag("huggingface.co")
                         Text("hf-mirror（国内镜像）").tag("hf-mirror.com")
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "globe")
+                                .font(.title3)
+                                .foregroundStyle(.tint)
+                                .frame(width: 28)
+                            Text("下载源")
+                        }
                     }
                     if let err = session.bgDownloadError {
                         Text(err).font(.footnote).foregroundStyle(.red)
                     }
                 } header: {
-                    Text("模型")
-                } footer: {
-                    Text("导入翻译模型：选 .gguf 文件。导入语音识别模型：选 WhisperKit 模型文件夹（里面有 AudioEncoder.mlmodelc 等）。")
-                }
-
-                // MARK: 翻译与总结
-                Section {
-                    Toggle("结合上文翻译（更连贯）", isOn: $session.useContext)
-                    NavigationLink {
-                        LLMSettingsView()
-                    } label: {
-                        LabeledContent("大模型 API") {
-                            Text(llm.active.map { "\($0.name) · \($0.selectedModel.isEmpty ? "未选模型" : $0.selectedModel)" } ?? "未配置")
-                                .lineLimit(1)
-                        }
-                    }
-                } header: {
-                    Text("翻译与总结")
+                    Text("模型管理")
                 }
 
                 // MARK: 语音识别（收音 → 断句 → 运行方式）
@@ -100,6 +91,21 @@ struct SettingsView: View {
                     Text("语音识别")
                 } footer: {
                     if let inputNote { Text(inputNote) }
+                }
+
+                // MARK: 翻译与总结
+                Section {
+                    Toggle("结合上文翻译（更连贯）", isOn: $session.useContext)
+                    NavigationLink {
+                        LLMSettingsView()
+                    } label: {
+                        LabeledContent("大模型 API") {
+                            Text(llm.active.map { "\($0.name) · \($0.selectedModel.isEmpty ? "未选模型" : $0.selectedModel)" } ?? "未配置")
+                                .lineLimit(1)
+                        }
+                    }
+                } header: {
+                    Text("翻译与总结")
                 }
 
                 // MARK: 朗读（出声 → 音色 → 耳机左右耳）
@@ -225,7 +231,7 @@ struct SettingsView: View {
     private var dialogMessage: String {
         let size = lastKind == .translation ? "约 2 GB" : "约 1.6 GB"
         let head = isInstalled(lastKind) ? "会先删除已下载的文件，再重新下载（\(size)）。" : "文件\(size)。"
-        return head + "请连接 Wi‑Fi，下载进度显示在「模型」里，下载时请保持 App 在前台。"
+        return head + "请连接 Wi‑Fi，下载进度显示在「模型管理」里，下载时请保持 App 在前台。"
     }
 
     /// 例如 “1.1”
@@ -331,7 +337,7 @@ struct SettingsView: View {
     private var engineFooter: String {
         if !session.appleAvailable { return "苹果自带需要 iOS 26。" }
         if session.bgDownloading {
-            return "正在下载听见本地模型，进度见下方「模型」。"
+            return "正在下载听见本地模型，进度见下方「模型管理」。"
         }
         if session.usingApple {
             return "苹果自带：用 iOS 的系统听写和翻译，不用下载模型。" +

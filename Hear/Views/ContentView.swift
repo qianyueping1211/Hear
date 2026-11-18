@@ -150,8 +150,7 @@ struct TopBar: View {
     }
 }
 
-/// 右上角弹出的菜单：样式参照系统菜单（图标在左、文字在右、分组之间有粗分隔），
-/// 宽度比系统菜单窄 20%
+/// 右上角弹出的菜单：窄面板，每行图标 + 文字居中，行与行之间用细线分隔
 struct MoreMenuPanel: View {
     var onNew: () -> Void
     var onHistory: () -> Void
@@ -160,28 +159,32 @@ struct MoreMenuPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             row("新建对话", "square.and.pencil", onNew)
-            Divider().padding(.leading, 54)
+            line
             row("历史记录", "clock.arrow.circlepath", onHistory)
-            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 8)
+            line
             row("功能设置", "gearshape", onSettings)
         }
-        .frame(width: 200)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .frame(width: 164)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
     }
 
+    /// 行与行之间的细线（左右留一点边）
+    private var line: some View {
+        Divider().padding(.horizontal, 12)
+    }
+
+    /// 一行：图标 + 文字，在框内居中
     private func row(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 14) {
+            HStack(spacing: 12) {
                 Image(systemName: icon)
                     .font(.system(size: 18))
                     .frame(width: 24)
                 Text(title).font(.body)
-                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 16)
-            .frame(height: 48)
+            .frame(maxWidth: .infinity, minHeight: 48)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

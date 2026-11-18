@@ -74,8 +74,9 @@ jobs:
         run: |
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/Hear.app Payload/
-          zip -qry Hear.ipa Payload
-          ls -lh Hear.ipa
+          # 文件名带上版本号，例如 Hear-3.3.ipa
+          zip -qry "Hear-${VER}.ipa" Payload
+          ls -lh "Hear-${VER}.ipa"
 
       # 旧的发布记录（build-11 ~ build-19）改成版本号 1.1 ~ 1.9；已改过的会跳过
       - name: Rename old releases
@@ -107,12 +108,12 @@ jobs:
             echo "llama.cpp：$(cat Frameworks/LLAMA_VERSION)"
             echo ""
             echo "### 安装"
-            echo "1. 下载下面的 \`Hear.ipa\`"
+            echo "1. 下载下面的 \`Hear-${VER}.ipa\`"
             echo "2. 用 [Sideloadly](https://sideloadly.io) + 你的 Apple ID 安装到 iPhone"
             echo "3. 已安装过的直接覆盖安装，模型不用重新下载"
           } > notes.md
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" Hear.ipa \
+          gh release create "$TAG" "Hear-${VER}.ipa" \
             --title "听见 ${VER}" \
             --notes-file notes.md \
             --latest
