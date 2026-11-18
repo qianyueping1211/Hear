@@ -28,7 +28,6 @@ struct LLMProvider: Codable, Identifiable, Equatable {
         .init(name: "MiniMax", kind: .openai, baseURL: "https://api.minimaxi.com/v1"),
         .init(name: "Kimi", kind: .openai, baseURL: "https://api.moonshot.cn/v1"),
         .init(name: "OpenRouter", kind: .openai, baseURL: "https://openrouter.ai/api/v1"),
-        .init(name: "Ollama（局域网）", kind: .openai, baseURL: "http://192.168.1.100:11434/v1"),
         .init(name: "自定义", kind: .openai, baseURL: "https://"),
     ]
 }

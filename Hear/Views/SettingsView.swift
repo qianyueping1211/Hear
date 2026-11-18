@@ -26,6 +26,49 @@ struct SettingsView: View {
                     Text(engineFooter)
                 }
 
+                // MARK: 已下载的模型（只显示下载完成的）
+                Section {
+                    if !session.translationStatus.installed && !session.speechStatus.installed {
+                        Text("暂无").foregroundStyle(.secondary)
+                    }
+                    if session.translationStatus.installed {
+                        ModelRow(title: "翻译模型（MT）", icon: "character.book.closed", status: session.translationStatus)
+                    }
+                    if session.speechStatus.installed {
+                        ModelRow(title: "语音识别模型（ASR）", icon: "waveform", status: session.speechStatus)
+                    }
+
+                    if session.installedGGUFs.count > 1 {
+                        Picker("使用的翻译模型", selection: ggufSelection) {
+                            ForEach(session.installedGGUFs, id: \.self) { url in
+                                Text(url.lastPathComponent).tag(url.lastPathComponent)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("已下载的模型")
+                }
+
+                Section {
+                    Picker("下载源", selection: $session.hfHost) {
+                        Text("Hugging Face 官方").tag("huggingface.co")
+                        Text("hf-mirror（国内镜像）").tag("hf-mirror.com")
+                    }
+                    downloadRow(.translation, name: "翻译模型（MT）", installed: session.translationStatus.installed)
+                    downloadRow(.speech, name: "语音识别模型（ASR）", installed: session.speechStatus.installed)
+                    if let err = session.bgDownloadError {
+                        Text(err).font(.footnote).foregroundStyle(.red)
+                    }
+                    Button { importing = true } label: {
+                        Label("从“文件”导入 GGUF 翻译模型（MT）…", systemImage: "folder")
+                    }
+                    .disabled(session.isBusyWithModels)
+                } header: {
+                    Text("下载与导入")
+                } footer: {
+                    Text("模型文件损坏、翻译异常或想换下载源时，可以重新下载。也可以通过电脑的“访达/iTunes 文件共享”把 .gguf 拷进“听见”。")
+                }
+
                 Section("翻译") {
                     Toggle("结合上文翻译（更连贯）", isOn: $session.useContext)
                 }
@@ -141,49 +184,6 @@ struct SettingsView: View {
                     Text("每行一条，格式：原文=译文\n例如：张伟=Zhang Wei")
                 }
 
-                // MARK: 已下载的模型（只显示下载完成的）
-                Section {
-                    if !session.translationStatus.installed && !session.speechStatus.installed {
-                        Text("暂无").foregroundStyle(.secondary)
-                    }
-                    if session.translationStatus.installed {
-                        ModelRow(title: "翻译模型（MT）", icon: "character.book.closed", status: session.translationStatus)
-                    }
-                    if session.speechStatus.installed {
-                        ModelRow(title: "语音识别模型（ASR）", icon: "waveform", status: session.speechStatus)
-                    }
-
-                    if session.installedGGUFs.count > 1 {
-                        Picker("使用的翻译模型", selection: ggufSelection) {
-                            ForEach(session.installedGGUFs, id: \.self) { url in
-                                Text(url.lastPathComponent).tag(url.lastPathComponent)
-                            }
-                        }
-                    }
-                } header: {
-                    Text("已下载的模型")
-                }
-
-                Section {
-                    Picker("下载源", selection: $session.hfHost) {
-                        Text("Hugging Face 官方").tag("huggingface.co")
-                        Text("hf-mirror（国内镜像）").tag("hf-mirror.com")
-                    }
-                    downloadRow(.translation, name: "翻译模型（MT）", installed: session.translationStatus.installed)
-                    downloadRow(.speech, name: "语音识别模型（ASR）", installed: session.speechStatus.installed)
-                    if let err = session.bgDownloadError {
-                        Text(err).font(.footnote).foregroundStyle(.red)
-                    }
-                    Button { importing = true } label: {
-                        Label("从“文件”导入 GGUF 翻译模型（MT）…", systemImage: "folder")
-                    }
-                    .disabled(session.isBusyWithModels)
-                } header: {
-                    Text("下载与导入")
-                } footer: {
-                    Text("模型文件损坏、翻译异常或想换下载源时，可以重新下载。也可以通过电脑的“访达/iTunes 文件共享”把 .gguf 拷进“听见”。")
-                }
-
                 // MARK: 日志
                 Section {
                     Toggle("开启日志", isOn: $log.enabled)
@@ -220,28 +220,6 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) { Button("完成") { dismiss() } }
             }
-            .confirmationDialog(confirmTitle,
-                                isPresented: Binding(get: { confirmKind != nil },
-                                                     set: { if !$0 { confirmKind = nil } }),
-                                titleVisibility: .visible,
-                                presenting: confirmKind) { kind in
-                Button(isInstalled(kind) ? "删除并重新下载" : "开始下载",
-                       role: isInstalled(kind) ? .destructive : nil) {
-                    Task { await session.redownload(kind) }
-                }
-                Button("取消", role: .cancel) {}
-            } message: { kind in
-                Text((kind == .translation
-                     ? "翻译模型（MT）约 2 GB，请连接 Wi‑Fi。"
-                     : "语音识别模型（ASR）约 1.6 GB，请连接 Wi‑Fi。")
-                     + "下载进度显示在「下载与导入」里，下载时请保持 App 在前台。")
-            }
-            .confirmationDialog("下载听见本地模型？", isPresented: $askDownload, titleVisibility: .visible) {
-                Button("开始下载") { session.startBackgroundDownload() }
-                Button("取消", role: .cancel) {}
-            } message: {
-                Text("翻译模型约 2 GB、语音识别模型约 1.6 GB，请连接 Wi‑Fi。下载期间继续用苹果自带，下载完成后自动切换。下载时请保持 App 在前台。")
-            }
             .fileImporter(isPresented: $importing,
                           allowedContentTypes: [UTType(filenameExtension: "gguf") ?? .data, .data]) { result in
                 if case .success(let url) = result {
@@ -250,10 +228,36 @@ struct SettingsView: View {
                 }
             }
         }
+        // 屏幕正中的确认框：背后整页虚化
+        .centerDialog(isPresented: Binding(get: { confirmKind != nil },
+                                           set: { if !$0 { confirmKind = nil } }),
+                      title: dialogTitle,
+                      message: dialogMessage,
+                      destructive: isInstalled(lastKind)) {
+            if let k = confirmKind { Task { await session.redownload(k) } }
+        }
+        .centerDialog(isPresented: $askDownload,
+                      title: "下载听见本地模型？",
+                      message: "翻译模型约 2 GB、语音识别模型约 1.6 GB，请连接 Wi‑Fi。下载期间继续用苹果自带，下载完成后自动切换。下载时请保持 App 在前台。") {
+            session.startBackgroundDownload()
+        }
     }
 
     @State private var personalVoiceNote: String?
     @State private var askDownload = false
+    /// 最近一次要下载的模型（确认框收起的动画里文字不会突然变空）
+    @State private var lastKind: LiveSession.ModelKind = .translation
+
+    private var dialogTitle: String {
+        let name = lastKind == .translation ? "翻译模型（MT）" : "语音识别模型（ASR）"
+        return (isInstalled(lastKind) ? "重新下载" : "下载") + name + "？"
+    }
+
+    private var dialogMessage: String {
+        let size = lastKind == .translation ? "约 2 GB" : "约 1.6 GB"
+        let head = isInstalled(lastKind) ? "会先删除已下载的文件，再重新下载（\(size)）。" : "文件\(size)。"
+        return head + "请连接 Wi‑Fi，下载进度显示在「下载与导入」里，下载时请保持 App 在前台。"
+    }
 
     /// 例如 “1.1”
     static var appVersion: String {
@@ -279,7 +283,7 @@ struct SettingsView: View {
             Label("等待下载\(name)", systemImage: "clock")
                 .foregroundStyle(.secondary)
         } else {
-            Button { confirmKind = kind } label: {
+            Button { lastKind = kind; confirmKind = kind } label: {
                 Label(installed ? "重新下载\(name)" : "下载\(name)", systemImage: "arrow.clockwise")
             }
             .disabled(session.isBusyWithModels)
@@ -377,11 +381,6 @@ struct SettingsView: View {
         }
         let langs = Set(voices.map { Locale.current.localizedString(forIdentifier: $0.language) ?? $0.language })
         return "已找到个人声音（\(langs.sorted().joined(separator: "、"))）。个人声音只能说录制时的语言，只有译文是这种语言时才会用它，其他语言用普通声音。"
-    }
-
-    private var confirmTitle: String {
-        guard let k = confirmKind else { return "" }
-        return k == .translation ? "翻译模型（MT）" : "语音识别模型（ASR）"
     }
 
     private func isInstalled(_ kind: LiveSession.ModelKind) -> Bool {
