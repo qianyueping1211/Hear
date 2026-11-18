@@ -52,11 +52,19 @@ final class LiveSession: ObservableObject {
     @Published var outputMode: AudioOutput { didSet { save("outputMode", outputMode.rawValue) } }
     @Published var leftEar: String { didSet { save("leftEar", leftEar) } }
     @Published var rightEar: String { didSet { save("rightEar", rightEar) } }
-    // 音色："system" 系统默认 / "match" 接近说话人（性别 + 音高）
-    @Published var voiceStyle: String { didSet { save("voiceStyle", voiceStyle) } }
-    // 用我的“个人声音”朗读我说的话；mySide 表示我说的是语言 A 还是 B
-    @Published var usePersonalVoice: Bool { didSet { save("usePersonalVoice", usePersonalVoice) } }
-    @Published var mySide: String { didSet { save("mySide", mySide) } }
+    // 声音克隆朗读：用说话人自己的声音读出译文（Qwen3-TTS）。打开时加载模型，关掉就卸载省内存
+    @Published var voiceClone: Bool {
+        didSet {
+            save("voiceClone", voiceClone)
+            guard voiceClone != oldValue else { return }
+            hearLog("声音克隆朗读：\(voiceClone ? "开" : "关")")
+            if voiceClone { loadClonerIfNeeded() } else {
+                cloneTasks.removeAll()
+                Task { await cloner.unload() }
+            }
+        }
+    }
+    @Published private(set) var cloneLoading = false
     // 语音识别用 GPU（加载快）还是神经引擎（省电，首次编译慢）
     @Published var asrUseGPU: Bool { didSet { save("asrUseGPU", asrUseGPU) } }
     // 识别引擎（本地模型时）：
@@ -169,6 +177,12 @@ final class LiveSession: ObservableObject {
     private let translator = LlamaTranslator()
     private let speaker = Speaker()
     private let systemTranslator = SystemTranslator()
+    private let cloner = VoiceCloner()
+    // 声音克隆：每句话的样本（声音 + 文字），以及提前生成好的克隆朗读
+    private var cloneRefs: [UUID: (samples: [Float], text: String)] = [:]
+    private var cloneRefOrder: [UUID] = []
+    private var lastCloneRef: [String: (samples: [Float], text: String)] = [:]   // 每种语言最近一句够长的样本
+    private var cloneTasks: [UUID: Task<[Float]?, Never>] = [:]
     private var appleEngines: [LiveTextEngine] = []   // 苹果自带模式：每种语言一个系统听写
 
     private var queue: [(itemID: UUID, segID: Int, samples: [Float])] = []
@@ -225,9 +239,7 @@ final class LiveSession: ObservableObject {
         outputMode = AudioOutput(rawValue: d.string(forKey: "outputMode") ?? "") ?? .speaker
         leftEar = d.string(forKey: "leftEar") ?? "A"
         rightEar = d.string(forKey: "rightEar") ?? "B"
-        voiceStyle = d.string(forKey: "voiceStyle") ?? "system"
-        usePersonalVoice = d.object(forKey: "usePersonalVoice") as? Bool ?? false
-        mySide = d.string(forKey: "mySide") ?? "A"
+        voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
         asrUseGPU = d.object(forKey: "asrUseGPU") as? Bool ?? true
         // 本地模型也默认用 iOS 系统听写逐字显示原文（iOS 26），说完后仍由 Whisper 定稿；老用户也改一次
         if d.object(forKey: "liveTextDefaultV2") == nil {
@@ -375,7 +387,7 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 模型状态（设置页显示）
 
-    enum ModelKind { case translation, speech, senseVoice }
+    enum ModelKind { case translation, speech, senseVoice, voiceClone }
 
     struct ModelStatus {
         let name: String
@@ -413,14 +425,33 @@ final class LiveSession: ObservableObject {
         return .init(name: "SenseVoice-Small", detail: "未下载", installed: false)
     }
 
+    var cloneStatus: ModelStatus {
+        _ = modelFiles()            // 模型变动后让大小缓存重新计算
+        if cloneInstalled {
+            return .init(name: "Qwen3-TTS 0.6B",
+                         detail: ModelManager.format(cachedSize(VoiceCloner.base, folder: true)) + (cloneLoading ? " · 加载中" : ""),
+                         installed: true)
+        }
+        return .init(name: "Qwen3-TTS 0.6B", detail: "未下载", installed: false)
+    }
+
     func isInstalled(_ kind: ModelKind) -> Bool {
         _ = modelsRevision
         switch kind {
         case .translation: return modelFiles().gguf != nil
         case .speech: return modelFiles().whisper != nil
         case .senseVoice: return modelFiles().sense != nil
+        case .voiceClone: return cloneInstalled
         }
     }
+
+    private var cloneInstalled: Bool {
+        if let c = cloneCache, c.rev == modelsRevision { return c.ok }
+        let ok = VoiceCloner.installed()
+        cloneCache = (modelsRevision, ok)
+        return ok
+    }
+    private var cloneCache: (rev: Int, ok: Bool)?
 
     // 模型文件的位置和大小：界面每次刷新都会用到，查一次就记住，模型文件变动（modelsRevision 变了）才重新查。
     // 以前每次刷新都去遍历模型文件夹算大小，说话、朗读时界面刷新很频繁，会造成卡顿
@@ -480,10 +511,14 @@ final class LiveSession: ObservableObject {
             case .senseVoice:
                 await sense.unload()
                 SenseVoiceRecognizer.delete()
+            case .voiceClone:
+                cloneTasks.removeAll()
+                await cloner.unload()
+                VoiceCloner.delete()
             }
             modelsRevision += 1
             // 当前引擎用得到这个模型才需要等它下载完再用
-            let used = kind == .translation || missingSpeechKinds(for: asrEngine).contains(kind)
+            let used = kind == .translation || (kind != .voiceClone && missingSpeechKinds(for: asrEngine).contains(kind))
             if !usingApple && used { phase = .loading("正在重新下载模型，完成后自动加载") }
         }
         startBackgroundDownload(kinds: [kind], switchWhenDone: false)
@@ -500,6 +535,7 @@ final class LiveSession: ObservableObject {
 
     func bootstrap() async {
         guard phase == .checking || phase == .needsModels || phaseIsFailed else { return }
+        if voiceClone { loadClonerIfNeeded() }
         let installed = modelsInstalled
         if engineMode.isEmpty && installed { engineMode = "local" }   // 已经下载过模型的老用户
         if usingApple {
@@ -562,11 +598,12 @@ final class LiveSession: ObservableObject {
         bgSwitchWhenDone = switchWhenDone
         bgQueue = list
         bgThenEngine = thenEngine
-        let host = hfHost
         hearLog("后台下载本地模型：\(list.map(Self.kindName).joined(separator: "、"))")
         Task {
             UIApplication.shared.isIdleTimerDisabled = true
             var ok = false
+            let host = await HostPicker.best()
+            hfHost = host
             do {
                 for kind in list {
                     bgDownloadKind = kind
@@ -579,6 +616,9 @@ final class LiveSession: ObservableObject {
                     case .translation: _ = try await ModelManager.downloadGGUF(host: host, progress: onProgress)
                     case .speech: _ = try await ModelManager.downloadWhisper(host: host, progress: onProgress)
                     case .senseVoice: try await SenseVoiceRecognizer.download(host: host, progress: onProgress)
+                    case .voiceClone:
+                        try await cloner.download(host: host, progress: onProgress)
+                        if !voiceClone { await cloner.unload() }     // 没打开声音克隆就先不占内存
                     }
                     bgDownloadKind = nil              // 下载完立刻收起进度条
                     bgQueue.removeAll { $0 == kind }
@@ -587,6 +627,7 @@ final class LiveSession: ObservableObject {
                 ok = true
             } catch {
                 hearLog("后台下载失败：\(error)", .error)
+                HostPicker.reset()
                 bgDownloadError = "下载失败：\(error.localizedDescription)"
             }
             // 先结束“下载中”的显示，再去切换或加载模型（加载要好几秒，不用一直挂着 100%）
@@ -623,6 +664,7 @@ final class LiveSession: ObservableObject {
         case .translation: return "翻译模型 Hy-MT2"
         case .speech: return "语音识别模型 Whisper"
         case .senseVoice: return "语音识别模型 SenseVoice"
+        case .voiceClone: return "声音克隆模型 Qwen3-TTS"
         }
     }
 
@@ -658,7 +700,8 @@ final class LiveSession: ObservableObject {
     func downloadModels(forceTranslation: Bool = false) async {
         UIApplication.shared.isIdleTimerDisabled = true
         defer { UIApplication.shared.isIdleTimerDisabled = isRunning }
-        let host = hfHost
+        let host = await HostPicker.best()
+        hfHost = host
         do {
             if forceTranslation || ModelManager.currentGGUF() == nil {
                 phase = .downloading("翻译模型 Hy-MT2", 0)
@@ -684,7 +727,8 @@ final class LiveSession: ObservableObject {
             await loadModels()
         } catch {
             hearLog("下载失败：\(error)", .error)
-            phase = .failed("下载失败：\(error.localizedDescription)\n可以在设置里换下载源后重试。")
+            HostPicker.reset()
+            phase = .failed("下载失败：\(error.localizedDescription)\n请检查网络后重试。")
         }
     }
 
@@ -1484,15 +1528,10 @@ final class LiveSession: ObservableObject {
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
         let old = items[idx]
         let preview = old.source == src ? old.translated : ""
-        var item = TranslationItem(id: itemID, source: src, target: tgt, sourceText: b.text, translated: preview)
-        if voiceStyle == "match" {
-            item.speakerF0 = await Task.detached(priority: .utility) {
-                VoiceAnalyzer.estimateF0(samples)
-            }.value
-            guard gen == runGen else { return }
-        }
+        let item = TranslationItem(id: itemID, source: src, target: tgt, sourceText: b.text, translated: preview)
         guard let idx2 = items.firstIndex(where: { $0.id == itemID }) else { return }
         items[idx2] = item
+        rememberReference(itemID, samples: samples, text: b.text, lang: src.id)
         activity = "翻译中…"
         do {
             let out = try await systemTranslator.translate(b.text, from: src, to: tgt)
@@ -1598,16 +1637,11 @@ final class LiveSession: ObservableObject {
         // 语言和预览一致时先保留预览译文，最终译文出来后再替换，避免闪烁
         let old = items[idx]
         let preview = old.source == src ? old.translated : ""
-        var item = TranslationItem(id: itemID, source: src, target: tgt, sourceText: text, translated: preview)
-        if voiceStyle == "match" {
-            item.speakerF0 = await Task.detached(priority: .utility) {
-                VoiceAnalyzer.estimateF0(samples)
-            }.value
-            guard gen == runGen else { return }
-        }
+        let item = TranslationItem(id: itemID, source: src, target: tgt, sourceText: text, translated: preview)
         guard let idx2 = items.firstIndex(where: { $0.id == itemID }) else { return }
         items[idx2] = item
         let id = itemID
+        rememberReference(id, samples: samples, text: text, lang: src.id)
 
         let context: [String] = useContext
             ? Array(items[..<idx2].filter { $0.done }.suffix(2).map(\.sourceText))
@@ -1667,6 +1701,7 @@ final class LiveSession: ObservableObject {
         if wasReading { stopReading() }
         items[i].sourceText = text
         items[i].corrected = true
+        rememberReference(id, samples: samples, text: text, lang: src.id)
         let context: [String] = useContext
             ? Array(items[..<i].filter { $0.done }.suffix(2).map(\.sourceText))
             : []
@@ -1708,7 +1743,7 @@ final class LiveSession: ObservableObject {
         return d >= 2 || (d == 1 && max(x.count, y.count) <= 8)
     }
 
-    /// 朗读一条译文：决定左右耳、声音和音高
+    /// 朗读一条译文：决定左右耳；打开声音克隆时用说话人的原声
     private func speak(_ item: TranslationItem) async {
         let text = item.translated
         guard !text.isEmpty, !text.hasPrefix("（翻译失败") else { return }
@@ -1722,26 +1757,29 @@ final class LiveSession: ObservableObject {
             pan = (l && r) ? 0 : (l ? -1 : 1)
         }
 
-        // 音色
-        var voice: AVSpeechSynthesisVoice?
-        var pitch: Float = 1
-        let fromSlot = item.source == langA ? "A" : "B"
-        if usePersonalVoice, fromSlot == mySide, let pv = Speaker.personalVoice(for: item.target.tts) {
-            voice = pv
-        } else if voiceStyle == "match", let f0 = item.speakerF0 {
-            let male = f0 < 165
-            voice = Speaker.bestVoice(for: item.target.tts, gender: male ? .male : .female)
-            let base: Float = male ? 120 : 210
-            pitch = min(1.4, max(0.75, f0 / base))
-        }
-
         AudioRoute.apply(outputMode)
         // 聆听中用扬声器读（只有点句子时才会）：暂停麦克风，避免把喇叭声音再识别一遍
         let mute = outputMode == .speaker && isRunning
-        hearLog("朗读：\(item.target.displayName)，\(outputMode == .speaker ? "扬声器" : (pan < 0 ? "左耳" : (pan > 0 ? "右耳" : "双耳")))，声音 \(voice?.name ?? "默认")")
+        // 声音克隆：等提前生成好的克隆声音（最多等 20 秒），没有就用系统声音
+        var cloned: [Float]?
+        if voiceClone, let t = cloneTasks[item.id] ?? prepareClone(item.id) {
+            if cloneTasks[item.id] == nil { cloneTasks[item.id] = t }
+            cloned = await withTaskGroup(of: [Float]?.self) { g in
+                g.addTask { await t.value }
+                g.addTask { try? await Task.sleep(nanoseconds: 20_000_000_000); return nil }
+                let first = await g.next() ?? nil
+                g.cancelAll()
+                return first
+            }
+            if Task.isCancelled { return }
+        }
+        hearLog("朗读：\(item.target.displayName)，\(outputMode == .speaker ? "扬声器" : (pan < 0 ? "左耳" : (pan > 0 ? "右耳" : "双耳")))，\(cloned != nil ? "克隆原声" : "系统声音")")
         if mute { capture.muted = true }
-        await speaker.speak(SpeakRequest(text: text, locale: item.target.tts,
-                                         voice: voice, pitch: pitch, pan: pan))
+        if let cloned {
+            await speaker.play(samples: cloned, sampleRate: Double(VoiceCloner.sampleRate), pan: pan)
+        } else {
+            await speaker.speak(SpeakRequest(text: text, locale: item.target.tts, pan: pan))
+        }
         if mute {
             try? await Task.sleep(nanoseconds: 300_000_000)
             capture.muted = false
@@ -1789,8 +1827,67 @@ final class LiveSession: ObservableObject {
     private func update(_ id: UUID, _ text: String, done: Bool) {
         guard let i = items.firstIndex(where: { $0.id == id }) else { return }
         if items[i].done && !done { return }
+        let changed = items[i].translated != text
         items[i].translated = text
         items[i].done = done
+        // 译文定稿后马上在后台生成克隆声音，轮到朗读时就不用等
+        if done, voiceClone, speakOutput, changed || cloneTasks[id] == nil {
+            cloneTasks[id] = prepareClone(id)
+        }
+    }
+
+    // MARK: - 声音克隆
+
+    private func loadClonerIfNeeded() {
+        guard VoiceCloner.installed(), !cloneLoading else { return }
+        cloneLoading = true
+        modelsRevision += 1
+        Task {
+            do {
+                try await cloner.load()
+            } catch {
+                hearLog("声音克隆：模型加载失败 \(error)", .error)
+                showToast("声音克隆模型加载失败，先用系统声音朗读")
+            }
+            cloneLoading = false
+            modelsRevision += 1
+        }
+    }
+
+    /// 记下这句话的声音和文字，给声音克隆当样本（只留最近 30 句）
+    private func rememberReference(_ id: UUID, samples: [Float], text: String, lang: String) {
+        guard voiceClone else { return }
+        let secs = Double(samples.count) / 16_000
+        // 太长的只取前 12 秒会和文字对不上，就不当样本；太短（不到 1.5 秒）声音特征不够
+        guard secs <= 12 else { return }
+        if secs >= 1.5 {
+            cloneRefs[id] = (samples, text)
+            lastCloneRef[lang] = (samples, text)
+        } else if let last = lastCloneRef[lang] {
+            cloneRefs[id] = last          // 太短：借用同一种语言最近一句的声音
+        } else {
+            cloneRefs[id] = (samples, text)
+        }
+        cloneRefOrder.removeAll { $0 == id }
+        cloneRefOrder.append(id)
+        while cloneRefOrder.count > 30 {
+            let old = cloneRefOrder.removeFirst()
+            cloneRefs[old] = nil
+            cloneTasks[old] = nil
+        }
+    }
+
+    /// 在后台生成这句译文的克隆声音；没有样本、不支持这种语言或模型没加载时返回 nil
+    private func prepareClone(_ id: UUID) -> Task<[Float]?, Never>? {
+        guard let ref = cloneRefs[id],
+              let item = items.first(where: { $0.id == id }),
+              !item.translated.isEmpty, !item.translated.hasPrefix("（翻译失败"),
+              VoiceCloner.languageName(item.target.id) != nil else { return nil }
+        let text = item.translated, lang = item.target.id
+        let cloner = self.cloner
+        return Task.detached(priority: .userInitiated) {
+            await cloner.synthesize(text: text, language: lang, reference: ref.samples, referenceText: ref.text)
+        }
     }
 
     // MARK: - 设置
