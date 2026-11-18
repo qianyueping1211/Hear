@@ -5,6 +5,8 @@ struct HearApp: App {
     @StateObject private var session = LiveSession()
 
     init() {
+        // iCloud 同步：iCloud 上的设置比较新就先用上（要在 LiveSession 读设置之前）
+        CloudSync.shared.applyCloudSettingsAtLaunch()
         // 在 LiveSession 读设置之前先调整默认值
         let d = UserDefaults.standard
         let a = d.string(forKey: "langA") ?? "zh"
