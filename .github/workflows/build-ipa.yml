@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    # 只改“旧版本号改名”工作流时不打包
+    paths-ignore:
+      - .github/workflows/rename-releases.yml
 
 permissions:
   contents: write
@@ -24,11 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # 版本号按打包次数自动生成：第 19 次 → 1.9，第 22 次 → 2.2
+      # 版本号写在仓库根目录的 VERSION 文件里（三位，例如 1.0.0），每次发布前改这个文件
       - name: Version
         run: |
-          N=${{ github.run_number }}
-          echo "VER=$((N / 10)).$((N % 10))" >> "$GITHUB_ENV"
+          VER=$(tr -d ' \r\n' < VERSION)
+          echo "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::VERSION 文件格式不对：$VER（应为 1.0.0 这样的三位）"; exit 1; }
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          echo "版本号：$VER"
 
       - name: Select Xcode
         run: |
@@ -74,27 +79,11 @@ jobs:
         run: |
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/Hear.app Payload/
-          # 文件名带上版本号，例如 Hear-3.3.ipa
+          # 文件名带上版本号，例如 Hear-1.0.0.ipa
           zip -qry "Hear-${VER}.ipa" Payload
           ls -lh "Hear-${VER}.ipa"
 
-      # 旧的发布记录（build-11 ~ build-19）改成版本号 1.1 ~ 1.9；已改过的会跳过
-      - name: Rename old releases
-        continue-on-error: true
-        run: |
-          R="${{ github.repository }}"
-          for N in 11 12 13 14 15 16 17 18 19; do
-            V="$((N / 10)).$((N % 10))"; OLD="build-$N"; NEW="v$V"
-            gh release view "$OLD" >/dev/null 2>&1 || continue
-            SHA=$(gh api "repos/$R/git/ref/tags/$OLD" --jq .object.sha)
-            gh api "repos/$R/git/refs" -f ref="refs/tags/$NEW" -f sha="$SHA" >/dev/null 2>&1 || true
-            BODY=$(gh release view "$OLD" --json body -q .body | sed "1s/.*/## 听见 $V/")
-            gh release edit "$OLD" --tag "$NEW" --title "听见 $V" --notes "$BODY"
-            gh api -X DELETE "repos/$R/git/refs/tags/$OLD" || true
-            echo "$OLD -> $NEW"
-          done
-
-      # 发布：标签和标题都用版本号（例如 v1.1 / 听见 1.1）。同一版本号重新打包会覆盖原来的发布
+      # 发布：标签和标题都用版本号（例如 v1.0.0 / 听见 1.0.0）。同一版本号重新打包会覆盖原来的发布
       - name: Publish release
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
