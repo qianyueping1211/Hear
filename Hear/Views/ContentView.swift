@@ -93,6 +93,7 @@ struct TopBar: View {
     var onNew: () -> Void
     var onHistory: () -> Void
     var onSettings: () -> Void
+    @State private var showMenu = false
 
     var body: some View {
         HStack {
@@ -108,14 +109,23 @@ struct TopBar: View {
 
             Spacer()
 
-            Menu {
-                Button(action: onNew) { Label("新建", systemImage: "square.and.pencil") }
-                Button(action: onHistory) { Label("历史", systemImage: "clock.arrow.circlepath") }
-                Button(action: onSettings) { Label("设置", systemImage: "gearshape") }
-            } label: {
+            Button { showMenu = true } label: {
                 MoreDots()
             }
+            .foregroundStyle(.primary)
             .accessibilityLabel("更多")
+            // 紧凑的弹出菜单：宽度只包住图标和文字
+            .popover(isPresented: $showMenu, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 0) {
+                    menuRow("新建", "square.and.pencil", onNew)
+                    Divider()
+                    menuRow("历史", "clock.arrow.circlepath", onHistory)
+                    Divider()
+                    menuRow("设置", "gearshape", onSettings)
+                }
+                .fixedSize()
+                .presentationCompactAdaptation(.popover)
+            }
         }
         .overlay {
             Text("听见").font(.headline)
@@ -124,20 +134,35 @@ struct TopBar: View {
         .padding(.top, 6)
         .padding(.bottom, 2)
     }
+
+    private func menuRow(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button {
+            showMenu = false
+            // 等菜单收起后再打开下一个页面
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { action() }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: icon).frame(width: 22)
+                Text(title)
+            }
+            .font(.body)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
 }
 
-/// 右上角按钮：和左边清空按钮一样大的 44pt 圆框，中间三个点和垃圾桶图标一样大
+/// 右上角按钮：和左边清空按钮完全一样的样式，只是图标换成三个点
 struct MoreDots: View {
     var body: some View {
-        ZStack {
-            Circle()
-                .strokeBorder(Color.primary, lineWidth: 1.5)
-            Image(systemName: "ellipsis")
-                .font(.system(size: 19, weight: .bold))
-        }
-        .foregroundStyle(.primary)
-        .frame(width: 44, height: 44)
-        .contentShape(Circle())
+        Image(systemName: "ellipsis")
+            .font(.system(size: 19, weight: .medium))
+            .frame(width: 44, height: 44)
+            .background(.ultraThinMaterial, in: Circle())
+            .contentShape(Circle())
     }
 }
 
