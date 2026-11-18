@@ -37,7 +37,7 @@ struct SettingsView: View {
                     Text(engineFooter)
                 }
 
-                // MARK: 模型管理（语音识别 → 翻译 → 下载源）
+                // MARK: 模型管理（语音识别 → 翻译 → 声音克隆）
                 Section {
                     modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
                              status: session.speechStatus)
@@ -45,6 +45,8 @@ struct SettingsView: View {
                              status: session.senseStatus)
                     modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
                              status: session.translationStatus)
+                    modelRow(.voiceClone, title: "声音克隆（Qwen3-TTS）", icon: "person.wave.2",
+                             status: session.cloneStatus)
                     if session.installedGGUFs.count > 1 {
                         Picker("使用的翻译模型", selection: ggufSelection) {
                             ForEach(session.installedGGUFs, id: \.self) { url in
@@ -52,23 +54,13 @@ struct SettingsView: View {
                             }
                         }
                     }
-                    Picker(selection: $session.hfHost) {
-                        Text("Hugging Face 官方").tag("huggingface.co")
-                        Text("hf-mirror（国内镜像）").tag("hf-mirror.com")
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "globe")
-                                .font(.title3)
-                                .foregroundStyle(.tint)
-                                .frame(width: 28)
-                            Text("下载源")
-                        }
-                    }
                     if let err = session.bgDownloadError {
                         Text(err).font(.footnote).foregroundStyle(.red)
                     }
                 } header: {
                     Text("模型管理")
+                } footer: {
+                    Text("下载源自动选择：在中国用国内镜像，在国外用 Hugging Face 官方。")
                 }
 
                 // MARK: 语音识别（收音 → 断句 → 运行方式）
@@ -127,18 +119,14 @@ struct SettingsView: View {
                     Text("翻译与总结")
                 }
 
-                // MARK: 朗读（出声 → 音色 → 耳机左右耳）
+                // MARK: 朗读（朗读译文 → 声音克隆 → 出声 → 耳机左右耳）
                 Section {
                     Toggle("朗读译文", isOn: $session.speakOutput)
+                    Toggle("声音克隆（用说话人的原声朗读）", isOn: cloneBinding)
                     Picker("朗读从哪里出声", selection: outputBinding) {
                         Text("手机扬声器").tag(AudioOutput.speaker)
                         Text("耳机").tag(AudioOutput.headphones)
                     }
-                    Picker("朗读音色", selection: $session.voiceStyle) {
-                        Text("系统默认").tag("system")
-                        Text("接近说话人（性别和音高）").tag("match")
-                    }
-                    Toggle("用我的“个人声音”朗读我说的话", isOn: personalVoiceBinding)
                     if session.outputMode == .headphones {
                         Picker("左耳听", selection: $session.leftEar) {
                             Text(session.langA.name).tag("A")
@@ -154,7 +142,9 @@ struct SettingsView: View {
                 } header: {
                     Text("朗读")
                 } footer: {
-                    if let personalVoiceNote { Text(personalVoiceNote) }
+                    Text(session.voiceClone
+                         ? "声音克隆：用说话人刚说的那句话当样本，把译文用他的声音读出来（支持中、英、日、韩、德、法、俄、葡、西、意）。每句要先生成，会比系统声音慢一些；生成不了时自动用系统声音。"
+                         : "打开声音克隆后，译文会用说话人自己的声音读出来。")
                 }
 
                 Section {
@@ -194,9 +184,6 @@ struct SettingsView: View {
             }
             .onAppear {
                 session.refreshHeadset()
-                if session.usePersonalVoice {
-                    personalVoiceNote = Self.personalVoiceDescription(Speaker.personalVoices)
-                }
             }
             .navigationTitle("功能设置")
             .navigationBarTitleDisplayMode(.inline)
@@ -216,6 +203,7 @@ struct SettingsView: View {
                     case .speech: await session.importWhisper(url)
                     case .senseVoice: await session.importSenseVoice(url)
                     case .translation: await session.importModel(url)
+                    case .voiceClone: break
                     }
                 }
             }
@@ -241,6 +229,13 @@ struct SettingsView: View {
             // 等选项列表收起后再弹下载确认框，避免两个弹窗叠在一起闪动
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { asrEngineBinding.wrappedValue = e }
         }
+        // 打开声音克隆但还没下载模型：先问要不要下载
+        .centerDialog(isPresented: $askClone,
+                      title: "下载声音克隆模型？",
+                      message: "声音克隆需要下载 Qwen3-TTS 模型（约 1.4 GB），请连接 Wi‑Fi。下载期间先用系统声音朗读，下载完成后自动改用原声。下载时请保持 App 在前台。") {
+            session.voiceClone = true
+            session.startBackgroundDownload(kinds: [.voiceClone], switchWhenDone: false)
+        }
         .centerDialog(isPresented: $askDownload,
                       title: "下载听见本地模型？",
                       message: localDownloadMessage) {
@@ -248,8 +243,22 @@ struct SettingsView: View {
         }
     }
 
-    @State private var personalVoiceNote: String?
     @State private var askDownload = false
+    @State private var askClone = false
+
+    private var cloneBinding: Binding<Bool> {
+        Binding(
+            get: { session.voiceClone },
+            set: { on in
+                if !on { session.voiceClone = false; return }
+                if session.isInstalled(.voiceClone) {
+                    session.voiceClone = true
+                } else if !session.bgDownloading {
+                    askClone = true
+                }
+            }
+        )
+    }
     /// 选了还缺模型的识别引擎（等确认下载）
     @State private var pendingEngine: String?
     @State private var lastPendingEngine = "sensevoice"
@@ -342,6 +351,7 @@ struct SettingsView: View {
         case .translation: return "翻译模型（MT）"
         case .speech: return "语音识别模型（Whisper）"
         case .senseVoice: return "语音识别模型（SenseVoice）"
+        case .voiceClone: return "声音克隆模型（Qwen3-TTS）"
         }
     }
 
@@ -350,6 +360,7 @@ struct SettingsView: View {
         case .translation: return "约 2 GB"
         case .speech: return "约 1.6 GB"
         case .senseVoice: return "约 240 MB"
+        case .voiceClone: return "约 1.4 GB"
         }
     }
 
@@ -400,18 +411,22 @@ struct SettingsView: View {
                 .buttonStyle(.borderless)
                 .disabled(session.isBusyWithModels)
                 .accessibilityLabel(status.installed ? "重新下载" : "下载")
-                // 导入
-                Button {
-                    lastImportKind = kind
-                    importKind = kind
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.title3)
-                        .frame(width: 34, height: 34)
+                // 导入（声音克隆模型由两部分组成，只能在线下载，不提供导入）
+                if kind == .voiceClone {
+                    Color.clear.frame(width: 34, height: 34)
+                } else {
+                    Button {
+                        lastImportKind = kind
+                        importKind = kind
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.title3)
+                            .frame(width: 34, height: 34)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(session.isBusyWithModels)
+                    .accessibilityLabel("导入")
                 }
-                .buttonStyle(.borderless)
-                .disabled(session.isBusyWithModels)
-                .accessibilityLabel("导入")
             }
             if downloading {
                 HStack(spacing: 8) {
@@ -495,37 +510,6 @@ struct SettingsView: View {
             get: { session.outputMode },
             set: { new in if new != session.outputMode { session.cycleOutput() } }
         )
-    }
-
-    private var personalVoiceBinding: Binding<Bool> {
-        Binding(
-            get: { session.usePersonalVoice },
-            set: { on in
-                guard on else { session.usePersonalVoice = false; personalVoiceNote = nil; return }
-                Task {
-                    let ok = await Speaker.requestPersonalVoiceAccess()
-                    guard ok else {
-                        session.usePersonalVoice = false
-                        personalVoiceNote = "没有获得个人声音的使用权限，可以在 iPhone 设置 → 辅助功能 → 个人声音 里允许。"
-                        return
-                    }
-                    // 已授权就打开；找不到对应语言的个人声音时会自动用普通声音
-                    session.usePersonalVoice = true
-                    let voices = await Speaker.findPersonalVoices()
-                    let names = voices.map { $0.name + "(" + $0.language + ")" }.joined(separator: ", ")
-                    hearLog("个人声音：找到 \(voices.count) 个 \(names)")
-                    personalVoiceNote = Self.personalVoiceDescription(voices)
-                }
-            }
-        )
-    }
-
-    static func personalVoiceDescription(_ voices: [AVSpeechSynthesisVoice]) -> String {
-        if voices.isEmpty {
-            return "已允许使用，但暂时读不到个人声音。如果是刚刚才允许，把 App 从后台完全划掉后重新打开再试。"
-        }
-        let langs = Set(voices.map { Locale.current.localizedString(forIdentifier: $0.language) ?? $0.language })
-        return "已找到个人声音（\(langs.sorted().joined(separator: "、"))）。个人声音只能说录制时的语言，只有译文是这种语言时才会用它，其他语言用普通声音。"
     }
 
     private func isInstalled(_ kind: LiveSession.ModelKind) -> Bool {
