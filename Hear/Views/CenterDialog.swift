@@ -84,3 +84,93 @@ extension View {
                               confirmTitle: confirmTitle, destructive: destructive, onConfirm: onConfirm))
     }
 }
+
+/// 屏幕正中的选项列表：背后整页虚化变暗，聚焦在选项上；选项一行显示不换行。点卡片以外的地方关闭。
+struct CenterChoice: ViewModifier {
+    @Binding var isPresented: Bool
+    let title: String
+    let options: [(tag: String, title: String, detail: String)]
+    let selected: String
+    let onSelect: (String) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .blur(radius: isPresented ? 14 : 0)
+            .allowsHitTesting(!isPresented)
+            .overlay {
+                if isPresented {
+                    GeometryReader { geo in
+                        ZStack {
+                            Color.black.opacity(0.35)
+                                .contentShape(Rectangle())
+                                .onTapGesture { isPresented = false }
+                            card
+                                .frame(width: min(geo.size.width * 0.88, 440))
+                                .transition(.scale(scale: 0.9).combined(with: .opacity))
+                        }
+                        .frame(width: geo.size.width, height: geo.size.height)
+                    }
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+                }
+            }
+            .animation(.spring(duration: 0.3), value: isPresented)
+    }
+
+    private var card: some View {
+        VStack(spacing: 6) {
+            Text(title)
+                .font(.headline)
+                .padding(.bottom, 6)
+            ForEach(options, id: \.tag) { o in
+                Button {
+                    onSelect(o.tag)
+                    isPresented = false
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "checkmark")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .opacity(o.tag == selected ? 1 : 0)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(o.title)
+                                .font(.body.weight(o.tag == selected ? .semibold : .regular))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                            if !o.detail.isEmpty {
+                                Text(o.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(o.tag == selected ? Color.accentColor.opacity(0.15) : Color.primary.opacity(0.06),
+                                in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 22)
+        .padding(.bottom, 16)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
+        .shadow(color: .black.opacity(0.3), radius: 24, y: 8)
+    }
+}
+
+extension View {
+    /// 屏幕正中的选项列表（单选）
+    func centerChoice(isPresented: Binding<Bool>, title: String,
+                      options: [(tag: String, title: String, detail: String)],
+                      selected: String, onSelect: @escaping (String) -> Void) -> some View {
+        modifier(CenterChoice(isPresented: isPresented, title: title, options: options,
+                              selected: selected, onSelect: onSelect))
+    }
+}

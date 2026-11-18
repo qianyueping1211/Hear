@@ -69,22 +69,75 @@ actor SenseVoiceRecognizer {
         return base.appendingPathComponent("FluidAudio/Models/sensevoice-small-coreml", isDirectory: true)
     }
 
-    /// 已下载（或已导入）就返回文件夹
+    /// 已下载（或已导入）就返回文件夹。
+    /// FluidAudio 下载的位置可能和默认目录不完全一样，所以找不到时在它的模型目录里找一遍，找到就记住
     static func installedFolder() -> URL? {
-        let f = folder
-        let ok = SenseVoiceModels.modelsExist(at: f, precision: .int8)
+        var candidates: [URL] = []
+        if let p = UserDefaults.standard.string(forKey: "senseVoiceFolder") {
+            candidates.append(URL(fileURLWithPath: p, isDirectory: true))
+        }
+        candidates.append(folder)
+        for f in candidates where hasModels(f) { return f }
+        guard let found = scan() else { return nil }
+        UserDefaults.standard.set(found.path, forKey: "senseVoiceFolder")
+        return found
+    }
+
+    private static func hasModels(_ f: URL) -> Bool {
+        SenseVoiceModels.modelsExist(at: f, precision: .int8)
             || SenseVoiceModels.modelsExist(at: f, precision: .fp16)
-        return ok ? f : nil
+    }
+
+    /// 在 Application Support 和 Caches 里找含有 SenseVoice 模型的文件夹（最多往下 5 层）
+    private static func scan() -> URL? {
+        let fm = FileManager.default
+        let roots = [fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0],
+                     fm.urls(for: .cachesDirectory, in: .userDomainMask)[0],
+                     fm.urls(for: .documentDirectory, in: .userDomainMask)[0]]
+        for root in roots {
+            var level = [root]
+            for _ in 0..<5 {
+                var next: [URL] = []
+                for dir in level {
+                    guard let subs = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey]) else { continue }
+                    for u in subs {
+                        guard (try? u.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { continue }
+                        let name = u.lastPathComponent.lowercased()
+                        if name.hasSuffix(".mlmodelc") || name.hasSuffix(".mlpackage") { continue }
+                        if name.contains("sensevoice"), hasModels(u) { return u }
+                        next.append(u)
+                    }
+                }
+                level = next
+                if level.isEmpty { break }
+            }
+        }
+        return nil
     }
 
     static func download(host: String, progress: @escaping @Sendable (Double) -> Void) async throws {
         ModelRegistry.baseURL = "https://\(host)"
-        _ = try await SenseVoiceModels.download(precision: .int8, force: false) { p in
+        let r = try await SenseVoiceModels.download(precision: .int8, force: false) { p in
             progress(p.fractionCompleted)
+        }
+        hearLog("SenseVoice 下载返回：\(String(describing: r))")
+        UserDefaults.standard.removeObject(forKey: "senseVoiceFolder")
+        if let f = installedFolder() {
+            hearLog("SenseVoice 模型位置：\(f.path)")
+        } else {
+            // 下载说完成了却找不到模型：把目录里的文件列出来，方便查原因
+            let fm = FileManager.default
+            let base = folder.deletingLastPathComponent()
+            let list = (fm.enumerator(atPath: base.path)?.allObjects as? [String] ?? []).prefix(40)
+            hearLog("SenseVoice 下载后没找到模型，\(base.path) 里有：\(list.joined(separator: ", "))", .error)
+            throw NSError(domain: "Hear", code: 5, userInfo: [NSLocalizedDescriptionKey:
+                "SenseVoice 下载完成但没有找到模型文件，请到 运行日志 查看详情"])
         }
     }
 
     static func delete() {
+        if let f = installedFolder(), f != folder { try? FileManager.default.removeItem(at: f) }
+        UserDefaults.standard.removeObject(forKey: "senseVoiceFolder")
         try? FileManager.default.removeItem(at: folder)
     }
 

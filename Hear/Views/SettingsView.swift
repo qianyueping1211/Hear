@@ -93,14 +93,18 @@ struct SettingsView: View {
                         Text("神经引擎（省电）").tag(false)
                     }
                     if !session.usingApple {
-                        Picker("识别引擎", selection: asrEngineBinding) {
-                            Text("本地最准：Whisper").tag("whisper")
-                            Text("本地最快：SenseVoice").tag("sensevoice")
-                            Text("SenseVoice + Whisper 校正").tag("hybrid")
-                            if LiveTextEngineFactory.isSupported {
-                                Text("iOS 系统听写").tag("apple")
+                        Button {
+                            showEngineChoice = true
+                        } label: {
+                            LabeledContent("识别引擎") {
+                                HStack(spacing: 4) {
+                                    Text(Self.engineTitle(session.asrEngine)).lineLimit(1)
+                                    Image(systemName: "chevron.up.chevron.down").font(.caption)
+                                }
+                                .foregroundStyle(.secondary)
                             }
                         }
+                        .foregroundStyle(.primary)
                     }
                 } header: {
                     Text("语音识别")
@@ -237,6 +241,12 @@ struct SettingsView: View {
                       message: engineDownloadMessage) {
             if let e = pendingEngine { session.downloadForEngine(e) }
         }
+        // 识别引擎：屏幕正中的选项列表（背后虚化）
+        .centerChoice(isPresented: $showEngineChoice, title: "识别引擎",
+                      options: engineOptions, selected: session.asrEngine) { e in
+            // 等选项列表收起后再弹下载确认框，避免两个弹窗叠在一起闪动
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { asrEngineBinding.wrappedValue = e }
+        }
         .centerDialog(isPresented: $askDownload,
                       title: "下载听见本地模型？",
                       message: localDownloadMessage) {
@@ -249,6 +259,33 @@ struct SettingsView: View {
     /// 选了还缺模型的识别引擎（等确认下载）
     @State private var pendingEngine: String?
     @State private var lastPendingEngine = "sensevoice"
+    @State private var showEngineChoice = false
+
+    static func engineTitle(_ e: String) -> String {
+        switch e {
+        case "sensevoice": return "本地最快：SenseVoice"
+        case "hybrid": return "SenseVoice + Whisper 校正"
+        case "apple": return "iOS 系统听写"
+        default: return "本地最准：Whisper"
+        }
+    }
+
+    private var engineOptions: [(tag: String, title: String, detail: String)] {
+        var list: [(tag: String, title: String, detail: String)] = [
+            ("whisper", Self.engineTitle("whisper"), "标点和长句更好，稍慢"),
+            ("sensevoice", Self.engineTitle("sensevoice"), "说完马上出字 · 中英日韩"),
+            ("hybrid", Self.engineTitle("hybrid"), "先快后准，有差别自动替换 · 中英日韩"),
+        ]
+        if LiveTextEngineFactory.isSupported {
+            list.append(("apple", Self.engineTitle("apple"), "逐字显示，说完由 Whisper 定稿"))
+        }
+        return list.map { (o) -> (tag: String, title: String, detail: String) in
+            let missing = session.missingSpeechKinds(for: o.tag)
+            guard !missing.isEmpty else { return o }
+            let names = missing.map { $0 == .senseVoice ? "SenseVoice" : "Whisper" }.joined(separator: "、")
+            return (o.tag, o.title, "需下载 \(names) · " + o.detail)
+        }
+    }
 
     private var asrEngineBinding: Binding<String> {
         Binding(
