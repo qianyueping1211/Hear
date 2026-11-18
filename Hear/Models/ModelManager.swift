@@ -128,6 +128,34 @@ enum ModelManager {
         return FileManager.default.fileExists(atPath: marker.path) ? url : nil
     }
 
+    /// 导入语音识别模型：选一个 WhisperKit 模型文件夹（里面有 AudioEncoder.mlmodelc 等）。
+    /// 复制到 App 里，替换掉原来的语音识别模型。
+    static func importWhisper(from src: URL) throws {
+        let access = src.startAccessingSecurityScopedResource()
+        defer { if access { src.stopAccessingSecurityScopedResource() } }
+        let fm = FileManager.default
+        let need = ["AudioEncoder.mlmodelc", "TextDecoder.mlmodelc", "MelSpectrogram.mlmodelc"]
+        let missing = need.filter { !fm.fileExists(atPath: src.appendingPathComponent($0).path) }
+        guard missing.isEmpty else {
+            throw NSError(domain: "Hear", code: 3, userInfo: [NSLocalizedDescriptionKey:
+                "这个文件夹不是 WhisperKit 语音识别模型（缺少 \(missing.joined(separator: "、"))）"])
+        }
+        let dir = whisperBase.appendingPathComponent("imported", isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dst = dir.appendingPathComponent(src.lastPathComponent, isDirectory: true)
+        let old = whisperFolder()
+        if src.standardizedFileURL.path != dst.standardizedFileURL.path {
+            if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
+            try fm.copyItem(at: src, to: dst)
+        }
+        // 原来的模型删掉，省空间（选的就是原来那个文件夹时不删）
+        if let old, old.standardizedFileURL.path != dst.standardizedFileURL.path,
+           old.standardizedFileURL.path != src.standardizedFileURL.path {
+            try? fm.removeItem(at: old)
+        }
+        UserDefaults.standard.set("huggingface/imported/" + src.lastPathComponent, forKey: "whisperRelPath")
+    }
+
     static func downloadWhisper(host: String, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
         if host != "huggingface.co" { setenv("HF_ENDPOINT", "https://\(host)", 1) }
         let folder = try await WhisperKit.download(
