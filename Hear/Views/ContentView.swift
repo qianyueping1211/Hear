@@ -38,6 +38,8 @@ struct ContentView: View {
                 Divider()
                 ControlBar()
             }
+            // 弹出键盘时底部的实时翻译区域固定不动
+            .ignoresSafeArea(.keyboard, edges: .bottom)
             .toolbar(.hidden, for: .navigationBar)
             // 右上角 ⋯ 菜单：自己画的面板，不跟着页面实时刷新，所以不会闪
             .overlay(alignment: .topTrailing) {
@@ -60,7 +62,8 @@ struct ContentView: View {
             .animation(.spring(duration: 0.28), value: showMenu)
             .overlay {
                 if let id = editingID, let item = session.items.first(where: { $0.id == id }) {
-                    SourceEditor(text: $draft, flag: item.source.flag) {
+                    SourceEditor(text: $draft, flag: item.source.flag,
+                                 translation: item.translated, targetFlag: item.target.flag) {
                         session.editSource(id, to: draft)
                         editingID = nil
                     }
@@ -158,7 +161,7 @@ struct MoreMenuPanel: View {
             line
             row("功能设置", "gearshape", onSettings)
         }
-        .frame(width: 164)
+        .frame(width: 180)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
@@ -413,6 +416,8 @@ private struct BubbleLongPress: ViewModifier {
 struct SourceEditor: View {
     @Binding var text: String
     let flag: String
+    var translation: String = ""          // 当前译文，只看不改
+    var targetFlag: String = ""
     let onDone: () -> Void
     @FocusState private var focused: Bool
 
@@ -429,6 +434,15 @@ struct SourceEditor: View {
                     .focused($focused)
                     .padding(10)
                     .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                // 最新译文：方便对照，不能修改
+                if !translation.isEmpty {
+                    Text("\(targetFlag) 最新译文").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(translation)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(Color(.secondarySystemBackground).opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+                }
                 Text("点空白处保存，并重新翻译").font(.footnote).foregroundStyle(.secondary)
             }
             .padding(16)
@@ -483,6 +497,7 @@ struct ControlBar: View {
                         Text(session.useContext ? "上下文开" : "上下文关").font(.caption2)
                     }
                     .frame(width: 70)
+                    .foregroundStyle(session.useContext ? Color.accentColor : Color.secondary)   // 关闭时灰色
                 }
             }
             .padding(.horizontal, 24)
@@ -555,7 +570,7 @@ struct SpeakToggle: View {
             Text(label).font(.caption2)
         }
         .frame(width: 76, height: 56)
-        .foregroundStyle(Color.accentColor)
+        .foregroundStyle(session.speakOutput ? Color.accentColor : Color.secondary)   // 关闭时灰色
         .contentShape(Rectangle())
         .onTapGesture { session.speakOutput.toggle() }
         // 按住 2 秒：耳机播报时弹出左右耳设置；扬声器播报时切换到耳机（没连耳机不切换）
