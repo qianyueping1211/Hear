@@ -112,6 +112,10 @@ final class ConversationStore: ObservableObject {
     }
 
     func delete(_ id: UUID) {
+        // 记下删除过的对话，iCloud 备份时也删掉，不会被同步回来
+        var gone = Self.deletedIDs
+        gone[id.uuidString] = Date()
+        UserDefaults.standard.set(gone, forKey: "deletedConversations")
         try? FileManager.default.removeItem(at: fileURL(id))
         metas.removeAll { $0.id == id }
         writeIndex()
@@ -137,6 +141,49 @@ final class ConversationStore: ObservableObject {
         guard var c = load(id) else { return }
         c.summaries[templateID] = record
         save(c)
+    }
+
+    // MARK: iCloud 备份用
+
+    /// 删除过的对话（id → 删除时间）
+    static var deletedIDs: [String: Date] {
+        (UserDefaults.standard.dictionary(forKey: "deletedConversations") as? [String: Date]) ?? [:]
+    }
+
+    static func mergeDeleted(_ other: [String: Date]) {
+        var gone = deletedIDs
+        for (k, v) in other where gone[k] == nil { gone[k] = v }
+        UserDefaults.standard.set(gone, forKey: "deletedConversations")
+    }
+
+    /// 所有对话：id → 最后修改时间
+    var allUpdated: [UUID: Date] {
+        Dictionary(metas.map { ($0.id, $0.updatedAt) }, uniquingKeysWith: { a, b in max(a, b) })
+    }
+
+    /// 某个对话文件的原始内容
+    func rawData(_ id: UUID) -> Data? { try? Data(contentsOf: fileURL(id)) }
+
+    /// 把 iCloud 里更新的对话放回本地（保留原来的修改时间，不当成新改动）
+    @discardableResult
+    func importRaw(_ data: Data) -> Bool {
+        guard let c = try? decoder.decode(Conversation.self, from: data) else { return false }
+        do { try data.write(to: fileURL(c.id), options: .atomic) } catch { return false }
+        let meta = Self.meta(of: c)
+        if let i = metas.firstIndex(where: { $0.id == c.id }) { metas[i] = meta } else { metas.append(meta) }
+        metas.sort { $0.updatedAt > $1.updatedAt }
+        writeIndex()
+        revision += 1
+        return true
+    }
+
+    /// iCloud 上已经删除的对话：本地也删掉（不再记一次删除）
+    func removeSynced(_ id: UUID) {
+        guard metas.contains(where: { $0.id == id }) else { return }
+        try? FileManager.default.removeItem(at: fileURL(id))
+        metas.removeAll { $0.id == id }
+        writeIndex()
+        revision += 1
     }
 
     // MARK: 索引

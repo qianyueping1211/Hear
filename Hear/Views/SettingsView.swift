@@ -10,6 +10,8 @@ struct SettingsView: View {
     @State private var confirmKind: LiveSession.ModelKind?
     @ObservedObject private var log = AppLog.shared
     @ObservedObject private var llm = LLMSettings.shared
+    @ObservedObject private var cloud = CloudSync.shared
+    @State private var showCloudPicker = false
 
     var body: some View {
         NavigationStack {
@@ -37,7 +39,7 @@ struct SettingsView: View {
                     Text(engineFooter)
                 }
 
-                // MARK: 模型管理（语音识别 → 翻译 → 声音克隆）
+                // MARK: 模型管理（语音识别 → 翻译 → 下载源）
                 Section {
                     modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
                              status: session.speechStatus)
@@ -119,7 +121,7 @@ struct SettingsView: View {
                     Text("翻译与总结")
                 }
 
-                // MARK: 朗读（朗读译文 → 声音克隆 → 出声 → 耳机左右耳）
+                // MARK: 朗读（出声 → 音色 → 耳机左右耳）
                 Section {
                     Toggle("朗读译文", isOn: $session.speakOutput)
                     Toggle("声音克隆（用说话人的原声朗读）", isOn: cloneBinding)
@@ -157,6 +159,31 @@ struct SettingsView: View {
                     Text("每行一条，格式：原文=译文\n例如：张伟=Zhang Wei")
                 }
 
+                // MARK: iCloud 同步
+                Section {
+                    Toggle("iCloud 同步", isOn: cloudBinding)
+                    if cloud.enabled, let name = cloud.folderName {
+                        LabeledContent("同步位置", value: "iCloud 云盘 / \(name)")
+                        LabeledContent("上次同步") {
+                            if cloud.syncing {
+                                ProgressView()
+                            } else {
+                                Text(cloud.lastSync.map { Self.timeText($0) } ?? "还没有同步")
+                            }
+                        }
+                        Button("立即同步") { cloud.syncNow() }
+                            .disabled(cloud.syncing)
+                        Button("更换同步位置") { showCloudPicker = true }
+                    }
+                    if let m = cloud.message {
+                        Text(m).font(.footnote).foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text("iCloud 同步")
+                } footer: {
+                    Text("开启后，设置和历史记录会同步到你 iCloud 云盘里的一个文件夹（模型不同步）。数据仍存在手机上，有网络时系统自动上传；换手机或重装 App 后，开启并选同一个文件夹，会自动判断哪边更新并同步。第一次开启时，在“iCloud 云盘”里选一个文件夹（可以新建一个“听见”）。大模型 API Key 不同步，换手机后需要重新填写。")
+                }
+
                 // MARK: 日志
                 Section {
                     Toggle("开启日志", isOn: $log.enabled)
@@ -185,12 +212,16 @@ struct SettingsView: View {
             .onAppear {
                 session.refreshHeadset()
             }
+            .sheet(isPresented: $showCloudPicker) {
+                CloudFolderPicker { url in cloud.setFolder(url) }
+                    .ignoresSafeArea()
+            }
             .navigationTitle("功能设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) { Button("完成") { dismiss() } }
             }
-            // 导入：翻译模型选 .gguf 文件，语音识别和声音克隆模型选文件夹
+            // 导入：翻译模型选 .gguf 文件，语音识别模型选文件夹
             .fileImporter(isPresented: Binding(get: { importKind != nil },
                                                set: { if !$0 { importKind = nil } }),
                           allowedContentTypes: lastImportKind != .translation
@@ -245,6 +276,22 @@ struct SettingsView: View {
 
     @State private var askDownload = false
     @State private var askClone = false
+
+    private var cloudBinding: Binding<Bool> {
+        Binding(
+            get: { cloud.enabled },
+            set: { on in
+                if !on { cloud.enabled = false; return }
+                if cloud.hasFolder { cloud.enabled = true } else { showCloudPicker = true }
+            }
+        )
+    }
+
+    static func timeText(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "M月d日 HH:mm"
+        return f.string(from: d)
+    }
 
     private var cloneBinding: Binding<Bool> {
         Binding(
