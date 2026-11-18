@@ -30,6 +30,9 @@ final class LiveSession: ObservableObject {
     /// 音量（每秒变化很多次）单独放一个对象，只有麦克风按钮跟着刷新，整页和弹出的页面不会跟着闪
     let meter = LevelMeter()
     @Published var activity = ""
+    /// 实时翻译按钮上方的短暂提示（几秒后自动消失）
+    @Published private(set) var toast: String?
+    private var toastTask: Task<Void, Never>?
 
     // 设置
     @Published var speakOutput: Bool {
@@ -627,8 +630,12 @@ final class LiveSession: ObservableObject {
 
     func toggle() async {
         if isRunning { stop(); return }
-        // 模型还在加载时也可以先开始收音：说的话先排队，加载好马上识别
-        guard phase == .ready || isLoadingPhase else { return }
+        // 本地模型还没加载好：不开始，在按钮上方提示一下
+        if isLoadingPhase {
+            showToast("由于本地模型加载中，请稍等。")
+            return
+        }
+        guard phase == .ready else { return }
         guard await AudioCapture.requestPermission() else {
             activity = "请在 设置 → 听见 里允许使用麦克风"
             return
@@ -661,6 +668,17 @@ final class LiveSession: ObservableObject {
         } catch {
             hearLog("麦克风启动失败：\(error)", .error)
             activity = "麦克风启动失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 在实时翻译按钮上方显示几秒钟的提示
+    func showToast(_ text: String) {
+        toast = text
+        toastTask?.cancel()
+        toastTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled else { return }
+            self?.toast = nil
         }
     }
 
