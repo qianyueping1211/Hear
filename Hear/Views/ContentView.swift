@@ -10,13 +10,12 @@ struct ContentView: View {
     @State private var noLLMAlert = false
     @State private var editingID: UUID?          // 正在修改原文的那一条
     @State private var draft = ""
+    @State private var showMenu = false          // 右上角 ⋯ 菜单
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                TopBar(onNew: newTapped,
-                       onHistory: { showHistory = true },
-                       onSettings: { showSettings = true })
+                TopBar(onMore: { showMenu = true })
                 LanguageBar()
                 Divider()
                 Group {
@@ -46,6 +45,25 @@ struct ContentView: View {
                 ControlBar()
             }
             .toolbar(.hidden, for: .navigationBar)
+            // 右上角 ⋯ 菜单：自己画的面板，不跟着页面实时刷新，所以不会闪
+            .overlay(alignment: .topTrailing) {
+                if showMenu {
+                    ZStack(alignment: .topTrailing) {
+                        Color.black.opacity(0.001)
+                            .ignoresSafeArea()
+                            .onTapGesture { showMenu = false }
+                        MoreMenuPanel(
+                            onNew: { showMenu = false; newTapped() },
+                            onHistory: { showMenu = false; showHistory = true },
+                            onSettings: { showMenu = false; showSettings = true }
+                        )
+                        .padding(.top, 54)
+                        .padding(.trailing, 16)
+                        .transition(.scale(scale: 0.6, anchor: .topTrailing).combined(with: .opacity))
+                    }
+                }
+            }
+            .animation(.spring(duration: 0.28), value: showMenu)
             .overlay {
                 if let id = editingID, let item = session.items.first(where: { $0.id == id }) {
                     SourceEditor(text: $draft, flag: item.source.flag) {
@@ -103,9 +121,7 @@ struct ContentView: View {
 
 struct TopBar: View {
     @EnvironmentObject var session: LiveSession
-    var onNew: () -> Void
-    var onHistory: () -> Void
-    var onSettings: () -> Void
+    var onMore: () -> Void
 
     var body: some View {
         HStack {
@@ -121,21 +137,9 @@ struct TopBar: View {
 
             Spacer()
 
-            // 系统原生菜单（和“文件”App 右上角 ⋯ 一样）：大圆角面板，图标在左、文字在右，分组之间有分隔
-            Menu {
-                Section {
-                    Button(action: onNew) { Label("新建对话", systemImage: "square.and.pencil") }
-                    Button(action: onHistory) { Label("历史记录", systemImage: "clock.arrow.circlepath") }
-                }
-                Section {
-                    Button(action: onSettings) { Label("设置", systemImage: "gearshape") }
-                }
-            } label: {
-                MoreDots()
-            }
-            .menuOrder(.fixed)
-            .foregroundStyle(.primary)
-            .accessibilityLabel("更多")
+            Button(action: onMore) { MoreDots() }
+                .foregroundStyle(.primary)
+                .accessibilityLabel("更多")
         }
         .overlay {
             Text("听见").font(.headline)
@@ -143,6 +147,44 @@ struct TopBar: View {
         .padding(.horizontal)
         .padding(.top, 6)
         .padding(.bottom, 2)
+    }
+}
+
+/// 右上角弹出的菜单：样式参照系统菜单（图标在左、文字在右、分组之间有粗分隔），
+/// 宽度比系统菜单窄 20%
+struct MoreMenuPanel: View {
+    var onNew: () -> Void
+    var onHistory: () -> Void
+    var onSettings: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            row("新建对话", "square.and.pencil", onNew)
+            Divider().padding(.leading, 54)
+            row("历史记录", "clock.arrow.circlepath", onHistory)
+            Rectangle().fill(Color.primary.opacity(0.08)).frame(height: 8)
+            row("功能设置", "gearshape", onSettings)
+        }
+        .frame(width: 200)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
+    }
+
+    private func row(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: icon)
+                    .font(.system(size: 18))
+                    .frame(width: 24)
+                Text(title).font(.body)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 48)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -406,7 +448,7 @@ struct SourceEditor: View {
 struct ControlBar: View {
     @EnvironmentObject var session: LiveSession
 
-    private var mainColor: Color { session.isRunning ? Color.red : Color.accentColor }
+    private var mainColor: Color { Color.accentColor }        // 开始后也用蓝色，只换成停止图标
     private var mainIcon: String { session.isRunning ? "stop.fill" : "mic.fill" }
     private var mainHint: String {
         guard session.isRunning else { return "点击开始实时翻译" }
@@ -429,19 +471,8 @@ struct ControlBar: View {
                 Spacer()
 
                 Button { Task { await session.toggle() } } label: {
-                    ZStack {
-                        Circle()
-                            .fill(mainColor.opacity(0.18))
-                            .frame(width: 92 + CGFloat(session.isRunning ? session.level : 0) * 44)
-                        Circle()
-                            .fill(mainColor)
-                            .frame(width: 78)
-                        Image(systemName: mainIcon)
-                            .font(.system(size: 30, weight: .bold))
-                            .foregroundStyle(.white)
-                    }
-                    .frame(width: 140, height: 140)
-                    .animation(.easeOut(duration: 0.12), value: session.level)
+                    MicButton(meter: session.meter, running: session.isRunning,
+                              color: mainColor, icon: mainIcon)
                 }
                 .disabled(!(session.phase == .ready || session.isLoadingPhase))
                 .opacity(session.phase == .ready || session.isLoadingPhase ? 1 : 0.4)
@@ -464,6 +495,30 @@ struct ControlBar: View {
                 .padding(.bottom, 8)
         }
         .padding(.top, 6)
+    }
+}
+
+/// 中间的大按钮：外圈跟着音量变大（只有它跟着音量刷新）
+struct MicButton: View {
+    @ObservedObject var meter: LevelMeter
+    let running: Bool
+    let color: Color
+    let icon: String
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(color.opacity(0.18))
+                .frame(width: 92 + CGFloat(running ? meter.level : 0) * 44)
+            Circle()
+                .fill(color)
+                .frame(width: 78)
+            Image(systemName: icon)
+                .font(.system(size: 30, weight: .bold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: 140, height: 140)
+        .animation(.easeOut(duration: 0.12), value: meter.level)
     }
 }
 

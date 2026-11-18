@@ -5,7 +5,8 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @EnvironmentObject var session: LiveSession
     @Environment(\.dismiss) private var dismiss
-    @State private var importing = false
+    @State private var importKind: LiveSession.ModelKind?
+    @State private var lastImportKind: LiveSession.ModelKind = .translation
     @State private var confirmKind: LiveSession.ModelKind?
     @ObservedObject private var log = AppLog.shared
     @ObservedObject private var llm = LLMSettings.shared
@@ -26,18 +27,10 @@ struct SettingsView: View {
                     Text(engineFooter)
                 }
 
-                // MARK: 已下载的模型（只显示下载完成的）
+                // MARK: 模型（状态 / 下载 / 导入）
                 Section {
-                    if !session.translationStatus.installed && !session.speechStatus.installed {
-                        Text("暂无").foregroundStyle(.secondary)
-                    }
-                    if session.translationStatus.installed {
-                        ModelRow(title: "翻译模型（MT）", icon: "character.book.closed", status: session.translationStatus)
-                    }
-                    if session.speechStatus.installed {
-                        ModelRow(title: "语音识别模型（ASR）", icon: "waveform", status: session.speechStatus)
-                    }
-
+                    modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
+                             status: session.translationStatus)
                     if session.installedGGUFs.count > 1 {
                         Picker("使用的翻译模型", selection: ggufSelection) {
                             ForEach(session.installedGGUFs, id: \.self) { url in
@@ -45,28 +38,19 @@ struct SettingsView: View {
                             }
                         }
                     }
-                } header: {
-                    Text("已下载的模型")
-                }
-
-                Section {
+                    modelRow(.speech, title: "语音识别模型（ASR）", icon: "waveform",
+                             status: session.speechStatus)
                     Picker("下载源", selection: $session.hfHost) {
                         Text("Hugging Face 官方").tag("huggingface.co")
                         Text("hf-mirror（国内镜像）").tag("hf-mirror.com")
                     }
-                    downloadRow(.translation, name: "翻译模型（MT）", installed: session.translationStatus.installed)
-                    downloadRow(.speech, name: "语音识别模型（ASR）", installed: session.speechStatus.installed)
                     if let err = session.bgDownloadError {
                         Text(err).font(.footnote).foregroundStyle(.red)
                     }
-                    Button { importing = true } label: {
-                        Label("从“文件”导入 GGUF 翻译模型（MT）…", systemImage: "folder")
-                    }
-                    .disabled(session.isBusyWithModels)
                 } header: {
-                    Text("下载与导入")
+                    Text("模型")
                 } footer: {
-                    Text("模型文件损坏、翻译异常或想换下载源时，可以重新下载。也可以通过电脑的“访达/iTunes 文件共享”把 .gguf 拷进“听见”。")
+                    Text("导入翻译模型：选 .gguf 文件。导入语音识别模型：选 WhisperKit 模型文件夹（里面有 AudioEncoder.mlmodelc 等）。")
                 }
 
                 // MARK: 翻译与总结
@@ -195,16 +179,21 @@ struct SettingsView: View {
                     personalVoiceNote = Self.personalVoiceDescription(Speaker.personalVoices)
                 }
             }
-            .navigationTitle("设置")
+            .navigationTitle("功能设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) { Button("完成") { dismiss() } }
             }
-            .fileImporter(isPresented: $importing,
-                          allowedContentTypes: [UTType(filenameExtension: "gguf") ?? .data, .data]) { result in
-                if case .success(let url) = result {
-                    Task { await session.importModel(url) }
-                    dismiss()
+            // 导入：翻译模型选 .gguf 文件，语音识别模型选文件夹
+            .fileImporter(isPresented: Binding(get: { importKind != nil },
+                                               set: { if !$0 { importKind = nil } }),
+                          allowedContentTypes: lastImportKind == .speech
+                              ? [UTType.folder]
+                              : [UTType(filenameExtension: "gguf") ?? .data, .data]) { result in
+                guard case .success(let url) = result else { return }
+                let kind = lastImportKind
+                Task {
+                    if kind == .speech { await session.importWhisper(url) } else { await session.importModel(url) }
                 }
             }
         }
@@ -236,7 +225,7 @@ struct SettingsView: View {
     private var dialogMessage: String {
         let size = lastKind == .translation ? "约 2 GB" : "约 1.6 GB"
         let head = isInstalled(lastKind) ? "会先删除已下载的文件，再重新下载（\(size)）。" : "文件\(size)。"
-        return head + "请连接 Wi‑Fi，下载进度显示在「下载与导入」里，下载时请保持 App 在前台。"
+        return head + "请连接 Wi‑Fi，下载进度显示在「模型」里，下载时请保持 App 在前台。"
     }
 
     /// 例如 “1.1”
@@ -244,30 +233,84 @@ struct SettingsView: View {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-"
     }
 
-    /// 下载与导入里的一行：没在下载时是按钮，下载中显示进度，排队时显示“等待下载”
+    /// 一种模型一行：名称 + 状态图标 + 下载/重新下载图标 + 导入图标；
+    /// 下面一行是具体的模型文件名和大小，下载中显示进度
     @ViewBuilder
-    private func downloadRow(_ kind: LiveSession.ModelKind, name: String, installed: Bool) -> some View {
-        if session.bgDownloadKind == kind {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Label("正在下载\(name)", systemImage: "arrow.down.circle")
-                    Spacer()
+    private func modelRow(_ kind: LiveSession.ModelKind, title: String, icon: String,
+                          status: LiveSession.ModelStatus) -> some View {
+        let downloading = session.bgDownloadKind == kind
+        let waiting = !downloading && session.bgDownloading && session.bgDownloadAll && !status.installed
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundStyle(.tint)
+                    .frame(width: 28)
+                Text(title)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 4)
+                // 状态
+                Group {
+                    if downloading {
+                        Image(systemName: "arrow.down.circle.dotted").foregroundStyle(.tint)
+                    } else if waiting {
+                        Image(systemName: "clock").foregroundStyle(.secondary)
+                    } else if status.installed {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    } else {
+                        Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
+                    }
+                }
+                .font(.title3)
+                .frame(width: 34, height: 34)
+                .accessibilityLabel(downloading ? "正在下载" : (waiting ? "等待下载" : (status.installed ? "已下载" : "未下载")))
+                // 下载 / 重新下载
+                Button {
+                    lastKind = kind
+                    confirmKind = kind
+                } label: {
+                    Image(systemName: status.installed ? "arrow.clockwise" : "arrow.down.circle")
+                        .font(.title3)
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.borderless)
+                .disabled(session.isBusyWithModels)
+                .accessibilityLabel(status.installed ? "重新下载" : "下载")
+                // 导入
+                Button {
+                    lastImportKind = kind
+                    importKind = kind
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.title3)
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.borderless)
+                .disabled(session.isBusyWithModels)
+                .accessibilityLabel("导入")
+            }
+            if downloading {
+                HStack(spacing: 8) {
+                    ProgressView(value: session.bgDownloadProgress)
                     Text(String(format: "%.0f%%", session.bgDownloadProgress * 100))
+                        .font(.caption)
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
-                ProgressView(value: session.bgDownloadProgress)
+                .padding(.leading, 38)
+            } else if status.installed {
+                Text("\(status.name) · \(status.detail)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.leading, 38)
+            } else if waiting {
+                Text("等待下载").font(.caption).foregroundStyle(.secondary).padding(.leading, 38)
             }
-            .padding(.vertical, 2)
-        } else if session.bgDownloading && session.bgDownloadAll && !installed {
-            Label("等待下载\(name)", systemImage: "clock")
-                .foregroundStyle(.secondary)
-        } else {
-            Button { lastKind = kind; confirmKind = kind } label: {
-                Label(installed ? "重新下载\(name)" : "下载\(name)", systemImage: "arrow.clockwise")
-            }
-            .disabled(session.isBusyWithModels)
         }
+        .padding(.vertical, 2)
     }
 
     private var engineBinding: Binding<String> {
@@ -288,10 +331,10 @@ struct SettingsView: View {
     private var engineFooter: String {
         if !session.appleAvailable { return "苹果自带需要 iOS 26。" }
         if session.bgDownloading {
-            return "正在下载听见本地模型，进度见下方「下载与导入」。"
+            return "正在下载听见本地模型，进度见下方「模型」。"
         }
         if session.usingApple {
-            return "苹果自带：用 iOS 的系统听写和翻译，不用下载模型。第一次用某种语言时，系统会提示下载语言包。" +
+            return "苹果自带：用 iOS 的系统听写和翻译，不用下载模型。" +
                 (session.modelsInstalled ? "" : "\n选择“听见本地模型”会先下载模型，下载完成后自动切换。")
         }
         return "听见本地模型：Whisper + Hy-MT2，在手机本地运行，支持结合上文和术语表。"
@@ -320,7 +363,7 @@ struct SettingsView: View {
                 guard gpu != session.asrUseGPU else { return }
                 session.asrUseGPU = gpu
                 Task { await session.reloadASR() }
-                dismiss()
+                if !session.usingApple { dismiss() }      // 本地模型要重新加载，回到首页看进度
             }
         )
     }
@@ -376,41 +419,5 @@ struct SettingsView: View {
                 }
             }
         )
-    }
-}
-
-/// 一行模型状态：名称、文件名、大小、是否已下载
-struct ModelRow: View {
-    let title: String
-    let icon: String
-    let status: LiveSession.ModelStatus
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.title3)
-                .foregroundStyle(.tint)
-                .frame(width: 28)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                Text(status.name)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer()
-            if status.installed {
-                Label(status.detail, systemImage: "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-                    .labelStyle(.titleAndIcon)
-            } else {
-                Label("未下载", systemImage: "exclamationmark.circle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-        }
-        .padding(.vertical, 2)
     }
 }
