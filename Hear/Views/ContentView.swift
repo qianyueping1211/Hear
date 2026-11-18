@@ -250,11 +250,13 @@ struct LanguageBar: View {
 }
 
 struct LanguageMenu: View {
+    @EnvironmentObject var session: LiveSession
     @Binding var selection: Language
 
     var body: some View {
         Menu {
-            ForEach(Language.all) { lang in
+            // 只列出当前识别引擎支持的语言，避免选了识别不了的语言
+            ForEach(session.supportedLanguages) { lang in
                 Button { selection = lang } label: {
                     if lang == selection {
                         Label("\(lang.flag) \(lang.displayName)", systemImage: "checkmark")
@@ -262,6 +264,10 @@ struct LanguageMenu: View {
                         Text("\(lang.flag) \(lang.displayName)")
                     }
                 }
+            }
+            if session.supportedLanguages.count < Language.all.count {
+                Divider()
+                Text("更多语言：在功能设置里换识别引擎")
             }
         } label: {
             HStack(spacing: 6) {
@@ -358,7 +364,11 @@ struct BubbleView: View {
         HStack {
             if !leading { Spacer(minLength: 40) }
             VStack(alignment: leading ? .leading : .trailing, spacing: 6) {
-                flagged(item.source.flag, item.sourceText)
+                // 被 Whisper 校正过的句子，原文后面带一个魔法棒小图标
+                (flagged(item.source.flag, item.sourceText)
+                 + (item.corrected == true
+                    ? Text(" ") + Text(Image(systemName: "wand.and.stars")).foregroundStyle(Color.accentColor)
+                    : Text("")))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 if item.translated.isEmpty {

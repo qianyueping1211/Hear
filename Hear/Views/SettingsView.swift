@@ -39,8 +39,10 @@ struct SettingsView: View {
 
                 // MARK: 模型管理（语音识别 → 翻译 → 下载源）
                 Section {
-                    modelRow(.speech, title: "语音识别模型（ASR）", icon: "waveform",
+                    modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
                              status: session.speechStatus)
+                    modelRow(.senseVoice, title: "语音识别（SenseVoice）", icon: "hare",
+                             status: session.senseStatus)
                     modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
                              status: session.translationStatus)
                     if session.installedGGUFs.count > 1 {
@@ -91,16 +93,19 @@ struct SettingsView: View {
                         Text("神经引擎（省电）").tag(false)
                     }
                     if !session.usingApple {
-                        Picker("识别引擎", selection: $session.asrEngine) {
-                            Text("Whisper").tag("whisper")
-                            Text("iOS 系统听写").tag("apple")
+                        Picker("识别引擎", selection: asrEngineBinding) {
+                            Text("本地最准：Whisper").tag("whisper")
+                            Text("本地最快：SenseVoice").tag("sensevoice")
+                            Text("SenseVoice + Whisper 校正").tag("hybrid")
+                            if LiveTextEngineFactory.isSupported {
+                                Text("iOS 系统听写").tag("apple")
+                            }
                         }
-                        .disabled(!LiveTextEngineFactory.isSupported)
                     }
                 } header: {
                     Text("语音识别")
                 } footer: {
-                    if let inputNote { Text(inputNote) }
+                    if let inputNote { Text(inputNote) } else if !session.usingApple { Text(engineNote) }
                 }
 
                 // MARK: 翻译与总结
@@ -203,13 +208,17 @@ struct SettingsView: View {
             // 导入：翻译模型选 .gguf 文件，语音识别模型选文件夹
             .fileImporter(isPresented: Binding(get: { importKind != nil },
                                                set: { if !$0 { importKind = nil } }),
-                          allowedContentTypes: lastImportKind == .speech
+                          allowedContentTypes: lastImportKind != .translation
                               ? [UTType.folder]
                               : [UTType(filenameExtension: "gguf") ?? .data, .data]) { result in
                 guard case .success(let url) = result else { return }
                 let kind = lastImportKind
                 Task {
-                    if kind == .speech { await session.importWhisper(url) } else { await session.importModel(url) }
+                    switch kind {
+                    case .speech: await session.importWhisper(url)
+                    case .senseVoice: await session.importSenseVoice(url)
+                    case .translation: await session.importModel(url)
+                    }
                 }
             }
         }
@@ -221,27 +230,96 @@ struct SettingsView: View {
                       destructive: isInstalled(lastKind)) {
             if let k = confirmKind { Task { await session.redownload(k) } }
         }
+        // 选了还缺模型的识别引擎：先问要不要下载
+        .centerDialog(isPresented: Binding(get: { pendingEngine != nil },
+                                           set: { if !$0 { pendingEngine = nil } }),
+                      title: "需要先下载模型",
+                      message: engineDownloadMessage) {
+            if let e = pendingEngine { session.downloadForEngine(e) }
+        }
         .centerDialog(isPresented: $askDownload,
                       title: "下载听见本地模型？",
-                      message: "翻译模型约 2 GB、语音识别模型约 1.6 GB，请连接 Wi‑Fi。下载期间继续用苹果自带，下载完成后自动切换。下载时请保持 App 在前台。") {
+                      message: localDownloadMessage) {
             session.startBackgroundDownload()
         }
     }
 
     @State private var personalVoiceNote: String?
     @State private var askDownload = false
+    /// 选了还缺模型的识别引擎（等确认下载）
+    @State private var pendingEngine: String?
+    @State private var lastPendingEngine = "sensevoice"
+
+    private var asrEngineBinding: Binding<String> {
+        Binding(
+            get: { session.asrEngine },
+            set: { e in
+                guard e != session.asrEngine else { return }
+                if session.missingSpeechKinds(for: e).isEmpty {
+                    session.asrEngine = e
+                } else if !session.bgDownloading {
+                    lastPendingEngine = e
+                    pendingEngine = e
+                }
+            }
+        )
+    }
+
+    private var engineDownloadMessage: String {
+        let kinds = session.missingSpeechKinds(for: lastPendingEngine)
+        let names = kinds.map { $0 == .senseVoice ? "SenseVoice（约 240 MB）" : "Whisper（约 1.6 GB）" }
+        return "这个识别引擎需要 \(names.joined(separator: "、")) 语音识别模型。下载期间继续用现在的引擎，下载完成后自动切换。请连接 Wi‑Fi，并保持 App 在前台。"
+    }
+
+    /// 切换到听见本地模型时要下载哪些（按当前识别引擎）
+    private var localDownloadMessage: String {
+        let kinds = [LiveSession.ModelKind.translation] + session.missingSpeechKinds(for: session.asrEngine)
+        let list = kinds.filter { !session.isInstalled($0) }
+            .map { Self.kindTitle($0) + Self.kindSize($0) }
+            .joined(separator: "、")
+        return "需要下载\(list)，请连接 Wi‑Fi。下载期间继续用苹果自带，下载完成后自动切换。下载时请保持 App 在前台。"
+    }
+
+    /// 识别引擎的说明（语音识别下方）
+    private var engineNote: String {
+        switch session.asrEngine {
+        case "sensevoice":
+            return "本地最快：说完马上出字，不会卡住。只支持中文、英语、日语、韩语。"
+        case "hybrid":
+            return "先用 SenseVoice 马上出结果，空闲时再用 Whisper 识别一遍；有明显差别就替换并重新翻译，句子后面会显示魔法棒图标。只支持中文、英语、日语、韩语。"
+        case "apple":
+            return "说话时用 iOS 系统听写逐字显示，说完一句由 Whisper 定稿。"
+        default:
+            return "本地最准：标点和长句更好，说完一句后识别，稍慢。"
+        }
+    }
     /// 最近一次要下载的模型（确认框收起的动画里文字不会突然变空）
     @State private var lastKind: LiveSession.ModelKind = .translation
 
     private var dialogTitle: String {
-        let name = lastKind == .translation ? "翻译模型（MT）" : "语音识别模型（ASR）"
-        return (isInstalled(lastKind) ? "重新下载" : "下载") + name + "？"
+        return (isInstalled(lastKind) ? "重新下载" : "下载") + Self.kindTitle(lastKind) + "？"
     }
 
     private var dialogMessage: String {
-        let size = lastKind == .translation ? "约 2 GB" : "约 1.6 GB"
+        let size = Self.kindSize(lastKind)
         let head = isInstalled(lastKind) ? "会先删除已下载的文件，再重新下载（\(size)）。" : "文件\(size)。"
         return head + "请连接 Wi‑Fi，下载进度显示在「模型管理」里，下载时请保持 App 在前台。"
+    }
+
+    static func kindTitle(_ kind: LiveSession.ModelKind) -> String {
+        switch kind {
+        case .translation: return "翻译模型（MT）"
+        case .speech: return "语音识别模型（Whisper）"
+        case .senseVoice: return "语音识别模型（SenseVoice）"
+        }
+    }
+
+    static func kindSize(_ kind: LiveSession.ModelKind) -> String {
+        switch kind {
+        case .translation: return "约 2 GB"
+        case .speech: return "约 1.6 GB"
+        case .senseVoice: return "约 240 MB"
+        }
     }
 
     /// 例如 “1.1”
@@ -255,7 +333,7 @@ struct SettingsView: View {
     private func modelRow(_ kind: LiveSession.ModelKind, title: String, icon: String,
                           status: LiveSession.ModelStatus) -> some View {
         let downloading = session.bgDownloadKind == kind
-        let waiting = !downloading && session.bgDownloading && session.bgDownloadAll && !status.installed
+        let waiting = !downloading && session.bgDownloading && session.bgQueue.contains(kind)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: icon)
@@ -420,7 +498,7 @@ struct SettingsView: View {
     }
 
     private func isInstalled(_ kind: LiveSession.ModelKind) -> Bool {
-        kind == .translation ? session.translationStatus.installed : session.speechStatus.installed
+        session.isInstalled(kind)
     }
 
     private var ggufSelection: Binding<String> {
