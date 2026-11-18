@@ -1055,8 +1055,70 @@ final class LiveSession: ObservableObject {
         guard usingApple, isRunning, currentSeg > finishedSeg, partialSeg == currentSeg,
               let b = bestApple(currentSeg), SpeechRecognizer.isMeaningful(b.text) else { return }
         partialSource = b.lang
-        partial = b.text
-        requestPreviewTranslation(id: currentSeg, text: b.text, src: b.lang, tgt: b.lang == langA ? langB : langA)
+        // 中间停顿过的一句话：系统听写会把上一句的内容再带一遍，这里只显示新说的部分
+        var text = b.text
+        if let c = continuation(of: b.text, lang: b.lang) {
+            guard SpeechRecognizer.isMeaningful(c.rest) else { partial = "…"; return }
+            text = c.rest
+        }
+        partial = text
+        requestPreviewTranslation(id: currentSeg, text: text, src: b.lang, tgt: b.lang == langA ? langB : langA)
+    }
+
+    /// 上一条苹果听写定稿的句子（用来识别“同一句话被拆成两段”）
+    private var lastCommit: (id: UUID, text: String, lang: Language, at: Date)?
+
+    /// text 是不是上一句的延续（开头和上一句基本一样）。是的话返回上一句的 id 和新多出来的部分
+    private func continuation(of text: String, lang: Language) -> (prevID: UUID, rest: String)? {
+        guard let c = lastCommit, c.lang == lang, Date().timeIntervalSince(c.at) < 12,
+              items.contains(where: { $0.id == c.id }) else { return nil }
+        func norm(_ s: String) -> [Character] {
+            Array(s.lowercased().filter { $0.isLetter || $0.isNumber })
+        }
+        let a = norm(c.text), b = norm(text)
+        guard a.count >= 2 else { return nil }
+        var same = 0
+        while same < a.count, same < b.count, a[same] == b[same] { same += 1 }
+        // 系统听写后面会更正前面的字，所以不要求完全一样：前 80% 对得上就算同一句
+        guard same >= max(2, Int((Double(a.count) * 0.8).rounded(.up))) else { return nil }
+        // 跳过已经对上的字，剩下的就是新说的
+        var skipped = 0
+        var idx = text.startIndex
+        while idx < text.endIndex, skipped < same {
+            let ch = text[idx]
+            if ch.isLetter || ch.isNumber { skipped += 1 }
+            idx = text.index(after: idx)
+        }
+        let rest = String(text[idx...]).trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        return (c.id, rest)
+    }
+
+    /// 把这句并进上一句：上一条换成完整的原文并重新翻译，这条占位删掉
+    private func mergeIntoPrevious(_ prevID: UUID, fullText: String, src: Language,
+                                   placeholder: UUID, gen: Int) async {
+        guard let i = items.firstIndex(where: { $0.id == prevID }) else { removeItem(placeholder); return }
+        let tgt = items[i].target
+        hearLog("系统听写：和上一句是同一句话，合并为「\(fullText.prefix(40))」")
+        // 正在读或已经读过：译文变了，换成新译文从这句重新读
+        if readingID == prevID { stopReading() }
+        if readIndex > i { readIndex = i }
+        items[i].sourceText = fullText
+        items[i].done = false          // 译文先保留旧的；停止时不会被删掉
+        removeItem(placeholder)
+        lastCommit = (prevID, fullText, src, Date())
+        activity = "翻译中…"
+        do {
+            let out = try await systemTranslator.translate(fullText, from: src, to: tgt)
+            guard gen == runGen else { return }
+            update(prevID, out, done: true)
+        } catch {
+            hearLog("苹果翻译失败：\(error)", .error)
+            if let j = items.firstIndex(where: { $0.id == prevID }) { items[j].done = true }
+            prepareAppleTranslation()
+        }
+        persist()
+        activity = isRunning ? "正在聆听" : ""
+        kickReader()
     }
 
     private func processApple(_ samples: [Float], itemID: UUID, segID: Int, gen: Int) async {
@@ -1073,6 +1135,11 @@ final class LiveSession: ObservableObject {
         let tgt = src == langA ? langB : langA
         lastLangID = src.id
         hearLog("系统听写（\(src.name)）：\(b.text.prefix(40))")
+        if let c = continuation(of: b.text, lang: src) {
+            await mergeIntoPrevious(c.prevID, fullText: b.text, src: src, placeholder: itemID, gen: gen)
+            return
+        }
+        lastCommit = (itemID, b.text, src, Date())
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
         let old = items[idx]
         let preview = old.source == src ? old.translated : ""
