@@ -611,32 +611,36 @@ struct ContextToggle: View {
     }
 }
 
-/// 对话翻译模式的按钮：中间是这种语言的国旗，按住说话，松开暂停
+/// 对话翻译模式的按钮：和实时翻译的大按钮同样的样式，中间是这种语言的国旗。
+/// 按住时外面一圈圈水波纹不停往外扩，松开就停
 struct HoldButton: View {
     @EnvironmentObject var session: LiveSession
     let lang: Language
     @GestureState private var pressing = false
 
     var body: some View {
-        let active = session.holding == lang
+        // 手指一按下就显示按住效果，不等麦克风真正打开
+        let active = pressing || session.holding == lang
         let enabled = session.phase == .ready || session.isLoadingPhase
         VStack(spacing: 6) {
             ZStack {
+                if active { RippleRings() }
                 HoldRing(meter: session.meter, active: active)
                 Circle()
-                    .fill(active ? Color.accentColor : Color.accentColor.opacity(0.15))
-                    .frame(width: 88)
-                Text(lang.flag).font(.system(size: 42))
+                    .fill(Color.accentColor)
+                    .frame(width: 78, height: 78)
+                    .shadow(color: Color.accentColor.opacity(active ? 0.5 : 0), radius: 10)
+                Text(lang.flag).font(.system(size: 38))
             }
             .frame(width: 116, height: 110)
+            .scaleEffect(active ? 1.08 : 1)
             Text(active ? "松开暂停" : "按住说\(lang.name)")
-                .font(.caption)
+                .font(.caption.weight(active ? .semibold : .regular))
                 .foregroundStyle(active ? Color.accentColor : Color.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
                 .frame(width: 116)
         }
-        .scaleEffect(active ? 1.06 : 1)
         .animation(.spring(duration: 0.2), value: active)
         .opacity(enabled ? 1 : 0.4)
         .contentShape(Rectangle())
@@ -658,16 +662,34 @@ struct HoldButton: View {
     }
 }
 
-/// 按住时外圈跟着音量变大
+/// 未按住时和实时翻译按钮一样的浅色外圈；按住时跟着音量变大
 struct HoldRing: View {
     @ObservedObject var meter: LevelMeter
     let active: Bool
 
     var body: some View {
         Circle()
-            .fill(Color.accentColor.opacity(active ? 0.22 : 0))
-            .frame(width: 92 + CGFloat(active ? meter.level : 0) * 22)
+            .fill(Color.accentColor.opacity(active ? 0.25 : 0.18))
+            .frame(width: 92 + CGFloat(active ? meter.level : 0) * 20)
             .animation(.easeOut(duration: 0.12), value: meter.level)
+    }
+}
+
+/// 按住时的水波纹：三圈从按钮边缘不断往外扩、慢慢变淡
+struct RippleRings: View {
+    var body: some View {
+        TimelineView(.animation) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            ZStack {
+                ForEach(0..<3, id: \.self) { i in
+                    let p = (t / 1.5 + Double(i) / 3).truncatingRemainder(dividingBy: 1)
+                    Circle()
+                        .stroke(Color.accentColor.opacity(0.6 * (1 - p)), lineWidth: 3)
+                        .frame(width: 90 * (1 + 0.35 * p), height: 90 * (1 + 0.35 * p))
+                }
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 
