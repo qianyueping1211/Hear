@@ -31,6 +31,22 @@ enum LiveTextEngineFactory {
         return false
     }
 
+    /// 系统听写支持这些语言里的哪些（iOS 26 以下返回 nil）
+    static func supportedLanguageIDs(_ langs: [Language]) async -> Set<String>? {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            var ids = Set<String>()
+            for l in langs {
+                if await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: l.tts)) != nil {
+                    ids.insert(l.id)
+                }
+            }
+            return ids
+        }
+        #endif
+        return nil
+    }
+
     static func make() -> LiveTextEngine? {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) { return AppleLiveTranscriber() }

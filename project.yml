@@ -9,6 +9,9 @@ packages:
   WhisperKit:
     url: https://github.com/argmaxinc/WhisperKit
     from: 0.12.0
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio
+    exactVersion: 0.18.3
 
 targets:
   Hear:
@@ -19,6 +22,8 @@ targets:
     dependencies:
       - package: WhisperKit
         product: WhisperKit
+      - package: FluidAudio
+        product: FluidAudio
       - framework: Frameworks/llama.xcframework
         embed: true
     info:

@@ -43,4 +43,5 @@ struct TranslationItem: Identifiable, Equatable, Codable {
     var translated: String = ""
     var done = false
     var speakerF0: Float? = nil   // 说话人音高（Hz），用于“接近说话人音色”
+    var corrected: Bool? = nil    // SenseVoice 的结果被 Whisper 校正过
 }

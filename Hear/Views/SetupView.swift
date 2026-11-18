@@ -56,7 +56,7 @@ struct SetupView: View {
                 Text(msg).multilineTextAlignment(.center).padding(.horizontal)
                 Button("重试") {
                     Task {
-                        if ModelManager.currentGGUF() != nil && ModelManager.whisperFolder() != nil {
+                        if session.modelsInstalled {
                             await session.loadModels()
                         } else {
                             await session.downloadModels()
