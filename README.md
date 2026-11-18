@@ -17,11 +17,11 @@ iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话
 
 ### 方法 A：直接下载安装包 + Sideloadly 安装（不用学 Xcode，Windows 也行）
 
-1. 打开本仓库右侧的 **Releases（发行版）**，进入最新版本，下载 `Hear.ipa`。不用登录。
+1. 打开本仓库右侧的 **Releases（发行版）**，进入最新版本，下载 `Hear-版本号.ipa`（例如 `Hear-3.4.ipa`）。不用登录。
    （每次更新代码后，GitHub 会自动打包并发布一个新版本，大约 3～15 分钟。）
 2. 如果想手动重新打包：**Actions** → **Build IPA (unsigned)** → **Run workflow**。
 3. 在电脑上安装 [Sideloadly](https://sideloadly.io)（Mac / Windows 都有）。Windows 还需要装 iTunes 和 iCloud 的官网版本。
-4. 用数据线连接 iPhone，把 `Hear.ipa` 拖进 Sideloadly，填你的 Apple ID，点 **Start**。
+4. 用数据线连接 iPhone，把下载的 ipa 拖进 Sideloadly，填你的 Apple ID，点 **Start**。
 5. 在 iPhone 上：
    - **设置 → 隐私与安全性 → 开发者模式** → 打开（会重启）。
    - **设置 → 通用 → VPN 与设备管理** → 点你的 Apple ID → **信任**。
@@ -88,3 +88,4 @@ scripts/fetch_llama.sh           下载 llama.cpp 的 iOS 框架
 - **打包失败（Actions 变红）**：点进失败的任务，下载 `build-log`，把里面带 `error:` 的几行发给 Claude 修。
 - **llama.cpp 新版本改了接口导致编译错误**：可以固定版本。在 workflow 的 `env` 里加 `LLAMA_TAG: b7xxx`（填一个能用的版本号）。
 - **免费账号限制**：同时最多 3 个自签 App；每 7 天需要重签。
+- **安装包文件名**：从 3.4 起，Releases 里的安装包文件名带版本号，例如 `Hear-3.4.ipa`。
