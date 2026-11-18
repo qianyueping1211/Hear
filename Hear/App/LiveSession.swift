@@ -54,6 +54,14 @@ final class LiveSession: ObservableObject {
     @Published var mySide: String { didSet { save("mySide", mySide) } }
     // 语音识别用 GPU（加载快）还是神经引擎（省电，首次编译慢）
     @Published var asrUseGPU: Bool { didSet { save("asrUseGPU", asrUseGPU) } }
+    // 识别引擎："whisper"（默认）/ "apple"（iOS 系统听写：说话时逐字显示，说完再由 Whisper 校正）
+    @Published var asrEngine: String {
+        didSet {
+            save("asrEngine", asrEngine)
+            guard asrEngine != oldValue, isRunning else { return }
+            if asrEngine == "apple" { startLiveEngine() } else { stopLiveEngine() }
+        }
+    }
     // 声音来源："phone" 手机麦克风（默认）/ "headset" 耳机麦克风（只在连着耳机时可选）
     @Published var inputSource: String {
         didSet {
@@ -73,11 +81,19 @@ final class LiveSession: ObservableObject {
     private let translator = LlamaTranslator()
     private let speaker = Speaker()
 
-    private var queue: [[Float]] = []
+    private var queue: [(itemID: UUID, samples: [Float])] = []
     private var runGen = 0                // 每次停止 +1：停止前排队/进行中的识别和翻译全部作废
     private var working = false
-    private var partialBusy = false
     private var currentSeg = 0
+    private var partialSeg = 0            // 实时气泡（partial）属于第几句
+    // 实时预览分两条线：识别只管出原文，翻译只拿最新的原文去翻，互不等待
+    private var previewSamples: (id: Int, samples: [Float])?
+    private var asrPreviewBusy = false
+    private var mtPending: (id: Int, text: String, src: Language, tgt: Language)?
+    private var mtPreviewBusy = false
+    // iOS 系统听写（逐字显示原文）
+    private var live: LiveTextEngine?
+    private var liveActive = false
     private var finishedSeg = 0
     private var lastLangID: String?
     private var swapping = false
@@ -111,6 +127,7 @@ final class LiveSession: ObservableObject {
         usePersonalVoice = d.object(forKey: "usePersonalVoice") as? Bool ?? false
         mySide = d.string(forKey: "mySide") ?? "A"
         asrUseGPU = d.object(forKey: "asrUseGPU") as? Bool ?? true
+        asrEngine = d.string(forKey: "asrEngine") ?? "whisper"
         voiceProcessing = d.object(forKey: "voiceProcessing") as? Bool ?? true
         inputSource = d.string(forKey: "inputSource") ?? "phone"
         capture.voiceProcessing = voiceProcessing
@@ -448,6 +465,7 @@ final class LiveSession: ObservableObject {
             try capture.start()
             if outputMode == .headphones { AudioRoute.apply(.headphones) }
             isRunning = true
+            if asrEngine == "apple" { startLiveEngine() }
             hearLog("开始实时翻译：\(langA.displayName) ⇄ \(langB.displayName)，朗读\(outputMode == .speaker ? "扬声器" : "耳机")")
             activity = "正在聆听"
             UIApplication.shared.isIdleTimerDisabled = true
@@ -470,6 +488,10 @@ final class LiveSession: ObservableObject {
         runGen += 1
         queue.removeAll()
         translator.cancelCurrent()
+        translator.cancelPreview()
+        previewSamples = nil
+        mtPending = nil
+        stopLiveEngine()
         finishedSeg = max(finishedSeg, currentSeg)
         partial = ""; partialTranslation = ""; partialSource = nil
         dropUnfinished()
@@ -480,7 +502,12 @@ final class LiveSession: ObservableObject {
     private func dropUnfinished() {
         var changed = false
         for i in items.indices.reversed() where !items[i].done {
-            if items[i].translated.isEmpty { items.remove(at: i) } else { items[i].done = true }
+            if items[i].translated.isEmpty || items[i].sourceText == "…" {
+                items.remove(at: i)
+                if i < readIndex { readIndex -= 1 }
+            } else {
+                items[i].done = true
+            }
             changed = true
         }
         if readIndex > items.count { readIndex = items.count }
@@ -643,63 +670,171 @@ final class LiveSession: ObservableObject {
             level = l
         case .started(let id):
             currentSeg = id
-            if partial.isEmpty { partial = "…" }
+            partialSeg = id
+            partial = "…"; partialTranslation = ""; partialSource = nil
+            live?.markSegmentStart()
             hearLog("断句：检测到说话（第 \(id) 句）")
         case .partial(let id, let samples):
-            // 说话过程中：识别到目前为止的内容并马上翻译，后面的内容会更正前面的
-            guard !working, !partialBusy else { return }
-            partialBusy = true
-            Task { await livePreview(id: id, samples: samples) }
+            // 系统听写在工作时由它出原文；否则用 Whisper 不停地识别最新的声音
+            guard !liveActive else { return }
+            previewSamples = (id, samples)
+            if !asrPreviewBusy {
+                asrPreviewBusy = true
+                Task { await previewLoop() }
+            }
         case .ended(let id, let samples):
             finishedSeg = id
             hearLog("断句：一句话结束，时长 \(String(format: "%.1f", Double(samples.count) / 16000)) 秒")
-            queue.append(samples)
+            // 立刻打断这句的实时预览，让整句识别和翻译马上开始
+            translator.cancelPreview()
+            previewSamples = nil
+            mtPending = nil
+            // 先把这句（实时预览的文字）放进对话，整句识别完再替换，屏幕上不会空一下
+            let mine = partialSeg == id
+            let src = (mine ? partialSource : nil) ?? ((lastLangID == langB.id) ? langB : langA)
+            let tgt = src == langA ? langB : langA
+            var item = TranslationItem(source: src, target: tgt,
+                                       sourceText: mine && !partial.isEmpty ? partial : "…")
+            item.translated = mine ? partialTranslation : ""
+            items.append(item)
+            if mine { partial = ""; partialTranslation = ""; partialSource = nil }
+            queue.append((item.id, samples))
             if !working { Task { await drain() } }
         case .discarded(let id):
             finishedSeg = max(finishedSeg, id)
-            if !working && queue.isEmpty { partial = ""; partialTranslation = ""; partialSource = nil }
+            if partialSeg == id { partial = ""; partialTranslation = ""; partialSource = nil }
         case .noise(let n, let t):
             if isRunning { hearLog(String(format: "环境噪声 %.0f dB，说话触发阈值 %.0f dB", n, t)) }
         }
     }
 
-    /// 实时预览：识别 + 翻译当前这句话说到目前为止的内容
-    private func livePreview(id: Int, samples: [Float]) async {
-        defer { partialBusy = false }
-        guard phase == .ready else { return }          // 模型还在准备：先不做实时预览
-        let gen = runGen
-        let a = langA, b = langB
-        let fallback = (lastLangID == b.id) ? b.id : a.id
-        let t0 = Date()
-        let r: (String, String)
-        do {
-            r = try await asr.recognize(samples, candidates: [a.id, b.id], fallback: fallback, preview: true)
-        } catch {
-            hearLog("实时识别失败：\(error)", .error)
+    // MARK: - 实时预览（说话过程中）
+
+    /// 识别线：上一次识别一结束就拿最新的声音再识别，不等翻译
+    private func previewLoop() async {
+        defer { asrPreviewBusy = false }
+        while let job = previewSamples {
+            previewSamples = nil
+            let id = job.id
+            guard phase == .ready, isRunning, !liveActive, id == currentSeg, id > finishedSeg else { continue }
+            let gen = runGen
+            let a = langA, b = langB
+            let fallback = (lastLangID == b.id) ? b.id : a.id
+            // 只识别最近 10 秒，长句也跟得上
+            let maxN = 16_000 * 10
+            let clipped = job.samples.count > maxN
+            let clip = clipped ? Array(job.samples.suffix(maxN)) : job.samples
+            let t0 = Date()
+            let r: (String, String)
+            do {
+                r = try await asr.recognize(clip, candidates: [a.id, b.id], fallback: fallback, preview: true)
+            } catch {
+                hearLog("实时识别失败：\(error)", .error)
+                continue
+            }
+            hearLog("实时识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(r.1.prefix(30))")
+            guard gen == runGen, isRunning, id == currentSeg, id > finishedSeg, partialSeg == id,
+                  SpeechRecognizer.isMeaningful(r.1) else { continue }
+            let src = (r.0 == b.id) ? b : a
+            partialSource = src
+            partial = (clipped ? "…" : "") + r.1
+            requestPreviewTranslation(id: id, text: r.1, src: src, tgt: src == a ? b : a)
+        }
+    }
+
+    /// 系统听写给出的最新文字
+    private func liveText(_ text: String) {
+        guard liveActive, isRunning, currentSeg > finishedSeg, partialSeg == currentSeg,
+              SpeechRecognizer.isMeaningful(text) else { return }
+        let src = (live?.languageID == langB.id) ? langB : langA
+        partialSource = src
+        partial = text
+        requestPreviewTranslation(id: currentSeg, text: text, src: src, tgt: src == langA ? langB : langA)
+    }
+
+    /// 翻译线：只翻最新的原文，翻完一次再拿最新的，不断修正译文
+    private func requestPreviewTranslation(id: Int, text: String, src: Language, tgt: Language) {
+        mtPending = (id, text, src, tgt)
+        guard !mtPreviewBusy else { return }
+        mtPreviewBusy = true
+        Task { await previewTranslateLoop() }
+    }
+
+    private func previewTranslateLoop() async {
+        defer { mtPreviewBusy = false }
+        while let p = mtPending {
+            mtPending = nil
+            let id = p.id
+            guard isRunning, id == currentSeg, id > finishedSeg else { continue }
+            let gen = runGen
+            let epoch = translator.currentPreviewEpoch
+            let prompt = PromptBuilder.build(text: p.text, from: p.src, to: p.tgt, context: [],
+                                             glossary: PromptBuilder.parseGlossary(glossary))
+            let out = try? await translator.translate(prompt: prompt, maxNewTokens: 256, previewEpoch: epoch) { t in
+                Task { @MainActor in
+                    if gen == self.runGen, id == self.partialSeg, id > self.finishedSeg { self.partialTranslation = t }
+                }
+            }
+            if let out, !out.isEmpty, gen == runGen, id == partialSeg, id > finishedSeg { partialTranslation = out }
+        }
+    }
+
+    // MARK: - iOS 系统听写
+
+    private func startLiveEngine() {
+        liveActive = false
+        guard LiveTextEngineFactory.isSupported else {
+            activity = "系统听写需要 iOS 26，已改用 Whisper"
             return
         }
-        hearLog("实时识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(r.1.prefix(30))")
-        guard gen == runGen, isRunning, id == currentSeg, id > finishedSeg, SpeechRecognizer.isMeaningful(r.1) else { return }
-        let src = (r.0 == b.id) ? b : a
-        let tgt = (src == a) ? b : a
-        partialSource = src
-        partial = r.1
-
-        let prompt = PromptBuilder.build(text: r.1, from: src, to: tgt, context: [],
-                                         glossary: PromptBuilder.parseGlossary(glossary))
-        let out = try? await translator.translate(prompt: prompt, maxNewTokens: 256) { p in
-            Task { @MainActor in
-                if gen == self.runGen, id == self.currentSeg, id > self.finishedSeg { self.partialTranslation = p }
+        if live == nil {
+            live = LiveTextEngineFactory.make()
+            live?.onUpdate = { [weak self] text in
+                Task { @MainActor in self?.liveText(text) }
             }
         }
-        if let out, !out.isEmpty, gen == runGen, id == currentSeg, id > finishedSeg { partialTranslation = out }
+        guard let live else { return }
+        capture.onSamples = { [weak live] s in live?.feed(s) }
+        let lang = (lastLangID == langB.id) ? langB : langA
+        runLiveEngine(live, lang)
     }
+
+    private func stopLiveEngine() {
+        liveActive = false
+        capture.onSamples = nil
+        if let live { Task { await live.stop() } }
+    }
+
+    /// 系统听写一次只能听一种语言：整句识别发现换了语言，就改听这种语言
+    private func switchLiveLanguage(to lang: Language) {
+        guard asrEngine == "apple", isRunning, let live, live.languageID != lang.id else { return }
+        hearLog("系统听写改听 \(lang.name)")
+        liveActive = false
+        runLiveEngine(live, lang)
+    }
+
+    private func runLiveEngine(_ live: LiveTextEngine, _ lang: Language) {
+        let gen = runGen
+        Task {
+            do {
+                try await live.start(languageID: lang.id, locale: lang.tts)
+                guard isRunning, gen == runGen, asrEngine == "apple" else { await live.stop(); return }
+                liveActive = true
+                live.markSegmentStart()
+            } catch {
+                hearLog("系统听写不可用（\(lang.name)）：\(error.localizedDescription)，改用 Whisper 实时预览", .warning)
+                if gen == runGen { liveActive = false }
+            }
+        }
+    }
+
+    // MARK: - 整句识别和翻译
 
     private func drain() async {
         working = true
         while !queue.isEmpty {
-            let s = queue.removeFirst()
-            await process(s, gen: runGen)
+            let job = queue.removeFirst()
+            await process(job.samples, itemID: job.itemID, gen: runGen)
         }
         working = false
     }
@@ -707,7 +842,15 @@ final class LiveSession: ObservableObject {
     var isLoadingPhase: Bool { if case .loading = phase { return true }; return false }
     var loadingText: String? { if case .loading(let m) = phase { return m }; return nil }
 
-    private func process(_ samples: [Float], gen: Int) async {
+    /// 删掉一条（识别结果没有意义时）
+    private func removeItem(_ id: UUID) {
+        guard let i = items.firstIndex(where: { $0.id == id }) else { return }
+        items.remove(at: i)
+        if i < readIndex { readIndex -= 1 }
+        kickReader()
+    }
+
+    private func process(_ samples: [Float], itemID: UUID, gen: Int) async {
         // 模型还在加载：先把这句话留着，加载好马上识别
         if phase != .ready {
             activity = "模型准备好后马上识别"
@@ -729,41 +872,43 @@ final class LiveSession: ObservableObject {
             hearLog("整句识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(text.prefix(40))")
         } catch {
             hearLog("识别失败：\(error)", .error)
-            if gen == runGen { activity = "识别失败"; partial = "" }
+            if gen == runGen { activity = "识别失败"; removeItem(itemID) }
             return
         }
         guard gen == runGen else { return }              // 已经停止：结果丢弃
         let src = (detected == b.id) ? b : a
         let tgt = (src == a) ? b : a
         lastLangID = src.id
+        switchLiveLanguage(to: src)
 
         guard SpeechRecognizer.isMeaningful(text) else {
-            partial = ""; partialTranslation = ""; partialSource = nil
+            removeItem(itemID)
             activity = isRunning ? "正在聆听" : ""
             return
         }
-
-        var item = TranslationItem(source: src, target: tgt, sourceText: text)
+        guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
+        // 语言和预览一致时先保留预览译文，最终译文出来后再替换，避免闪烁
+        let old = items[idx]
+        let preview = old.source == src ? old.translated : ""
+        var item = TranslationItem(id: itemID, source: src, target: tgt, sourceText: text, translated: preview)
         if voiceStyle == "match" {
             item.speakerF0 = await Task.detached(priority: .utility) {
                 VoiceAnalyzer.estimateF0(samples)
             }.value
             guard gen == runGen else { return }
         }
-        // 先把实时预览的译文放进去，最终译文出来后再替换，避免闪烁
-        let preview = partialTranslation
-        item.translated = preview
-        partial = ""; partialTranslation = ""; partialSource = nil
-        items.append(item)
-        let id = item.id
+        guard let idx2 = items.firstIndex(where: { $0.id == itemID }) else { return }
+        items[idx2] = item
+        let id = itemID
 
-        let context = useContext
-            ? items.dropLast().suffix(2).map(\.sourceText)
+        let context: [String] = useContext
+            ? Array(items[..<idx2].filter { $0.done }.suffix(2).map(\.sourceText))
             : []
         let prompt = PromptBuilder.build(text: text, from: src, to: tgt,
-                                         context: Array(context),
+                                         context: context,
                                          glossary: PromptBuilder.parseGlossary(glossary))
         activity = "翻译中…"
+        translator.cancelPreview()        // 正在跑的实时预览翻译先让路
         let result: String
         do {
             result = try await translator.translate(prompt: prompt) { partialText in

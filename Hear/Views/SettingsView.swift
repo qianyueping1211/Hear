@@ -88,6 +88,11 @@ struct SettingsView: View {
 
                 // MARK: 语音识别
                 Section {
+                    Picker("识别引擎", selection: $session.asrEngine) {
+                        Text("Whisper").tag("whisper")
+                        Text("iOS 系统听写").tag("apple")
+                    }
+                    .disabled(!LiveTextEngineFactory.isSupported)
                     Picker("语音识别运行在", selection: asrBinding) {
                         Text("GPU（加载快，推荐）").tag(true)
                         Text("神经引擎（省电）").tag(false)
@@ -95,7 +100,7 @@ struct SettingsView: View {
                 } header: {
                     Text("语音识别")
                 } footer: {
-                    Text("神经引擎更省电，但第一次加载要先编译模型，可能需要好几分钟。切换后会重新加载语音识别模型。")
+                    Text("Whisper：自动判断说的是哪种语言，几个字一批显示。iOS 系统听写：说话时逐字显示（需要 iOS 26，第一次使用某种语言会先下载系统语言包），一句说完后仍由 Whisper 校正并判断语言。\n神经引擎更省电，但第一次加载要先编译模型，可能需要好几分钟。切换后会重新加载语音识别模型。")
                 }
 
                 Section {
