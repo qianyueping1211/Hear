@@ -156,7 +156,12 @@ final class LiveSession: ObservableObject {
         usePersonalVoice = d.object(forKey: "usePersonalVoice") as? Bool ?? false
         mySide = d.string(forKey: "mySide") ?? "A"
         asrUseGPU = d.object(forKey: "asrUseGPU") as? Bool ?? true
-        asrEngine = d.string(forKey: "asrEngine") ?? "whisper"
+        // 本地模型也默认用 iOS 系统听写逐字显示原文（iOS 26），说完后仍由 Whisper 定稿；老用户也改一次
+        if d.object(forKey: "liveTextDefaultV2") == nil {
+            d.set(true, forKey: "liveTextDefaultV2")
+            if LiveTextEngineFactory.isSupported { d.set("apple", forKey: "asrEngine") }
+        }
+        asrEngine = d.string(forKey: "asrEngine") ?? (LiveTextEngineFactory.isSupported ? "apple" : "whisper")
         engineMode = d.string(forKey: "engineMode") ?? ""
         voiceProcessing = d.object(forKey: "voiceProcessing") as? Bool ?? true
         inputSource = d.string(forKey: "inputSource") ?? "phone"
@@ -949,9 +954,9 @@ final class LiveSession: ObservableObject {
                 continue
             }
             hearLog("实时识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(r.1.prefix(30))")
-            guard gen == runGen, isRunning, id == currentSeg, id > finishedSeg, partialSeg == id,
-                  SpeechRecognizer.isMeaningful(r.1) else { continue }
             let src = (r.0 == b.id) ? b : a
+            guard gen == runGen, isRunning, id == currentSeg, id > finishedSeg, partialSeg == id,
+                  SpeechRecognizer.isMeaningful(r.1), SpeechRecognizer.matchesLanguage(r.1, src.id) else { continue }
             partialSource = src
             partial = (clipped ? "…" : "") + r.1
             requestPreviewTranslation(id: id, text: r.1, src: src, tgt: src == a ? b : a)
@@ -1275,7 +1280,9 @@ final class LiveSession: ObservableObject {
         lastLangID = src.id
         switchLiveLanguage(to: src)
 
-        guard SpeechRecognizer.isMeaningful(text) else {
+        // 没意义的、或者文字和语言对不上的（例如说中文却出来俄文）都当成噪声丢掉
+        guard SpeechRecognizer.isMeaningful(text), SpeechRecognizer.matchesLanguage(text, src.id) else {
+            if !text.isEmpty { hearLog("丢弃可疑识别结果（\(src.name)）：\(text.prefix(30))", .warning) }
             removeItem(itemID)
             activity = isRunning ? "正在聆听" : ""
             return
