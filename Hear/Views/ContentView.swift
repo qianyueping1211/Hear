@@ -26,7 +26,7 @@ struct ContentView: View {
                             editingID = item.id
                         })
                             .overlay(alignment: .top) {
-                                if session.usingApple, let note = session.appleNote {
+                                if session.usingAppleTranslation, let note = session.appleNote {
                                     NotePill(text: note).padding(.top, 8)
                                 }
                             }

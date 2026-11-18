@@ -69,23 +69,28 @@ final class LiveSession: ObservableObject {
     @Published private(set) var cloneLoading = false
     // 语音识别用 GPU（加载快）还是神经引擎（省电，首次编译慢）
     @Published var asrUseGPU: Bool { didSet { save("asrUseGPU", asrUseGPU) } }
-    // 识别引擎（本地模型时）：
-    //   "whisper" 本地最准 / "sensevoice" 本地最快 / "hybrid" SenseVoice 先出、Whisper 校正 /
-    //   "apple" iOS 系统听写逐字显示、说完由 Whisper 定稿
+    // 识别引擎："apple" 苹果自带（系统听写）/ "whisper" 本地最准 /
+    //   "sensevoice" 本地最快 / "hybrid" SenseVoice 先出、Whisper 校正 / "" 还没选
     @Published var asrEngine: String {
         didSet {
             save("asrEngine", asrEngine)
             guard asrEngine != oldValue else { return }
             hearLog("识别引擎改为 \(asrEngine)")
             enforceLanguages()
-            guard !usingApple else { return }
             if isRunning { stop(readAfter: false) }
             Task { await reloadIfLocal() }       // 加载新引擎需要的模型，不用的卸掉省内存
         }
     }
-    // 引擎："local" 听见本地模型（Whisper + Hy-MT2）/ "apple" 苹果自带（系统听写 + 系统翻译）/ "" 还没选
-    @Published private(set) var engineMode: String {
-        didSet { save("engineMode", engineMode); if engineMode != oldValue { enforceLanguages() } }
+    // 翻译引擎："apple" 苹果自带（系统翻译）/ "local" 本地模型（Hy-MT2）/ "" 还没选
+    @Published var translationEngine: String {
+        didSet {
+            save("translationEngine", translationEngine)
+            guard translationEngine != oldValue else { return }
+            hearLog("翻译引擎改为 \(translationEngine)")
+            if isRunning { stop(readAfter: false) }
+            if translationEngine == "apple" { Task { await translator.unload() } }   // 用不到本地翻译了，省内存
+            Task { await reloadIfLocal() }
+        }
     }
     // 后台下载本地模型（苹果自带模式下进行，设置里显示进度）
     @Published private(set) var bgDownloading = false
@@ -102,12 +107,17 @@ final class LiveSession: ObservableObject {
     private var pendingLocalSwitch = false
 
     var appleAvailable: Bool { LiveTextEngineFactory.isSupported }
-    /// 说话时用系统听写逐字显示：苹果自带模式，或本地模型选了“iOS 系统听写”。两种语言各开一个听写同时听
-    private var dualLive: Bool { appleAvailable && (usingApple || asrEngine == "apple") }
-    var usingApple: Bool { engineMode == "apple" && appleAvailable }
+    /// 语音识别用系统听写（识别引擎选了“苹果自带”）
+    var usingAppleASR: Bool { asrEngine == "apple" && appleAvailable }
+    /// 翻译用系统翻译（翻译引擎选了“苹果自带”）
+    var usingAppleTranslation: Bool { translationEngine == "apple" && appleAvailable }
+    /// 说话时用系统听写逐字显示
+    private var dualLive: Bool { usingAppleASR }
+    /// 当前两个引擎需要的模型是否都齐了（按当前选择判断，用不到的模型不用管）
     var modelsInstalled: Bool {
         _ = modelsRevision
-        return modelFiles().gguf != nil && missingSpeechKinds(for: asrEngine).isEmpty
+        if translationEngine == "local", modelFiles().gguf == nil { return false }
+        return missingSpeechKinds(for: asrEngine).isEmpty
     }
 
     /// 某个识别引擎要用到哪些语音识别模型
@@ -115,7 +125,8 @@ final class LiveSession: ObservableObject {
         switch engine {
         case "sensevoice": return (false, true)
         case "hybrid": return (true, true)
-        default: return (true, false)
+        case "whisper": return (true, false)
+        default: return (false, false)      // apple 或还没选：不需要本地识别模型
         }
     }
 
@@ -131,7 +142,7 @@ final class LiveSession: ObservableObject {
     }
 
     /// 本地模型模式下整句识别用 SenseVoice
-    private var useSense: Bool { !usingApple && (asrEngine == "sensevoice" || asrEngine == "hybrid") }
+    private var useSense: Bool { asrEngine == "sensevoice" || asrEngine == "hybrid" }
 
     // MARK: - 语言（不同识别引擎支持的语言不同）
 
@@ -243,13 +254,12 @@ final class LiveSession: ObservableObject {
         rightEar = d.string(forKey: "rightEar") ?? "B"
         voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
         asrUseGPU = d.object(forKey: "asrUseGPU") as? Bool ?? true
-        // 本地模型也默认用 iOS 系统听写逐字显示原文（iOS 26），说完后仍由 Whisper 定稿；老用户也改一次
-        if d.object(forKey: "liveTextDefaultV2") == nil {
-            d.set(true, forKey: "liveTextDefaultV2")
-            if LiveTextEngineFactory.isSupported { d.set("apple", forKey: "asrEngine") }
-        }
-        asrEngine = d.string(forKey: "asrEngine") ?? (LiveTextEngineFactory.isSupported ? "apple" : "whisper")
-        engineMode = d.string(forKey: "engineMode") ?? ""
+        // 迁移旧版本：原来只有一个 engineMode（apple/local 同时管识别和翻译），拆成独立的翻译引擎
+        let oldEngine = d.string(forKey: "engineMode") ?? ""
+        translationEngine = d.string(forKey: "translationEngine")
+            ?? (oldEngine == "apple" ? "apple" : (oldEngine == "local" ? "local" : ""))
+        // 识别引擎：老用户沿用原来的选择，全新用户留空，等用户在设置里选
+        asrEngine = d.string(forKey: "asrEngine") ?? ""
         voiceProcessing = d.object(forKey: "voiceProcessing") as? Bool ?? true
         inputSource = d.string(forKey: "inputSource") ?? "phone"
         talkMode = d.object(forKey: "talkMode") as? Bool ?? false
@@ -447,6 +457,16 @@ final class LiveSession: ObservableObject {
         }
     }
 
+    /// 当前引擎选择下，这个模型是否正在被用到（用不到的模型不需要加载/下载）
+    func isKindInUse(_ kind: ModelKind) -> Bool {
+        switch kind {
+        case .translation: return translationEngine == "local"
+        case .speech: return Self.engineNeeds(asrEngine).whisper
+        case .senseVoice: return Self.engineNeeds(asrEngine).sense
+        case .voiceClone: return voiceClone
+        }
+    }
+
     private var cloneInstalled: Bool {
         if let c = cloneCache, c.rev == modelsRevision { return c.ok }
         let ok = VoiceCloner.installed()
@@ -491,7 +511,7 @@ final class LiveSession: ObservableObject {
     }
 
     func selectGGUF(_ url: URL) async {
-        if isRunning && !usingApple { stop(readAfter: false) }
+        if isRunning, translationEngine == "local" { stop(readAfter: false) }
         ModelManager.select(url)
         await translator.unload()
         modelsRevision += 1
@@ -502,7 +522,7 @@ final class LiveSession: ObservableObject {
     func redownload(_ kind: ModelKind) async {
         guard !bgDownloading else { return }
         if isInstalled(kind) {
-            if isRunning && !usingApple { stop(readAfter: false) }
+            if isRunning, isKindInUse(kind) { stop(readAfter: false) }
             switch kind {
             case .translation:
                 await translator.unload()
@@ -520,8 +540,7 @@ final class LiveSession: ObservableObject {
             }
             modelsRevision += 1
             // 当前引擎用得到这个模型才需要等它下载完再用
-            let used = kind == .translation || (kind != .voiceClone && missingSpeechKinds(for: asrEngine).contains(kind))
-            if !usingApple && used { phase = .loading("正在重新下载模型，完成后自动加载") }
+            if isKindInUse(kind) { phase = .loading("正在重新下载模型，完成后自动加载") }
         }
         startBackgroundDownload(kinds: [kind], switchWhenDone: false)
     }
@@ -549,18 +568,18 @@ final class LiveSession: ObservableObject {
         }
         hearLog("启动：可用内存 \(Self.freeMB()) MB")
         defer { if voiceClone { scheduleCloneLoad(delay: 3) } }   // 其他模型准备好以后再加载声音克隆
-        let installed = modelsInstalled
-        if engineMode.isEmpty && installed { engineMode = "local" }   // 已经下载过模型的老用户
-        if usingApple {
+        // 还没选引擎：不自动加载模型，等用户在设置里选（开始翻译时会提示）
+        if asrEngine.isEmpty || translationEngine.isEmpty {
             phase = .ready
-            prepareAppleTranslation()
             return
         }
-        if installed {
-            engineMode = "local"
+        if modelsInstalled {
             await loadModels()
+        } else if usingAppleASR && usingAppleTranslation {
+            phase = .ready
+            prepareAppleTranslation()
         } else {
-            phase = .needsModels                  // 首次使用：让用户选择下载还是先用苹果自带
+            phase = .needsModels
         }
     }
 
@@ -571,29 +590,27 @@ final class LiveSession: ObservableObject {
         guard appleAvailable else { return }
         if isRunning { stop(readAfter: false) }
         stopLiveEngine()
-        engineMode = "apple"
+        stopAppleASR()
+        asrEngine = "apple"
+        translationEngine = "apple"
         phase = .ready
         hearLog("引擎：苹果自带")
         prepareAppleTranslation()
     }
 
-    /// 首次使用选择“下载”：能用苹果自带时先用它，后台下载完再自动切换
+    /// 首次使用选择“下载”：下载翻译模型和识别模型
     func chooseLocalAndDownload() async {
-        if appleAvailable {
-            chooseApple()
-            startBackgroundDownload()
-        } else {
-            engineMode = "local"
-            await downloadModels()
-        }
+        if asrEngine.isEmpty { asrEngine = appleAvailable ? "apple" : "whisper" }
+        translationEngine = "local"
+        await downloadModels()
     }
 
-    /// 切换到听见本地模型（模型已下载）
+    /// 切到本地翻译（模型已下载）
     func switchToLocal() async {
         if isRunning { stop(readAfter: false) }
         stopAppleASR()
-        engineMode = "local"
-        hearLog("引擎：听见本地模型")
+        translationEngine = "local"
+        hearLog("引擎：本地翻译")
         if modelsInstalled { await loadModels() } else { phase = .needsModels }
     }
 
@@ -603,8 +620,14 @@ final class LiveSession: ObservableObject {
     func startBackgroundDownload(kinds: [ModelKind]? = nil, switchWhenDone: Bool = true,
                                  thenEngine: String? = nil) {
         guard !bgDownloading else { return }
-        let list = (kinds ?? ([ModelKind.translation] + missingSpeechKinds(for: asrEngine)))
-            .filter { !isInstalled($0) }
+        let list: [ModelKind]
+        if let kinds {
+            list = kinds.filter { !isInstalled($0) }
+        } else {
+            var need = missingSpeechKinds(for: asrEngine)
+            if translationEngine == "local", !isInstalled(.translation) { need.insert(.translation, at: 0) }
+            list = need
+        }
         bgDownloading = true
         bgDownloadError = nil
         bgDownloadProgress = 0
@@ -657,17 +680,17 @@ final class LiveSession: ObservableObject {
                 return
             }
             guard ok, modelsInstalled else {
-                if !usingApple, case .loading = phase { phase = .needsModels }
+                if case .loading = phase { phase = .needsModels }
                 return
             }
             hearLog("模型下载完成")
-            // 正在用本地模型（或刚重新下载）：直接加载；苹果自带：只有选择了切换才切过去
-            guard !usingApple || bgSwitchWhenDone else { return }
+            // 只为下载声音克隆（switchWhenDone == false）就到此为止，不用加载翻译/识别模型
+            guard bgSwitchWhenDone else { return }
             if isRunning {
-                pendingLocalSwitch = true     // 正在对话：停止实时翻译后再切换
-                activity = "本地模型已下载，停止实时翻译后切换"
+                pendingLocalSwitch = true     // 正在对话：停止实时翻译后再加载
+                activity = "模型已下载，停止实时翻译后加载"
             } else {
-                await switchToLocal()
+                await loadModels()
             }
         }
     }
@@ -683,7 +706,7 @@ final class LiveSession: ObservableObject {
 
     /// 检查苹果翻译的语言包；没下载就让系统弹出下载
     func prepareAppleTranslation() {
-        guard usingApple else { return }
+        guard usingAppleTranslation else { return }
         let a = langA, b = langB
         systemTranslator.reset()
         Task {
@@ -695,7 +718,7 @@ final class LiveSession: ObservableObject {
                 translationPrepConfig = TranslationSession.Configuration(source: a.appleLanguage,
                                                                          target: b.appleLanguage)
             case .unsupported:
-                appleNote = "苹果翻译暂不支持 \(a.name) ⇄ \(b.name)，可以在设置里改用听见本地模型"
+                appleNote = "苹果翻译暂不支持 \(a.name) ⇄ \(b.name)，可以在设置里改用本地翻译引擎"
                 hearLog(appleNote ?? "", .warning)
             }
         }
@@ -716,7 +739,7 @@ final class LiveSession: ObservableObject {
         let host = await HostPicker.best()
         hfHost = host
         do {
-            if forceTranslation || ModelManager.currentGGUF() == nil {
+            if translationEngine == "local", forceTranslation || ModelManager.currentGGUF() == nil {
                 phase = .downloading("翻译模型 Hy-MT2", 0)
                 _ = try await ModelManager.downloadGGUF(host: host) { p in
                     Task { @MainActor in self.setProgress("翻译模型 Hy-MT2", p) }
@@ -754,24 +777,39 @@ final class LiveSession: ObservableObject {
         let need = Self.engineNeeds(asrEngine)
         let wf = ModelManager.whisperFolder()
         let sf = SenseVoiceRecognizer.installedFolder()
-        guard let gguf = ModelManager.currentGGUF(),
+        let needLocalMT = translationEngine == "local"
+        guard !needLocalMT || ModelManager.currentGGUF() != nil,
               !need.whisper || wf != nil, !need.sense || sf != nil else {
             phase = .needsModels; return
         }
-        // 当前引擎用不到的语音识别模型卸掉，省内存
-        if !need.whisper, await asr.isLoaded { await asr.unload(); hearLog("卸载 Whisper（当前引擎用不到）") }
-        if !need.sense, await sense.isLoaded { await sense.unload(); hearLog("卸载 SenseVoice（当前引擎用不到）") }
+        // 当前引擎用不到的模型卸掉，省内存
+        if !need.whisper, await asr.isLoaded { await asr.unload(); hearLog("卸载 Whisper（当前识别用不到）") }
+        if !need.sense, await sense.isLoaded { await sense.unload(); hearLog("卸载 SenseVoice（当前识别用不到）") }
+        if !needLocalMT, await translator.isLoaded { await translator.unload(); hearLog("卸载翻译模型（当前翻译用苹果自带）") }
         let start = Date()
         let gpu = asrUseGPU
         let asrLoaded = await asr.isLoaded
         let svLoaded = await sense.isLoaded
         let needASR = need.whisper && !asrLoaded
         let needSV = need.sense && !svLoaded
-        let needMT = !(await translator.isLoaded)
+        let needMT = needLocalMT && !(await translator.isLoaded)
         if !needASR && !needSV && !needMT { phase = .ready; return }
-        // 加载识别和翻译模型时先把声音克隆卸掉，避免几个大模型同时占内存；全部就绪后再加载
+        // 加载识别和翻译模型前，先等声音克隆结束再卸掉：
+        // 声音克隆（约 3 GB）和识别/翻译模型一起加载，App 的内存额度会被撑爆，直接被系统杀掉
         cloneLoadTask?.cancel()
-        if await cloner.isLoaded { cloneTasks.removeAll(); await cloner.unload() }
+        try? await Task.sleep(nanoseconds: 50_000_000)   // 让被取消的任务有机会跑到设置 cloneLoading 的那一步
+        let cloneLoadingNow = cloneLoading || await cloner.isLoading
+        let cloneLoadedNow = await cloner.isLoaded
+        if cloneLoadingNow || cloneLoadedNow {
+            phase = .loading("正在等待声音克隆加载完成…")
+            while true {
+                let stillLoading = cloneLoading || await cloner.isLoading
+                if !stillLoading { break }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            cloneTasks.removeAll()
+            if await cloner.isLoaded { await cloner.unload() }
+        }
         defer { if voiceClone { scheduleCloneLoad(delay: 3) } }
         // 每秒刷新一次已用时间，让用户知道没有卡死
         let ticker = Task { @MainActor in
@@ -792,7 +830,7 @@ final class LiveSession: ObservableObject {
         phase = .loading("正在准备模型…")
         do {
             // 一个一个加载：同时加载几个大模型，内存峰值太高会被系统强制退出
-            try await loadMTIfNeeded(needMT, path: gguf.path)
+            try await loadMTIfNeeded(needMT, path: ModelManager.currentGGUF()?.path ?? "")
             try await loadSVIfNeeded(needSV, folder: sf)
             try await loadASRIfNeeded(needASR, folder: wf, gpu: gpu)
             phase = .ready
@@ -824,7 +862,7 @@ final class LiveSession: ObservableObject {
 
     /// 切换语音识别的运行方式后重新加载
     func reloadASR() async {
-        if isRunning && !usingApple { stop(readAfter: false) }
+        if isRunning, asrEngine != "apple" { stop(readAfter: false) }
         await asr.unload()
         await reloadIfLocal()
     }
@@ -832,7 +870,7 @@ final class LiveSession: ObservableObject {
     /// 设置 → 导入翻译模型（.gguf 文件）。苹果自带模式下只放进“已下载的模型”，不切换、不加载
     func importModel(_ url: URL) async {
         do {
-            if isRunning && !usingApple { stop(readAfter: false) }
+            if isRunning, translationEngine == "local" { stop(readAfter: false) }
             await translator.unload()
             _ = try ModelManager.importGGUF(from: url)
             modelsRevision += 1
@@ -848,7 +886,7 @@ final class LiveSession: ObservableObject {
     /// 设置 → 导入语音识别模型（WhisperKit 模型文件夹）
     func importWhisper(_ url: URL) async {
         do {
-            if isRunning && !usingApple { stop(readAfter: false) }
+            if isRunning, Self.engineNeeds(asrEngine).whisper { stop(readAfter: false) }
             await asr.unload()
             try ModelManager.importWhisper(from: url)
             modelsRevision += 1
@@ -864,7 +902,7 @@ final class LiveSession: ObservableObject {
     /// 设置 → 导入 SenseVoice 模型（文件夹）
     func importSenseVoice(_ url: URL) async {
         do {
-            if isRunning && !usingApple && useSense { stop(readAfter: false) }
+            if isRunning, useSense { stop(readAfter: false) }
             await sense.unload()
             try SenseVoiceRecognizer.importFolder(from: url)
             modelsRevision += 1
@@ -898,9 +936,9 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    /// 正在用本地模型时，模型变了就重新加载；苹果自带模式下什么都不做
+    /// 引擎变了就按当前选择重新加载；模型没齐时什么都不做
     private func reloadIfLocal() async {
-        guard !usingApple, engineMode == "local", modelsInstalled else { return }
+        guard !asrEngine.isEmpty, !translationEngine.isEmpty, modelsInstalled else { return }
         await loadModels()
     }
 
@@ -972,6 +1010,11 @@ final class LiveSession: ObservableObject {
 
     /// 打开麦克风开始收音（实时翻译和对话翻译共用）
     private func beginListening() async -> Bool {
+        // 还没选引擎：提示去设置里选
+        if asrEngine.isEmpty || translationEngine.isEmpty {
+            showToast("请先到 功能设置 → 引擎 里选择语音识别和翻译引擎")
+            return false
+        }
         // 本地模型还没加载好：不开始，在按钮上方提示一下
         if isLoadingPhase {
             showToast("由于本地模型加载中，请稍等。")
@@ -1348,7 +1391,7 @@ final class LiveSession: ObservableObject {
             let id = p.id
             guard isRunning, id == currentSeg, id > finishedSeg else { continue }
             let gen = runGen
-            if usingApple {
+            if usingAppleTranslation {
                 let out = try? await systemTranslator.translate(p.text, from: p.src, to: p.tgt)
                 if let out, !out.isEmpty, gen == runGen, id == partialSeg, id > finishedSeg { partialTranslation = out }
                 continue
@@ -1365,6 +1408,18 @@ final class LiveSession: ObservableObject {
             }
             if let out, !out.isEmpty, gen == runGen, id == partialSeg, id > finishedSeg { partialTranslation = out }
         }
+    }
+
+    /// 按当前翻译引擎翻译一句定稿的原文。
+    /// 苹果翻译不带上下文和术语表；本地翻译带上，并用部分译文回调做实时显示。
+    private func translateFinal(_ text: String, from src: Language, to tgt: Language,
+                                context: [String], onPartial: @escaping (String) -> Void) async throws -> String {
+        if usingAppleTranslation {
+            return try await systemTranslator.translate(text, from: src, to: tgt)
+        }
+        let prompt = PromptBuilder.build(text: text, from: src, to: tgt, context: context,
+                                         glossary: PromptBuilder.parseGlossary(glossary))
+        return try await translator.translate(prompt: prompt) { partial in onPartial(partial) }
     }
 
     // MARK: - iOS 系统听写
@@ -1528,11 +1583,11 @@ final class LiveSession: ObservableObject {
         lastCommit = (prevID, fullText, src, Date())
         activity = "翻译中…"
         do {
-            let out = try await systemTranslator.translate(fullText, from: src, to: tgt)
+            let out = try await translateFinal(fullText, from: src, to: tgt, context: []) { _ in }
             guard gen == runGen else { return }
             update(prevID, out, done: true)
         } catch {
-            hearLog("苹果翻译失败：\(error)", .error)
+            hearLog("翻译失败：\(error)", .error)
             if let j = items.firstIndex(where: { $0.id == prevID }) { items[j].done = true }
             prepareAppleTranslation()
         }
@@ -1569,11 +1624,11 @@ final class LiveSession: ObservableObject {
         rememberReference(itemID, samples: samples, text: b.text, lang: src.id)
         activity = "翻译中…"
         do {
-            let out = try await systemTranslator.translate(b.text, from: src, to: tgt)
+            let out = try await translateFinal(b.text, from: src, to: tgt, context: []) { _ in }
             guard gen == runGen else { return }
             update(itemID, out, done: true)
         } catch {
-            hearLog("苹果翻译失败：\(error)", .error)
+            hearLog("翻译失败：\(error)", .error)
             update(itemID, "（翻译失败：\(error.localizedDescription)）", done: true)
             prepareAppleTranslation()
         }
@@ -1588,7 +1643,7 @@ final class LiveSession: ObservableObject {
         working = true
         while !queue.isEmpty {
             let job = queue.removeFirst()
-            if usingApple {
+            if usingAppleASR {
                 await processApple(job.samples, itemID: job.itemID, segID: job.segID, gen: runGen)
             } else {
                 await process(job.samples, itemID: job.itemID, gen: runGen)
@@ -1681,14 +1736,11 @@ final class LiveSession: ObservableObject {
         let context: [String] = useContext
             ? Array(items[..<idx2].filter { $0.done }.suffix(2).map(\.sourceText))
             : []
-        let prompt = PromptBuilder.build(text: text, from: src, to: tgt,
-                                         context: context,
-                                         glossary: PromptBuilder.parseGlossary(glossary))
         activity = "翻译中…"
         translator.cancelPreview()        // 正在跑的实时预览翻译先让路
         let result: String
         do {
-            result = try await translator.translate(prompt: prompt) { partialText in
+            result = try await translateFinal(text, from: src, to: tgt, context: context) { partialText in
                 // 有预览译文时，等最终结果完整再替换；没有预览时边生成边显示
                 guard preview.isEmpty else { return }
                 Task { @MainActor in self.update(id, partialText, done: false) }
@@ -1706,7 +1758,7 @@ final class LiveSession: ObservableObject {
         // 朗读在单独的队列里进行，不会挡住后面的识别和翻译
         kickReader()
         // SenseVoice + Whisper 校正：后面没有排队的句子时，用 Whisper 再识别一遍，有明显差别就替换
-        if asrEngine == "hybrid", !usingApple, queue.isEmpty {
+        if asrEngine == "hybrid", queue.isEmpty {
             await whisperCorrect(id: id, samples: samples, src: src, oldText: text, gen: gen)
         }
     }
@@ -1740,11 +1792,9 @@ final class LiveSession: ObservableObject {
         let context: [String] = useContext
             ? Array(items[..<i].filter { $0.done }.suffix(2).map(\.sourceText))
             : []
-        let prompt = PromptBuilder.build(text: text, from: src, to: tgt, context: context,
-                                         glossary: PromptBuilder.parseGlossary(glossary))
         activity = "翻译中…"
         do {
-            let out = try await translator.translate(prompt: prompt) { _ in }
+            let out = try await translateFinal(text, from: src, to: tgt, context: context) { _ in }
             guard gen == runGen else { return }
             update(id, out, done: true)
         } catch {
@@ -1838,17 +1888,12 @@ final class LiveSession: ObservableObject {
             : []
         Task {
             do {
-                let result: String
-                if usingApple {
-                    result = try await systemTranslator.translate(text, from: src, to: tgt)
-                } else {
-                    // 本地模型还在加载时先等它就绪
+                // 本地翻译模型还在加载时先等它就绪
+                if translationEngine == "local" {
                     while isLoadingPhase { try? await Task.sleep(nanoseconds: 200_000_000) }
                     guard phase == .ready else { throw TranslatorError.notLoaded }
-                    let prompt = PromptBuilder.build(text: text, from: src, to: tgt, context: context,
-                                                     glossary: PromptBuilder.parseGlossary(glossary))
-                    result = try await translator.translate(prompt: prompt) { _ in }
                 }
+                let result = try await translateFinal(text, from: src, to: tgt, context: context) { _ in }
                 update(id, result, done: true)
             } catch {
                 hearLog("重新翻译失败：\(error)", .error)
@@ -1975,7 +2020,7 @@ final class LiveSession: ObservableObject {
         }
         save("langA", langA.id); save("langB", langB.id)
         lastLangID = nil
-        if usingApple { prepareAppleTranslation() }
+        if usingAppleTranslation { prepareAppleTranslation() }
         if isRunning && dualLive { startAppleASR() }
     }
 

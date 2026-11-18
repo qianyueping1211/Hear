@@ -16,6 +16,8 @@ actor VoiceCloner {
     private var loading = false
 
     var isLoaded: Bool { model != nil }
+    /// 正在加载（下载）中：加载别的模型前要先等它结束，避免同时占内存
+    var isLoading: Bool { loading }
 
     /// 模型放在 Application Support/VoiceClone 下
     static var base: URL {

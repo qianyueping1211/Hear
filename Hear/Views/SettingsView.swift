@@ -37,19 +37,59 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("iCloud 同步")
-                } footer: {
-                    Text("开启后，设置和历史记录会同步到你 iCloud 云盘里的一个文件夹（模型不同步）。数据仍存在手机上，有网络时系统自动上传；换手机或重装 App 后，开启并选同一个文件夹，会自动判断哪边更新并同步。第一次开启时，在“iCloud 云盘”里选一个文件夹（可以新建一个“听见”）。大模型 API Key 不同步，换手机后需要重新填写。")
                 }
 
-                // MARK: 引擎
+                // MARK: 引擎（语音识别 → 文本翻译 → 声音克隆）
                 Section {
-                    Picker("引擎", selection: engineBinding) {
-                        Text("苹果自带").tag("apple")
-                        Text("听见本地模型").tag("local")
+                    Picker("语音识别引擎", selection: asrEngineBinding) {
+                        Text("未选择").tag("")
+                        if session.appleAvailable {
+                            Text("苹果自带").tag("apple")
+                        }
+                        Text("本地极速：SenseVoice").tag("sensevoice")
+                        Text("本地最准：Whisper").tag("whisper")
+                        Text("SenseVoice + Whisper").tag("hybrid")
                     }
-                    .disabled(!session.appleAvailable)
-                    // 本地模型加载进度显示在这里（首页不再提示）
-                    if let msg = session.loadingText {
+                } header: {
+                    Text("语音识别引擎")
+                } footer: {
+                    Text(session.asrEngine.isEmpty ? "请选择语音识别引擎。" : asrNote)
+                }
+
+                Section {
+                    Picker("文本翻译引擎", selection: translationEngineBinding) {
+                        Text("未选择").tag("")
+                        if session.appleAvailable {
+                            Text("苹果自带").tag("apple")
+                        }
+                        Text("本地引擎：MT").tag("local")
+                    }
+                    if session.translationEngine == "local", !session.isInstalled(.translation) {
+                        Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text("文本翻译引擎")
+                } footer: {
+                    Text(translationFooter)
+                }
+
+                Section {
+                    Picker("声音克隆引擎", selection: voiceCloneEngineBinding) {
+                        Text("苹果自带").tag("apple")
+                        Text("本地引擎：Qwen").tag("local")
+                    }
+                    if session.voiceClone, !session.isInstalled(.voiceClone) {
+                        Text("声音克隆模型还没下载").font(.footnote).foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text("声音克隆引擎")
+                } footer: {
+                    Text(voiceCloneFooter)
+                }
+
+                // 本地模型加载进度显示在这里（首页不再提示）
+                if let msg = session.loadingText {
+                    Section {
                         HStack(spacing: 10) {
                             ProgressView()
                             Text(msg)
@@ -58,10 +98,6 @@ struct SettingsView: View {
                                 .lineLimit(2)
                         }
                     }
-                } header: {
-                    Text("引擎")
-                } footer: {
-                    Text(engineFooter)
                 }
 
                 // MARK: 模型管理（语音识别 → 翻译 → 下载源）
@@ -109,24 +145,10 @@ struct SettingsView: View {
                         Text("GPU（加载快，推荐）").tag(true)
                         Text("神经引擎（省电）").tag(false)
                     }
-                    if !session.usingApple {
-                        Button {
-                            showEngineChoice = true
-                        } label: {
-                            LabeledContent("识别引擎") {
-                                HStack(spacing: 4) {
-                                    Text(Self.engineTitle(session.asrEngine)).lineLimit(1)
-                                    Image(systemName: "chevron.up.chevron.down").font(.caption)
-                                }
-                                .foregroundStyle(.secondary)
-                            }
-                        }
-                        .foregroundStyle(.primary)
-                    }
                 } header: {
                     Text("语音识别")
                 } footer: {
-                    if let inputNote { Text(inputNote) } else if !session.usingApple { Text(engineNote) }
+                    if let inputNote { Text(inputNote) }
                 }
 
                 // MARK: 翻译与总结
@@ -147,7 +169,6 @@ struct SettingsView: View {
                 // MARK: 朗读（出声 → 音色 → 耳机左右耳）
                 Section {
                     Toggle("朗读译文", isOn: $session.speakOutput)
-                    Toggle("声音克隆（用说话人的原声朗读）", isOn: cloneBinding)
                     Picker("朗读从哪里出声", selection: outputBinding) {
                         Text("手机扬声器").tag(AudioOutput.speaker)
                         Text("耳机").tag(AudioOutput.headphones)
@@ -167,9 +188,7 @@ struct SettingsView: View {
                 } header: {
                     Text("朗读")
                 } footer: {
-                    Text(session.voiceClone
-                         ? "声音克隆：用说话人刚说的那句话当样本，把译文用他的声音读出来（支持中、英、日、韩、德、法、俄、葡、西、意）。每句要先生成，会比系统声音慢一些；生成不了时自动用系统声音。"
-                         : "打开声音克隆后，译文会用说话人自己的声音读出来。")
+                    Text("朗读用系统声音；在「声音克隆引擎」选本地 Qwen 后，会用说话人的原声朗读。")
                 }
 
                 Section {
@@ -252,12 +271,6 @@ struct SettingsView: View {
                       message: engineDownloadMessage) {
             if let e = pendingEngine { session.downloadForEngine(e) }
         }
-        // 识别引擎：屏幕正中的选项列表（背后虚化）
-        .centerChoice(isPresented: $showEngineChoice, title: "识别引擎",
-                      options: engineOptions, selected: session.asrEngine) { e in
-            // 等选项列表收起后再弹下载确认框，避免两个弹窗叠在一起闪动
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { asrEngineBinding.wrappedValue = e }
-        }
         // 打开声音克隆但还没下载模型：先问要不要下载
         .centerDialog(isPresented: $askClone,
                       title: "下载声音克隆模型？",
@@ -265,14 +278,8 @@ struct SettingsView: View {
             session.voiceClone = true
             session.startBackgroundDownload(kinds: [.voiceClone], switchWhenDone: false)
         }
-        .centerDialog(isPresented: $askDownload,
-                      title: "下载听见本地模型？",
-                      message: localDownloadMessage) {
-            session.startBackgroundDownload()
-        }
     }
 
-    @State private var askDownload = false
     @State private var askClone = false
 
     private var cloudBinding: Binding<Bool> {
@@ -291,10 +298,12 @@ struct SettingsView: View {
         return f.string(from: d)
     }
 
-    private var cloneBinding: Binding<Bool> {
+    private var voiceCloneEngineBinding: Binding<String> {
         Binding(
-            get: { session.voiceClone },
-            set: { on in
+            get: { session.voiceClone ? "local" : "apple" },
+            set: { v in
+                let on = v == "local"
+                if on == session.voiceClone { return }
                 if !on { session.voiceClone = false; return }
                 if session.isInstalled(.voiceClone) {
                     session.voiceClone = true
@@ -307,33 +316,6 @@ struct SettingsView: View {
     /// 选了还缺模型的识别引擎（等确认下载）
     @State private var pendingEngine: String?
     @State private var lastPendingEngine = "sensevoice"
-    @State private var showEngineChoice = false
-
-    static func engineTitle(_ e: String) -> String {
-        switch e {
-        case "sensevoice": return "本地最快：SenseVoice"
-        case "hybrid": return "SenseVoice + Whisper 校正"
-        case "apple": return "iOS 系统听写"
-        default: return "本地最准：Whisper"
-        }
-    }
-
-    private var engineOptions: [(tag: String, title: String, detail: String)] {
-        var list: [(tag: String, title: String, detail: String)] = [
-            ("whisper", Self.engineTitle("whisper"), "标点和长句更好，稍慢"),
-            ("sensevoice", Self.engineTitle("sensevoice"), "说完马上出字 · 中英日韩"),
-            ("hybrid", Self.engineTitle("hybrid"), "先快后准，有差别自动替换 · 中英日韩"),
-        ]
-        if LiveTextEngineFactory.isSupported {
-            list.append(("apple", Self.engineTitle("apple"), "逐字显示，说完由 Whisper 定稿"))
-        }
-        return list.map { (o) -> (tag: String, title: String, detail: String) in
-            let missing = session.missingSpeechKinds(for: o.tag)
-            guard !missing.isEmpty else { return o }
-            let names = missing.map { $0 == .senseVoice ? "SenseVoice" : "Whisper" }.joined(separator: "、")
-            return (o.tag, o.title, "需下载 \(names) · " + o.detail)
-        }
-    }
 
     private var asrEngineBinding: Binding<String> {
         Binding(
@@ -356,27 +338,34 @@ struct SettingsView: View {
         return "这个识别引擎需要 \(names.joined(separator: "、")) 语音识别模型。下载期间继续用现在的引擎，下载完成后自动切换。请连接 Wi‑Fi，并保持 App 在前台。"
     }
 
-    /// 切换到听见本地模型时要下载哪些（按当前识别引擎）
-    private var localDownloadMessage: String {
-        let kinds = [LiveSession.ModelKind.translation] + session.missingSpeechKinds(for: session.asrEngine)
-        let list = kinds.filter { !session.isInstalled($0) }
-            .map { Self.kindTitle($0) + Self.kindSize($0) }
-            .joined(separator: "、")
-        return "需要下载\(list)，请连接 Wi‑Fi。下载期间继续用苹果自带，下载完成后自动切换。下载时请保持 App 在前台。"
-    }
-
-    /// 识别引擎的说明（语音识别下方）
-    private var engineNote: String {
+    /// 语音识别引擎的说明
+    private var asrNote: String {
         switch session.asrEngine {
         case "sensevoice":
             return "本地最快：说完马上出字，不会卡住。只支持中文、英语、日语、韩语。"
         case "hybrid":
-            return "先用 SenseVoice 马上出结果，空闲时再用 Whisper 识别一遍；有明显差别就替换并重新翻译，句子后面会显示魔法棒图标。只支持中文、英语、日语、韩语。"
+            return "先用 SenseVoice 马上出结果，空闲时再用 Whisper 校正；有明显差别就替换并重新翻译。只支持中文、英语、日语、韩语。"
         case "apple":
-            return "说话时用 iOS 系统听写逐字显示，说完一句由 Whisper 定稿。"
-        default:
+            return "苹果自带：用 iOS 系统听写逐字显示，说话就出字。"
+        case "whisper":
             return "本地最准：标点和长句更好，说完一句后识别，稍慢。"
+        default:
+            return "请选择语音识别引擎。"
         }
+    }
+
+    private var translationFooter: String {
+        switch session.translationEngine {
+        case "apple": return "苹果自带：用 iOS 系统翻译，不用下载模型；不支持术语表和结合上文。"
+        case "local": return "本地引擎：Hy-MT2 在手机本地运行，支持术语表和结合上文。"
+        default: return "请选择翻译引擎。"
+        }
+    }
+
+    private var voiceCloneFooter: String {
+        session.voiceClone
+            ? "本地 Qwen3-TTS：用说话人的原声朗读。模型约 1.4 GB，加载要几秒；内存不够或生成不了时自动用系统声音。"
+            : "苹果自带：用系统声音朗读，不额外占内存。"
     }
     /// 最近一次要下载的模型（确认框收起的动画里文字不会突然变空）
     @State private var lastKind: LiveSession.ModelKind = .translation
@@ -492,31 +481,17 @@ struct SettingsView: View {
         .padding(.vertical, 2)
     }
 
-    private var engineBinding: Binding<String> {
+    private var translationEngineBinding: Binding<String> {
         Binding(
-            get: { session.usingApple ? "apple" : "local" },
-            set: { v in
-                if v == "apple" {
-                    session.chooseApple()
-                } else if session.modelsInstalled {
-                    Task { await session.switchToLocal() }
-                } else if !session.bgDownloading {
-                    askDownload = true
+            get: { session.translationEngine },
+            set: { e in
+                guard e != session.translationEngine else { return }
+                session.translationEngine = e
+                if e == "local", !session.isInstalled(.translation), !session.bgDownloading {
+                    session.startBackgroundDownload(kinds: [.translation], switchWhenDone: true)
                 }
             }
         )
-    }
-
-    private var engineFooter: String {
-        if !session.appleAvailable { return "苹果自带需要 iOS 26。" }
-        if session.bgDownloading {
-            return "正在下载听见本地模型，进度见下方「模型管理」。"
-        }
-        if session.usingApple {
-            return "苹果自带：用 iOS 的系统听写和翻译，不用下载模型。" +
-                (session.modelsInstalled ? "" : "\n选择“听见本地模型”会先下载模型，下载完成后自动切换。")
-        }
-        return "听见本地模型：Whisper + Hy-MT2，在手机本地运行，支持结合上文和术语表。"
     }
     @State private var inputNote: String?
 
