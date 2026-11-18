@@ -1,0 +1,55 @@
+name: Rename old releases (x.y → 0.x.y)
+
+# 把以前两位的版本号（v4.3 / 听见 4.3 / Hear-4.3.ipa）改成三位（v0.4.3 / 听见 0.4.3 / Hear-0.4.3.ipa）。
+# 已经是三位的会跳过，可以重复运行。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/rename-releases.yml
+
+permissions:
+  contents: write
+
+jobs:
+  rename:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      R: ${{ github.repository }}
+    steps:
+      # 还有打包在进行的话先等它发布完，避免它刚发布的旧版本号没被改到
+      - name: Wait for running builds
+        run: |
+          for i in $(seq 1 60); do
+            N=$(gh run list -R "$R" --workflow build-ipa.yml --limit 20 --json status \
+                -q '[.[] | select(.status != "completed")] | length')
+            [ "$N" = "0" ] && break
+            echo "还有 $N 个打包在进行，等 1 分钟"; sleep 60
+          done
+
+      - name: Rename
+        run: |
+          for OLD in $(gh release list -R "$R" --limit 200 --json tagName -q '.[].tagName'); do
+            echo "$OLD" | grep -Eq '^v[0-9]+\.[0-9]+$' || { echo "跳过 $OLD"; continue; }
+            V="${OLD#v}"; NV="0.$V"; NEW="v$NV"
+            # 新标签指向原来的提交
+            SHA=$(gh api "repos/$R/git/ref/tags/$OLD" --jq .object.sha)
+            gh api "repos/$R/git/refs" -f ref="refs/tags/$NEW" -f sha="$SHA" >/dev/null 2>&1 || true
+            # 说明里的版本号一起改
+            VE=$(echo "$V" | sed 's/\./\\./g')
+            BODY=$(gh release view "$OLD" -R "$R" --json body -q .body \
+              | sed -E "s/听见 $VE([^0-9.]|$)/听见 $NV\1/g; s/Hear-$VE\.ipa/Hear-$NV.ipa/g")
+            gh release edit "$OLD" -R "$R" --tag "$NEW" --title "听见 $NV" --notes "$BODY"
+            # 安装包改名：Hear-4.3.ipa → Hear-0.4.3.ipa
+            RID=$(gh api "repos/$R/releases/tags/$NEW" --jq .id)
+            gh api "repos/$R/releases/$RID/assets" --jq '.[] | "\(.id) \(.name)"' | while read -r AID ANAME; do
+              if [ "$ANAME" = "Hear-$V.ipa" ]; then
+                gh api -X PATCH "repos/$R/releases/assets/$AID" -f name="Hear-$NV.ipa" >/dev/null
+                echo "  $ANAME → Hear-$NV.ipa"
+              fi
+            done
+            gh api -X DELETE "repos/$R/git/refs/tags/$OLD" >/dev/null 2>&1 || true
+            echo "$OLD → $NEW"
+          done
