@@ -106,7 +106,6 @@ struct TopBar: View {
     var onNew: () -> Void
     var onHistory: () -> Void
     var onSettings: () -> Void
-    @State private var showMenu = false
 
     var body: some View {
         HStack {
@@ -122,23 +121,21 @@ struct TopBar: View {
 
             Spacer()
 
-            Button { showMenu = true } label: {
+            // 系统原生菜单（和“文件”App 右上角 ⋯ 一样）：大圆角面板，图标在左、文字在右，分组之间有分隔
+            Menu {
+                Section {
+                    Button(action: onNew) { Label("新建对话", systemImage: "square.and.pencil") }
+                    Button(action: onHistory) { Label("历史记录", systemImage: "clock.arrow.circlepath") }
+                }
+                Section {
+                    Button(action: onSettings) { Label("设置", systemImage: "gearshape") }
+                }
+            } label: {
                 MoreDots()
             }
+            .menuOrder(.fixed)
             .foregroundStyle(.primary)
             .accessibilityLabel("更多")
-            // 紧凑的弹出菜单：宽度只包住图标和文字
-            .popover(isPresented: $showMenu, arrowEdge: .top) {
-                VStack(alignment: .leading, spacing: 0) {
-                    menuRow("新建", "square.and.pencil", onNew)
-                    Divider()
-                    menuRow("历史", "clock.arrow.circlepath", onHistory)
-                    Divider()
-                    menuRow("设置", "gearshape", onSettings)
-                }
-                .fixedSize()
-                .presentationCompactAdaptation(.popover)
-            }
         }
         .overlay {
             Text("听见").font(.headline)
@@ -146,25 +143,6 @@ struct TopBar: View {
         .padding(.horizontal)
         .padding(.top, 6)
         .padding(.bottom, 2)
-    }
-
-    private func menuRow(_ title: String, _ icon: String, _ action: @escaping () -> Void) -> some View {
-        Button {
-            showMenu = false
-            // 等菜单收起后再打开下一个页面
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { action() }
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: icon).frame(width: 22)
-                Text(title)
-            }
-            .font(.body)
-            .padding(.horizontal, 18)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 }
 
