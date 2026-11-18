@@ -287,22 +287,35 @@ actor GGUFVoiceCloner {
         defer { mtmd_bitmap_free(bitmap) }
 
         // 2) 准备输入
+        //    C 结构体里的字符串是 const char*，Swift 侧要用 withCString 包起来
         var inp = mtmd_helper_gen_audio_inp_default()
         inp.stream = false
         inp.seq_id = 0
-        inp.prompt = text
-        inp.prompt_len = text.utf8.count
         inp.speaker_ref = bitmap
-        // 有参考原文就用 ICL 模式，克隆得更像
-        inp.speaker_ref_text = referenceText.isEmpty ? nil : referenceText
-        inp.lang = lang
         inp.top_k = 20
         inp.top_p = 0.6
         inp.temp = -1            // 用模型默认值
         inp.seed = UInt32.max
         inp.out_type = MTMD_HELPER_GEN_AUDIO_OUTTYPE_PCM
 
-        let rc = mtmd_helper_gen_audio_set_input(gen, &inp)
+        let rc = text.withCString { textPtr in
+            lang.withCString { langPtr in
+                if referenceText.isEmpty {
+                    inp.prompt = textPtr
+                    inp.prompt_len = text.utf8.count
+                    inp.speaker_ref_text = nil
+                    inp.lang = langPtr
+                    return mtmd_helper_gen_audio_set_input(gen, &inp)
+                }
+                return referenceText.withCString { refPtr in
+                    inp.prompt = textPtr
+                    inp.prompt_len = text.utf8.count
+                    inp.speaker_ref_text = refPtr
+                    inp.lang = langPtr
+                    return mtmd_helper_gen_audio_set_input(gen, &inp)
+                }
+            }
+        }
         guard rc == 0 else {
             throw VoiceCloneGGUFError.generateFailed("set_input 返回 \(rc)")
         }
