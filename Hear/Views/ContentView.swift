@@ -620,7 +620,7 @@ struct ContextToggle: View {
 struct HoldButton: View {
     @EnvironmentObject var session: LiveSession
     let lang: Language
-    @GestureState private var pressing = false
+    @State private var pressing = false
     /// 这次按下时启动的“开始听”任务，以及按了第几次（松开时用来确认没有再按下）
     @State private var beginTask: Task<Void, Never>?
     @State private var pressCount = 0
@@ -651,12 +651,13 @@ struct HoldButton: View {
         .animation(.spring(duration: 0.2), value: active)
         .opacity(enabled ? 1 : 0.4)
         .contentShape(Rectangle())
-        // 按下就开始听，松开（或手指滑出按钮很远）就暂停
-        .gesture(
-            DragGesture(minimumDistance: 0).updating($pressing) { _, state, _ in state = true }
-        )
-        // 手势被系统取消（来电等）时 pressing 也会自动变回 false，不会一直在听
-        .onChange(of: pressing) { _, p in
+        // 按下就开始听，松开就暂停。
+        // 用“按压状态”而不是拖动手势：拖动手势要等系统判断你是不是在左右滑动切换模式，
+        // 会过好一会儿才有反应；按压状态手指一碰到就触发。手势被系统取消（来电等）时也会自动松开
+        .onLongPressGesture(minimumDuration: .infinity, maximumDistance: .infinity, perform: {},
+                            onPressingChanged: { p in
+            guard p != pressing else { return }
+            pressing = p
             if p {
                 guard enabled else { return }
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -673,7 +674,7 @@ struct HoldButton: View {
                     if count == pressCount, !pressing { session.holdEnded() }
                 }
             }
-        }
+        })
         .accessibilityLabel("按住说\(lang.name)")
     }
 }
