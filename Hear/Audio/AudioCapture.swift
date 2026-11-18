@@ -23,6 +23,9 @@ final class AudioCapture {
     private let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                           sampleRate: 16_000, channels: 1, interleaved: false)!
     private let queue = DispatchQueue(label: "hear.audio.segmenter")
+    /// 停止音频引擎放在后台做：戴蓝牙耳机时，关麦克风会让系统把耳机从通话模式切回音乐模式，
+    /// 要好几百毫秒，放在主线程会让界面（例如切换模式的动画）卡住
+    private let engineQueue = DispatchQueue(label: "hear.audio.engine", qos: .userInitiated)
     private let lock = NSLock()
     private var _muted = false
     private(set) var isRunning = false
@@ -51,6 +54,7 @@ final class AudioCapture {
     }
 
     func start() throws {
+        engineQueue.sync {}            // 等上一次的停止做完
         try AudioRoute.activate()
         let input = engine.inputNode
 
@@ -84,9 +88,13 @@ final class AudioCapture {
     func stop() {
         guard isRunning else { return }
         isRunning = false
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        queue.async { [segmenter] in segmenter.flush() }
+        let engine = self.engine
+        engineQueue.async { [queue, segmenter] in
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            // 引擎停了再把最后一句交出去，后面不会再有声音进来
+            queue.async { segmenter.flush() }
+        }
     }
 
     private func installTapAndStart() throws {
