@@ -148,7 +148,7 @@ struct TopBar: View {
     }
 }
 
-/// 右上角弹出的菜单：窄面板，每行图标 + 文字居中，行与行之间用细线分隔
+/// 右上角弹出的菜单：窄面板，每行图标 + 文字横向居中，行与行之间不加分隔线
 struct MoreMenuPanel: View {
     var onNew: () -> Void
     var onHistory: () -> Void
@@ -157,20 +157,14 @@ struct MoreMenuPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             row("新建对话", "square.and.pencil", onNew)
-            line
             row("历史记录", "clock.arrow.circlepath", onHistory)
-            line
             row("功能设置", "gearshape", onSettings)
         }
-        .frame(width: 180)
+        .padding(.vertical, 4)
+        .frame(width: 198)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
-    }
-
-    /// 行与行之间的细线（左右留一点边）
-    private var line: some View {
-        Divider().padding(.horizontal, 12)
     }
 
     /// 一行：图标 + 文字，在框内居中
@@ -178,11 +172,11 @@ struct MoreMenuPanel: View {
         Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: icon)
-                    .font(.system(size: 18))
-                    .frame(width: 24)
-                Text(title).font(.body)
+                    .font(.system(size: 20))
+                    .frame(width: 26)
+                Text(title).font(.system(size: 18.5))
             }
-            .frame(maxWidth: .infinity, minHeight: 48)
+            .frame(maxWidth: .infinity, minHeight: 53)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -627,6 +621,9 @@ struct HoldButton: View {
     @EnvironmentObject var session: LiveSession
     let lang: Language
     @GestureState private var pressing = false
+    /// 这次按下时启动的“开始听”任务，以及按了第几次（松开时用来确认没有再按下）
+    @State private var beginTask: Task<Void, Never>?
+    @State private var pressCount = 0
 
     var body: some View {
         // 手指一按下就显示按住效果，不等麦克风真正打开
@@ -663,9 +660,18 @@ struct HoldButton: View {
             if p {
                 guard enabled else { return }
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                Task { await session.holdBegan(lang) }
+                pressCount += 1
+                beginTask = Task { await session.holdBegan(lang) }
             } else {
                 session.holdEnded()
+                // 很快地按一下就松开：松开时“开始听”可能还没来得及开始，等它开始后再松开一次，
+                // 否则会一直在听（界面也一直显示“松开暂停”）
+                let task = beginTask
+                let count = pressCount
+                Task {
+                    await task?.value
+                    if count == pressCount, !pressing { session.holdEnded() }
+                }
             }
         }
         .accessibilityLabel("按住说\(lang.name)")

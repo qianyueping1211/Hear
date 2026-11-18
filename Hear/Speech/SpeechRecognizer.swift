@@ -37,6 +37,7 @@ actor SpeechRecognizer {
         ASRProgress.shared.set(stage: "初始化", pipe: nil)
         hearLog("语音识别：开始加载 \(folder.lastPathComponent)，运行在 \(useGPU ? "GPU" : "神经引擎")")
 
+        Self.prepareTokenizer(modelFolder: folder)
         let config = WhisperKitConfig()
         config.modelFolder = folder.path
         config.verbose = false
@@ -52,6 +53,11 @@ actor SpeechRecognizer {
             p = try await WhisperKit(config)
         } catch {
             hearLog("语音识别：初始化失败 \(error)", .error)
+            // 分词文件（tokenizer.json）不在本地时 WhisperKit 会联网下载，下载失败就给一个看得懂的提示
+            if !FileManager.default.fileExists(atPath: Self.tokenizerRepo.appendingPathComponent("tokenizer.json").path) {
+                throw NSError(domain: "Hear", code: 6, userInfo: [NSLocalizedDescriptionKey:
+                    "缺少 Whisper 分词文件 tokenizer.json（约 2 MB）。请联网后重试；或把 tokenizer.json 和 tokenizer_config.json 放进模型文件夹后重新导入。"])
+            }
             throw error
         }
         hearLog("语音识别：初始化完成（\(Int(Date().timeIntervalSince(t0)))s），开始载入模型")
@@ -72,6 +78,35 @@ actor SpeechRecognizer {
         if let tk = p.tokenizer {
             zhPromptTokens = tk.encode(text: " 以下是普通话的句子，使用简体中文。")
                 .filter { $0 < tk.specialTokens.specialTokenBegin }
+        }
+    }
+
+    /// WhisperKit 找分词文件的位置：Documents/huggingface/models/openai/whisper-large-v3
+    static var tokenizerRepo: URL {
+        ModelManager.whisperBase.appendingPathComponent("models/openai/whisper-large-v3", isDirectory: true)
+    }
+
+    /// 导入的模型里通常没有分词文件，WhisperKit 会去网上下载。这里先准备好：
+    /// 模型文件夹里带了分词文件就复制过去；本地没有时清掉上次没下完的临时文件，并建好文件夹，避免下载后移动失败
+    static func prepareTokenizer(modelFolder: URL) {
+        let fm = FileManager.default
+        let repo = tokenizerRepo
+        try? fm.createDirectory(at: repo, withIntermediateDirectories: true)
+        let names = ["tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt",
+                     "special_tokens_map.json", "added_tokens.json", "normalizer.json"]
+        var copied: [String] = []
+        for n in names {
+            let src = modelFolder.appendingPathComponent(n)
+            let dst = repo.appendingPathComponent(n)
+            guard fm.fileExists(atPath: src.path), !fm.fileExists(atPath: dst.path) else { continue }
+            if (try? fm.copyItem(at: src, to: dst)) != nil { copied.append(n) }
+        }
+        if !copied.isEmpty { hearLog("语音识别：从模型文件夹复制分词文件 \(copied.joined(separator: "、"))") }
+        if fm.fileExists(atPath: repo.appendingPathComponent("tokenizer.json").path) {
+            hearLog("语音识别：分词文件已在本地")
+        } else {
+            try? fm.removeItem(at: repo.appendingPathComponent(".cache", isDirectory: true))
+            hearLog("语音识别：本地没有分词文件 tokenizer.json，需要联网下载（约 2 MB）", .warning)
         }
     }
 
