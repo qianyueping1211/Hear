@@ -63,8 +63,8 @@ final class LiveSession: ObservableObject {
     @Published var asrEngine: String {
         didSet {
             save("asrEngine", asrEngine)
-            guard asrEngine != oldValue, isRunning else { return }
-            if asrEngine == "apple" { startLiveEngine() } else { stopLiveEngine() }
+            guard asrEngine != oldValue, isRunning, !usingApple else { return }
+            if asrEngine == "apple" { startAppleASR() } else { stopAppleASR() }
         }
     }
     // 引擎："local" 听见本地模型（Whisper + Hy-MT2）/ "apple" 苹果自带（系统听写 + 系统翻译）/ "" 还没选
@@ -83,6 +83,8 @@ final class LiveSession: ObservableObject {
     private var pendingLocalSwitch = false
 
     var appleAvailable: Bool { LiveTextEngineFactory.isSupported }
+    /// 说话时用系统听写逐字显示：苹果自带模式，或本地模型选了“iOS 系统听写”。两种语言各开一个听写同时听
+    private var dualLive: Bool { appleAvailable && (usingApple || asrEngine == "apple") }
     var usingApple: Bool { engineMode == "apple" && appleAvailable }
     var modelsInstalled: Bool {
         _ = modelsRevision
@@ -662,11 +664,7 @@ final class LiveSession: ObservableObject {
             try capture.start()
             if outputMode == .headphones { AudioRoute.apply(.headphones) }
             isRunning = true
-            if usingApple {
-                startAppleASR()
-            } else if asrEngine == "apple" {
-                startLiveEngine()
-            }
+            if dualLive { startAppleASR() }
             hearLog("开始实时翻译：\(langA.displayName) ⇄ \(langB.displayName)，朗读\(outputMode == .speaker ? "扬声器" : "耳机")")
             activity = "正在聆听"
             UIApplication.shared.isIdleTimerDisabled = true
@@ -895,7 +893,7 @@ final class LiveSession: ObservableObject {
             hearLog("断句：检测到说话（第 \(id) 句）")
         case .partial(let id, let samples):
             // 系统听写在工作时由它出原文；否则用 Whisper 不停地识别最新的声音
-            guard !liveActive, !usingApple else { return }
+            guard !liveActive, appleEngines.isEmpty else { return }
             previewSamples = (id, samples)
             if !asrPreviewBusy {
                 asrPreviewBusy = true
@@ -937,7 +935,8 @@ final class LiveSession: ObservableObject {
         while let job = previewSamples {
             previewSamples = nil
             let id = job.id
-            guard phase == .ready, isRunning, !liveActive, id == currentSeg, id > finishedSeg else { continue }
+            // 整句识别在进行时不做预览，GPU 先让给整句（否则整句会一直“识别中”）
+            guard phase == .ready, isRunning, !liveActive, !working, id == currentSeg, id > finishedSeg else { continue }
             let gen = runGen
             let a = langA, b = langB
             let fallback = (lastLangID == b.id) ? b.id : a.id
@@ -954,7 +953,12 @@ final class LiveSession: ObservableObject {
                 continue
             }
             hearLog("实时识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(r.1.prefix(30))")
-            let src = (r.0 == b.id) ? b : a
+            var src = (r.0 == b.id) ? b : a
+            // 按已经出来的字马上判断语言：字是英文就放英文侧，是汉字就放中文侧，不等整句
+            if !SpeechRecognizer.matchesLanguage(r.1, src.id) {
+                let other = src == a ? b : a
+                if SpeechRecognizer.matchesLanguage(r.1, other.id) { src = other }
+            }
             guard gen == runGen, isRunning, id == currentSeg, id > finishedSeg, partialSeg == id,
                   SpeechRecognizer.isMeaningful(r.1), SpeechRecognizer.matchesLanguage(r.1, src.id) else { continue }
             partialSource = src
@@ -995,6 +999,8 @@ final class LiveSession: ObservableObject {
                 if let out, !out.isEmpty, gen == runGen, id == partialSeg, id > finishedSeg { partialTranslation = out }
                 continue
             }
+            // 本地翻译模型和 Whisper 共用 GPU：整句在识别/翻译时，预览翻译先让路
+            if working { continue }
             let epoch = translator.currentPreviewEpoch
             let prompt = PromptBuilder.build(text: p.text, from: p.src, to: p.tgt, context: [],
                                              glossary: PromptBuilder.parseGlossary(glossary))
@@ -1073,7 +1079,7 @@ final class LiveSession: ObservableObject {
             Task {
                 do {
                     try await e.start(languageID: lang.id, locale: lang.tts)
-                    guard isRunning, gen == runGen, usingApple else { await e.stop(); return }
+                    guard isRunning, gen == runGen, dualLive else { await e.stop(); return }
                     if currentSeg > finishedSeg { e.markSegmentStart(currentSeg) }
                 } catch {
                     hearLog("系统听写不支持 \(lang.name)：\(error.localizedDescription)", .warning)
@@ -1101,14 +1107,16 @@ final class LiveSession: ObservableObject {
             let r = e.segmentText(id)
             guard !r.text.isEmpty, let lid = e.languageID else { continue }
             let lang = lid == langB.id ? langB : langA
-            if best == nil || r.confidence > best!.conf { best = (r.text, lang, r.confidence) }
+            // 例如中文听写把英文也写成了英文字母：文字和语言对不上就降分，避免说英文却当成中文
+            let score = r.confidence + (SpeechRecognizer.matchesLanguage(r.text, lang.id) ? 1 : 0)
+            if best == nil || score > best!.conf { best = (r.text, lang, score) }
         }
         guard let best else { return nil }
         return (best.text, best.lang)
     }
 
     private func appleUpdated() {
-        guard usingApple, isRunning, currentSeg > finishedSeg, partialSeg == currentSeg,
+        guard !appleEngines.isEmpty, isRunning, currentSeg > finishedSeg, partialSeg == currentSeg,
               let b = bestApple(currentSeg), SpeechRecognizer.isMeaningful(b.text) else { return }
         partialSource = b.lang
         // 中间停顿过的一句话：系统听写会把上一句的内容再带一遍，这里只显示新说的部分
@@ -1275,10 +1283,14 @@ final class LiveSession: ObservableObject {
             return
         }
         guard gen == runGen else { return }              // 已经停止：结果丢弃
-        let src = (detected == b.id) ? b : a
+        var src = (detected == b.id) ? b : a
+        // Whisper 判断的语言和文字对不上（例如说英文却判成中文）：按文字改成另一种语言
+        if !SpeechRecognizer.matchesLanguage(text, src.id) {
+            let other = src == a ? b : a
+            if SpeechRecognizer.matchesLanguage(text, other.id) { src = other }
+        }
         let tgt = (src == a) ? b : a
         lastLangID = src.id
-        switchLiveLanguage(to: src)
 
         // 没意义的、或者文字和语言对不上的（例如说中文却出来俄文）都当成噪声丢掉
         guard SpeechRecognizer.isMeaningful(text), SpeechRecognizer.matchesLanguage(text, src.id) else {
@@ -1429,10 +1441,8 @@ final class LiveSession: ObservableObject {
         }
         save("langA", langA.id); save("langB", langB.id)
         lastLangID = nil
-        if usingApple {
-            prepareAppleTranslation()
-            if isRunning { startAppleASR() }
-        }
+        if usingApple { prepareAppleTranslation() }
+        if isRunning && dualLive { startAppleASR() }
     }
 
     private func pushConfig() {
