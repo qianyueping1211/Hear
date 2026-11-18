@@ -95,5 +95,6 @@ scripts/fetch_llama.sh           下载 llama.cpp 的 iOS 框架
 
 - **打包失败（Actions 变红）**：点进失败的任务，下载 `build-log`，把里面带 `error:` 的几行发给 Claude 修。
 - **llama.cpp 新版本改了接口导致编译错误**：可以固定版本。在 workflow 的 `env` 里加 `LLAMA_TAG: b7xxx`（填一个能用的版本号）。
+- **打包显示 “The job was not acquired by Runner” 或 “Internal server error”**：这是 GitHub 自己的服务器临时出问题，和代码无关。进入这次打包，点右上角 **Re-run all jobs** 重新打包即可。
 - **免费账号限制**：同时最多 3 个自签 App；每 7 天需要重签。
 - **版本号**：三位数字，写在仓库根目录的 `VERSION` 文件里（例如 `1.0.0`），打包时用它命名安装包，例如 `Hear-1.0.0.ipa`。之前的版本已改为 0.x.y（例如 4.3 → 0.4.3）。
