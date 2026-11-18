@@ -139,7 +139,12 @@ struct TopBar: View {
                 .accessibilityLabel("更多")
         }
         .overlay {
-            Text("听见").font(.headline)
+            VStack(spacing: 0) {
+                Text("听见").font(.headline)
+                Text(session.talkMode ? "对话翻译模式" : "实时翻译模式")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.horizontal)
         .padding(.top, 6)
@@ -322,9 +327,11 @@ struct EmptyHint: View {
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "waveform").font(.system(size: 44)).foregroundStyle(.secondary)
-            Text("点下方按钮开始，之后直接说话即可")
+            Text(session.talkMode ? "按住下方对应语言的按钮说话，松开暂停" : "点下方按钮开始，之后直接说话即可")
                 .font(.headline)
-            Text("\(session.langA.name) 和 \(session.langB.name) 都可以说，App 会自动识别是哪种语言并翻译成另一种。全部在手机本地完成。")
+            Text(session.talkMode
+                 ? "左边按钮说\(session.langA.name)，右边按钮说\(session.langB.name)。左右滑动底部可以切回实时翻译模式。"
+                 : "\(session.langA.name) 和 \(session.langB.name) 都可以说，App 会自动识别是哪种语言并翻译成另一种。左右滑动底部可以切换到对话翻译模式。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -462,6 +469,10 @@ struct ControlBar: View {
     private var mainColor: Color { Color.accentColor }        // 开始后也用蓝色，只换成停止图标
     private var mainIcon: String { session.isRunning ? "stop.fill" : "mic.fill" }
     private var mainHint: String {
+        if session.talkMode {
+            if let l = session.holding { return "正在听\(l.name) · 松开暂停" }
+            return "按住对应语言的按钮说话"
+        }
         guard session.isRunning else { return "点击开始实时翻译" }
         if session.speakOutput && session.outputMode == .speaker {
             return "实时翻译中 · 点击停止后朗读"
@@ -475,38 +486,37 @@ struct ControlBar: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
-            HStack {
-                // 点一下：朗读开/关；按住 2 秒：扬声器 ⇄ 耳机
-                SpeakToggle()
-
-                Spacer()
-
-                Button { Task { await session.toggle() } } label: {
-                    MicButton(meter: session.meter, running: session.isRunning,
-                              color: mainColor, icon: mainIcon)
-                }
-                .disabled(!(session.phase == .ready || session.isLoadingPhase))
-                .opacity(session.phase == .ready || session.isLoadingPhase ? 1 : 0.4)
-
-                Spacer()
-
-                Button { session.useContext.toggle() } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: session.useContext ? "text.bubble.fill" : "text.bubble")
-                            .font(.title2)
-                        Text(session.useContext ? "上下文开" : "上下文关").font(.caption2)
-                    }
-                    .frame(width: 70)
-                    .foregroundStyle(session.useContext ? Color.accentColor : Color.secondary)   // 关闭时灰色
+            ZStack {
+                if session.talkMode {
+                    talkControls
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                } else {
+                    liveControls
+                        .transition(.move(edge: .leading).combined(with: .opacity))
                 }
             }
-            .padding(.horizontal, 24)
+            .frame(height: 140)
+            .clipped()
 
             Text(mainHint)
                 .font(.callout.weight(.medium))
-                .padding(.bottom, 8)
+
+            ModeDots()
+                .padding(.bottom, 6)
         }
         .padding(.top, 6)
+        .contentShape(Rectangle())
+        // 左右滑动切换：实时翻译 ⇄ 对话翻译（按着说话时不切换）
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 30).onEnded { v in
+                let dx = v.translation.width
+                guard session.holding == nil, abs(dx) > 50, abs(dx) > abs(v.translation.height) else { return }
+                let talk = dx < 0
+                guard talk != session.talkMode else { return }
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(.spring(duration: 0.3)) { session.talkMode = talk }
+            }
+        )
         // 按钮上方的短暂提示（例如本地模型还在加载）
         .overlay(alignment: .top) {
             if let t = session.toast {
@@ -521,6 +531,147 @@ struct ControlBar: View {
             }
         }
         .animation(.spring(duration: 0.25), value: session.toast)
+    }
+
+    /// 实时翻译模式：播报 · 大按钮 · 上下文
+    private var liveControls: some View {
+        HStack {
+            // 点一下：朗读开/关；按住 2 秒：扬声器 ⇄ 耳机
+            SpeakToggle()
+
+            Spacer()
+
+            Button { Task { await session.toggle() } } label: {
+                MicButton(meter: session.meter, running: session.isRunning,
+                          color: mainColor, icon: mainIcon)
+            }
+            .disabled(!(session.phase == .ready || session.isLoadingPhase))
+            .opacity(session.phase == .ready || session.isLoadingPhase ? 1 : 0.4)
+
+            Spacer()
+
+            ContextToggle()
+        }
+        .padding(.horizontal, 24)
+    }
+
+    /// 对话翻译模式：左边按住说语言 A，右边按住说语言 B，中间是播报和上下文
+    private var talkControls: some View {
+        HStack(spacing: 0) {
+            HoldButton(lang: session.langA)
+            Spacer(minLength: 4)
+            VStack(spacing: 10) {
+                SpeakToggle()
+                ContextToggle()
+            }
+            Spacer(minLength: 4)
+            HoldButton(lang: session.langB)
+        }
+        .padding(.horizontal, 16)
+    }
+}
+
+/// 底部的两个小圆点：表示当前是哪个模式，点一下也能切换
+struct ModeDots: View {
+    @EnvironmentObject var session: LiveSession
+
+    var body: some View {
+        HStack(spacing: 6) {
+            dot(active: !session.talkMode) { session.talkMode = false }
+            dot(active: session.talkMode) { session.talkMode = true }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(session.talkMode ? "对话翻译模式" : "实时翻译模式")
+        .accessibilityHint("左右滑动切换模式")
+    }
+
+    private func dot(active: Bool, _ action: @escaping () -> Void) -> some View {
+        Capsule()
+            .fill(active ? Color.accentColor : Color.secondary.opacity(0.35))
+            .frame(width: active ? 16 : 6, height: 6)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard session.holding == nil, !active else { return }
+                withAnimation(.spring(duration: 0.3)) { action() }
+            }
+    }
+}
+
+/// 上下文开关（关闭时灰色）
+struct ContextToggle: View {
+    @EnvironmentObject var session: LiveSession
+
+    var body: some View {
+        Button { session.useContext.toggle() } label: {
+            VStack(spacing: 4) {
+                Image(systemName: session.useContext ? "text.bubble.fill" : "text.bubble")
+                    .font(.title2)
+                Text(session.useContext ? "上下文开" : "上下文关").font(.caption2)
+            }
+            .frame(width: 70)
+            .foregroundStyle(session.useContext ? Color.accentColor : Color.secondary)
+        }
+    }
+}
+
+/// 对话翻译模式的按钮：中间是这种语言的国旗，按住说话，松开暂停
+struct HoldButton: View {
+    @EnvironmentObject var session: LiveSession
+    let lang: Language
+    @GestureState private var pressing = false
+
+    var body: some View {
+        let active = session.holding == lang
+        let enabled = session.phase == .ready || session.isLoadingPhase
+        VStack(spacing: 6) {
+            ZStack {
+                HoldRing(meter: session.meter, active: active)
+                Circle()
+                    .fill(active ? Color.accentColor : Color.accentColor.opacity(0.15))
+                    .frame(width: 88)
+                Text(lang.flag).font(.system(size: 42))
+            }
+            .frame(width: 116, height: 110)
+            Text(active ? "松开暂停" : "按住说\(lang.name)")
+                .font(.caption)
+                .foregroundStyle(active ? Color.accentColor : Color.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(width: 116)
+        }
+        .scaleEffect(active ? 1.06 : 1)
+        .animation(.spring(duration: 0.2), value: active)
+        .opacity(enabled ? 1 : 0.4)
+        .contentShape(Rectangle())
+        // 按下就开始听，松开（或手指滑出按钮很远）就暂停
+        .gesture(
+            DragGesture(minimumDistance: 0).updating($pressing) { _, state, _ in state = true }
+        )
+        // 手势被系统取消（来电等）时 pressing 也会自动变回 false，不会一直在听
+        .onChange(of: pressing) { _, p in
+            if p {
+                guard enabled else { return }
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                Task { await session.holdBegan(lang) }
+            } else {
+                session.holdEnded()
+            }
+        }
+        .accessibilityLabel("按住说\(lang.name)")
+    }
+}
+
+/// 按住时外圈跟着音量变大
+struct HoldRing: View {
+    @ObservedObject var meter: LevelMeter
+    let active: Bool
+
+    var body: some View {
+        Circle()
+            .fill(Color.accentColor.opacity(active ? 0.22 : 0))
+            .frame(width: 92 + CGFloat(active ? meter.level : 0) * 22)
+            .animation(.easeOut(duration: 0.12), value: meter.level)
     }
 }
 
