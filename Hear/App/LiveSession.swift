@@ -792,23 +792,27 @@ final class LiveSession: ObservableObject {
         let svLoaded = await sense.isLoaded
         let needASR = need.whisper && !asrLoaded
         let needSV = need.sense && !svLoaded
-        let needMT = needLocalMT && !(await translator.isLoaded)
+        let mtLoaded = await translator.isLoaded
+        let needMT = needLocalMT && !mtLoaded
         if !needASR && !needSV && !needMT { phase = .ready; return }
         // 加载识别和翻译模型前，先等声音克隆结束再卸掉：
         // 声音克隆（约 3 GB）和识别/翻译模型一起加载，App 的内存额度会被撑爆，直接被系统杀掉
         cloneLoadTask?.cancel()
         try? await Task.sleep(nanoseconds: 50_000_000)   // 让被取消的任务有机会跑到设置 cloneLoading 的那一步
-        let cloneLoadingNow = cloneLoading || await cloner.isLoading
-        let cloneLoadedNow = await cloner.isLoaded
-        if cloneLoadingNow || cloneLoadedNow {
+        // 注意：Swift 不允许 await 出现在 && / || 右侧，逐个取值
+        var cloneBusy = cloneLoading
+        if await cloner.isLoading { cloneBusy = true }
+        var cloneHasModel = await cloner.isLoaded
+        if cloneBusy || cloneHasModel {
             phase = .loading("正在等待声音克隆加载完成…")
-            while true {
-                let stillLoading = cloneLoading || await cloner.isLoading
-                if !stillLoading { break }
+            while cloneBusy {
                 try? await Task.sleep(nanoseconds: 200_000_000)
+                cloneBusy = cloneLoading
+                if await cloner.isLoading { cloneBusy = true }
             }
             cloneTasks.removeAll()
-            if await cloner.isLoaded { await cloner.unload() }
+            cloneHasModel = await cloner.isLoaded
+            if cloneHasModel { await cloner.unload() }
         }
         defer { if voiceClone { scheduleCloneLoad(delay: 3) } }
         // 每秒刷新一次已用时间，让用户知道没有卡死
