@@ -863,6 +863,27 @@ final class LiveSession: ObservableObject {
         }
     }
 
+    /// 设置 → 导入声音克隆模型（包含主模型和声音编解码器两个文件夹的大文件夹）
+    func importVoiceClone(_ url: URL) async {
+        do {
+            cloneTasks.removeAll()
+            await cloner.unload()
+            let r = try VoiceCloner.importFolder(from: url)
+            modelsRevision += 1
+            if r.model && r.tokenizer {
+                bgDownloadError = nil
+            } else {
+                bgDownloadError = r.model
+                    ? "已导入主模型，还缺声音编解码器（Qwen3-TTS-Tokenizer-12Hz）"
+                    : "已导入声音编解码器，还缺主模型（Qwen3-TTS-12Hz-0.6B-Base-MLX-4bit）"
+            }
+            if voiceClone { loadClonerIfNeeded() }
+        } catch {
+            hearLog("导入声音克隆模型失败：\(error)", .error)
+            bgDownloadError = "导入失败：\(error.localizedDescription)"
+        }
+    }
+
     /// 正在用本地模型时，模型变了就重新加载；苹果自带模式下什么都不做
     private func reloadIfLocal() async {
         guard !usingApple, engineMode == "local", modelsInstalled else { return }
