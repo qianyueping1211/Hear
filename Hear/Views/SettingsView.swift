@@ -266,16 +266,13 @@ struct SettingsView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Spacer(minLength: 4)
-                // 状态
-                Group {
-                    if downloading {
-                        Image(systemName: "arrow.down.circle.dotted").foregroundStyle(.tint)
-                    } else if waiting {
-                        Image(systemName: "clock").foregroundStyle(.secondary)
-                    } else if status.installed {
+                // 状态：已下载是绿色对勾；没下载是灰色对勾；下载中（或排队等下载）灰色对勾外面转一圈灰点
+                ZStack {
+                    if status.installed && !downloading {
                         Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                     } else {
-                        Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
+                        Image(systemName: "checkmark.circle").foregroundStyle(.secondary)
+                        if downloading || waiting { ProcessingDots() }
                     }
                 }
                 .font(.title3)
@@ -286,7 +283,8 @@ struct SettingsView: View {
                     lastKind = kind
                     confirmKind = kind
                 } label: {
-                    Image(systemName: status.installed ? "arrow.clockwise" : "arrow.down.circle")
+                    // 没有模型（包括正在下载）是下载图标；下载完成后变成刷新（重新下载）图标
+                    Image(systemName: status.installed && !downloading ? "arrow.clockwise" : "arrow.down.circle")
                         .font(.title3)
                         .frame(width: 34, height: 34)
                 }
@@ -434,5 +432,20 @@ struct SettingsView: View {
                 }
             }
         )
+    }
+}
+
+/// 状态图标外面一圈不停转动的灰点：表示正在处理（下载中）
+private struct ProcessingDots: View {
+    @State private var spin = false
+
+    var body: some View {
+        Circle()
+            .stroke(Color.secondary, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: [0.1, 5]))
+            .frame(width: 32, height: 32)
+            .rotationEffect(.degrees(spin ? 360 : 0))
+            .animation(.linear(duration: 2.4).repeatForever(autoreverses: false), value: spin)
+            .onAppear { spin = true }
+            .accessibilityHidden(true)
     }
 }

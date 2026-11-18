@@ -82,16 +82,17 @@ actor SpeechRecognizer {
                    preview: Bool = false) async throws -> (String, String) {
         guard let pipe else { return (fallback, "") }
         await acquire(final: !preview); defer { release() }
+        let secs = Double(samples.count) / 16_000
 
         // 只有一种候选语言（对话翻译模式按住了某种语言）：直接按这种语言识别，不再自动判断
         if candidates.count == 1, let only = candidates.first {
             let r = try await pipe.transcribe(audioArray: samples,
-                                              decodeOptions: options(language: only, preview: preview))
+                                              decodeOptions: options(language: only, preview: preview, seconds: secs))
             return (only, Self.confident(r) ? Self.joinText(r, language: only) : "")
         }
 
         let auto = try await pipe.transcribe(audioArray: samples,
-                                             decodeOptions: options(language: nil, preview: preview))
+                                             decodeOptions: options(language: nil, preview: preview, seconds: secs))
         let detected = auto.first?.language ?? ""
         if candidates.contains(detected) {
             return (detected, Self.confident(auto) ? Self.joinText(auto, language: detected) : "")
@@ -100,7 +101,7 @@ actor SpeechRecognizer {
             return (fallback, Self.confident(auto) ? Self.joinText(auto, language: fallback) : "")
         }
         let forced = try await pipe.transcribe(audioArray: samples,
-                                               decodeOptions: options(language: fallback, preview: false))
+                                               decodeOptions: options(language: fallback, preview: false, seconds: secs))
         return (fallback, Self.confident(forced) ? Self.joinText(forced, language: fallback) : "")
     }
 
@@ -112,7 +113,9 @@ actor SpeechRecognizer {
         return Self.joinText(results, language: language ?? results.first?.language)
     }
 
-    private func options(language: String?, preview: Bool = false) -> DecodingOptions {
+    /// seconds：这段声音有多长。输出长度按时长封顶：正常说话每秒最多十来个字，
+    /// 噪声上 Whisper 容易“复读”出几百个字，封顶后不会卡很久
+    private func options(language: String?, preview: Bool = false, seconds: Double = 30) -> DecodingOptions {
         var opts = DecodingOptions()
         opts.verbose = false
         opts.task = .transcribe
@@ -121,9 +124,9 @@ actor SpeechRecognizer {
         opts.usePrefillPrompt = (language != nil)
         opts.temperature = 0
         // 噪声或半句话时 Whisper 容易“复读”很长的内容并反复重试，非常慢：
-        // 预览不重试、限制长度；整句最多重试一次
-        opts.temperatureFallbackCount = preview ? 0 : 1
-        opts.sampleLength = preview ? 96 : 224
+        // 都不重试（重试一次要再花一整遍的时间）；长度按声音时长封顶
+        opts.temperatureFallbackCount = 0
+        opts.sampleLength = min(preview ? 96 : 224, max(24, Int(seconds * 15)))
         opts.compressionRatioThreshold = 2.4
         opts.logProbThreshold = -1.0
         opts.firstTokenLogProbThreshold = -1.5
