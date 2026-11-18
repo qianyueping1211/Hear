@@ -27,7 +27,8 @@ final class LiveSession: ObservableObject {
     @Published var partial = ""                 // 说话中的实时识别文字
     @Published var partialTranslation = ""      // 说话中的实时译文（会不断更正）
     @Published var partialSource: Language?     // 实时识别判断出的语言
-    @Published var level: Float = 0
+    /// 音量（每秒变化很多次）单独放一个对象，只有麦克风按钮跟着刷新，整页和弹出的页面不会跟着闪
+    let meter = LevelMeter()
     @Published var activity = ""
 
     // 设置
@@ -183,7 +184,7 @@ final class LiveSession: ObservableObject {
                 guard let self else { return }
                 hearLog("音频被系统打断（来电等）", .warning)
                 self.stopReading()
-                if self.isRunning { self.stop() }
+                if self.isRunning { self.stop(readAfter: false) }
             }
         }
     }
@@ -307,7 +308,7 @@ final class LiveSession: ObservableObject {
     var speechStatus: ModelStatus {
         _ = modelsRevision
         if let f = ModelManager.whisperFolder() {
-            return .init(name: "Whisper large-v3 turbo",
+            return .init(name: f.lastPathComponent,
                          detail: ModelManager.format(ModelManager.folderSize(f)), installed: true)
         }
         return .init(name: "Whisper large-v3 turbo", detail: "未下载", installed: false)
@@ -327,11 +328,11 @@ final class LiveSession: ObservableObject {
     }
 
     func selectGGUF(_ url: URL) async {
-        if isRunning { stop() }
+        if isRunning && !usingApple { stop(readAfter: false) }
         ModelManager.select(url)
         await translator.unload()
         modelsRevision += 1
-        await loadModels()
+        await reloadIfLocal()
     }
 
     /// 设置 → 下载与导入：下载（或删除后重新下载）某个模型，进度显示在设置里
@@ -339,7 +340,7 @@ final class LiveSession: ObservableObject {
         guard !bgDownloading else { return }
         let installed = kind == .translation ? ModelManager.currentGGUF() != nil : ModelManager.whisperFolder() != nil
         if installed {
-            if isRunning && !usingApple { stop() }
+            if isRunning && !usingApple { stop(readAfter: false) }
             switch kind {
             case .translation:
                 await translator.unload()
@@ -378,7 +379,7 @@ final class LiveSession: ObservableObject {
     /// 用苹果自带的系统听写 + 系统翻译（不用下载模型）
     func chooseApple() {
         guard appleAvailable else { return }
-        if isRunning { stop() }
+        if isRunning { stop(readAfter: false) }
         stopLiveEngine()
         engineMode = "apple"
         phase = .ready
@@ -399,7 +400,7 @@ final class LiveSession: ObservableObject {
 
     /// 切换到听见本地模型（模型已下载）
     func switchToLocal() async {
-        if isRunning { stop() }
+        if isRunning { stop(readAfter: false) }
         stopAppleASR()
         engineMode = "local"
         hearLog("引擎：听见本地模型")
@@ -418,11 +419,7 @@ final class LiveSession: ObservableObject {
         hearLog("后台下载本地模型")
         Task {
             UIApplication.shared.isIdleTimerDisabled = true
-            defer {
-                bgDownloading = false
-                bgDownloadKind = nil
-                UIApplication.shared.isIdleTimerDisabled = isRunning
-            }
+            var ok = false
             do {
                 if only != .speech, ModelManager.currentGGUF() == nil {
                     bgDownloadKind = .translation
@@ -431,6 +428,7 @@ final class LiveSession: ObservableObject {
                     _ = try await ModelManager.downloadGGUF(host: host) { p in
                         Task { @MainActor in self.bgDownloadProgress = p }
                     }
+                    bgDownloadKind = nil              // 下载完立刻收起进度条
                     modelsRevision += 1
                 }
                 if only != .translation, ModelManager.whisperFolder() == nil {
@@ -440,22 +438,30 @@ final class LiveSession: ObservableObject {
                     _ = try await ModelManager.downloadWhisper(host: host) { p in
                         Task { @MainActor in self.bgDownloadProgress = p }
                     }
+                    bgDownloadKind = nil
                     modelsRevision += 1
                 }
-                hearLog("模型下载完成")
-                guard modelsInstalled else { return }       // 另一个模型还没下载
-                // 正在用本地模型（或刚重新下载）：直接加载；苹果自带：只有选择了切换才切过去
-                guard !usingApple || bgSwitchWhenDone else { return }
-                if isRunning {
-                    pendingLocalSwitch = true     // 正在对话：停止实时翻译后再切换
-                    activity = "本地模型已下载，停止实时翻译后切换"
-                } else {
-                    await switchToLocal()
-                }
+                ok = true
             } catch {
                 hearLog("后台下载失败：\(error)", .error)
                 bgDownloadError = "下载失败：\(error.localizedDescription)"
+            }
+            // 先结束“下载中”的显示，再去切换或加载模型（加载要好几秒，不用一直挂着 100%）
+            bgDownloading = false
+            bgDownloadKind = nil
+            UIApplication.shared.isIdleTimerDisabled = isRunning
+            guard ok, modelsInstalled else {
                 if !usingApple, case .loading = phase { phase = .needsModels }
+                return
+            }
+            hearLog("模型下载完成")
+            // 正在用本地模型（或刚重新下载）：直接加载；苹果自带：只有选择了切换才切过去
+            guard !usingApple || bgSwitchWhenDone else { return }
+            if isRunning {
+                pendingLocalSwitch = true     // 正在对话：停止实时翻译后再切换
+                activity = "本地模型已下载，停止实时翻译后切换"
+            } else {
+                await switchToLocal()
             }
         }
     }
@@ -554,7 +560,7 @@ final class LiveSession: ObservableObject {
             hearLog("全部就绪，用时 \(Int(Date().timeIntervalSince(start)))s")
         } catch {
             hearLog("模型加载失败：\(error)", .error)
-            if isRunning { stop() }
+            if isRunning { stop(readAfter: false) }
             phase = .failed("模型加载失败：\(error.localizedDescription)\n可以在 设置 → 运行日志 查看详情。")
         }
     }
@@ -574,21 +580,47 @@ final class LiveSession: ObservableObject {
 
     /// 切换语音识别的运行方式后重新加载
     func reloadASR() async {
-        if isRunning { stop() }
+        if isRunning && !usingApple { stop(readAfter: false) }
         await asr.unload()
-        await loadModels()
+        await reloadIfLocal()
     }
 
+    /// 设置 → 导入翻译模型（.gguf 文件）。苹果自带模式下只放进“已下载的模型”，不切换、不加载
     func importModel(_ url: URL) async {
         do {
-            if isRunning { stop() }
-            _ = try ModelManager.importGGUF(from: url)
+            if isRunning && !usingApple { stop(readAfter: false) }
             await translator.unload()
+            _ = try ModelManager.importGGUF(from: url)
             modelsRevision += 1
-            await loadModels()
+            bgDownloadError = nil
+            hearLog("已导入翻译模型：\(url.lastPathComponent)")
+            await reloadIfLocal()
         } catch {
-            phase = .failed("导入失败：\(error.localizedDescription)")
+            hearLog("导入翻译模型失败：\(error)", .error)
+            bgDownloadError = "导入失败：\(error.localizedDescription)"
         }
+    }
+
+    /// 设置 → 导入语音识别模型（WhisperKit 模型文件夹）
+    func importWhisper(_ url: URL) async {
+        do {
+            if isRunning && !usingApple { stop(readAfter: false) }
+            await asr.unload()
+            try ModelManager.importWhisper(from: url)
+            modelsRevision += 1
+            bgDownloadError = nil
+            hearLog("已导入语音识别模型：\(url.lastPathComponent)")
+            await reloadIfLocal()
+        } catch {
+            hearLog("导入语音识别模型失败：\(error)", .error)
+            bgDownloadError = "导入失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 正在用本地模型时，模型变了就重新加载；苹果自带模式下什么都不做
+    private func reloadIfLocal() async {
+        guard !usingApple, engineMode == "local", modelsInstalled else { return }
+        await loadModels()
     }
 
     // MARK: - 开始 / 停止
@@ -632,13 +664,14 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    func stop() {
+    /// readAfter：停止后是否接着朗读没读的句子（只有用户自己点停止时才读）
+    func stop(readAfter: Bool = true) {
         let wasRunning = isRunning
         if wasRunning { hearLog("停止实时翻译") }
         capture.stop()
         capture.muted = false
         isRunning = false
-        level = 0
+        meter.level = 0
         activity = ""
         UIApplication.shared.isIdleTimerDisabled = false
         // 停止收音 = 立刻停止所有识别和翻译：清空排队的句子，打断正在生成的译文
@@ -653,7 +686,7 @@ final class LiveSession: ObservableObject {
         finishedSeg = max(finishedSeg, currentSeg)
         partial = ""; partialTranslation = ""; partialSource = nil
         dropUnfinished()
-        if wasRunning { kickReader() }        // 停止聆听后，从上次没读完的地方接着读
+        if wasRunning && readAfter { kickReader() }   // 停止聆听后，从上次没读完的地方接着读
         if pendingLocalSwitch {
             pendingLocalSwitch = false
             Task { await switchToLocal() }
@@ -719,7 +752,7 @@ final class LiveSession: ObservableObject {
 
     /// 新建一页。summarize = true 时在后台用默认模板总结刚才那一页
     func newConversation(summarize: Bool) {
-        if isRunning { stop() }
+        if isRunning { stop(readAfter: false) }
         persist()
         let oldID = conversationID
         let hadContent = items.contains { $0.done }
@@ -829,7 +862,7 @@ final class LiveSession: ObservableObject {
         }
         switch e {
         case .level(let l):
-            level = l
+            meter.level = isRunning ? l : 0
         case .started(let id):
             currentSeg = id
             partialSeg = id
@@ -1387,4 +1420,10 @@ final class LiveSession: ObservableObject {
     private func save(_ key: String, _ value: Any) {
         UserDefaults.standard.set(value, forKey: key)
     }
+}
+
+/// 麦克风音量（0~1），只给麦克风按钮的动画用
+@MainActor
+final class LevelMeter: ObservableObject {
+    @Published var level: Float = 0
 }
