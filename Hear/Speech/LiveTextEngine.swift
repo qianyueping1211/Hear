@@ -178,10 +178,11 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         var pieces = finals.filter { $0.end > lo && $0.start < hi }
         if let v = volatilePiece, v.end > lo, v.start < hi { pieces.append(v) }
         let cjk = ["zh", "ja", "ko"].contains(_languageID ?? "")
-        let text = pieces.map { $0.text.trimmingCharacters(in: .whitespaces) }
+        let joined = pieces.map { $0.text.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: cjk ? "" : " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = Fillers.clean(joined)          // 去掉单独的语气词（嗯、啊、um…）
         var sum = 0.0, weight = 0.0
         for p in pieces {
             guard let c = p.conf else { continue }

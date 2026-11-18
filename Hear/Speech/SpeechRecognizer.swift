@@ -134,13 +134,14 @@ actor SpeechRecognizer {
         if language == "zh" {
             text = text.applyingTransform(StringTransform("Hant-Hans"), reverse: false) ?? text
         }
-        return text
+        return Fillers.clean(text)          // 去掉单独的语气词（嗯、啊、um…）
     }
 
     /// 过滤 Whisper 在噪声/静音上常见的“幻觉”句子
     static func isMeaningful(_ text: String) -> Bool {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
         if t.count < 1 { return false }
+        if Fillers.isOnlyFillers(t) { return false }        // 只有「嗯」「啊」这类语气词
         let junk = ["字幕", "订阅", "點贊", "点赞", "打赏", "Amara", "谢谢观看", "感谢观看",
                     "Thank you for watching", "Thanks for watching", "Subtitles by", "明镜", "请不吝"]
         if junk.contains(where: { t.localizedCaseInsensitiveContains($0) }) { return false }
