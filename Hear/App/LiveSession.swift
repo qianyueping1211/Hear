@@ -97,7 +97,7 @@ final class LiveSession: ObservableObject {
     var usingApple: Bool { engineMode == "apple" && appleAvailable }
     var modelsInstalled: Bool {
         _ = modelsRevision
-        return ModelManager.currentGGUF() != nil && missingSpeechKinds(for: asrEngine).isEmpty
+        return modelFiles().gguf != nil && missingSpeechKinds(for: asrEngine).isEmpty
     }
 
     /// 某个识别引擎要用到哪些语音识别模型
@@ -114,8 +114,9 @@ final class LiveSession: ObservableObject {
         _ = modelsRevision
         let need = Self.engineNeeds(engine)
         var out: [ModelKind] = []
-        if need.sense && SenseVoiceRecognizer.installedFolder() == nil { out.append(.senseVoice) }
-        if need.whisper && ModelManager.whisperFolder() == nil { out.append(.speech) }
+        let files = modelFiles()
+        if need.sense && files.sense == nil { out.append(.senseVoice) }
+        if need.whisper && files.whisper == nil { out.append(.speech) }
         return out
     }
 
@@ -387,27 +388,27 @@ final class LiveSession: ObservableObject {
 
     var translationStatus: ModelStatus {
         _ = modelsRevision
-        if let u = ModelManager.currentGGUF() {
+        if let u = modelFiles().gguf {
             return .init(name: u.lastPathComponent,
-                         detail: ModelManager.format(ModelManager.fileSize(u)), installed: true)
+                         detail: ModelManager.format(cachedSize(u, folder: false)), installed: true)
         }
         return .init(name: "Hy-MT2-1.8B", detail: "未下载", installed: false)
     }
 
     var speechStatus: ModelStatus {
         _ = modelsRevision
-        if let f = ModelManager.whisperFolder() {
+        if let f = modelFiles().whisper {
             return .init(name: f.lastPathComponent,
-                         detail: ModelManager.format(ModelManager.folderSize(f)), installed: true)
+                         detail: ModelManager.format(cachedSize(f, folder: true)), installed: true)
         }
         return .init(name: "Whisper large-v3 turbo", detail: "未下载", installed: false)
     }
 
     var senseStatus: ModelStatus {
         _ = modelsRevision
-        if let f = SenseVoiceRecognizer.installedFolder() {
+        if let f = modelFiles().sense {
             return .init(name: "SenseVoice-Small",
-                         detail: ModelManager.format(ModelManager.folderSize(f)), installed: true)
+                         detail: ModelManager.format(cachedSize(f, folder: true)), installed: true)
         }
         return .init(name: "SenseVoice-Small", detail: "未下载", installed: false)
     }
@@ -415,10 +416,32 @@ final class LiveSession: ObservableObject {
     func isInstalled(_ kind: ModelKind) -> Bool {
         _ = modelsRevision
         switch kind {
-        case .translation: return ModelManager.currentGGUF() != nil
-        case .speech: return ModelManager.whisperFolder() != nil
-        case .senseVoice: return SenseVoiceRecognizer.installedFolder() != nil
+        case .translation: return modelFiles().gguf != nil
+        case .speech: return modelFiles().whisper != nil
+        case .senseVoice: return modelFiles().sense != nil
         }
+    }
+
+    // 模型文件的位置和大小：界面每次刷新都会用到，查一次就记住，模型文件变动（modelsRevision 变了）才重新查。
+    // 以前每次刷新都去遍历模型文件夹算大小，说话、朗读时界面刷新很频繁，会造成卡顿
+    private var fileCache: (rev: Int, gguf: URL?, whisper: URL?, sense: URL?)?
+    private var sizeCache: [String: Int64] = [:]
+
+    private func modelFiles() -> (gguf: URL?, whisper: URL?, sense: URL?) {
+        if let c = fileCache, c.rev == modelsRevision { return (c.gguf, c.whisper, c.sense) }
+        let g = ModelManager.currentGGUF()
+        let w = ModelManager.whisperFolder()
+        let sv = SenseVoiceRecognizer.installedFolder()
+        fileCache = (modelsRevision, g, w, sv)
+        sizeCache.removeAll()
+        return (g, w, sv)
+    }
+
+    private func cachedSize(_ u: URL, folder: Bool) -> Int64 {
+        if let v = sizeCache[u.path] { return v }
+        let v = folder ? ModelManager.folderSize(u) : ModelManager.fileSize(u)
+        sizeCache[u.path] = v
+        return v
     }
 
     var installedGGUFs: [URL] {
@@ -642,6 +665,7 @@ final class LiveSession: ObservableObject {
                 _ = try await ModelManager.downloadGGUF(host: host) { p in
                     Task { @MainActor in self.setProgress("翻译模型 Hy-MT2", p) }
                 }
+                modelsRevision += 1
             }
             // 只下载当前识别引擎要用的语音识别模型
             for kind in missingSpeechKinds(for: asrEngine) {
@@ -1529,7 +1553,7 @@ final class LiveSession: ObservableObject {
         }
         guard gen == runGen, phase == .ready else { return }
         let a = langA, b = langB
-        activity = "识别中…"
+        activity = useSense ? "SenseVoice 识别中…" : "Whisper 识别中…"
         let forced = forcedItemLang(itemID)
         let fallback = forced?.id ?? ((lastLangID == b.id) ? b.id : a.id)
         let cands = forced.map { [$0.id] } ?? [a.id, b.id]
@@ -1715,7 +1739,6 @@ final class LiveSession: ObservableObject {
         // 聆听中用扬声器读（只有点句子时才会）：暂停麦克风，避免把喇叭声音再识别一遍
         let mute = outputMode == .speaker && isRunning
         hearLog("朗读：\(item.target.displayName)，\(outputMode == .speaker ? "扬声器" : (pan < 0 ? "左耳" : (pan > 0 ? "右耳" : "双耳")))，声音 \(voice?.name ?? "默认")")
-        activity = "朗读中…"
         if mute { capture.muted = true }
         await speaker.speak(SpeakRequest(text: text, locale: item.target.tts,
                                          voice: voice, pitch: pitch, pan: pan))
@@ -1723,7 +1746,6 @@ final class LiveSession: ObservableObject {
             try? await Task.sleep(nanoseconds: 300_000_000)
             capture.muted = false
         }
-        if activity == "朗读中…" { activity = isRunning ? "正在聆听" : "" }
     }
 
     // MARK: - 修改原文后重新翻译
