@@ -201,6 +201,13 @@ struct SettingsView: View {
                 } header: {
                     Text("日志")
                 }
+
+                // MARK: 关于
+                Section {
+                    LabeledContent("版本", value: Self.appVersion)
+                } header: {
+                    Text("关于")
+                }
             }
             .onAppear {
                 session.refreshHeadset()
@@ -247,6 +254,14 @@ struct SettingsView: View {
 
     @State private var personalVoiceNote: String?
     @State private var askDownload = false
+
+    /// 例如 “1.1（第 20 版）”
+    static var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let v = info?["CFBundleShortVersionString"] as? String ?? "-"
+        let b = info?["CFBundleVersion"] as? String ?? "-"
+        return "\(v)（第 \(b) 版）"
+    }
 
     /// 下载与导入里的一行：没在下载时是按钮，下载中显示进度，排队时显示“等待下载”
     @ViewBuilder
