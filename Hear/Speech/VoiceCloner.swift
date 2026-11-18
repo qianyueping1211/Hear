@@ -40,6 +40,49 @@ actor VoiceCloner {
         try? FileManager.default.removeItem(at: base)
     }
 
+    /// 导入本地下载好的模型。可以选：
+    /// - 一个大文件夹，里面放着 Qwen3-TTS-12Hz-0.6B-Base-MLX-4bit 和 Qwen3-TTS-Tokenizer-12Hz 两个文件夹（一次导入两部分）
+    /// - 或者只选其中一个文件夹（只导入那一部分）
+    /// 两个文件夹里有重名的文件（config.json 等），分别复制到各自的位置，不会互相覆盖。
+    /// 返回导入了哪些部分
+    static func importFolder(from src: URL) throws -> (model: Bool, tokenizer: Bool) {
+        let access = src.startAccessingSecurityScopedResource()
+        defer { if access { src.stopAccessingSecurityScopedResource() } }
+        let fm = FileManager.default
+        var dirs = [src]
+        if let subs = try? fm.contentsOfDirectory(at: src, includingPropertiesForKeys: [.isDirectoryKey]) {
+            dirs += subs.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
+        }
+        func has(_ dir: URL, _ name: String) -> Bool { fm.fileExists(atPath: dir.appendingPathComponent(name).path) }
+        var gotModel = false, gotTokenizer = false
+        for dir in dirs where hasWeights(dir) {
+            let isTokenizer = dir.lastPathComponent.lowercased().contains("tokenizer") || has(dir, "preprocessor_config.json")
+            let isModel = !isTokenizer && has(dir, "config.json") && has(dir, "vocab.json")
+            if isTokenizer && !gotTokenizer {
+                try replace(tokenizerDir, with: dir)
+                gotTokenizer = true
+                hearLog("声音克隆：已导入声音编解码器 \(dir.lastPathComponent)")
+            } else if isModel && !gotModel {
+                try replace(modelDir, with: dir)
+                gotModel = true
+                hearLog("声音克隆：已导入主模型 \(dir.lastPathComponent)")
+            }
+        }
+        guard gotModel || gotTokenizer else {
+            throw NSError(domain: "Hear", code: 7, userInfo: [NSLocalizedDescriptionKey:
+                "没有找到声音克隆模型。请选包含 Qwen3-TTS-12Hz-0.6B-Base-MLX-4bit 和 Qwen3-TTS-Tokenizer-12Hz 两个文件夹的大文件夹"])
+        }
+        return (gotModel, gotTokenizer)
+    }
+
+    private static func replace(_ dst: URL, with src: URL) throws {
+        let fm = FileManager.default
+        if src.standardizedFileURL.path == dst.standardizedFileURL.path { return }
+        try fm.createDirectory(at: dst.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
+        try fm.copyItem(at: src, to: dst)
+    }
+
     /// 支持的语言（Qwen3-TTS 10 种）：App 的语言代码 → Qwen3-TTS 的语言名
     static func languageName(_ id: String) -> String? {
         [
