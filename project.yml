@@ -39,8 +39,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ${BUNDLE_ID}
-        MARKETING_VERSION: "1.1"          # 版本号：功能更新时改这里
-        CURRENT_PROJECT_VERSION: "1"      # 构建号：打包时自动换成第几版
+        MARKETING_VERSION: "1.0"          # 版本号：打包时自动按次数生成（第 22 次 → 2.2）
+        CURRENT_PROJECT_VERSION: "1"      # 内部构建号：打包时自动递增
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic

@@ -24,6 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 版本号按打包次数自动生成：第 19 次 → 1.9，第 22 次 → 2.2
+      - name: Version
+        run: |
+          N=${{ github.run_number }}
+          echo "VER=$((N / 10)).$((N % 10))" >> "$GITHUB_ENV"
+
       - name: Select Xcode
         run: |
           XC=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
@@ -56,7 +62,7 @@ jobs:
             -skipPackagePluginValidation \
             -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} MARKETING_VERSION=${VER} \
             build | tee build.log | grep -E "error:|warning: .*deprecated|BUILD" || true
           if ! test -f build/Build/Products/Release-iphoneos/Hear.app/Hear; then
             echo "::error::编译失败，错误如下："
@@ -71,14 +77,30 @@ jobs:
           zip -qry Hear.ipa Payload
           ls -lh Hear.ipa
 
+      # 旧的发布记录（build-11 ~ build-19）改成版本号 1.1 ~ 1.9；已改过的会跳过
+      - name: Rename old releases
+        continue-on-error: true
+        run: |
+          R="${{ github.repository }}"
+          for N in 11 12 13 14 15 16 17 18 19; do
+            V="$((N / 10)).$((N % 10))"; OLD="build-$N"; NEW="v$V"
+            gh release view "$OLD" >/dev/null 2>&1 || continue
+            SHA=$(gh api "repos/$R/git/ref/tags/$OLD" --jq .object.sha)
+            gh api "repos/$R/git/refs" -f ref="refs/tags/$NEW" -f sha="$SHA" >/dev/null 2>&1 || true
+            BODY=$(gh release view "$OLD" --json body -q .body | sed "1s/.*/## 听见 $V/")
+            gh release edit "$OLD" --tag "$NEW" --title "听见 $V" --notes "$BODY"
+            gh api -X DELETE "repos/$R/git/refs/tags/$OLD" || true
+            echo "$OLD -> $NEW"
+          done
+
+      # 发布：标签和标题都用版本号（例如 v1.1 / 听见 1.1）。同一版本号重新打包会覆盖原来的发布
       - name: Publish release
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          TAG="build-${{ github.run_number }}"
-          VER=$(grep -m1 'MARKETING_VERSION:' project.yml | sed -E 's/.*"([^"]+)".*/\1/')
+          TAG="v${VER}"
           {
-            echo "## 听见 ${VER}（第 ${{ github.run_number }} 版）"
+            echo "## 听见 ${VER}"
             echo ""
             echo "**更新内容：** $(printf '%s' "${COMMIT_MSG:-手动打包}" | head -1)"
             echo ""
@@ -89,8 +111,9 @@ jobs:
             echo "2. 用 [Sideloadly](https://sideloadly.io) + 你的 Apple ID 安装到 iPhone"
             echo "3. 已安装过的直接覆盖安装，模型不用重新下载"
           } > notes.md
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" Hear.ipa \
-            --title "听见 ${VER}（第 ${{ github.run_number }} 版）" \
+            --title "听见 ${VER}" \
             --notes-file notes.md \
             --latest
 
