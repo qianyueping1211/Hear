@@ -241,9 +241,9 @@ struct SettingsView: View {
             // 导入：翻译模型选 .gguf 文件，语音识别模型选文件夹
             .fileImporter(isPresented: Binding(get: { importKind != nil },
                                                set: { if !$0 { importKind = nil } }),
-                          allowedContentTypes: lastImportKind != .translation
-                              ? [UTType.folder]
-                              : [UTType(filenameExtension: "gguf") ?? .data, .data]) { result in
+                          allowedContentTypes: lastImportKind == .translation
+                              ? [UTType(filenameExtension: "gguf") ?? .data, .data]
+                              : [UTType.folder]) { result in
                 guard case .success(let url) = result else { return }
                 let kind = lastImportKind
                 Task {
@@ -274,7 +274,7 @@ struct SettingsView: View {
         // 打开声音克隆但还没下载模型：先问要不要下载
         .centerDialog(isPresented: $askClone,
                       title: "下载声音克隆模型？",
-                      message: "声音克隆需要下载 Qwen3-TTS 模型（约 1.4 GB），请连接 Wi‑Fi。下载期间先用系统声音朗读，下载完成后自动改用原声。下载时请保持 App 在前台。") {
+                      message: "声音克隆需要下载 Qwen3-TTS 模型（GGUF，约 760 MB），请连接 Wi‑Fi。下载期间先用系统声音朗读，下载完成后自动改用原声。下载时请保持 App 在前台。") {
             session.voiceClone = true
             session.startBackgroundDownload(kinds: [.voiceClone], switchWhenDone: false)
         }
@@ -364,7 +364,7 @@ struct SettingsView: View {
 
     private var voiceCloneFooter: String {
         session.voiceClone
-            ? "本地 Qwen3-TTS：用说话人的原声朗读。模型约 1.4 GB，加载要几秒；内存不够或生成不了时自动用系统声音。"
+            ? "本地 Qwen3-TTS（GGUF，和翻译模型共用 llama.cpp）：用说话人的原声朗读。模型约 760 MB，占内存少，和翻译模型可以一起用；生成不了时自动用系统声音。"
             : "苹果自带：用系统声音朗读，不额外占内存。"
     }
     /// 最近一次要下载的模型（确认框收起的动画里文字不会突然变空）
@@ -385,7 +385,7 @@ struct SettingsView: View {
         case .translation: return "翻译模型（MT）"
         case .speech: return "语音识别模型（Whisper）"
         case .senseVoice: return "语音识别模型（SenseVoice）"
-        case .voiceClone: return "声音克隆模型（Qwen3-TTS）"
+        case .voiceClone: return "声音克隆模型（Qwen3-TTS GGUF）"
         }
     }
 
@@ -394,7 +394,7 @@ struct SettingsView: View {
         case .translation: return "约 2 GB"
         case .speech: return "约 1.6 GB"
         case .senseVoice: return "约 240 MB"
-        case .voiceClone: return "约 1.4 GB"
+        case .voiceClone: return "约 760 MB"
         }
     }
 
@@ -445,7 +445,7 @@ struct SettingsView: View {
                 .buttonStyle(.borderless)
                 .disabled(session.isBusyWithModels)
                 .accessibilityLabel(status.installed ? "重新下载" : "下载")
-                // 导入（声音克隆：选包含主模型和声音编解码器两个文件夹的大文件夹，一次导入）
+                // 导入（声音克隆：选一个放着两个 .gguf 文件的文件夹，一次导入）
                 Button {
                     lastImportKind = kind
                     importKind = kind

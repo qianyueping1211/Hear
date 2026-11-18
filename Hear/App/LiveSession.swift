@@ -190,7 +190,7 @@ final class LiveSession: ObservableObject {
     private let translator = LlamaTranslator()
     private let speaker = Speaker()
     private let systemTranslator = SystemTranslator()
-    private let cloner = VoiceCloner()
+    private let cloner = GGUFVoiceCloner()
     // 声音克隆：每句话的样本（声音 + 文字），以及提前生成好的克隆朗读
     private var cloneRefs: [UUID: (samples: [Float], text: String)] = [:]
     private var cloneRefOrder: [UUID] = []
@@ -441,7 +441,7 @@ final class LiveSession: ObservableObject {
         _ = modelFiles()            // 模型变动后让大小缓存重新计算
         if cloneInstalled {
             return .init(name: "Qwen3-TTS 0.6B",
-                         detail: ModelManager.format(cachedSize(VoiceCloner.base, folder: true)) + (cloneLoading ? " · 加载中" : ""),
+                         detail: ModelManager.format(cachedSize(VoiceCloneGGUF.base, folder: true)) + (cloneLoading ? " · 加载中" : ""),
                          installed: true)
         }
         return .init(name: "Qwen3-TTS 0.6B", detail: "未下载", installed: false)
@@ -469,7 +469,7 @@ final class LiveSession: ObservableObject {
 
     private var cloneInstalled: Bool {
         if let c = cloneCache, c.rev == modelsRevision { return c.ok }
-        let ok = VoiceCloner.installed()
+        let ok = VoiceCloneGGUF.installed
         cloneCache = (modelsRevision, ok)
         return ok
     }
@@ -536,7 +536,7 @@ final class LiveSession: ObservableObject {
             case .voiceClone:
                 cloneTasks.removeAll()
                 await cloner.unload()
-                VoiceCloner.delete()
+                VoiceCloneGGUF.delete()
             }
             modelsRevision += 1
             // 当前引擎用得到这个模型才需要等它下载完再用
@@ -653,8 +653,7 @@ final class LiveSession: ObservableObject {
                     case .speech: _ = try await ModelManager.downloadWhisper(host: host, progress: onProgress)
                     case .senseVoice: try await SenseVoiceRecognizer.download(host: host, progress: onProgress)
                     case .voiceClone:
-                        try await cloner.download(host: host, progress: onProgress)
-                        if !voiceClone { await cloner.unload() }     // 没打开声音克隆就先不占内存
+                        try await VoiceCloneGGUF.download(host: host, progress: onProgress)
                     }
                     bgDownloadKind = nil              // 下载完立刻收起进度条
                     bgQueue.removeAll { $0 == kind }
@@ -924,15 +923,10 @@ final class LiveSession: ObservableObject {
         do {
             cloneTasks.removeAll()
             await cloner.unload()
-            let r = try VoiceCloner.importFolder(from: url)
+            try VoiceCloneGGUF.importFiles(at: url)
             modelsRevision += 1
-            if r.model && r.tokenizer {
-                bgDownloadError = nil
-            } else {
-                bgDownloadError = r.model
-                    ? "已导入主模型，还缺声音编解码器（Qwen3-TTS-Tokenizer-12Hz）"
-                    : "已导入声音编解码器，还缺主模型（Qwen3-TTS-12Hz-0.6B-Base-MLX-4bit）"
-            }
+            bgDownloadError = nil
+            hearLog("已导入声音克隆模型（GGUF）")
             if voiceClone { scheduleCloneLoad(delay: 0.5) }
         } catch {
             hearLog("导入声音克隆模型失败：\(error)", .error)
@@ -1865,7 +1859,7 @@ final class LiveSession: ObservableObject {
         hearLog("朗读：\(item.target.displayName)，\(outputMode == .speaker ? "扬声器" : (pan < 0 ? "左耳" : (pan > 0 ? "右耳" : "双耳")))，\(cloned != nil ? "克隆原声" : "系统声音")")
         if mute { capture.muted = true }
         if let cloned {
-            await speaker.play(samples: cloned, sampleRate: Double(VoiceCloner.sampleRate), pan: pan)
+            await speaker.play(samples: cloned, sampleRate: Double(GGUFVoiceCloner.sampleRate), pan: pan)
         } else {
             await speaker.speak(SpeakRequest(text: text, locale: item.target.tts, pan: pan))
         }
@@ -1939,7 +1933,7 @@ final class LiveSession: ObservableObject {
     }
 
     private func loadClonerIfNeeded() async {
-        guard voiceClone, VoiceCloner.installed(), !cloneLoading else { return }
+        guard voiceClone, VoiceCloneGGUF.installed, !cloneLoading else { return }
         if case .loading = phase { return }                 // 识别、翻译模型还在加载，等它们好了会再叫
         // 声音克隆模型加载和生成要 1.5 GB 左右内存；不够就先不加载，用系统声音
         let free = Self.freeMB()
@@ -1999,17 +1993,17 @@ final class LiveSession: ObservableObject {
         guard let ref = cloneRefs[id],
               let item = items.first(where: { $0.id == id }),
               !item.translated.isEmpty, !item.translated.hasPrefix("（翻译失败"),
-              VoiceCloner.languageName(item.target.id) != nil else { return nil }
-        // 生成声音时内存还会再涨；剩得太少就这句先用系统声音，免得 App 被系统强制退出
-        let free = Self.freeMB()
-        guard free >= 700 else {
-            hearLog("声音克隆：可用内存只剩 \(free) MB，这句用系统声音", .warning)
-            return nil
-        }
+              VoiceCloneGGUF.languageNames[item.target.id] != nil else { return nil }
         let text = item.translated, lang = item.target.id
         let cloner = self.cloner
         return Task.detached(priority: .userInitiated) {
-            await cloner.synthesize(text: text, language: lang, reference: ref.samples, referenceText: ref.text)
+            do {
+                return try await cloner.synthesize(text: text, language: lang,
+                                                   reference: ref.samples, referenceText: ref.text)
+            } catch {
+                hearLog("声音克隆生成失败：\(error)", .error)
+                return nil
+            }
         }
     }
 

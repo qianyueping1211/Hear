@@ -49,7 +49,7 @@ actor LlamaTranslator {
     private let nCtx: UInt32 = 4096
     private(set) var loadedPath: String?
 
-    private static let backendOnce: Void = { llama_backend_init() }()
+    private static let backendOnce: Void = { LlamaBackend.ensureReady() }()
 
     var isLoaded: Bool { ctx != nil }
 
@@ -117,13 +117,24 @@ actor LlamaTranslator {
         llama_memory_clear(llama_get_memory(ctx), true)
         llama_sampler_reset(sampler)
 
-        let rc = tokens.withUnsafeMutableBufferPointer { buf in
-            llama_decode(ctx, llama_batch_get_one(buf.baseAddress, Int32(buf.count)))
+        // 用新的扩展批接口（llama_decode/llama_batch_get_one 已弃用）
+        guard let batch = llama_batch_ext_init(ctx) else { throw TranslatorError.decodeFailed }
+        defer { llama_batch_ext_free(batch) }
+        llama_batch_ext_clear(batch)
+        var ok = true
+        for (i, t) in tokens.enumerated() {
+            let idx = llama_batch_ext_add_token(batch, 0, t)
+            if idx < 0 { ok = false; break }
+            var pos = llama_pos(i)
+            if !llama_batch_ext_set_pos(batch, idx, &pos) { ok = false; break }
         }
+        if !ok { throw TranslatorError.decodeFailed }
+        let rc = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch)
         guard rc == 0 else { throw TranslatorError.decodeFailed }
 
         var output = ""
         var pending: [UInt8] = []
+        var nGenerated = 0
 
         for _ in 0..<maxNewTokens {
             if Task.isCancelled || stopFlag.isSet { break }
@@ -138,9 +149,14 @@ actor LlamaTranslator {
                 onUpdate(Self.clean(output))
             }
 
-            let r = withUnsafeMutablePointer(to: &tok) { p in
-                llama_decode(ctx, llama_batch_get_one(p, 1))
-            }
+            // 把刚采样出来的 token 喂回去，继续生成下一个
+            llama_batch_ext_clear(batch)
+            let idx = llama_batch_ext_add_token(batch, 0, tok)
+            if idx < 0 { break }
+            var pos = llama_pos(tokens.count + nGenerated)
+            if !llama_batch_ext_set_pos(batch, idx, &pos) { break }
+            let r = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch)
+            nGenerated += 1
             if r != 0 { break }
         }
         return Self.clean(output)
