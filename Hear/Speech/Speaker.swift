@@ -79,6 +79,50 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
+    /// 播放一段已经生成好的声音（声音克隆朗读用），播完（或被 stop 打断）后返回
+    func play(samples: [Float], sampleRate: Double, pan: Float) async {
+        stop()
+        try? AudioRoute.activate()
+        guard !samples.isEmpty,
+              let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(samples.count)),
+              let ch = buf.floatChannelData else { return }
+        buf.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { p in
+            if let base = p.baseAddress { ch[0].update(from: base, count: samples.count) }
+        }
+        let gen: Int = queue.sync {
+            generation += 1
+            scheduled = 0; played = 0; finished = true
+            currentPan = pan
+            usingEngine = true
+            current = nil
+            return generation
+        }
+        let limit = 5 + Double(samples.count) / sampleRate * 1.5
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            queue.sync { continuation = c }
+            queue.async { [self] in
+                guard gen == generation else { return }
+                ensureEngine(format: fmt)
+                scheduled = 1
+                player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                    self?.queue.async {
+                        guard let self, gen == self.generation else { return }
+                        self.played += 1
+                        self.checkDone(gen)
+                    }
+                }
+                if !player.isPlaying { player.play() }
+            }
+            queue.asyncAfter(deadline: .now() + limit) { [weak self] in
+                guard let self, gen == self.generation, self.continuation != nil else { return }
+                hearLog("朗读：克隆声音播放超时，自动跳过", .warning)
+                self.resume(gen)
+            }
+        }
+    }
+
     /// 立即停止当前朗读
     func stop() {
         if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }

@@ -42,6 +42,11 @@ jobs:
           sudo xcode-select -s "$XC"
           xcodebuild -version
 
+      # 声音克隆用的 MLX 要编译 Metal 着色器；新版 Xcode 的 Metal 工具链需要单独下载
+      - name: Metal toolchain
+        continue-on-error: true
+        run: xcodebuild -downloadComponent MetalToolchain || true
+
       - name: Install XcodeGen
         run: brew install xcodegen
 

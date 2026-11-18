@@ -8,10 +8,13 @@ options:
 packages:
   WhisperKit:
     url: https://github.com/argmaxinc/WhisperKit
-    from: 0.12.0
+    from: 1.0.0          # speech-swift 要求 1.0 以上
   FluidAudio:
     url: https://github.com/FluidInference/FluidAudio
     exactVersion: 0.18.3
+  SpeechSwift:           # 声音克隆朗读：Qwen3-TTS（MLX）
+    url: https://github.com/soniqo/speech-swift
+    branch: main
 
 targets:
   Hear:
@@ -24,6 +27,8 @@ targets:
         product: WhisperKit
       - package: FluidAudio
         product: FluidAudio
+      - package: SpeechSwift
+        product: Qwen3TTS
       - framework: Frameworks/llama.xcframework
         embed: true
     info:
