@@ -16,6 +16,31 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                // MARK: iCloud 同步
+                Section {
+                    Toggle("iCloud 同步", isOn: cloudBinding)
+                    if cloud.enabled, let name = cloud.folderName {
+                        LabeledContent("同步位置", value: "iCloud 云盘 / \(name)")
+                        LabeledContent("上次同步") {
+                            if cloud.syncing {
+                                ProgressView()
+                            } else {
+                                Text(cloud.lastSync.map { Self.timeText($0) } ?? "还没有同步")
+                            }
+                        }
+                        Button("立即同步") { cloud.syncNow() }
+                            .disabled(cloud.syncing)
+                        Button("更换同步位置") { showCloudPicker = true }
+                    }
+                    if let m = cloud.message {
+                        Text(m).font(.footnote).foregroundStyle(.orange)
+                    }
+                } header: {
+                    Text("iCloud 同步")
+                } footer: {
+                    Text("开启后，设置和历史记录会同步到你 iCloud 云盘里的一个文件夹（模型不同步）。数据仍存在手机上，有网络时系统自动上传；换手机或重装 App 后，开启并选同一个文件夹，会自动判断哪边更新并同步。第一次开启时，在“iCloud 云盘”里选一个文件夹（可以新建一个“听见”）。大模型 API Key 不同步，换手机后需要重新填写。")
+                }
+
                 // MARK: 引擎
                 Section {
                     Picker("引擎", selection: engineBinding) {
@@ -61,8 +86,6 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("模型管理")
-                } footer: {
-                    Text("下载源自动选择：在中国用国内镜像，在国外用 Hugging Face 官方。")
                 }
 
                 // MARK: 语音识别（收音 → 断句 → 运行方式）
@@ -157,31 +180,6 @@ struct SettingsView: View {
                     Text("术语表")
                 } footer: {
                     Text("每行一条，格式：原文=译文\n例如：张伟=Zhang Wei")
-                }
-
-                // MARK: iCloud 同步
-                Section {
-                    Toggle("iCloud 同步", isOn: cloudBinding)
-                    if cloud.enabled, let name = cloud.folderName {
-                        LabeledContent("同步位置", value: "iCloud 云盘 / \(name)")
-                        LabeledContent("上次同步") {
-                            if cloud.syncing {
-                                ProgressView()
-                            } else {
-                                Text(cloud.lastSync.map { Self.timeText($0) } ?? "还没有同步")
-                            }
-                        }
-                        Button("立即同步") { cloud.syncNow() }
-                            .disabled(cloud.syncing)
-                        Button("更换同步位置") { showCloudPicker = true }
-                    }
-                    if let m = cloud.message {
-                        Text(m).font(.footnote).foregroundStyle(.orange)
-                    }
-                } header: {
-                    Text("iCloud 同步")
-                } footer: {
-                    Text("开启后，设置和历史记录会同步到你 iCloud 云盘里的一个文件夹（模型不同步）。数据仍存在手机上，有网络时系统自动上传；换手机或重装 App 后，开启并选同一个文件夹，会自动判断哪边更新并同步。第一次开启时，在“iCloud 云盘”里选一个文件夹（可以新建一个“听见”）。大模型 API Key 不同步，换手机后需要重新填写。")
                 }
 
                 // MARK: 日志
