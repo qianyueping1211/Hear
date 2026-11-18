@@ -699,7 +699,7 @@ final class LiveSession: ObservableObject {
         case .translation: return "翻译模型 Hy-MT2"
         case .speech: return "语音识别模型 Whisper"
         case .senseVoice: return "语音识别模型 SenseVoice"
-        case .voiceClone: return "声音克隆模型 Qwen3-TTS"
+        case .voiceClone: return "声音克隆模型 Qwen3-TTS（GGUF）"
         }
     }
 
