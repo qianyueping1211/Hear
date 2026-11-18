@@ -185,7 +185,7 @@ actor GGUFVoiceCloner {
     private var loading = false
 
     /// 加载骨架模型 + mmproj
-    func load() throws {
+    func load() async throws {
         guard model == nil else { return }
         guard !loading else { return }
         loading = true
@@ -298,6 +298,7 @@ actor GGUFVoiceCloner {
         inp.top_p = 0.6
         inp.temp = -1            // 用模型默认值
         inp.seed = UInt32.max
+        // 直接要裸 F32 PCM（不用 WAV，省一层解析）
         inp.out_type = MTMD_HELPER_GEN_AUDIO_OUTTYPE_PCM
 
         let rc = text.withCString { textPtr in
@@ -359,8 +360,8 @@ actor GGUFVoiceCloner {
         guard rc3 == 0, let data, nSamples > 0 else {
             throw VoiceCloneGGUFError.generateFailed("get_output")
         }
-        // WAV 是 16-bit LE，转换成 F32
-        let pcm = Self.wavToFloat32(data: data, byteCount: dataLen)
+        // 裸 PCM：字节数 = 样本数 × 4（F32）
+        let pcm = Self.pcmToFloat32(data: data, byteCount: dataLen)
         let t0 = Date()
         let secs = Double(pcm.count) / Double(max(Int(sampleRate), 1))
         hearLog("声音克隆（GGUF）：生成 \(String(format: "%.1f", secs)) 秒声音，用时 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
@@ -416,33 +417,11 @@ actor GGUFVoiceCloner {
         return path
     }
 
-    /// WAV（16-bit LE）转 F32 PCM
-    private static func wavToFloat32(data: UnsafePointer<CChar>, byteCount: Int) -> [Float] {
-        let bytes = UnsafeRawPointer(data).assumingMemoryBound(to: UInt8.self)
-        // 找 data 块
-        var pos = 12
-        var dataStart = 44
-        var dataSize = byteCount - 44
-        while pos + 8 <= byteCount {
-            let id = String(decoding: UnsafeBufferPointer(start: bytes + pos, count: 4), as: UTF8.self)
-            let size = Int(UInt32(bytes[pos + 4]) | UInt32(bytes[pos + 5]) << 8
-                           | UInt32(bytes[pos + 6]) << 16 | UInt32(bytes[pos + 7]) << 24)
-            if id == "data" {
-                dataStart = pos + 8
-                dataSize = min(size, byteCount - dataStart)
-                break
-            }
-            pos += 8 + size + (size % 2)
-        }
-        guard dataSize > 0 else { return [] }
-        let count = dataSize / 2
-        var out = [Float](repeating: 0, count: count)
-        for i in 0..<count {
-            let b0 = UInt16(bytes[dataStart + i * 2])
-            let b1 = UInt16(bytes[dataStart + i * 2 + 1])
-            let v = Int16(bitPattern: b0 | (b1 << 8))
-            out[i] = Float(v) / 32768.0
-        }
-        return out
+    /// 裸 PCM（F32）转 Swift 数组
+    private static func pcmToFloat32(data: UnsafePointer<CChar>, byteCount: Int) -> [Float] {
+        let floats = UnsafeRawPointer(data).assumingMemoryBound(to: Float.self)
+        let count = byteCount / MemoryLayout<Float>.size
+        guard count > 0 else { return [] }
+        return Array(UnsafeBufferPointer(start: floats, count: count))
     }
 }
