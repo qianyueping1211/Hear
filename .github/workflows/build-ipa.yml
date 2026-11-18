@@ -56,6 +56,7 @@ jobs:
             -skipPackagePluginValidation \
             -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             build | tee build.log | grep -E "error:|warning: .*deprecated|BUILD" || true
           if ! test -f build/Build/Products/Release-iphoneos/Hear.app/Hear; then
             echo "::error::编译失败，错误如下："
@@ -75,8 +76,9 @@ jobs:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           TAG="build-${{ github.run_number }}"
+          VER=$(grep -m1 'MARKETING_VERSION:' project.yml | sed -E 's/.*"([^"]+)".*/\1/')
           {
-            echo "## 听见 第 ${{ github.run_number }} 版"
+            echo "## 听见 ${VER}（第 ${{ github.run_number }} 版）"
             echo ""
             echo "**更新内容：** $(printf '%s' "${COMMIT_MSG:-手动打包}" | head -1)"
             echo ""
@@ -88,7 +90,7 @@ jobs:
             echo "3. 已安装过的直接覆盖安装，模型不用重新下载"
           } > notes.md
           gh release create "$TAG" Hear.ipa \
-            --title "听见 第 ${{ github.run_number }} 版" \
+            --title "听见 ${VER}（第 ${{ github.run_number }} 版）" \
             --notes-file notes.md \
             --latest
 
