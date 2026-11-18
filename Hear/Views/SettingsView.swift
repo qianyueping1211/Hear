@@ -139,12 +139,6 @@ struct SettingsView: View {
                         Text("接近说话人（性别和音高）").tag("match")
                     }
                     Toggle("用我的“个人声音”朗读我说的话", isOn: personalVoiceBinding)
-                    if session.usePersonalVoice {
-                        Picker("我说的语言", selection: $session.mySide) {
-                            Text(session.langA.name).tag("A")
-                            Text(session.langB.name).tag("B")
-                        }
-                    }
                     if session.outputMode == .headphones {
                         Picker("左耳听", selection: $session.leftEar) {
                             Text(session.langA.name).tag("A")
