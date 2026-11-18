@@ -15,17 +15,30 @@ struct SetupView: View {
 
             case .needsModels:
                 Image(systemName: "arrow.down.circle").font(.system(size: 54)).foregroundStyle(.tint)
-                Text("首次使用需要下载模型").font(.title3.weight(.semibold))
-                Text("翻译模型（MT）Hy-MT2-1.8B，约 2 GB\n语音识别模型（ASR）Whisper large-v3 turbo，约 1.6 GB\n\n只需下载一次。之后完全离线运行。\n请连接 Wi‑Fi，下载时保持 App 在前台。")
+                Text("要下载听见的本地模型吗？").font(.title3.weight(.semibold))
+                Text("翻译模型 Hy-MT2-1.8B，约 2 GB\n语音识别模型 Whisper large-v3 turbo，约 1.6 GB\n\n只需下载一次，之后完全离线运行，翻译质量更好、支持的语言更多。请连接 Wi‑Fi。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                 Button {
-                    Task { await session.downloadModels() }
+                    Task { await session.chooseLocalAndDownload() }
                 } label: {
-                    Text("开始下载").frame(maxWidth: 240).padding(.vertical, 6)
+                    Text("下载").frame(maxWidth: 240).padding(.vertical, 6)
                 }
                 .buttonStyle(.borderedProminent)
+                if session.appleAvailable {
+                    Button {
+                        session.chooseApple()
+                    } label: {
+                        Text("先不下载，用苹果自带").frame(maxWidth: 240).padding(.vertical, 6)
+                    }
+                    .buttonStyle(.bordered)
+                    Text("苹果自带：用 iOS 的系统听写和翻译，马上就能用。选择下载时也会先用它，下载完成后自动切换；可以在 设置 → 引擎 里看下载进度和随时切换。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+                }
 
             case .downloading(let name, let p):
                 Text("正在下载 \(name)").font(.headline)

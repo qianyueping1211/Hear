@@ -1,4 +1,5 @@
 import SwiftUI
+import Translation
 
 struct ContentView: View {
     @EnvironmentObject var session: LiveSession
@@ -21,9 +22,15 @@ struct ContentView: View {
                         // 加载模型时也显示对话页，顶部一行小字提示，不挡住内容
                         TranscriptView()
                             .overlay(alignment: .top) {
-                                if let msg = session.loadingText {
-                                    LoadingPill(text: msg).padding(.top, 8)
+                                VStack(spacing: 6) {
+                                    if let msg = session.loadingText {
+                                        LoadingPill(text: msg)
+                                    }
+                                    if session.usingApple, let note = session.appleNote {
+                                        NotePill(text: note)
+                                    }
                                 }
+                                .padding(.top, 8)
                             }
                     } else {
                         SetupView()
@@ -58,6 +65,16 @@ struct ContentView: View {
             }
         }
         .task { await session.bootstrap() }
+        // 苹果自带模式：语言包没下载时，由系统弹出下载窗口
+        .translationTask(session.translationPrepConfig) { ts in
+            do {
+                try await ts.prepareTranslation()
+                await session.appleTranslationPrepared(true)
+            } catch {
+                hearLog("苹果翻译语言包准备失败：\(error)", .warning)
+                await session.appleTranslationPrepared(false)
+            }
+        }
     }
 
     private func newTapped() {
@@ -121,6 +138,21 @@ struct MoreDots: View {
         .foregroundStyle(.primary)
         .frame(width: 44, height: 44)
         .contentShape(Circle())
+    }
+}
+
+/// 顶部的提示（例如苹果翻译语言包还没下载）
+struct NotePill: View {
+    let text: String
+    var body: some View {
+        Label(text, systemImage: "info.circle")
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .lineLimit(2)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: Capsule())
+            .padding(.horizontal)
     }
 }
 
