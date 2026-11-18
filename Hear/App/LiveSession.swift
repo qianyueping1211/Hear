@@ -59,23 +59,32 @@ final class LiveSession: ObservableObject {
     @Published var mySide: String { didSet { save("mySide", mySide) } }
     // 语音识别用 GPU（加载快）还是神经引擎（省电，首次编译慢）
     @Published var asrUseGPU: Bool { didSet { save("asrUseGPU", asrUseGPU) } }
-    // 识别引擎："whisper"（默认）/ "apple"（iOS 系统听写：说话时逐字显示，说完再由 Whisper 校正）
+    // 识别引擎（本地模型时）：
+    //   "whisper" 本地最准 / "sensevoice" 本地最快 / "hybrid" SenseVoice 先出、Whisper 校正 /
+    //   "apple" iOS 系统听写逐字显示、说完由 Whisper 定稿
     @Published var asrEngine: String {
         didSet {
             save("asrEngine", asrEngine)
-            guard asrEngine != oldValue, isRunning, !usingApple else { return }
-            if asrEngine == "apple" { startAppleASR() } else { stopAppleASR() }
+            guard asrEngine != oldValue else { return }
+            hearLog("识别引擎改为 \(asrEngine)")
+            enforceLanguages()
+            guard !usingApple else { return }
+            if isRunning { stop(readAfter: false) }
+            Task { await reloadIfLocal() }       // 加载新引擎需要的模型，不用的卸掉省内存
         }
     }
     // 引擎："local" 听见本地模型（Whisper + Hy-MT2）/ "apple" 苹果自带（系统听写 + 系统翻译）/ "" 还没选
-    @Published private(set) var engineMode: String { didSet { save("engineMode", engineMode) } }
+    @Published private(set) var engineMode: String {
+        didSet { save("engineMode", engineMode); if engineMode != oldValue { enforceLanguages() } }
+    }
     // 后台下载本地模型（苹果自带模式下进行，设置里显示进度）
     @Published private(set) var bgDownloading = false
     @Published private(set) var bgDownloadName = ""
     @Published private(set) var bgDownloadProgress: Double = 0
     @Published private(set) var bgDownloadError: String?
     @Published private(set) var bgDownloadKind: ModelKind?
-    @Published private(set) var bgDownloadAll = false       // true：这次下载所有缺少的模型（另一个会排队）
+    @Published private(set) var bgQueue: [ModelKind] = []   // 这次要下载、还没下完的模型（排在后面的显示“等待下载”）
+    private var bgThenEngine: String?                       // 下载完后切换到这个识别引擎
     private var bgSwitchWhenDone = true
     // 让系统弹出苹果翻译语言包下载（ContentView 的 translationTask 使用）
     @Published var translationPrepConfig: TranslationSession.Configuration?
@@ -88,7 +97,55 @@ final class LiveSession: ObservableObject {
     var usingApple: Bool { engineMode == "apple" && appleAvailable }
     var modelsInstalled: Bool {
         _ = modelsRevision
-        return ModelManager.currentGGUF() != nil && ModelManager.whisperFolder() != nil
+        return ModelManager.currentGGUF() != nil && missingSpeechKinds(for: asrEngine).isEmpty
+    }
+
+    /// 某个识别引擎要用到哪些语音识别模型
+    static func engineNeeds(_ engine: String) -> (whisper: Bool, sense: Bool) {
+        switch engine {
+        case "sensevoice": return (false, true)
+        case "hybrid": return (true, true)
+        default: return (true, false)
+        }
+    }
+
+    /// 某个识别引擎还缺哪些语音识别模型
+    func missingSpeechKinds(for engine: String) -> [ModelKind] {
+        _ = modelsRevision
+        let need = Self.engineNeeds(engine)
+        var out: [ModelKind] = []
+        if need.sense && SenseVoiceRecognizer.installedFolder() == nil { out.append(.senseVoice) }
+        if need.whisper && ModelManager.whisperFolder() == nil { out.append(.speech) }
+        return out
+    }
+
+    /// 本地模型模式下整句识别用 SenseVoice
+    private var useSense: Bool { !usingApple && (asrEngine == "sensevoice" || asrEngine == "hybrid") }
+
+    // MARK: - 语言（不同识别引擎支持的语言不同）
+
+    /// iOS 系统听写支持的语言（启动后查询；查到之前为 nil，当作都支持）
+    @Published private(set) var appleLangIDs: Set<String>?
+
+    /// 当前引擎能用的语言：语言列表里只显示这些
+    var supportedLanguages: [Language] {
+        var ids = Set(Language.all.map(\.id))
+        if useSense { ids.formIntersection(SenseVoiceRecognizer.languageIDs) }
+        if dualLive, let a = appleLangIDs { ids.formIntersection(a) }
+        let list = Language.all.filter { ids.contains($0.id) }
+        return list.count >= 2 ? list : Language.all
+    }
+
+    /// 换了引擎后，原来选的语言不支持了：自动换成支持的语言
+    private func enforceLanguages() {
+        let ok = supportedLanguages
+        var changed = false
+        if !ok.contains(langA) { langA = ok.first { $0 != langB } ?? ok[0]; changed = true }
+        if !ok.contains(langB) { langB = ok.first { $0 != langA } ?? ok[0]; changed = true }
+        if changed {
+            hearLog("当前识别引擎不支持原来的语言，改为 \(langA.name) ⇄ \(langB.name)", .warning)
+            showToast("当前识别引擎不支持原来的语言，已改为 \(langA.name) ⇄ \(langB.name)")
+        }
     }
 
     // 声音来源："phone" 手机麦克风（默认）/ "headset" 耳机麦克风（只在连着耳机时可选）
@@ -107,6 +164,7 @@ final class LiveSession: ObservableObject {
 
     private let capture = AudioCapture()
     private let asr = SpeechRecognizer()
+    private let sense = SenseVoiceRecognizer()
     private let translator = LlamaTranslator()
     private let speaker = Speaker()
     private let systemTranslator = SystemTranslator()
@@ -187,6 +245,14 @@ final class LiveSession: ObservableObject {
             Task { @MainActor in self?.handle(e) }
         }
         pushConfig()
+
+        // 查一下 iOS 系统听写支持哪些语言；然后检查一遍当前选的语言
+        Task { [weak self] in
+            let ids = await LiveTextEngineFactory.supportedLanguageIDs(Language.all)
+            guard let self else { return }
+            self.appleLangIDs = ids
+            self.enforceLanguages()
+        }
 
         // 插上耳机：自动改为耳机朗读；拔掉：改回扬声器（正在聆听时先暂停朗读）
         NotificationCenter.default.addObserver(
@@ -308,7 +374,7 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 模型状态（设置页显示）
 
-    enum ModelKind { case translation, speech }
+    enum ModelKind { case translation, speech, senseVoice }
 
     struct ModelStatus {
         let name: String
@@ -337,6 +403,24 @@ final class LiveSession: ObservableObject {
         return .init(name: "Whisper large-v3 turbo", detail: "未下载", installed: false)
     }
 
+    var senseStatus: ModelStatus {
+        _ = modelsRevision
+        if let f = SenseVoiceRecognizer.installedFolder() {
+            return .init(name: "SenseVoice-Small",
+                         detail: ModelManager.format(ModelManager.folderSize(f)), installed: true)
+        }
+        return .init(name: "SenseVoice-Small", detail: "未下载", installed: false)
+    }
+
+    func isInstalled(_ kind: ModelKind) -> Bool {
+        _ = modelsRevision
+        switch kind {
+        case .translation: return ModelManager.currentGGUF() != nil
+        case .speech: return ModelManager.whisperFolder() != nil
+        case .senseVoice: return SenseVoiceRecognizer.installedFolder() != nil
+        }
+    }
+
     var installedGGUFs: [URL] {
         _ = modelsRevision
         return ModelManager.installedGGUFs()
@@ -361,8 +445,7 @@ final class LiveSession: ObservableObject {
     /// 设置 → 下载与导入：下载（或删除后重新下载）某个模型，进度显示在设置里
     func redownload(_ kind: ModelKind) async {
         guard !bgDownloading else { return }
-        let installed = kind == .translation ? ModelManager.currentGGUF() != nil : ModelManager.whisperFolder() != nil
-        if installed {
+        if isInstalled(kind) {
             if isRunning && !usingApple { stop(readAfter: false) }
             switch kind {
             case .translation:
@@ -371,11 +454,23 @@ final class LiveSession: ObservableObject {
             case .speech:
                 await asr.unload()
                 ModelManager.deleteWhisper()
+            case .senseVoice:
+                await sense.unload()
+                SenseVoiceRecognizer.delete()
             }
             modelsRevision += 1
-            if !usingApple { phase = .loading("正在重新下载模型，完成后自动加载") }
+            // 当前引擎用得到这个模型才需要等它下载完再用
+            let used = kind == .translation || missingSpeechKinds(for: asrEngine).contains(kind)
+            if !usingApple && used { phase = .loading("正在重新下载模型，完成后自动加载") }
         }
-        startBackgroundDownload(only: kind, switchWhenDone: false)
+        startBackgroundDownload(kinds: [kind], switchWhenDone: false)
+    }
+
+    /// 设置里选了还缺模型的识别引擎：下载缺的模型，下载完再切换过去
+    func downloadForEngine(_ engine: String) {
+        let kinds = missingSpeechKinds(for: engine)
+        guard !kinds.isEmpty else { asrEngine = engine; return }
+        startBackgroundDownload(kinds: kinds, switchWhenDone: false, thenEngine: engine)
     }
 
     // MARK: - 模型
@@ -430,38 +525,40 @@ final class LiveSession: ObservableObject {
         if modelsInstalled { await loadModels() } else { phase = .needsModels }
     }
 
-    /// 后台下载本地模型：期间继续用苹果自带，设置里显示进度，下载完自动切换
-    func startBackgroundDownload(only: ModelKind? = nil, switchWhenDone: Bool = true) {
+    /// 后台下载本地模型：期间继续用当前引擎，设置里显示进度，下载完自动切换。
+    /// kinds：要下载哪些模型；不指定就下载当前识别引擎缺的全部模型
+    /// thenEngine：下载完后切换到这个识别引擎
+    func startBackgroundDownload(kinds: [ModelKind]? = nil, switchWhenDone: Bool = true,
+                                 thenEngine: String? = nil) {
         guard !bgDownloading else { return }
+        let list = (kinds ?? ([ModelKind.translation] + missingSpeechKinds(for: asrEngine)))
+            .filter { !isInstalled($0) }
         bgDownloading = true
         bgDownloadError = nil
         bgDownloadProgress = 0
         bgSwitchWhenDone = switchWhenDone
-        bgDownloadAll = only == nil
+        bgQueue = list
+        bgThenEngine = thenEngine
         let host = hfHost
-        hearLog("后台下载本地模型")
+        hearLog("后台下载本地模型：\(list.map(Self.kindName).joined(separator: "、"))")
         Task {
             UIApplication.shared.isIdleTimerDisabled = true
             var ok = false
             do {
-                if only != .speech, ModelManager.currentGGUF() == nil {
-                    bgDownloadKind = .translation
-                    bgDownloadName = "翻译模型 Hy-MT2"
+                for kind in list {
+                    bgDownloadKind = kind
+                    bgDownloadName = Self.kindName(kind)
                     bgDownloadProgress = 0
-                    _ = try await ModelManager.downloadGGUF(host: host) { p in
+                    let onProgress: @Sendable (Double) -> Void = { p in
                         Task { @MainActor in self.bgDownloadProgress = p }
+                    }
+                    switch kind {
+                    case .translation: _ = try await ModelManager.downloadGGUF(host: host, progress: onProgress)
+                    case .speech: _ = try await ModelManager.downloadWhisper(host: host, progress: onProgress)
+                    case .senseVoice: try await SenseVoiceRecognizer.download(host: host, progress: onProgress)
                     }
                     bgDownloadKind = nil              // 下载完立刻收起进度条
-                    modelsRevision += 1
-                }
-                if only != .translation, ModelManager.whisperFolder() == nil {
-                    bgDownloadKind = .speech
-                    bgDownloadName = "语音识别模型 Whisper"
-                    bgDownloadProgress = 0
-                    _ = try await ModelManager.downloadWhisper(host: host) { p in
-                        Task { @MainActor in self.bgDownloadProgress = p }
-                    }
-                    bgDownloadKind = nil
+                    bgQueue.removeAll { $0 == kind }
                     modelsRevision += 1
                 }
                 ok = true
@@ -472,7 +569,16 @@ final class LiveSession: ObservableObject {
             // 先结束“下载中”的显示，再去切换或加载模型（加载要好几秒，不用一直挂着 100%）
             bgDownloading = false
             bgDownloadKind = nil
+            bgQueue = []
             UIApplication.shared.isIdleTimerDisabled = isRunning
+            let then = bgThenEngine
+            bgThenEngine = nil
+            // 为了换识别引擎而下载：下载完就切过去（切换时会自动加载模型）
+            if ok, let then, then != asrEngine {
+                hearLog("模型下载完成，识别引擎切换为 \(then)")
+                asrEngine = then
+                return
+            }
             guard ok, modelsInstalled else {
                 if !usingApple, case .loading = phase { phase = .needsModels }
                 return
@@ -486,6 +592,14 @@ final class LiveSession: ObservableObject {
             } else {
                 await switchToLocal()
             }
+        }
+    }
+
+    static func kindName(_ kind: ModelKind) -> String {
+        switch kind {
+        case .translation: return "翻译模型 Hy-MT2"
+        case .speech: return "语音识别模型 Whisper"
+        case .senseVoice: return "语音识别模型 SenseVoice"
         }
     }
 
@@ -529,11 +643,19 @@ final class LiveSession: ObservableObject {
                     Task { @MainActor in self.setProgress("翻译模型 Hy-MT2", p) }
                 }
             }
-            if ModelManager.whisperFolder() == nil {
-                phase = .downloading("语音识别模型 Whisper", 0)
-                _ = try await ModelManager.downloadWhisper(host: host) { p in
-                    Task { @MainActor in self.setProgress("语音识别模型 Whisper", p) }
+            // 只下载当前识别引擎要用的语音识别模型
+            for kind in missingSpeechKinds(for: asrEngine) {
+                let name = Self.kindName(kind)
+                phase = .downloading(name, 0)
+                let onProgress: @Sendable (Double) -> Void = { p in
+                    Task { @MainActor in self.setProgress(name, p) }
                 }
+                if kind == .senseVoice {
+                    try await SenseVoiceRecognizer.download(host: host, progress: onProgress)
+                } else {
+                    _ = try await ModelManager.downloadWhisper(host: host, progress: onProgress)
+                }
+                modelsRevision += 1
             }
             await loadModels()
         } catch {
@@ -548,14 +670,22 @@ final class LiveSession: ObservableObject {
     }
 
     func loadModels() async {
-        guard let gguf = ModelManager.currentGGUF(), let wf = ModelManager.whisperFolder() else {
+        let need = Self.engineNeeds(asrEngine)
+        let wf = ModelManager.whisperFolder()
+        let sf = SenseVoiceRecognizer.installedFolder()
+        guard let gguf = ModelManager.currentGGUF(),
+              !need.whisper || wf != nil, !need.sense || sf != nil else {
             phase = .needsModels; return
         }
+        // 当前引擎用不到的语音识别模型卸掉，省内存
+        if !need.whisper, await asr.isLoaded { await asr.unload(); hearLog("卸载 Whisper（当前引擎用不到）") }
+        if !need.sense, await sense.isLoaded { await sense.unload(); hearLog("卸载 SenseVoice（当前引擎用不到）") }
         let start = Date()
         let gpu = asrUseGPU
-        let needASR = !(await asr.isLoaded)
+        let needASR = need.whisper && !(await asr.isLoaded)
+        let needSV = need.sense && !(await sense.isLoaded)
         let needMT = !(await translator.isLoaded)
-        if !needASR && !needMT { phase = .ready; return }
+        if !needASR && !needSV && !needMT { phase = .ready; return }
         // 每秒刷新一次已用时间，让用户知道没有卡死
         let ticker = Task { @MainActor in
             var warned = false
@@ -576,8 +706,10 @@ final class LiveSession: ObservableObject {
         do {
             // 语音识别和翻译模型同时加载，缩短等待
             async let asrDone: Void = loadASRIfNeeded(needASR, folder: wf, gpu: gpu)
+            async let svDone: Void = loadSVIfNeeded(needSV, folder: sf)
             async let mtDone: Void = loadMTIfNeeded(needMT, path: gguf.path)
             try await asrDone
+            try await svDone
             try await mtDone
             phase = .ready
             hearLog("全部就绪，用时 \(Int(Date().timeIntervalSince(start)))s")
@@ -588,9 +720,14 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    private nonisolated func loadASRIfNeeded(_ need: Bool, folder: URL, gpu: Bool) async throws {
-        guard need else { return }
+    private nonisolated func loadASRIfNeeded(_ need: Bool, folder: URL?, gpu: Bool) async throws {
+        guard need, let folder else { return }
         try await asr.load(folder: folder, useGPU: gpu)
+    }
+
+    private nonisolated func loadSVIfNeeded(_ need: Bool, folder: URL?) async throws {
+        guard need, let folder else { return }
+        try await sense.load(folder: folder)
     }
 
     private nonisolated func loadMTIfNeeded(_ need: Bool, path: String) async throws {
@@ -636,6 +773,22 @@ final class LiveSession: ObservableObject {
             await reloadIfLocal()
         } catch {
             hearLog("导入语音识别模型失败：\(error)", .error)
+            bgDownloadError = "导入失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 设置 → 导入 SenseVoice 模型（文件夹）
+    func importSenseVoice(_ url: URL) async {
+        do {
+            if isRunning && !usingApple && useSense { stop(readAfter: false) }
+            await sense.unload()
+            try SenseVoiceRecognizer.importFolder(from: url)
+            modelsRevision += 1
+            bgDownloadError = nil
+            hearLog("已导入 SenseVoice 模型：\(url.lastPathComponent)")
+            await reloadIfLocal()
+        } catch {
+            hearLog("导入 SenseVoice 模型失败：\(error)", .error)
             bgDownloadError = "导入失败：\(error.localizedDescription)"
         }
     }
@@ -1022,8 +1175,10 @@ final class LiveSession: ObservableObject {
         while let job = previewSamples {
             previewSamples = nil
             let id = job.id
-            // 整句识别在进行时不做预览，GPU 先让给整句（否则整句会一直“识别中”）
-            guard phase == .ready, isRunning, !liveActive, !working, id == currentSeg, id > finishedSeg else { continue }
+            // Whisper：整句识别在进行时不做预览，GPU 先让给整句（否则整句会一直“识别中”）
+            // SenseVoice 很快（跑在神经引擎上），不用让
+            let sv = useSense
+            guard phase == .ready, isRunning, !liveActive, sv || !working, id == currentSeg, id > finishedSeg else { continue }
             let gen = runGen
             let a = langA, b = langB
             let forced = forcedLang
@@ -1036,7 +1191,11 @@ final class LiveSession: ObservableObject {
             let t0 = Date()
             let r: (String, String)
             do {
-                r = try await asr.recognize(clip, candidates: cands, fallback: fallback, preview: true)
+                if sv {
+                    r = try await sense.recognize(clip, candidates: cands, fallback: fallback)
+                } else {
+                    r = try await asr.recognize(clip, candidates: cands, fallback: fallback, preview: true)
+                }
             } catch {
                 hearLog("实时识别失败：\(error)", .error)
                 continue
@@ -1376,10 +1535,16 @@ final class LiveSession: ObservableObject {
         let text: String
         let t0 = Date()
         do {
-            let r = try await asr.recognize(samples, candidates: cands, fallback: fallback)
+            let sv = useSense
+            let r: (String, String)
+            if sv {
+                r = try await sense.recognize(samples, candidates: cands, fallback: fallback)
+            } else {
+                r = try await asr.recognize(samples, candidates: cands, fallback: fallback)
+            }
             detected = r.0
             text = r.1
-            hearLog("整句识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(text.prefix(40))")
+            hearLog("整句识别（\(sv ? "SenseVoice" : "Whisper")）\(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(text.prefix(40))")
         } catch {
             hearLog("识别失败：\(error)", .error)
             if gen == runGen { activity = "识别失败"; removeItem(itemID) }
@@ -1445,6 +1610,76 @@ final class LiveSession: ObservableObject {
         activity = isRunning ? "正在聆听" : ""
         // 朗读在单独的队列里进行，不会挡住后面的识别和翻译
         kickReader()
+        // SenseVoice + Whisper 校正：后面没有排队的句子时，用 Whisper 再识别一遍，有明显差别就替换
+        if asrEngine == "hybrid", !usingApple, queue.isEmpty {
+            await whisperCorrect(id: id, samples: samples, src: src, oldText: text, gen: gen)
+        }
+    }
+
+    /// 用 Whisper 再识别一遍这句（按 SenseVoice 判断出的语言），明显不同就替换原文并重新翻译
+    private func whisperCorrect(id: UUID, samples: [Float], src: Language, oldText: String, gen: Int) async {
+        guard await asr.isLoaded else { return }
+        activity = "Whisper 校正中…"
+        defer { if activity == "Whisper 校正中…" { activity = isRunning ? "正在聆听" : "" } }
+        let t0 = Date()
+        guard let r = try? await asr.recognize(samples, candidates: [src.id], fallback: src.id),
+              gen == runGen else { return }
+        let text = r.1
+        let secs = String(format: "%.1f", Date().timeIntervalSince(t0))
+        guard SpeechRecognizer.isMeaningful(text), SpeechRecognizer.matchesLanguage(text, src.id) else {
+            hearLog("Whisper 校正 \(secs)s：没把握，保留 SenseVoice 结果")
+            return
+        }
+        guard Self.clearlyDifferent(oldText, text) else {
+            hearLog("Whisper 校正 \(secs)s：基本一致")
+            return
+        }
+        guard let i = items.firstIndex(where: { $0.id == id }) else { return }
+        hearLog("Whisper 校正 \(secs)s：「\(oldText.prefix(30))」→「\(text.prefix(30))」")
+        let tgt = items[i].target
+        let wasReading = readingID == id
+        if wasReading { stopReading() }
+        items[i].sourceText = text
+        items[i].corrected = true
+        let context: [String] = useContext
+            ? Array(items[..<i].filter { $0.done }.suffix(2).map(\.sourceText))
+            : []
+        let prompt = PromptBuilder.build(text: text, from: src, to: tgt, context: context,
+                                         glossary: PromptBuilder.parseGlossary(glossary))
+        activity = "翻译中…"
+        do {
+            let out = try await translator.translate(prompt: prompt) { _ in }
+            guard gen == runGen else { return }
+            update(id, out, done: true)
+        } catch {
+            hearLog("校正后重新翻译失败：\(error)", .error)
+        }
+        persist()
+        // 正在读这句时被打断：换成新译文重新读
+        if wasReading, let j = items.firstIndex(where: { $0.id == id }) {
+            readIndex = min(readIndex, j)
+            kickReader()
+        }
+    }
+
+    /// 两次识别结果是不是“明显不同”：去掉标点、空格、大小写后比较，差 2 个字以上
+    /// （很短的句子差 1 个字也算）
+    static func clearlyDifferent(_ a: String, _ b: String) -> Bool {
+        func norm(_ s: String) -> [Character] { Array(s.lowercased().filter { $0.isLetter || $0.isNumber }) }
+        let x = norm(a), y = norm(b)
+        if x == y { return false }
+        if x.isEmpty || y.isEmpty { return true }
+        // 编辑距离
+        var prev = Array(0...y.count)
+        for i in 1...x.count {
+            var cur = [i] + Array(repeating: 0, count: y.count)
+            for j in 1...y.count {
+                cur[j] = x[i - 1] == y[j - 1] ? prev[j - 1] : min(prev[j - 1], prev[j], cur[j - 1]) + 1
+            }
+            prev = cur
+        }
+        let d = prev[y.count]
+        return d >= 2 || (d == 1 && max(x.count, y.count) <= 8)
     }
 
     /// 朗读一条译文：决定左右耳、声音和音高
