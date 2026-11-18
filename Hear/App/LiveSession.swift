@@ -70,6 +70,9 @@ final class LiveSession: ObservableObject {
     @Published private(set) var bgDownloadName = ""
     @Published private(set) var bgDownloadProgress: Double = 0
     @Published private(set) var bgDownloadError: String?
+    @Published private(set) var bgDownloadKind: ModelKind?
+    @Published private(set) var bgDownloadAll = false       // true：这次下载所有缺少的模型（另一个会排队）
+    private var bgSwitchWhenDone = true
     // 让系统弹出苹果翻译语言包下载（ContentView 的 translationTask 使用）
     @Published var translationPrepConfig: TranslationSession.Configuration?
     @Published private(set) var appleNote: String?
@@ -331,20 +334,24 @@ final class LiveSession: ObservableObject {
         await loadModels()
     }
 
-    /// 删除某个模型并重新下载
+    /// 设置 → 下载与导入：下载（或删除后重新下载）某个模型，进度显示在设置里
     func redownload(_ kind: ModelKind) async {
-        if isRunning { stop() }
-        switch kind {
-        case .translation:
-            await translator.unload()
-            ModelManager.deleteCurrentGGUF()
-        case .speech:
-            await asr.unload()
-            ModelManager.deleteWhisper()
+        guard !bgDownloading else { return }
+        let installed = kind == .translation ? ModelManager.currentGGUF() != nil : ModelManager.whisperFolder() != nil
+        if installed {
+            if isRunning && !usingApple { stop() }
+            switch kind {
+            case .translation:
+                await translator.unload()
+                ModelManager.deleteCurrentGGUF()
+            case .speech:
+                await asr.unload()
+                ModelManager.deleteWhisper()
+            }
+            modelsRevision += 1
+            if !usingApple { phase = .loading("正在重新下载模型，完成后自动加载") }
         }
-        modelsRevision += 1
-        await downloadModels(forceTranslation: kind == .translation)
-        modelsRevision += 1
+        startBackgroundDownload(only: kind, switchWhenDone: false)
     }
 
     // MARK: - 模型
@@ -400,36 +407,45 @@ final class LiveSession: ObservableObject {
     }
 
     /// 后台下载本地模型：期间继续用苹果自带，设置里显示进度，下载完自动切换
-    func startBackgroundDownload() {
+    func startBackgroundDownload(only: ModelKind? = nil, switchWhenDone: Bool = true) {
         guard !bgDownloading else { return }
         bgDownloading = true
         bgDownloadError = nil
         bgDownloadProgress = 0
+        bgSwitchWhenDone = switchWhenDone
+        bgDownloadAll = only == nil
         let host = hfHost
         hearLog("后台下载本地模型")
         Task {
             UIApplication.shared.isIdleTimerDisabled = true
             defer {
                 bgDownloading = false
+                bgDownloadKind = nil
                 UIApplication.shared.isIdleTimerDisabled = isRunning
             }
             do {
-                if ModelManager.currentGGUF() == nil {
+                if only != .speech, ModelManager.currentGGUF() == nil {
+                    bgDownloadKind = .translation
                     bgDownloadName = "翻译模型 Hy-MT2"
                     bgDownloadProgress = 0
                     _ = try await ModelManager.downloadGGUF(host: host) { p in
                         Task { @MainActor in self.bgDownloadProgress = p }
                     }
+                    modelsRevision += 1
                 }
-                if ModelManager.whisperFolder() == nil {
+                if only != .translation, ModelManager.whisperFolder() == nil {
+                    bgDownloadKind = .speech
                     bgDownloadName = "语音识别模型 Whisper"
                     bgDownloadProgress = 0
                     _ = try await ModelManager.downloadWhisper(host: host) { p in
                         Task { @MainActor in self.bgDownloadProgress = p }
                     }
+                    modelsRevision += 1
                 }
-                modelsRevision += 1
-                hearLog("本地模型下载完成")
+                hearLog("模型下载完成")
+                guard modelsInstalled else { return }       // 另一个模型还没下载
+                // 正在用本地模型（或刚重新下载）：直接加载；苹果自带：只有选择了切换才切过去
+                guard !usingApple || bgSwitchWhenDone else { return }
                 if isRunning {
                     pendingLocalSwitch = true     // 正在对话：停止实时翻译后再切换
                     activity = "本地模型已下载，停止实时翻译后切换"
@@ -439,6 +455,7 @@ final class LiveSession: ObservableObject {
             } catch {
                 hearLog("后台下载失败：\(error)", .error)
                 bgDownloadError = "下载失败：\(error.localizedDescription)"
+                if !usingApple, case .loading = phase { phase = .needsModels }
             }
         }
     }
