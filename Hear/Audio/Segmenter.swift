@@ -7,7 +7,7 @@ final class Segmenter {
         var sensitivityDB: Float = 12     // 高于环境噪声多少 dB 算说话（越小越灵敏）
         var silenceMs: Int = 700          // 停顿多久算一句话结束
         var maxSeconds: Double = 15       // 单句最长时长
-        var partialEvery: Double = 0.7    // 说话中每隔多久给一次中间结果（秒）
+        var partialEvery: Double = 0.4    // 说话中每隔多久给一次中间结果（秒）
         var minSpeechMs: Int = 400        // 太短的声音忽略（咳嗽、碰撞声等）
     }
 
