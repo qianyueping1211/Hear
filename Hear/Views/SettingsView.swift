@@ -13,6 +13,36 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                // MARK: 引擎
+                Section {
+                    Picker("引擎", selection: engineBinding) {
+                        Text("苹果自带").tag("apple")
+                        Text("听见本地模型").tag("local")
+                    }
+                    .disabled(!session.appleAvailable)
+                    if session.bgDownloading {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("正在下载 \(session.bgDownloadName)")
+                                Spacer()
+                                Text(String(format: "%.0f%%", session.bgDownloadProgress * 100))
+                                    .monospacedDigit()
+                                    .foregroundStyle(.secondary)
+                            }
+                            ProgressView(value: session.bgDownloadProgress)
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    if let err = session.bgDownloadError {
+                        Text(err).font(.footnote).foregroundStyle(.red)
+                        Button("重新下载") { session.startBackgroundDownload() }
+                    }
+                } header: {
+                    Text("引擎")
+                } footer: {
+                    Text(engineFooter)
+                }
+
                 Section("翻译") {
                     Toggle("结合上文翻译（更连贯）", isOn: $session.useContext)
                 }
@@ -88,11 +118,13 @@ struct SettingsView: View {
 
                 // MARK: 语音识别
                 Section {
-                    Picker("识别引擎", selection: $session.asrEngine) {
-                        Text("Whisper").tag("whisper")
-                        Text("iOS 系统听写").tag("apple")
+                    if !session.usingApple {
+                        Picker("识别引擎", selection: $session.asrEngine) {
+                            Text("Whisper").tag("whisper")
+                            Text("iOS 系统听写").tag("apple")
+                        }
+                        .disabled(!LiveTextEngineFactory.isSupported)
                     }
-                    .disabled(!LiveTextEngineFactory.isSupported)
                     Picker("语音识别运行在", selection: asrBinding) {
                         Text("GPU（加载快，推荐）").tag(true)
                         Text("神经引擎（省电）").tag(false)
@@ -212,6 +244,12 @@ struct SettingsView: View {
                      ? "翻译模型（MT）约 2 GB，请连接 Wi‑Fi。"
                      : "语音识别模型（ASR）约 1.6 GB，请连接 Wi‑Fi。下载后首次加载需要编译 1–3 分钟。")
             }
+            .confirmationDialog("下载听见本地模型？", isPresented: $askDownload, titleVisibility: .visible) {
+                Button("开始下载") { session.startBackgroundDownload() }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("翻译模型约 2 GB、语音识别模型约 1.6 GB，请连接 Wi‑Fi。下载期间继续用苹果自带，下载完成后自动切换。下载时请保持 App 在前台。")
+            }
             .fileImporter(isPresented: $importing,
                           allowedContentTypes: [UTType(filenameExtension: "gguf") ?? .data, .data]) { result in
                 if case .success(let url) = result {
@@ -223,6 +261,31 @@ struct SettingsView: View {
     }
 
     @State private var personalVoiceNote: String?
+    @State private var askDownload = false
+
+    private var engineBinding: Binding<String> {
+        Binding(
+            get: { session.usingApple ? "apple" : "local" },
+            set: { v in
+                if v == "apple" {
+                    session.chooseApple()
+                } else if session.modelsInstalled {
+                    Task { await session.switchToLocal() }
+                } else if !session.bgDownloading {
+                    askDownload = true
+                }
+            }
+        )
+    }
+
+    private var engineFooter: String {
+        if !session.appleAvailable { return "苹果自带需要 iOS 26。" }
+        if session.usingApple {
+            return "苹果自带：用 iOS 的系统听写和翻译，不用下载模型。第一次用某种语言时，系统会提示下载语言包。" +
+                (session.modelsInstalled ? "" : "\n选择“听见本地模型”会先下载模型，下载完成后自动切换。")
+        }
+        return "听见本地模型：Whisper + Hy-MT2，在手机本地运行，支持结合上文和术语表。"
+    }
     @State private var inputNote: String?
 
     private var inputBinding: Binding<String> {
