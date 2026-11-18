@@ -682,8 +682,10 @@ final class LiveSession: ObservableObject {
         if !need.sense, await sense.isLoaded { await sense.unload(); hearLog("卸载 SenseVoice（当前引擎用不到）") }
         let start = Date()
         let gpu = asrUseGPU
-        let needASR = need.whisper && !(await asr.isLoaded)
-        let needSV = need.sense && !(await sense.isLoaded)
+        let asrLoaded = await asr.isLoaded
+        let svLoaded = await sense.isLoaded
+        let needASR = need.whisper && !asrLoaded
+        let needSV = need.sense && !svLoaded
         let needMT = !(await translator.isLoaded)
         if !needASR && !needSV && !needMT { phase = .ready; return }
         // 每秒刷新一次已用时间，让用户知道没有卡死
