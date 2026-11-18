@@ -20,21 +20,15 @@ struct ContentView: View {
                 Divider()
                 Group {
                     if session.phase == .ready || session.isLoadingPhase {
-                        // 加载模型时也显示对话页，顶部一行小字提示，不挡住内容
+                        // 加载模型时也显示对话页；加载进度只在 功能设置 → 引擎 下方显示
                         TranscriptView(onEdit: { item in
                             draft = item.sourceText
                             editingID = item.id
                         })
                             .overlay(alignment: .top) {
-                                VStack(spacing: 6) {
-                                    if let msg = session.loadingText {
-                                        LoadingPill(text: msg)
-                                    }
-                                    if session.usingApple, let note = session.appleNote {
-                                        NotePill(text: note)
-                                    }
+                                if session.usingApple, let note = session.appleNote {
+                                    NotePill(text: note).padding(.top, 8)
                                 }
-                                .padding(.top, 8)
                             }
                     } else {
                         SetupView()
@@ -498,6 +492,20 @@ struct ControlBar: View {
                 .padding(.bottom, 8)
         }
         .padding(.top, 6)
+        // 按钮上方的短暂提示（例如本地模型还在加载）
+        .overlay(alignment: .top) {
+            if let t = session.toast {
+                Text(t)
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
+                    .offset(y: -30)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
+        }
+        .animation(.spring(duration: 0.25), value: session.toast)
     }
 }
 

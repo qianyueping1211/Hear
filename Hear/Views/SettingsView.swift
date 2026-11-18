@@ -21,6 +21,16 @@ struct SettingsView: View {
                         Text("听见本地模型").tag("local")
                     }
                     .disabled(!session.appleAvailable)
+                    // 本地模型加载进度显示在这里（首页不再提示）
+                    if let msg = session.loadingText {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text(msg)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                    }
                 } header: {
                     Text("引擎")
                 } footer: {
@@ -368,8 +378,7 @@ struct SettingsView: View {
             set: { gpu in
                 guard gpu != session.asrUseGPU else { return }
                 session.asrUseGPU = gpu
-                Task { await session.reloadASR() }
-                if !session.usingApple { dismiss() }      // 本地模型要重新加载，回到首页看进度
+                Task { await session.reloadASR() }      // 加载进度显示在「引擎」下方
             }
         )
     }
