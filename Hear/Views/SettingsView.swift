@@ -69,12 +69,9 @@ struct SettingsView: View {
                     Text("模型文件损坏、翻译异常或想换下载源时，可以重新下载。也可以通过电脑的“访达/iTunes 文件共享”把 .gguf 拷进“听见”。")
                 }
 
-                Section("翻译") {
-                    Toggle("结合上文翻译（更连贯）", isOn: $session.useContext)
-                }
-
-                // MARK: 大模型 API（用于总结）
+                // MARK: 翻译与总结
                 Section {
+                    Toggle("结合上文翻译（更连贯）", isOn: $session.useContext)
                     NavigationLink {
                         LLMSettingsView()
                     } label: {
@@ -84,28 +81,60 @@ struct SettingsView: View {
                         }
                     }
                 } header: {
-                    Text("总结")
+                    Text("翻译与总结")
                 }
 
-                // MARK: 收音
+                // MARK: 语音识别（收音 → 断句 → 运行方式）
                 Section {
                     Picker("声音来源", selection: inputBinding) {
                         Text("手机麦克风").tag("phone")
                         Text("耳机麦克风").tag("headset")
                     }
                     Toggle("语音增强（降噪、消除回声）", isOn: $session.voiceProcessing)
+                    VStack(alignment: .leading) {
+                        Text("说话灵敏度：\(Int(session.sensitivity)) dB")
+                        Slider(value: $session.sensitivity, in: 6...24, step: 1)
+                        Text("数值越小越灵敏；环境吵的话调大").font(.caption).foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading) {
+                        Text("停顿多久算一句：\(Int(session.silenceMs)) 毫秒")
+                        Slider(value: $session.silenceMs, in: 400...1500, step: 50)
+                        Text("短：出结果更快；长：句子更完整").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Picker("语音识别运行在", selection: asrBinding) {
+                        Text("GPU（加载快，推荐）").tag(true)
+                        Text("神经引擎（省电）").tag(false)
+                    }
+                    if !session.usingApple {
+                        Picker("识别引擎", selection: $session.asrEngine) {
+                            Text("Whisper").tag("whisper")
+                            Text("iOS 系统听写").tag("apple")
+                        }
+                        .disabled(!LiveTextEngineFactory.isSupported)
+                    }
                 } header: {
-                    Text("收音")
+                    Text("语音识别")
                 } footer: {
-                    Text((inputNote.map { $0 + "\n" } ?? "") + "使用 iPhone 自带的通话级降噪：压低空调、风扇、人群等背景声，只突出说话的人，也能减少没说话时被误识别。下次开始实时翻译时生效。开启后，还可以在聆听时从控制中心的“麦克风模式”里选择“语音突显”，降噪更强。")
+                    if let inputNote { Text(inputNote) }
                 }
 
-                // MARK: 朗读
+                // MARK: 朗读（出声 → 音色 → 耳机左右耳）
                 Section {
                     Toggle("朗读译文", isOn: $session.speakOutput)
                     Picker("朗读从哪里出声", selection: outputBinding) {
                         Text("手机扬声器").tag(AudioOutput.speaker)
                         Text("耳机").tag(AudioOutput.headphones)
+                    }
+                    Picker("朗读音色", selection: $session.voiceStyle) {
+                        Text("系统默认").tag("system")
+                        Text("接近说话人（性别和音高）").tag("match")
+                    }
+                    Toggle("用我的“个人声音”朗读我说的话", isOn: personalVoiceBinding)
+                    if session.usePersonalVoice {
+                        Picker("我说的语言", selection: $session.mySide) {
+                            Text(session.langA.name).tag("A")
+                            Text(session.langB.name).tag("B")
+                        }
                     }
                     if session.outputMode == .headphones {
                         Picker("左耳听", selection: $session.leftEar) {
@@ -121,58 +150,9 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("朗读")
-                }
-
-                // MARK: 音色
-                Section {
-                    Picker("朗读音色", selection: $session.voiceStyle) {
-                        Text("系统默认").tag("system")
-                        Text("接近说话人（性别和音高）").tag("match")
-                    }
-                    Toggle("用我的“个人声音”朗读我说的话", isOn: personalVoiceBinding)
-                    if session.usePersonalVoice {
-                        Picker("我说的语言", selection: $session.mySide) {
-                            Text(session.langA.name).tag("A")
-                            Text(session.langB.name).tag("B")
-                        }
-                    }
-                } header: {
-                    Text("音色")
                 } footer: {
                     if let personalVoiceNote { Text(personalVoiceNote) }
                 }
-
-                // MARK: 语音识别
-                Section {
-                    if !session.usingApple {
-                        Picker("识别引擎", selection: $session.asrEngine) {
-                            Text("Whisper").tag("whisper")
-                            Text("iOS 系统听写").tag("apple")
-                        }
-                        .disabled(!LiveTextEngineFactory.isSupported)
-                    }
-                    Picker("语音识别运行在", selection: asrBinding) {
-                        Text("GPU（加载快，推荐）").tag(true)
-                        Text("神经引擎（省电）").tag(false)
-                    }
-                } header: {
-                    Text("语音识别")
-                } footer: {
-                    Text("Whisper：自动判断说的是哪种语言，几个字一批显示。iOS 系统听写：说话时逐字显示（需要 iOS 26，第一次使用某种语言会先下载系统语言包），一句说完后仍由 Whisper 校正并判断语言。\n神经引擎更省电，但第一次加载要先编译模型，可能需要好几分钟。切换后会重新加载语音识别模型。")
-                }
-
-                Section {
-                    VStack(alignment: .leading) {
-                        Text("说话灵敏度：\(Int(session.sensitivity)) dB")
-                        Slider(value: $session.sensitivity, in: 6...24, step: 1)
-                        Text("数值越小越灵敏；环境吵的话调大").font(.caption).foregroundStyle(.secondary)
-                    }
-                    VStack(alignment: .leading) {
-                        Text("停顿多久算一句：\(Int(session.silenceMs)) 毫秒")
-                        Slider(value: $session.silenceMs, in: 400...1500, step: 50)
-                        Text("短：出结果更快；长：句子更完整").font(.caption).foregroundStyle(.secondary)
-                    }
-                } header: { Text("断句") }
 
                 Section {
                     TextEditor(text: $session.glossary)
