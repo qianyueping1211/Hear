@@ -80,6 +80,10 @@ actor SenseVoiceRecognizer {
         for f in candidates where hasModels(f) { return f }
         guard let found = scan() else { return nil }
         UserDefaults.standard.set(found.path, forKey: "senseVoiceFolder")
+        // 打印实际位置（找到一次后就记住，不会重复打印）
+        hearLog("SenseVoice 模型实际位置：\(found.path)")
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: found.path)) ?? []
+        hearLog("SenseVoice 模型文件：\(files.sorted().joined(separator: ", "))")
         return found
     }
 
