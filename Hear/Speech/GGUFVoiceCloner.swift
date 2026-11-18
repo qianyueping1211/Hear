@@ -336,10 +336,13 @@ actor GGUFVoiceCloner {
         var nFrames = 0
         var stop = false
         var sampled = llama_token(-1)
-        var hState: UnsafeMutablePointer<Float> = llama_get_embeddings_ith(ctx, -1)
+        guard let hStateRaw = llama_get_embeddings_ith(ctx, -1) else {
+            throw VoiceCloneGGUFError.generateFailed("拿不到 embedding")
+        }
+        var hState: UnsafePointer<Float> = UnsafePointer(hStateRaw)
 
         while !stop && nFrames < maxFrames {
-            var hNext: UnsafeMutablePointer<Float>?
+            var hNext: UnsafePointer<Float>?
             let rc2 = mtmd_helper_gen_audio_step_gen(gen, sampled, hState, &hNext, &stop)
             guard rc2 == 0 else {
                 throw VoiceCloneGGUFError.generateFailed("step_gen")
@@ -371,11 +374,12 @@ actor GGUFVoiceCloner {
     /// 从 logits 里采样一个 token（贪心，最稳）
     private func sampleToken(_ ctx: OpaquePointer, _ model: OpaquePointer) -> llama_token {
         guard let vocab = llama_model_get_vocab(model) else { return -1 }
-        let n = llama_vocab_n_tokens(vocab)
+        let n = Int(llama_vocab_n_tokens(vocab))
         guard n > 0 else { return -1 }
         var best = llama_token(0)
         var bestLogit = -Float.greatestFiniteMagnitude
-        guard let logits = llama_get_logits_ith(ctx, -1) else { return -1 }
+        guard let logitsPtr = llama_get_logits_ith(ctx, -1) else { return -1 }
+        let logits = UnsafePointer(logitsPtr)
         for i in 0..<n {
             let l = logits[i]
             if l > bestLogit { bestLogit = l; best = llama_token(i) }
