@@ -11,6 +11,13 @@ final class AudioCapture {
     /// 语音增强（降噪、回声消除）。下次开始聆听时生效
     var voiceProcessing = true
 
+    /// 同时把 16kHz 采样交给系统听写（音频线程调用；静音时给的是静音采样）
+    private var _onSamples: (([Float]) -> Void)?
+    var onSamples: (([Float]) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onSamples }
+        set { lock.lock(); _onSamples = newValue; lock.unlock() }
+    }
+
     private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?          // 只在音频线程里读写
     private let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
@@ -134,6 +141,9 @@ final class AudioCapture {
         guard error == nil, let ch = out.floatChannelData, out.frameLength > 0 else { return }
         let samples = Array(UnsafeBufferPointer(start: ch[0], count: Int(out.frameLength)))
         let isMuted = muted
+        if let feed = onSamples {
+            feed(isMuted ? [Float](repeating: 0, count: samples.count) : samples)
+        }
         queue.async { [segmenter] in
             if isMuted { segmenter.reset() } else { segmenter.feed(samples) }
         }

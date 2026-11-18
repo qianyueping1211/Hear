@@ -9,9 +9,15 @@ actor SpeechRecognizer {
     private var pipe: WhisperKit?
     private var zhPromptTokens: [Int]?
     private var busy = false   // WhisperKit 不保证并发安全，这里串行化
+    private var finalWaiting = 0
 
-    private func acquire() async {
-        while busy { try? await Task.sleep(nanoseconds: 15_000_000) }
+    /// 整句识别优先：有整句在等时，实时预览先让路
+    private func acquire(final: Bool) async {
+        if final { finalWaiting += 1 }
+        while busy || (!final && finalWaiting > 0) {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        if final { finalWaiting -= 1 }
         busy = true
     }
     private func release() { busy = false }
@@ -75,7 +81,7 @@ actor SpeechRecognizer {
     func recognize(_ samples: [Float], candidates: [String], fallback: String,
                    preview: Bool = false) async throws -> (String, String) {
         guard let pipe else { return (fallback, "") }
-        await acquire(); defer { release() }
+        await acquire(final: !preview); defer { release() }
 
         let auto = try await pipe.transcribe(audioArray: samples,
                                              decodeOptions: options(language: nil, preview: preview))
@@ -94,7 +100,7 @@ actor SpeechRecognizer {
     /// 指定语言识别（用于说话过程中的实时预览）
     func transcribe(_ samples: [Float], language: String?) async throws -> String {
         guard let pipe else { return "" }
-        await acquire(); defer { release() }
+        await acquire(final: true); defer { release() }
         let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options(language: language))
         return Self.joinText(results, language: language ?? results.first?.language)
     }

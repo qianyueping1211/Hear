@@ -22,12 +22,25 @@ final class CancelFlag: @unchecked Sendable {
     var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
 }
 
+/// 线程安全的计数器：实时预览翻译的“轮次”，换轮次后旧的预览翻译马上停下
+final class EpochCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var v = 0
+    func bump() { lock.lock(); v += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return v }
+}
+
 /// 用 llama.cpp（Metal GPU）在本机运行 Hy-MT2 GGUF 翻译模型
 actor LlamaTranslator {
     private let stopFlag = CancelFlag()
+    private let previewEpoch = EpochCounter()
 
     /// 立刻停止正在进行的翻译（不用等 actor 空闲）
     nonisolated func cancelCurrent() { stopFlag.set() }
+
+    /// 只停止实时预览的翻译（整句翻译不受影响），让整句翻译马上开始
+    nonisolated func cancelPreview() { previewEpoch.bump() }
+    nonisolated var currentPreviewEpoch: Int { previewEpoch.value }
 
     private var model: OpaquePointer?
     private var ctx: OpaquePointer?
@@ -92,6 +105,7 @@ actor LlamaTranslator {
     /// 翻译。onUpdate 会在生成过程中收到“到目前为止的译文”。
     func translate(prompt userPrompt: String,
                    maxNewTokens: Int = 512,
+                   previewEpoch epoch: Int? = nil,
                    onUpdate: @escaping @Sendable (String) -> Void) throws -> String {
         guard let ctx, let vocab, let sampler else { throw TranslatorError.notLoaded }
         stopFlag.reset()
@@ -113,6 +127,7 @@ actor LlamaTranslator {
 
         for _ in 0..<maxNewTokens {
             if Task.isCancelled || stopFlag.isSet { break }
+            if let epoch, epoch != previewEpoch.value { break }
             var tok = llama_sampler_sample(sampler, ctx, -1)
             if llama_vocab_is_eog(vocab, tok) { break }
 
