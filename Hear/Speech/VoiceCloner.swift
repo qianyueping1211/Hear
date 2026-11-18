@@ -12,6 +12,8 @@ actor VoiceCloner {
 
     private var model: Qwen3TTSModel?
     private var encoder: SpeechTokenizerEncoder?
+    /// 正在加载中：同一个模型加载两份会吃掉双倍内存，App 会被系统直接杀掉
+    private var loading = false
 
     var isLoaded: Bool { model != nil }
 
@@ -95,11 +97,16 @@ actor VoiceCloner {
     /// 下载（已下载就直接加载）。下载完模型会留在内存里
     func download(host: String, progress: @escaping @Sendable (Double) -> Void) async throws {
         setenv("HF_ENDPOINT", "https://\(host)", 1)
+        guard !loading else { return }                    // 已经在加载了，别再加载一份
+        loading = true
+        defer { loading = false }
         try await loadModel(offline: false, progress: progress)
     }
 
     func load() async throws {
-        guard model == nil else { return }
+        guard model == nil, !loading else { return }      // 已经在加载了，别再加载一份
+        loading = true
+        defer { loading = false }
         try await loadModel(offline: Self.installed(), progress: nil)
     }
 

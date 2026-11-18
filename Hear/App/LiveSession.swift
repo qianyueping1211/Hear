@@ -1890,7 +1890,7 @@ final class LiveSession: ObservableObject {
     }
 
     private func loadClonerIfNeeded() async {
-        guard voiceClone, VoiceCloner.installed(), !cloneLoading, !(await cloner.isLoaded) else { return }
+        guard voiceClone, VoiceCloner.installed(), !cloneLoading else { return }
         if case .loading = phase { return }                 // 识别、翻译模型还在加载，等它们好了会再叫
         // 声音克隆模型加载和生成要 1.5 GB 左右内存；不够就先不加载，用系统声音
         let free = Self.freeMB()
@@ -1900,8 +1900,10 @@ final class LiveSession: ObservableObject {
             showToast("内存不够，声音克隆暂时用系统声音")
             return
         }
+        // 先占位再 await：这样两个加载不会同时进行（模型加载两份，内存翻倍会被系统直接杀掉）
         cloneLoading = true
         modelsRevision += 1
+        if await cloner.isLoaded { cloneLoading = false; return }   // 已经加载好了
         // 记一下“正在加载”：万一加载时 App 被系统强制退出，下次打开会自动关掉声音克隆
         let d = UserDefaults.standard
         d.set(true, forKey: Self.clonePendingKey)
