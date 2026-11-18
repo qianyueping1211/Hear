@@ -83,6 +83,13 @@ actor SpeechRecognizer {
         guard let pipe else { return (fallback, "") }
         await acquire(final: !preview); defer { release() }
 
+        // 只有一种候选语言（对话翻译模式按住了某种语言）：直接按这种语言识别，不再自动判断
+        if candidates.count == 1, let only = candidates.first {
+            let r = try await pipe.transcribe(audioArray: samples,
+                                              decodeOptions: options(language: only, preview: preview))
+            return (only, Self.confident(r) ? Self.joinText(r, language: only) : "")
+        }
+
         let auto = try await pipe.transcribe(audioArray: samples,
                                              decodeOptions: options(language: nil, preview: preview))
         let detected = auto.first?.language ?? ""
