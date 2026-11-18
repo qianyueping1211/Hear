@@ -1,0 +1,75 @@
+name: Check build (compile only)
+
+# 只编译、不打包、不发布：用来快速验证 Swift 代码能不能编过
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'Hear/**'
+      - 'project.yml'
+      - 'scripts/**'
+      - 'Frameworks/LLAMA_VERSION'
+      - '.github/workflows/check-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-build
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      BUNDLE_ID: com.hear.app
+      TEAM_ID: ""
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select Xcode
+        run: |
+          XC=$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)
+          echo "Using $XC"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Metal toolchain
+        continue-on-error: true
+        run: xcodebuild -downloadComponent MetalToolchain || true
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Fetch llama.xcframework
+        run: bash scripts/fetch_llama.sh
+
+      - name: Prepare app icon
+        run: bash scripts/prepare_assets.sh
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Hear.xcodeproj \
+            -scheme Hear \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tee build.log | grep -E "error:|BUILD" || true
+          if ! test -f build/Build/Products/Release-iphoneos/Hear.app/Hear; then
+            echo "::error::编译失败，错误如下："
+            grep -E "error:" build.log | sed 's|.*/Hear/Hear/||' | sort -u | head -40
+            exit 1
+          fi
+          echo "✅ 编译通过"
