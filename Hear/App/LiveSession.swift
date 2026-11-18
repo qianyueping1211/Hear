@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import AVFoundation
 import Translation
+import os
 
 /// 整个实时翻译流程的调度中心：
 /// 麦克风 → 断句 → 判断语种 → 识别 → 翻译（流式显示）→ 朗读
@@ -58,7 +59,8 @@ final class LiveSession: ObservableObject {
             save("voiceClone", voiceClone)
             guard voiceClone != oldValue else { return }
             hearLog("声音克隆朗读：\(voiceClone ? "开" : "关")")
-            if voiceClone { loadClonerIfNeeded() } else {
+            if voiceClone { scheduleCloneLoad(delay: 0.3) } else {
+                cloneLoadTask?.cancel()
                 cloneTasks.removeAll()
                 Task { await cloner.unload() }
             }
@@ -535,7 +537,18 @@ final class LiveSession: ObservableObject {
 
     func bootstrap() async {
         guard phase == .checking || phase == .needsModels || phaseIsFailed else { return }
-        if voiceClone { loadClonerIfNeeded() }
+        // 上次加载声音克隆时 App 退出了（多半是内存不够）：这次先关掉，免得一打开就闪退
+        let d = UserDefaults.standard
+        if d.bool(forKey: Self.clonePendingKey) {
+            d.removeObject(forKey: Self.clonePendingKey)
+            if voiceClone {
+                hearLog("上次加载声音克隆时 App 退出了，已自动关闭声音克隆（可用内存 \(Self.freeMB()) MB）", .warning)
+                voiceClone = false
+                showToast("上次加载声音克隆时 App 退出，已自动关闭声音克隆")
+            }
+        }
+        hearLog("启动：可用内存 \(Self.freeMB()) MB")
+        defer { if voiceClone { scheduleCloneLoad(delay: 3) } }   // 其他模型准备好以后再加载声音克隆
         let installed = modelsInstalled
         if engineMode.isEmpty && installed { engineMode = "local" }   // 已经下载过模型的老用户
         if usingApple {
@@ -756,6 +769,10 @@ final class LiveSession: ObservableObject {
         let needSV = need.sense && !svLoaded
         let needMT = !(await translator.isLoaded)
         if !needASR && !needSV && !needMT { phase = .ready; return }
+        // 加载识别和翻译模型时先把声音克隆卸掉，避免几个大模型同时占内存；全部就绪后再加载
+        cloneLoadTask?.cancel()
+        if await cloner.isLoaded { cloneTasks.removeAll(); await cloner.unload() }
+        defer { if voiceClone { scheduleCloneLoad(delay: 3) } }
         // 每秒刷新一次已用时间，让用户知道没有卡死
         let ticker = Task { @MainActor in
             var warned = false
@@ -774,15 +791,12 @@ final class LiveSession: ObservableObject {
         defer { ticker.cancel() }
         phase = .loading("正在准备模型…")
         do {
-            // 语音识别和翻译模型同时加载，缩短等待
-            async let asrDone: Void = loadASRIfNeeded(needASR, folder: wf, gpu: gpu)
-            async let svDone: Void = loadSVIfNeeded(needSV, folder: sf)
-            async let mtDone: Void = loadMTIfNeeded(needMT, path: gguf.path)
-            try await asrDone
-            try await svDone
-            try await mtDone
+            // 一个一个加载：同时加载几个大模型，内存峰值太高会被系统强制退出
+            try await loadMTIfNeeded(needMT, path: gguf.path)
+            try await loadSVIfNeeded(needSV, folder: sf)
+            try await loadASRIfNeeded(needASR, folder: wf, gpu: gpu)
             phase = .ready
-            hearLog("全部就绪，用时 \(Int(Date().timeIntervalSince(start)))s")
+            hearLog("全部就绪，用时 \(Int(Date().timeIntervalSince(start)))s，可用内存 \(Self.freeMB()) MB")
         } catch {
             hearLog("模型加载失败：\(error)", .error)
             if isRunning { stop(readAfter: false) }
@@ -877,7 +891,7 @@ final class LiveSession: ObservableObject {
                     ? "已导入主模型，还缺声音编解码器（Qwen3-TTS-Tokenizer-12Hz）"
                     : "已导入声音编解码器，还缺主模型（Qwen3-TTS-12Hz-0.6B-Base-MLX-4bit）"
             }
-            if voiceClone { loadClonerIfNeeded() }
+            if voiceClone { scheduleCloneLoad(delay: 0.5) }
         } catch {
             hearLog("导入声音克隆模型失败：\(error)", .error)
             bgDownloadError = "导入失败：\(error.localizedDescription)"
@@ -1764,7 +1778,7 @@ final class LiveSession: ObservableObject {
         return d >= 2 || (d == 1 && max(x.count, y.count) <= 8)
     }
 
-    /// 朗读一条译文：决定左右耳；打开声音克隆时用说话人的原声
+    /// 朗读一条译文：决定左右耳、声音和音高
     private func speak(_ item: TranslationItem) async {
         let text = item.translated
         guard !text.isEmpty, !text.hasPrefix("（翻译失败") else { return }
@@ -1859,20 +1873,51 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 声音克隆
 
-    private func loadClonerIfNeeded() {
-        guard VoiceCloner.installed(), !cloneLoading else { return }
+    private static let clonePendingKey = "cloneLoadPending"
+    private var cloneLoadTask: Task<Void, Never>?
+
+    /// 这个 App 现在还能用多少内存（MB）
+    static func freeMB() -> Int { Int(os_proc_available_memory() / 1_048_576) }
+
+    /// 过一会儿再加载声音克隆（等其他模型加载完、界面动画结束）
+    private func scheduleCloneLoad(delay: Double) {
+        cloneLoadTask?.cancel()
+        cloneLoadTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.loadClonerIfNeeded()
+        }
+    }
+
+    private func loadClonerIfNeeded() async {
+        guard voiceClone, VoiceCloner.installed(), !cloneLoading, !(await cloner.isLoaded) else { return }
+        if case .loading = phase { return }                 // 识别、翻译模型还在加载，等它们好了会再叫
+        // 声音克隆模型加载和生成要 1.5 GB 左右内存；不够就先不加载，用系统声音
+        let free = Self.freeMB()
+        hearLog("声音克隆：准备加载，可用内存 \(free) MB")
+        guard free >= 1800 else {
+            hearLog("声音克隆：可用内存不够（\(free) MB，需要约 1800 MB），先用系统声音朗读", .warning)
+            showToast("内存不够，声音克隆暂时用系统声音")
+            return
+        }
         cloneLoading = true
         modelsRevision += 1
-        Task {
-            do {
-                try await cloner.load()
-            } catch {
-                hearLog("声音克隆：模型加载失败 \(error)", .error)
-                showToast("声音克隆模型加载失败，先用系统声音朗读")
-            }
-            cloneLoading = false
-            modelsRevision += 1
+        // 记一下“正在加载”：万一加载时 App 被系统强制退出，下次打开会自动关掉声音克隆
+        let d = UserDefaults.standard
+        d.set(true, forKey: Self.clonePendingKey)
+        d.synchronize()
+        do {
+            try await cloner.load()
+            hearLog("声音克隆：加载后可用内存 \(Self.freeMB()) MB")
+        } catch {
+            hearLog("声音克隆：模型加载失败 \(error)", .error)
+            showToast("声音克隆模型加载失败，先用系统声音朗读")
         }
+        cloneLoading = false
+        modelsRevision += 1
+        // 加载完再观察几秒（第一次生成声音时内存还会涨），没退出才清掉标记
+        try? await Task.sleep(nanoseconds: 8_000_000_000)
+        d.removeObject(forKey: Self.clonePendingKey)
     }
 
     /// 记下这句话的声音和文字，给声音克隆当样本（只留最近 30 句）
@@ -1904,6 +1949,12 @@ final class LiveSession: ObservableObject {
               let item = items.first(where: { $0.id == id }),
               !item.translated.isEmpty, !item.translated.hasPrefix("（翻译失败"),
               VoiceCloner.languageName(item.target.id) != nil else { return nil }
+        // 生成声音时内存还会再涨；剩得太少就这句先用系统声音，免得 App 被系统强制退出
+        let free = Self.freeMB()
+        guard free >= 700 else {
+            hearLog("声音克隆：可用内存只剩 \(free) MB，这句用系统声音", .warning)
+            return nil
+        }
         let text = item.translated, lang = item.target.id
         let cloner = self.cloner
         return Task.detached(priority: .userInitiated) {
