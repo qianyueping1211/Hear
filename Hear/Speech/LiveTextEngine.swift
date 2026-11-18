@@ -6,8 +6,8 @@ import Speech
 /// 说话时“逐字显示原文”的引擎（目前是 iOS 26 自带的系统听写）。
 /// 只负责实时显示；一句话说完后仍由 Whisper 做最终识别和语言判断。
 protocol LiveTextEngine: AnyObject {
-    /// 当前这句话到目前为止的文字（在任意线程回调）
-    var onUpdate: ((String) -> Void)? { get set }
+    /// 有新的识别结果（在任意线程回调）；用 segmentText 取某一句的文字
+    var onUpdate: (() -> Void)? { get set }
     /// 正在听的语言（Whisper 语言代码，例如 "zh"）
     var languageID: String? { get }
     /// 按某种语言开始听写；第一次使用某种语言时系统会先下载语言包
@@ -15,8 +15,11 @@ protocol LiveTextEngine: AnyObject {
     func stop() async
     /// 16kHz 单声道 Float 采样（音频线程调用）
     func feed(_ samples: [Float])
-    /// 检测到新的一句话开始：之后只显示这之后的文字
-    func markSegmentStart()
+    /// 断句检测到第 id 句开始 / 结束（用来把识别结果对到这一句上）
+    func markSegmentStart(_ id: Int)
+    func markSegmentEnd(_ id: Int)
+    /// 第 id 句目前识别到的文字，以及平均置信度（0~1）
+    func segmentText(_ id: Int) -> (text: String, confidence: Double)
 }
 
 enum LiveTextEngineFactory {
@@ -50,7 +53,14 @@ enum LiveTextError: LocalizedError {
 /// iOS 26 SpeechAnalyzer + SpeechTranscriber：边说边出字，后面的内容会更正前面的
 @available(iOS 26.0, *)
 final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
-    var onUpdate: ((String) -> Void)?
+    var onUpdate: (() -> Void)?
+
+    private struct Piece {
+        var start: Double
+        var end: Double
+        var text: String
+        var conf: Double?
+    }
 
     private let lock = NSLock()
     private var analyzer: SpeechAnalyzer?
@@ -59,9 +69,9 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
     private var format: AVAudioFormat?
     private var converter: AVAudioConverter?
     private var fedFrames: Int64 = 0                 // 已送入的 16kHz 采样数（用来对时间）
-    private var finals: [(start: Double, end: Double, text: String)] = []
-    private var volatileText = ""
-    private var segStart: Double = 0
+    private var finals: [Piece] = []
+    private var volatilePiece: Piece?
+    private var segs: [Int: (start: Double, end: Double?)] = [:]
     private var _languageID: String?
     private var generation = 0
 
@@ -78,7 +88,7 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         let transcriber = SpeechTranscriber(locale: loc,
                                             transcriptionOptions: [],
                                             reportingOptions: [.volatileResults, .fastResults],
-                                            attributeOptions: [])
+                                            attributeOptions: [.transcriptionConfidence])
         // 第一次用这种语言：下载系统语言包（之后系统会一直保留）
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
             hearLog("系统听写：下载 \(locale) 语言包…")
@@ -101,8 +111,8 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         self.converter = nil
         self.fedFrames = 0
         self.finals.removeAll()
-        self.volatileText = ""
-        self.segStart = 0
+        self.volatilePiece = nil
+        self.segs.removeAll()
         self._languageID = languageID
         lock.unlock()
 
@@ -112,9 +122,18 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
                     let text = String(r.text.characters)
                     let start = r.range.start.seconds
                     let end = CMTimeAdd(r.range.start, r.range.duration).seconds
-                    self?.ingest(text: text,
-                                 start: start.isFinite ? start : 0,
-                                 end: end.isFinite ? end : 0,
+                    // 平均置信度：用来判断两种语言的听写哪个更可信
+                    var sum = 0.0, weight = 0.0
+                    for (value, range) in r.text.runs[AttributeScopes.SpeechAttributes.ConfidenceAttribute.self] {
+                        guard let v = value else { continue }
+                        let w = Double(r.text[range].characters.count)
+                        sum += Double(v) * w
+                        weight += w
+                    }
+                    self?.ingest(Piece(start: start.isFinite ? start : 0,
+                                       end: end.isFinite ? end : 0,
+                                       text: text,
+                                       conf: weight > 0 ? sum / weight : nil),
                                  isFinal: r.isFinal, gen: gen)
                 }
             } catch {
@@ -135,12 +154,42 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         t?.cancel()
     }
 
-    func markSegmentStart() {
+    private var now: Double { Double(fedFrames) / 16_000 }
+
+    func markSegmentStart(_ id: Int) {
         lock.lock()
         // 断句检测会晚一点（前置缓冲 + 判断时间），往前留 0.8 秒
-        segStart = max(0, Double(fedFrames) / 16_000 - 0.8)
-        volatileText = ""
+        segs[id] = (max(0, now - 0.8), nil)
+        for k in segs.keys where k < id - 20 { segs[k] = nil }
         lock.unlock()
+    }
+
+    func markSegmentEnd(_ id: Int) {
+        lock.lock()
+        if let s = segs[id] { segs[id] = (s.start, now) }
+        lock.unlock()
+    }
+
+    func segmentText(_ id: Int) -> (text: String, confidence: Double) {
+        lock.lock(); defer { lock.unlock() }
+        guard let seg = segs[id] else { return ("", 0) }
+        let lo = seg.start
+        let hi = (seg.end ?? .greatestFiniteMagnitude) + 0.4
+        var pieces = finals.filter { $0.end > lo && $0.start < hi }
+        if let v = volatilePiece, v.end > lo, v.start < hi { pieces.append(v) }
+        let cjk = ["zh", "ja", "ko"].contains(_languageID ?? "")
+        let text = pieces.map { $0.text.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: cjk ? "" : " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var sum = 0.0, weight = 0.0
+        for p in pieces {
+            guard let c = p.conf else { continue }
+            let w = Double(max(1, p.text.count))
+            sum += c * w
+            weight += w
+        }
+        return (text, weight > 0 ? sum / weight : 0.5)
     }
 
     func feed(_ samples: [Float]) {
@@ -178,25 +227,19 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         cont.yield(AnalyzerInput(buffer: out))
     }
 
-    private func ingest(text: String, start: Double, end: Double, isFinal: Bool, gen: Int) {
+    private func ingest(_ piece: Piece, isFinal: Bool, gen: Int) {
         lock.lock()
         guard gen == generation else { lock.unlock(); return }
         if isFinal {
-            finals.append((start, end, text))
-            if finals.count > 80 { finals.removeFirst(finals.count - 80) }
-            volatileText = ""
+            finals.append(piece)
+            if finals.count > 120 { finals.removeFirst(finals.count - 120) }
+            volatilePiece = nil
         } else {
-            volatileText = end > segStart ? text : ""
+            volatilePiece = piece.text.isEmpty ? nil : piece
         }
-        let cjk = ["zh", "ja", "ko"].contains(_languageID ?? "")
-        let parts = finals.filter { $0.end > segStart }.map(\.text) + [volatileText]
-        var joined = parts.map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: cjk ? "" : " ")
-        joined = joined.trimmingCharacters(in: .whitespacesAndNewlines)
         let cb = onUpdate
         lock.unlock()
-        if !joined.isEmpty { cb?(joined) }
+        cb?()
     }
 }
 #endif
