@@ -190,7 +190,7 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) { Button("完成") { dismiss() } }
             }
-            // 导入：翻译模型选 .gguf 文件，语音识别模型选文件夹
+            // 导入：翻译模型选 .gguf 文件，语音识别和声音克隆模型选文件夹
             .fileImporter(isPresented: Binding(get: { importKind != nil },
                                                set: { if !$0 { importKind = nil } }),
                           allowedContentTypes: lastImportKind != .translation
@@ -203,7 +203,7 @@ struct SettingsView: View {
                     case .speech: await session.importWhisper(url)
                     case .senseVoice: await session.importSenseVoice(url)
                     case .translation: await session.importModel(url)
-                    case .voiceClone: break
+                    case .voiceClone: await session.importVoiceClone(url)
                     }
                 }
             }
@@ -411,22 +411,18 @@ struct SettingsView: View {
                 .buttonStyle(.borderless)
                 .disabled(session.isBusyWithModels)
                 .accessibilityLabel(status.installed ? "重新下载" : "下载")
-                // 导入（声音克隆模型由两部分组成，只能在线下载，不提供导入）
-                if kind == .voiceClone {
-                    Color.clear.frame(width: 34, height: 34)
-                } else {
-                    Button {
-                        lastImportKind = kind
-                        importKind = kind
-                    } label: {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.title3)
-                            .frame(width: 34, height: 34)
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(session.isBusyWithModels)
-                    .accessibilityLabel("导入")
+                // 导入（声音克隆：选包含主模型和声音编解码器两个文件夹的大文件夹，一次导入）
+                Button {
+                    lastImportKind = kind
+                    importKind = kind
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.title3)
+                        .frame(width: 34, height: 34)
                 }
+                .buttonStyle(.borderless)
+                .disabled(session.isBusyWithModels)
+                .accessibilityLabel("导入")
             }
             if downloading {
                 HStack(spacing: 8) {
