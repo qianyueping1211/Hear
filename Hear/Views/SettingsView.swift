@@ -537,12 +537,13 @@ struct SettingsView: View {
                     .font(.title3)
                     .frame(width: 34, height: 34)
                     .accessibilityLabel(downloading ? "正在下载" : (waiting ? "等待下载" : (status.installed ? "已下载" : "未下载")))
-                    // 配置（下载 / 重新下载、本地导入）
+                    // 配置入口：跟"大模型 API"那一行一样，后面是"已配置 / 未配置"加一个箭头
+                    // 没下过也没导入过 = 未配置；下载或导入完成任意一个 = 已配置
                     Button {
                         localEdit = .model(kind, title)
                     } label: {
                         HStack(spacing: 4) {
-                            Text("配置")
+                            Text(status.installed ? "已配置" : "未配置")
                             Image(systemName: "chevron.right")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.tertiary)
