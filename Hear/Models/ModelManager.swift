@@ -172,16 +172,57 @@ enum ModelManager {
     }
 }
 
-/// 带进度的大文件下载
+/// 带进度的大文件下载。
+/// 网络断了会自动重试，并且能断点续传（HF 的 CDN 传输大文件时很容易中途断）。
 final class FileDownloader: NSObject, URLSessionDownloadDelegate {
     private var continuation: CheckedContinuation<Void, Error>?
     private var destination: URL!
     private var progress: ((Double) -> Void)?
     private var moveError: Error?
+    /// 上次失败时系统给的续传数据（断点续传用）
+    private var resumeData: Data?
+    /// 已经重试了几次
+    private var retryCount = 0
+    private let maxRetries = 8
+    private var sourceURL: URL!
+    /// 续传时已经有的进度（用于合并进度条）
+    private var alreadyDone: Double = 0
 
     func download(_ url: URL, to dst: URL, progress: @escaping (Double) -> Void) async throws {
         destination = dst
         self.progress = progress
+        sourceURL = url
+        resumeData = nil
+        retryCount = 0
+        alreadyDone = 0
+        // 网络中断（-1005）、超时（-1001）这类错误会自动重试，能续传就从断点继续
+        var lastError: Error?
+        while retryCount <= maxRetries {
+            do {
+                try await run()
+                return
+            } catch {
+                lastError = error
+                // 这个错误重试也没用（比如 404、没权限）
+                let code = (error as NSError).code
+                if code == -1005 || code == -1001 || code == -1003 || code == NSURLErrorNetworkConnectionLost {
+                    retryCount += 1
+                    if retryCount > maxRetries { break }
+                    // 退避等待：网络抖一下的话过几秒就好了
+                    let wait = min(pow(2.0, Double(retryCount)), 30)
+                    hearLog("下载中断，第 \(retryCount) 次重试（\(wait) 秒后）", .warning)
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    continue
+                }
+                throw error
+            }
+        }
+        throw lastError ?? NSError(domain: "Hear", code: 30,
+                                  userInfo: [NSLocalizedDescriptionKey: "下载失败"])
+    }
+
+    /// 跑一次下载；失败且还能重试就自动重来
+    private func run() async throws {
         // 超时放宽：大文件在网络慢的时候容易触发默认的 60 秒超时
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 120
@@ -190,7 +231,14 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
         defer { session.finishTasksAndInvalidate() }
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
             continuation = c
-            session.downloadTask(with: url).resume()
+            let task: URLSessionDownloadTask
+            if let rd = resumeData {
+                // 从断点继续
+                task = session.downloadTask(withResumeData: rd)
+            } else {
+                task = session.downloadTask(with: sourceURL)
+            }
+            task.resume()
         }
     }
 
@@ -198,7 +246,9 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
                     didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
         guard totalBytesExpectedToWrite > 0 else { return }
-        progress?(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
+        // 续传时 totalBytesWritten 只是本次的部分，要加上之前已下载的
+        let done = alreadyDone + Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        progress?(min(done, 1.0))
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
@@ -217,7 +267,21 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        if let e = error ?? moveError { continuation?.resume(throwing: e) } else { continuation?.resume() }
+        if let e = error ?? moveError {
+            // 拿到系统的续传数据（网络中断时会给），下次从断点继续
+            let rd = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data
+            if let rd, rd.count > 0 { resumeData = rd }
+            // 已经下载了一部分的话，进度要算上
+            if let task = task as? URLSessionDownloadTask,
+               let resp = task.response as? HTTPURLResponse,
+               resp.expectedContentLength > 0,
+               let done = task.countOfBytesReceived {
+                alreadyDone = Double(done) / Double(resp.expectedContentLength)
+            }
+            continuation?.resume(throwing: e)
+        } else {
+            continuation?.resume()
+        }
         continuation = nil
     }
 }

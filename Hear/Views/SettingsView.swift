@@ -19,8 +19,8 @@ struct SettingsView: View {
                 // MARK: iCloud 同步
                 Section {
                     Toggle("iCloud 同步", isOn: cloudBinding)
-                    if cloud.enabled, let name = cloud.folderName {
-                        LabeledContent("同步位置", value: "iCloud 云盘 / \(name)")
+                    if cloud.enabled, !cloud.displayPath.isEmpty {
+                        LabeledContent("同步位置", value: cloud.displayPath)
                         LabeledContent("上次同步") {
                             if cloud.syncing {
                                 ProgressView()
@@ -90,7 +90,7 @@ struct SettingsView: View {
                              status: session.senseStatus)
                     modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
                              status: session.translationStatus)
-                    modelRow(.voiceClone, title: "声音克隆（Qwen3-TTS）", icon: "person.wave.2",
+                    modelRow(.voiceClone, title: "声音克隆（Qwen3-TTS GGUF）", icon: "person.wave.2",
                              status: session.cloneStatus)
                     if session.installedGGUFs.count > 1 {
                         Picker("使用的翻译模型", selection: ggufSelection) {
@@ -398,7 +398,7 @@ struct SettingsView: View {
                 .buttonStyle(.borderless)
                 .disabled(session.isBusyWithModels)
                 .accessibilityLabel(status.installed ? "重新下载" : "下载")
-                // 导入（声音克隆：选一个放着两个 .gguf 文件的文件夹，一次导入）
+                // 导入（翻译模型选 .gguf 文件；语音识别、声音克隆选文件夹）
                 Button {
                     lastImportKind = kind
                     importKind = kind

@@ -940,7 +940,7 @@ final class LiveSession: ObservableObject {
         do {
             cloneTasks.removeAll()
             await cloner.unload()
-            try VoiceCloneGGUF.importFiles(at: url)
+            try VoiceCloneGGUF.importFolder(at: url)
             modelsRevision += 1
             bgDownloadError = nil
             hearLog("已导入声音克隆模型（GGUF）")

@@ -23,6 +23,9 @@ final class CloudSync: ObservableObject {
         }
     }
     @Published private(set) var folderName: String?
+    /// 显示用的路径：选的是 iCloud 云盘根节点就显示「iCloud 云盘」，
+    /// 选了子文件夹就显示「iCloud 云盘/文件夹名」
+    @Published private(set) var displayPath: String = ""
     @Published private(set) var lastSync: Date?
     @Published private(set) var syncing = false
     @Published private(set) var message: String?
@@ -51,6 +54,7 @@ final class CloudSync: ObservableObject {
         enabled = d.bool(forKey: Keys.enabled)
         lastSync = d.object(forKey: Keys.lastSync) as? Date
         folderName = resolveFolder()?.lastPathComponent
+        displayPath = Self.displayPath(for: resolveFolder())
 
         // 历史有变动、设置有变动：过几秒同步一次（连续改动只同步一次）
         ConversationStore.shared.$revision
@@ -90,13 +94,41 @@ final class CloudSync: ObservableObject {
             // 换了文件夹：重新判断设置该用哪边的
             UserDefaults.standard.removeObject(forKey: Keys.settingsHash)
             folderName = url.lastPathComponent
-            hearLog("iCloud 同步：使用文件夹 \(url.lastPathComponent)")
+            displayPath = Self.displayPath(for: url)
+            hearLog("iCloud 同步：使用 \(displayPath)")
             enabled = true
             scheduleSync(delay: 0.3)
         } catch {
             message = "无法使用这个文件夹：\(error.localizedDescription)"
             hearLog("iCloud 同步：保存文件夹失败 \(error)", .error)
         }
+    }
+
+    /// iCloud 云盘根节点在不同系统版本下路径不一样：
+    /// 有的是 .../com~app~CloudDocuments/...，有的是 .../Mobile Documents/com~app~CloudDocs/...，
+    /// 有的直接就是容器的 Documents。都当成「iCloud 云盘」根节点。
+    static func isICloudRoot(_ url: URL) -> Bool {
+        let path = url.path
+        let n = url.lastPathComponent
+        // 容器内部名
+        if n == "com~app~CloudDocs" || n.hasSuffix(".CloudDocs") { return true }
+        // 就是容器的 Documents（iCloud 云盘根）
+        if n == "Documents" {
+            // 路径里带 CloudDocs / Mobile Documents / CloudKit 容器路径的才算
+            if path.contains("CloudDocs") || path.contains("Mobile Documents") { return true }
+            // 跟 iCloud 容器根目录一致也算
+            if let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) {
+                if path == container.path || path == container.appendingPathComponent("Documents").path { return true }
+            }
+        }
+        return false
+    }
+
+    /// 显示用的路径
+    static func displayPath(for url: URL?) -> String {
+        guard let url else { return "" }
+        if isICloudRoot(url) { return "iCloud 云盘" }
+        return "iCloud 云盘 / \(url.lastPathComponent)"
     }
 
     private func resolveFolder() -> URL? {
@@ -368,6 +400,7 @@ final class CloudSync: ObservableObject {
 }
 
 /// 选 iCloud 云盘里的文件夹（系统的文件选择器，只能选文件夹）
+/// 打开时直接定位到 iCloud 云盘，不用手动切过去
 struct CloudFolderPicker: UIViewControllerRepresentable {
     let onPick: (URL) -> Void
 
@@ -375,7 +408,20 @@ struct CloudFolderPicker: UIViewControllerRepresentable {
         let vc = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
         vc.allowsMultipleSelection = false
         vc.delegate = context.coordinator
+        // 定位到 iCloud 云盘
+        if let root = Self.iCloudDriveURL() {
+            vc.directoryURL = root
+        }
         return vc
+    }
+
+    /// iCloud 云盘的根目录（容器里的 Documents）
+    static func iCloudDriveURL() -> URL? {
+        guard let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) else { return nil }
+        // 容器根下：Documents 就是 iCloud 云盘
+        let docs = container.appendingPathComponent("Documents", isDirectory: true)
+        if FileManager.default.fileExists(atPath: docs.path) { return docs }
+        return container
     }
 
     func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}

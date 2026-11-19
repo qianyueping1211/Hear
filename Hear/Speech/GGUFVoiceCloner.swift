@@ -116,18 +116,41 @@ enum VoiceCloneGGUF {
         }
     }
 
-    /// 导入本地已下载的两个 gguf 文件（在一个文件夹里）
-    static func importFiles(at folder: URL) throws {
+    /// 导入本地已下载好的模型文件。
+    /// 选一个文件夹就行：里面直接放两个 gguf，或者每个模型各有自己的子文件夹，都认。
+    /// （递归往下找，最顶层选对就行）
+    static func importFolder(at folder: URL) throws {
         let fm = FileManager.default
         let access = folder.startAccessingSecurityScopedResource()
         defer { if access { folder.stopAccessingSecurityScopedResource() } }
-        let files = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-        let ggufs = files.filter { $0.pathExtension.lowercased() == "gguf" }
-        guard ggufs.count >= 2 else {
-            throw NSError(domain: "Hear", code: 21, userInfo: [NSLocalizedDescriptionKey:
-                "需要两个 .gguf 文件：骨架模型（\(backboneFile)）和 mmproj（\(mmprojFile)）"])
+
+        // 递归找所有 gguf（最多往下找 3 层，够用了）
+        var ggufs: [URL] = []
+        func scan(_ dir: URL, depth: Int) {
+            guard depth < 4 else { return }
+            let items = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+            for it in items {
+                let isDir = (try? it.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                if isDir {
+                    scan(it, depth: depth + 1)
+                } else if it.pathExtension.lowercased() == "gguf" {
+                    ggufs.append(it)
+                }
+            }
         }
-        // 按文件名判断哪个是骨架、哪个是 mmproj
+        scan(folder, depth: 0)
+
+        // 旧的 MLX 版本用的编解码器（GGUF 版用不到），跳过
+        ggufs = ggufs.filter { f in
+            let n = f.lastPathComponent.lowercased()
+            return !n.contains("tokenizer") && !n.contains("codec")
+        }
+        guard !ggufs.isEmpty else {
+            throw NSError(domain: "Hear", code: 21, userInfo: [NSLocalizedDescriptionKey:
+                "这个文件夹里没找到 .gguf 文件。需要 Qwen3-TTS-12Hz-0.6B-Base-Q4_K_M.gguf 和 mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf。"])
+        }
+
+        // 按文件名分：带 mmproj 的是 mmproj，其余是骨架
         var backbone: URL?
         var mmproj: URL?
         for f in ggufs {
@@ -135,23 +158,37 @@ enum VoiceCloneGGUF {
             if n.contains("mmproj") { mmproj = mmproj ?? f }
             else if backbone == nil { backbone = f }
         }
-        // 只认得出名字时，按大小兜底：mmproj 通常和骨架差不多大或更大
+        // 只找到一个、或者分不出来时，按大小兜底：mmproj 通常不比骨架小
         if backbone == nil || mmproj == nil {
-            let sorted = ggufs.sorted { (a, b) -> Bool in
+            let sorted = ggufs.sorted { a, b in
                 let sa = (try? a.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 let sb = (try? b.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 return sa < sb
             }
-            if sorted.count == 2 {
+            if sorted.count >= 2 {
                 if backbone == nil { backbone = sorted[0] }
                 if mmproj == nil { mmproj = sorted[1] }
+            } else if backbone == nil {
+                backbone = sorted.first
             }
         }
-        guard let b = backbone, let m = mmproj else {
+        guard let b = backbone else {
             throw NSError(domain: "Hear", code: 22, userInfo: [NSLocalizedDescriptionKey:
-                "分不清哪个是骨架模型、哪个是 mmproj。请确保文件名里有一个带 mmproj。"])
+                "没找到声音克隆模型。需要两个 .gguf：骨架模型和 mmproj。"])
         }
-        try install(backbone: b, mmproj: m)
+
+        try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        if fm.fileExists(atPath: backboneURL.path) { try fm.removeItem(at: backboneURL) }
+        try fm.copyItem(at: b, to: backboneURL)
+        hearLog("已导入骨架模型 \(b.lastPathComponent)")
+
+        if let m = mmproj {
+            if fm.fileExists(atPath: mmprojURL.path) { try fm.removeItem(at: mmprojURL) }
+            try fm.copyItem(at: m, to: mmprojURL)
+            hearLog("已导入 mmproj \(m.lastPathComponent)")
+        } else {
+            hearLog("没找到 mmproj 文件（\(mmprojFile)），声音克隆暂时用不了")
+        }
     }
 }
 
