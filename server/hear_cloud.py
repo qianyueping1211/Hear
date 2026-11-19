@@ -59,6 +59,27 @@ def log(*args):
     print("[听见]", *args, flush=True)
 
 
+def local_ips():
+    """这台电脑现在用的 IP（去掉 127 开头的回环地址）"""
+    import socket
+    ips = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ips.append(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except Exception:
+        pass
+    return ips
+
+
 # ---------------------------------------------------------------- 识别模型
 
 def get_whisper():
@@ -207,22 +228,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def test_page(self):
         """手机浏览器打开首页，能打开就说明手机到电脑的网络是通的（跟 App 无关）"""
-        import socket
-        ips = []
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("10.255.255.255", 1))
-            ips.append(s.getsockname()[0])
-            s.close()
-        except Exception:
-            pass
-        try:
-            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-                ip = info[4][0]
-                if not ip.startswith("127.") and ip not in ips:
-                    ips.append(ip)
-        except Exception:
-            pass
+        ips = local_ips()
         rows = "".join(
             "<tr><td>%s</td><td><a href=\"http://%s:%d/\">http://%s:%d/</a></td></tr>" % (ip, ip, PORT, ip, PORT)
             for ip in ips)
@@ -367,6 +373,16 @@ def main():
         threading.Thread(target=preload_whisper, daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     log("服务起来了，监听 %s:%d" % (HOST, PORT))
+    log("本机测试：http://127.0.0.1:%d/" % PORT)
+    for ip in local_ips():
+        log("手机访问：http://%s:%d/" % (ip, PORT))
+    # 自己连一下，通不通立刻就知道
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/health" % PORT, timeout=8) as r:
+            log("自检通过（%d）。在电脑浏览器打开上面第一个地址能打开，就说明服务没问题；"
+                "打不开就是服务没起来。" % r.status)
+    except Exception as e:
+        log("自检失败：%s" % e)
     log("翻译后端：%s" % MT_URL)
     log("克隆后端：%s" % CLONE_URL)
     log("识别后端：%s" % (ASR_URL or "本机 faster-whisper（%s）" % ASR_MODEL))

@@ -298,4 +298,16 @@ Write-Host ""
 Write-Host "  关掉这个窗口就等于关掉服务。"
 Write-Host ""
 
+# 看看端口是不是已经在监听（开着的话说明服务已经在了）
+$listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+if ($listener) {
+    Say "端口 $Port 已经在监听了，服务应该已经在跑（如果不确定，关掉旧的窗口再运行一次）"
+}
+else {
+    Say "起云端服务（端口 $Port）"
+}
+Write-Host "    服务起来后，先在电脑浏览器打开 http://127.0.0.1:$Port/ 验证一下：" -ForegroundColor Cyan
+Write-Host "      能打开 = 服务正常；打不开 = 服务没起来，看下面的日志。" -ForegroundColor DarkGray
+Write-Host ""
+
 & $venvPy (Join-Path $ServerDir "hear_cloud.py")
