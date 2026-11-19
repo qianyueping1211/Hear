@@ -1571,14 +1571,7 @@ final class LiveSession: ObservableObject {
             let r: (String, String)
             do {
                 if usingCloudASR {
-                    // 云端识别：先用本地的 SenseVoice 快速出字（预览要快），
-                    // 整句识别再交给云端 Whisper 定稿。
-                    // 本地没装 SenseVoice 就直接用云端。
-                    if await sense.isLoaded {
-                        r = try await sense.recognize(clip, candidates: cands, fallback: fallback)
-                    } else {
-                        r = try await cloud.transcribe(samples: clip, candidates: cands, fallback: fallback)
-                    }
+                    r = try await cloud.transcribePreview(samples: clip, candidates: cands, fallback: fallback)
                 } else if sv {
                     r = try await sense.recognize(clip, candidates: cands, fallback: fallback)
                 } else {
@@ -1956,20 +1949,9 @@ final class LiveSession: ObservableObject {
             let sv = useSense
             let r: (String, String)
             if usingCloudASR {
-                // 云端识别：先用本地 SenseVoice 快速出结果（"初步显示"），
-                // 再用云端 Whisper 修正（更准）。本地没装 SenseVoice 就只用云端。
-                if await sense.isLoaded {
-                    let fast = try await sense.recognize(samples, candidates: cands, fallback: fallback)
-                    // 云端 Whisper 定稿
-                    r = try await cloud.transcribe(samples: samples, candidates: cands, fallback: fallback)
-                    if r.1.isEmpty { r = fast }
-                    else {
-                        let secs = String(format: "%.1f", Date().timeIntervalSince(t0))
-                        hearLog("云端 Whisper 修正 \(secs)s：「\(fast.1.prefix(30))」→「\(r.1.prefix(30))」")
-                    }
-                } else {
-                    r = try await cloud.transcribe(samples: samples, candidates: cands, fallback: fallback)
-                }
+                // 识别方案由后端决定（SenseVoice / Whisper / 两者组合），
+                // App 只把选的方案传过去（X-ASR-Scheme 头）
+                r = try await cloud.transcribe(samples: samples, candidates: cands, fallback: fallback)
             } else if sv {
                 r = try await sense.recognize(samples, candidates: cands, fallback: fallback)
             } else {

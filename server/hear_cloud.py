@@ -266,34 +266,39 @@ def decode_wav(data):
     return samples, rate
 
 
-def recognize(samples, rate, language, fallback, scheme=None):
+def recognize(samples, rate, language, fallback, scheme=None, preview=False):
     """按方案选识别：
        whisper              只用 Whisper
        sensevoice           只用 SenseVoice
        sensevoice+whisper   SenseVoice 先出，Whisper 再修正
+    preview = True 时只要快，不要跑 Whisper 修正（实时预览用）
     返回 (语言, 文字)"""
     scheme = (scheme or ASR_SCHEME or "whisper").strip().lower()
+    # 注意：这里统一返回 (文字, 语言)
 
     if scheme == "sensevoice":
-        lang, text = sensevoice_transcribe(samples, rate)
-        if not text:                     # SenseVoice 没听出来，退回 Whisper
-            text, lang = whisper_transcribe(samples, rate, language, fallback)
-        return (lang or fallback, text)
+        sv_lang, sv_text = sensevoice_transcribe(samples, rate)
+        if not sv_text:                     # SenseVoice 没听出来，退回 Whisper
+            return whisper_transcribe(samples, rate, language, fallback)
+        return (sv_text, sv_lang or fallback)
 
     if scheme == "sensevoice+whisper":
         # 先用 SenseVoice 快速出结果（快）
         fast_lang, fast_text = sensevoice_transcribe(samples, rate)
+        # 实时预览只要快，不跑 Whisper 修正
+        if preview:
+            return (fast_text, fast_lang or fallback)
         # 再用 Whisper 修正（准）
         slow_text, slow_lang = whisper_transcribe(samples, rate, language, fallback)
         if not slow_text:
-            return (fast_lang or fallback, fast_text)
+            return (fast_text, fast_lang or fallback)
         if not fast_text:
-            return (slow_lang or fallback, slow_text)
-        # 两个结果差很多就以 Whisper 为准，一样就用 SenseVoice 的（更快）
+            return (slow_text, slow_lang or fallback)
+        # 两个结果不一样就以 Whisper 为准，一样就用 SenseVoice 的（更快）
         if fast_text != slow_text:
             log("Whisper 修正：「%s」→「%s」" % (fast_text[:30], slow_text[:30]))
-            return (slow_lang or fast_lang or fallback, slow_text)
-        return (fast_lang or slow_lang or fallback, fast_text)
+            return (slow_text, slow_lang or fast_lang or fallback)
+        return (fast_text, fast_lang or slow_lang or fallback)
 
     # 默认：只用 Whisper
     return whisper_transcribe(samples, rate, language, fallback)
@@ -496,7 +501,9 @@ a{color:#007aff;text-decoration:none}
         else:
             samples, rate = decode_wav(body)
             language = langs[0] if len(langs) == 1 else None
-            text, lang = recognize(samples, rate, language, fallback, scheme)
+            # 预览只要快：组合方案下只用 SenseVoice，不跑 Whisper 修正
+            preview = (self.headers.get("X-ASR-Preview") or "").strip() == "1"
+            text, lang = recognize(samples, rate, language, fallback, scheme, preview)
         log("识别（%s）%.1fs：%s" % (scheme, time.time() - t0, text[:40]))
         self._send_json({"lang": lang or fallback, "text": text})
 

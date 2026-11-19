@@ -257,7 +257,17 @@ actor CloudClient {
         if !v.isEmpty { asrScheme = v }
     }
 
+    /// 实时预览用的识别（要快，后端在组合方案下只用 SenseVoice）
+    func transcribePreview(samples: [Float], candidates: [String], fallback: String) async throws -> (lang: String, text: String) {
+        try await transcribe(samples: samples, candidates: candidates, fallback: fallback, preview: true)
+    }
+
     func transcribe(samples: [Float], candidates: [String], fallback: String) async throws -> (lang: String, text: String) {
+        try await transcribe(samples: samples, candidates: candidates, fallback: fallback, preview: false)
+    }
+
+    private func transcribe(samples: [Float], candidates: [String], fallback: String,
+                            preview: Bool) async throws -> (lang: String, text: String) {
         // 单独的 llama-server 没有识别接口，识别只能用 8000 的总服务
         if await kind(of: asrAddress) == .llamaServer {
             throw CloudError.badResponse("这个地址是单独的模型服务，不提供语音识别；识别请用 8000 的总服务地址")
@@ -269,6 +279,8 @@ actor CloudClient {
         req.setValue(fallback, forHTTPHeaderField: "X-Fallback-Language")
         // 告诉服务端用哪个识别方案
         req.setValue(asrScheme, forHTTPHeaderField: "X-ASR-Scheme")
+        // 预览只要快，不要修正
+        if preview { req.setValue("1", forHTTPHeaderField: "X-ASR-Preview") }
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
