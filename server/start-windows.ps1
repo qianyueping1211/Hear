@@ -219,6 +219,22 @@ if ($LASTEXITCODE -ne 0) {
     Step "手动装：& `"$venvPy`" -m pip install -r requirements.txt"
 }
 
+# ---------------------------------------------------------------- 云端服务（先起）
+# 模型还要下十几分钟，先把 8000 端口的服务起起来：
+# 这样手机马上就能连上来测试网络了（翻译和克隆要等模型下完才可用）。
+$env:HEAR_PORT = $Port
+$env:HEAR_MT_URL = "http://127.0.0.1:$MtPort"
+$env:HEAR_CLONE_URL = "http://127.0.0.1:$ClonePort"
+$env:HEAR_ASR_MODEL = $AsrModel
+$cloudScript = Join-Path $ServerDir "hear_cloud.py"
+$cloud = Start-Process -FilePath $venvPy -ArgumentList "`"$cloudScript`"" `
+            -PassThru -NoNewWindow
+Start-Sleep -Seconds 3
+Say "云端服务已启动（端口 $Port），模型还在准备中"
+Write-Host "    电脑浏览器打开 http://127.0.0.1:$Port/ 看看服务在不在" -ForegroundColor Cyan
+Write-Host "    手机浏览器打开下面打印的地址，能打开就说明手机到电脑是通的" -ForegroundColor Cyan
+Show-LanInfo $Port
+
 # ---------------------------------------------------------------- 模型
 function Get-Model($repo, $file) {
     $out = Join-Path $ModelDir $file
@@ -298,16 +314,14 @@ Write-Host ""
 Write-Host "  关掉这个窗口就等于关掉服务。"
 Write-Host ""
 
-# 看看端口是不是已经在监听（开着的话说明服务已经在了）
-$listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if ($listener) {
-    Say "端口 $Port 已经在监听了，服务应该已经在跑（如果不确定，关掉旧的窗口再运行一次）"
-}
-else {
-    Say "起云端服务（端口 $Port）"
-}
-Write-Host "    服务起来后，先在电脑浏览器打开 http://127.0.0.1:$Port/ 验证一下：" -ForegroundColor Cyan
-Write-Host "      能打开 = 服务正常；打不开 = 服务没起来，看下面的日志。" -ForegroundColor DarkGray
+Write-Host "  模型都准备好了，识别 / 翻译 / 克隆三个接口现在都能用。" -ForegroundColor Green
 Write-Host ""
 
-& $venvPy (Join-Path $ServerDir "hear_cloud.py")
+if ($cloud) {
+    if ($cloud.HasExited) {
+        Say "云端服务退出了（退出码 $($cloud.ExitCode)），看看上面的报错"
+    }
+    else {
+        Wait-Process -Id $cloud.Id
+    }
+}

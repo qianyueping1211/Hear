@@ -70,13 +70,24 @@ def local_ips():
         s.close()
     except Exception:
         pass
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if not ip.startswith("127.") and ip not in ips:
-                ips.append(ip)
-    except Exception:
-        pass
+    # getaddrinfo 有时候会卡好几秒（域名解析），放到后台线程里，最多等 1 秒
+    found = []
+
+    def work():
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if not ip.startswith("127.") and ip not in found:
+                    found.append(ip)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(1.0)
+    for ip in found:
+        if ip not in ips:
+            ips.append(ip)
     return ips
 
 
@@ -120,6 +131,26 @@ def whisper_status():
     if st == "失败":
         return "未安装 faster-whisper"
     return "未加载"
+
+
+def self_check():
+    """后台自己连一下，通不通立刻就知道（不能挡住服务接收请求）"""
+    time.sleep(2)
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/health" % PORT, timeout=20) as r:
+            log("自检通过（%d）。在电脑浏览器打开上面第一个地址能打开，就说明服务没问题；"
+                "打不开就是服务没起来。" % r.status)
+    except Exception as e:
+        log("自检失败：%s" % e)
+
+
+def warm_backends():
+    """后台先把翻译/克隆后端的状态查一遍，/health 第一次调用也不用等"""
+    for u in (MT_URL, CLONE_URL):
+        try:
+            backend_alive(u)
+        except Exception:
+            pass
 
 
 def preload_whisper():
@@ -173,12 +204,26 @@ def http_json(url, payload, timeout):
         return resp.read()
 
 
+# 后端（翻译 / 克隆）的存活状态缓存：最多两秒查一次。
+# 不缓存的话，后端没起来时每次 /health 都要等 3 秒 + 3 秒，
+# 手机那边 5 秒就超时了，会误报成"连不上"。
+_backend_cache = {}
+
+
 def backend_alive(url):
+    key = url.rstrip("/")
+    now = time.time()
+    hit = _backend_cache.get(key)
+    if hit and now - hit[0] < 2:
+        return hit[1]
+    ok = False
     try:
-        with urllib.request.urlopen(url.rstrip("/") + "/health", timeout=3) as resp:
-            return 200 <= resp.status < 300
+        with urllib.request.urlopen(key + "/health", timeout=1.5) as resp:
+            ok = 200 <= resp.status < 300
     except Exception:
-        return False
+        ok = False
+    _backend_cache[key] = (now, ok)
+    return ok
 
 
 # ---------------------------------------------------------------- HTTP
@@ -209,14 +254,17 @@ class Handler(BaseHTTPRequestHandler):
     # -- GET --
 
     def do_GET(self):
-        if self.path.startswith("/health"):
-            self._send_json(self.health())
-        elif self.path.startswith("/ping"):
-            self._send_json({"pong": True, "time": time.time()})
-        elif self.path.startswith("/"):
-            self._send_html(self.test_page())
-        else:
-            self._error("没有这个接口", 404)
+        try:
+            if self.path.startswith("/health"):
+                self._send_json(self.health())
+            elif self.path.startswith("/ping"):
+                self._send_json({"pong": True, "time": time.time()})
+            elif self.path.startswith("/"):
+                self._send_html(self.test_page())
+            else:
+                self._error("没有这个接口", 404)
+        except (BrokenPipeError, ConnectionResetError):
+            pass          # 手机那边超时断开了，不用刷报错
 
     def _send_html(self, html):
         data = html.encode("utf-8")
@@ -277,6 +325,8 @@ a{color:#007aff;text-decoration:none}
                 self.clone(body)
             else:
                 self._error("没有这个接口", 404)
+        except (BrokenPipeError, ConnectionResetError):
+            pass          # 手机那边超时断开了，不用刷报错
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:500]
             self._error("后端返回 %s：%s" % (e.code, detail), 502)
@@ -368,24 +418,20 @@ a{color:#007aff;text-decoration:none}
 
 
 def main():
-    # 识别模型在后台加载（第一次要下载模型），服务不等它，先起来
-    if not ASR_URL:
-        threading.Thread(target=preload_whisper, daemon=True).start()
+    # 先把端口占上（这样别人连过来不会报"拒绝连接"），再开始处理请求
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     log("服务起来了，监听 %s:%d" % (HOST, PORT))
     log("本机测试：http://127.0.0.1:%d/" % PORT)
     for ip in local_ips():
         log("手机访问：http://%s:%d/" % (ip, PORT))
-    # 自己连一下，通不通立刻就知道
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:%d/health" % PORT, timeout=8) as r:
-            log("自检通过（%d）。在电脑浏览器打开上面第一个地址能打开，就说明服务没问题；"
-                "打不开就是服务没起来。" % r.status)
-    except Exception as e:
-        log("自检失败：%s" % e)
     log("翻译后端：%s" % MT_URL)
     log("克隆后端：%s" % CLONE_URL)
     log("识别后端：%s" % (ASR_URL or "本机 faster-whisper（%s）" % ASR_MODEL))
+    # 这些都在后台做，不要挡住服务接收请求
+    if not ASR_URL:
+        threading.Thread(target=preload_whisper, daemon=True).start()
+    threading.Thread(target=warm_backends, daemon=True).start()
+    threading.Thread(target=self_check, daemon=True).start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
