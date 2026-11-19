@@ -18,6 +18,8 @@ struct SettingsView: View {
     @State private var modelTab = 0
     /// 正在配置哪个在线模型
     @State private var cloudEdit: CloudModel?
+    /// 本地引擎互斥的提示
+    @State private var conflictMessage: String?
 
     private var cloudAddressBinding: Binding<String> {
         Binding(
@@ -300,6 +302,12 @@ struct SettingsView: View {
             .sheet(item: $cloudEdit) { m in
                 CloudModelSheet(model: m)
             }
+            .alert("设置冲突", isPresented: Binding(get: { conflictMessage != nil },
+                                                   set: { if !$0 { conflictMessage = nil } })) {
+                Button("知道了", role: .cancel) { conflictMessage = nil }
+            } message: {
+                Text(conflictMessage ?? "")
+            }
             .onChange(of: modelTab) { _, t in
                 if t == 1 { Task { await session.refreshCloudStatus() } }
             }
@@ -377,6 +385,11 @@ struct SettingsView: View {
                     session.voiceClone = true
                     return
                 }
+                // 选本地克隆：别的本地引擎开着的话不行（会互相抢内存导致崩溃）
+                if v == "local", let msg = session.conflictWithOtherLocals() {
+                    conflictMessage = msg
+                    return
+                }
                 session.voiceCloneCloud = false
                 let on = v == "local"
                 if on == session.voiceClone { return }
@@ -398,6 +411,8 @@ struct SettingsView: View {
             get: { session.asrEngine },
             set: { e in
                 guard e != session.asrEngine else { return }
+                // 本地声音克隆和别的本地引擎互斥
+                if let msg = session.conflictWithClone(e) { conflictMessage = msg; return }
                 if session.missingSpeechKinds(for: e).isEmpty {
                     session.asrEngine = e
                 } else if !session.bgDownloading {
@@ -533,6 +548,8 @@ struct SettingsView: View {
             get: { session.translationEngine },
             set: { e in
                 guard e != session.translationEngine else { return }
+                // 本地声音克隆和别的本地引擎互斥
+                if let msg = session.conflictWithClone(e) { conflictMessage = msg; return }
                 session.translationEngine = e
                 if e == "local", !session.isInstalled(.translation), !session.bgDownloading {
                     session.startBackgroundDownload(kinds: [.translation], switchWhenDone: true)
@@ -617,6 +634,7 @@ struct CloudModelSheet: View {
     @State private var enabled: Bool = false
     @State private var status: String? = nil
     @State private var busy = false
+    @State private var conflict: String? = nil
 
     var body: some View {
         NavigationStack {
@@ -634,6 +652,9 @@ struct CloudModelSheet: View {
                         if let s = status {
                             Text(s).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
                         }
+                    }
+                    if let c = conflict {
+                        Text(c).font(.footnote).foregroundStyle(.red)
                     }
                 } header: {
                     Text(model.title)
@@ -657,7 +678,13 @@ struct CloudModelSheet: View {
 
     private func save() {
         session.setCloudOwnAddress(model, address)
-        session.setCloudEnabled(model, enabled)
+        // 本地声音克隆和别的本地引擎互斥，冲突的话不改并提示
+        if let msg = session.setCloudEnabled(model, enabled) {
+            enabled = session.cloudEnabled(model)
+            conflict = msg
+        } else {
+            conflict = nil
+        }
     }
 
     /// 测一下这个地址通不通

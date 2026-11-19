@@ -644,6 +644,12 @@ final class LiveSession: ObservableObject {
                 showToast("上次加载声音克隆时 App 退出，已自动关闭声音克隆")
             }
         }
+        // 本地声音克隆和别的本地引擎互斥（老版本存下来的设置可能同时开着），先解开
+        if localCloneOn, (Self.isLocalEngine(asrEngine) || translationEngine == "local") {
+            hearLog("本地声音克隆和其他本地引擎同时开着，已自动关闭声音克隆", .warning)
+            voiceClone = false
+            showToast("本地声音克隆不能和其他本地引擎同时用，已自动关闭声音克隆")
+        }
         hearLog("启动：可用内存 \(Self.freeMB()) MB")
         defer { if voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 3) } }   // 其他模型准备好以后再加载声音克隆
         // 还没选引擎（老版本数据异常）：不自动加载模型，等用户在设置里选
@@ -2056,7 +2062,7 @@ final class LiveSession: ObservableObject {
         items[i].done = done
         // 译文定稿后马上在后台生成克隆声音，轮到朗读时就不用等
         if done, voiceClone, speakOutput, changed || cloneTasks[id] == nil {
-            cloneTasks[id] = await prepareClone(id)
+            Task { cloneTasks[id] = await prepareClone(id) }
         }
     }
 
@@ -2079,6 +2085,34 @@ final class LiveSession: ObservableObject {
         Task { await cloud.setAddresses(asr: a, mt: m, clone: c) }
     }
 
+    // MARK: - 本地引擎互斥
+
+    /// 是不是"我们的"本地模型引擎（苹果自带、云端都不算，它们不占我们的内存）
+    static func isLocalEngine(_ e: String) -> Bool {
+        switch e {
+        case "sensevoice", "whisper", "hybrid", "local": return true
+        default: return false
+        }
+    }
+
+    /// 本地声音克隆是不是开着
+    var localCloneOn: Bool { voiceClone && !voiceCloneCloud }
+
+    /// 要切到别的本地引擎，但本地声音克隆开着：会互相抢内存导致崩溃，拦住
+    func conflictWithClone(_ newEngine: String) -> String? {
+        guard localCloneOn, Self.isLocalEngine(newEngine) else { return nil }
+        return "已经打开本地声音克隆引擎，同时选择当前引擎会导致软件崩溃，请修改！"
+    }
+
+    /// 要打开本地声音克隆，但别的本地引擎开着：拦住
+    func conflictWithOtherLocals() -> String? {
+        guard !voiceCloneCloud else { return nil }
+        if Self.isLocalEngine(asrEngine) || translationEngine == "local" {
+            return "已经打开其他本地引擎，同时选择本地声音克隆引擎会导致软件崩溃，请修改！"
+        }
+        return nil
+    }
+
     // MARK: - 在线模型（三个接口）
 
     /// 这个模型现在是不是走云端
@@ -2090,19 +2124,29 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    /// 打开/关掉某个模型的云端
-    func setCloudEnabled(_ model: CloudModel, _ on: Bool) {
+    /// 打开/关掉某个模型的云端。返回提示文字表示没生效（本地引擎互斥）
+    @discardableResult
+    func setCloudEnabled(_ model: CloudModel, _ on: Bool) -> String? {
         switch model {
         case .asr:
-            if on { asrEngine = "cloud" }
-            else if asrEngine == "cloud" { asrEngine = "sensevoice" }
+            if on { asrEngine = "cloud"; return nil }
+            if asrEngine == "cloud" {
+                if let msg = conflictWithClone("sensevoice") { return msg }
+                asrEngine = "sensevoice"
+            }
         case .mt:
-            if on { translationEngine = "cloud" }
-            else if translationEngine == "cloud" { translationEngine = "local" }
+            if on { translationEngine = "cloud"; return nil }
+            if translationEngine == "cloud" {
+                if let msg = conflictWithClone("local") { return msg }
+                translationEngine = "local"
+            }
         case .clone:
-            voiceCloneCloud = on
-            if on { voiceClone = true }
+            if on { voiceCloneCloud = true; voiceClone = true; return nil }
+            // 关掉云端克隆 = 改用本地克隆，要检查和别的本地引擎冲不冲突
+            if let msg = conflictWithOtherLocals() { return msg }
+            voiceCloneCloud = false
         }
+        return nil
     }
 
     /// 这个模型自己填的地址（空 = 用默认地址）
