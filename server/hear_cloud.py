@@ -361,20 +361,41 @@ def http_json(url, payload, timeout):
 _backend_cache = {}
 
 
-def backend_alive(url):
+def backend_state(url):
+    """后端（llama-server）的状态：
+       "就绪"   —— 服务在跑，模型也加载好了
+       "加载中" —— 服务在跑，但模型还在加载（llama-server 回 503 loading model）
+       "连不上" —— 服务没起来
+    """
     key = url.rstrip("/")
     now = time.time()
     hit = _backend_cache.get(key)
     if hit and now - hit[0] < 2:
         return hit[1]
-    ok = False
+    state = "连不上"
     try:
         with urllib.request.urlopen(key + "/health", timeout=1.5) as resp:
-            ok = 200 <= resp.status < 300
+            if 200 <= resp.status < 300:
+                state = "就绪"
+            else:
+                state = "加载中"
+    except urllib.error.HTTPError as e:
+        # llama-server 加载模型时回 503 {"status":"loading model"}：
+        # 服务是活的，只是还没准备好，不算连不上
+        try:
+            body = e.read().decode("utf-8", "ignore")
+        except Exception:
+            body = ""
+        state = "加载中" if "loading" in body.lower() else "连不上"
     except Exception:
-        ok = False
-    _backend_cache[key] = (now, ok)
-    return ok
+        state = "连不上"
+    _backend_cache[key] = (now, state)
+    return state
+
+
+def backend_alive(url):
+    """后端进程活着没有（加载中也算活着）"""
+    return backend_state(url) != "连不上"
 
 
 # ---------------------------------------------------------------- HTTP
@@ -460,8 +481,12 @@ a{color:#007aff;text-decoration:none}
         else:
             out["asr"] = whisper_status()
             out["asr_scheme"] = ASR_SCHEME
-        out["mt"] = "就绪" if backend_alive(MT_URL) else "连不上（%s）" % MT_URL
-        out["clone"] = "就绪" if backend_alive(CLONE_URL) else "连不上（%s）" % CLONE_URL
+        out["mt"] = backend_state(MT_URL)
+        if out["mt"] == "连不上":
+            out["mt"] = "连不上（%s）" % MT_URL
+        out["clone"] = backend_state(CLONE_URL)
+        if out["clone"] == "连不上":
+            out["clone"] = "连不上（%s）" % CLONE_URL
         return out
 
     # -- POST --

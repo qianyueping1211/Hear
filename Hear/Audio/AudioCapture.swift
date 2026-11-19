@@ -54,6 +54,9 @@ final class AudioCapture {
     }
 
     func start() throws {
+        // 已经在跑就别再开一次：AVAudioEngine 一个输入只能挂一个 tap，
+        // 重复挂会直接崩（"required condition is false: !engine.isRunning"）。
+        if isRunning { return }
         engineQueue.sync {}            // 等上一次的停止做完
         try AudioRoute.activate()
         let input = engine.inputNode
@@ -116,6 +119,9 @@ final class AudioCapture {
         guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
             throw NSError(domain: "Hear", code: 1, userInfo: [NSLocalizedDescriptionKey: "无法使用麦克风"])
         }
+        // 引擎在跑的时候不能换 tap，必须先停下来（AVFAudio 的硬性要求，
+        // 违反会直接 crash：'required condition is false: !engine.isRunning'）
+        if engine.isRunning { engine.stop() }
         input.removeTap(onBus: 0)
         // format 传 nil：始终按麦克风当前的真实格式接收，路由变化后也不会错位
         input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in

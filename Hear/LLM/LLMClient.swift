@@ -126,6 +126,25 @@ final class LLMSettings: ObservableObject {
 
     var active: LLMProvider? { providers.first { $0.id == activeID } ?? providers.first }
 
+    /// iCloud 同步过来的设置：直接换上，不用重开 App
+    func reloadFromDefaults() {
+        if let data = UserDefaults.standard.data(forKey: "llmProviders"),
+           let list = try? JSONDecoder().decode([LLMProvider].self, from: data) {
+            providers = list.map { item in
+                var p = item
+                if p.name == "通义千问" { p.name = "Qwen" }   // 旧名称改为英文
+                return p
+            }
+        } else {
+            providers = []
+        }
+        if let s = UserDefaults.standard.string(forKey: "llmActiveID") {
+            activeID = UUID(uuidString: s)
+        } else {
+            activeID = providers.first?.id
+        }
+    }
+
     /// 已选好模型并填了 Key，可以用来总结
     var isReady: Bool {
         guard let p = active else { return false }

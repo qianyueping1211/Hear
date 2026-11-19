@@ -57,6 +57,14 @@ final class AppLog: ObservableObject {
         loadTail()
     }
 
+    /// iCloud 同步过来的设置：直接换上，不用重开 App
+    func reloadFromDefaults() {
+        let e = UserDefaults.standard.object(forKey: "logEnabled") as? Bool ?? true
+        if e != enabled { enabled = e }
+        let m = UserDefaults.standard.object(forKey: "logMaxMB") as? Int ?? 100
+        if m != maxMB { maxMB = m }
+    }
+
     // MARK: 写入
 
     func add(_ message: String, level: LogLevel = .info) {

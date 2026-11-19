@@ -12,6 +12,11 @@ import UniformTypeIdentifiers
 /// - 设置：只有 iCloud 那边改过、这台手机没改过时才用 iCloud 的；两边都改过时以这台手机为准。
 /// - 大模型 API Key 存在钥匙串里，不同步（恢复后需要重新填一次 Key）。
 /// - 免费账号自签的 App 用不了 CloudKit，所以用“iCloud 云盘里的文件夹”这种方式，第一次打开时选一次文件夹。
+extension Notification.Name {
+    /// iCloud 把设置同步过来了：App 里的设置要立刻换新的（不用重开）
+    static let hearCloudSettingsApplied = Notification.Name("hear.cloudSettingsApplied")
+}
+
 @MainActor
 final class CloudSync: ObservableObject {
     static let shared = CloudSync()
@@ -226,7 +231,7 @@ final class CloudSync: ObservableObject {
         case .pull:
             if let cloud = await Self.readSettings(dir) {
                 applySettings(cloud, hash: manifest.settingsHash)
-                settingsNote = "已从 iCloud 同步设置，重新打开 App 后完全生效"
+                settingsNote = "已从 iCloud 同步设置"
                 hearLog("iCloud 同步：用了 iCloud 上更新的设置")
             }
         case .none:
@@ -291,6 +296,8 @@ final class CloudSync: ObservableObject {
         let d = UserDefaults.standard
         for k in Self.settingKeys { if let v = s[k] { d.set(v, forKey: k) } }
         d.set(hash ?? Self.settingsHash(Self.localSettings()), forKey: Keys.settingsHash)
+        // 告诉 App：新设置已经写好了，直接换上，不用重开
+        NotificationCenter.default.post(name: .hearCloudSettingsApplied, object: nil)
         // UserDefaults 的变动通知是异步发的，稍后再恢复监听
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 500_000_000)

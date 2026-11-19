@@ -141,21 +141,17 @@ struct SettingsView: View {
 
                 // MARK: 模型管理（本地模型 / 在线模型）
                 Section {
-                    // 页签用系统的分段控件：深色模式下也是浅色圆角块，不会变成黑块
-                    Picker("", selection: $modelTab) {
-                        Text("本地模型").tag(0)
-                        Text("在线模型").tag(1)
-                    }
-                    .pickerStyle(.segmented)
-                    // 页签高一点，好点得着
-                    .controlSize(.large)
-                    // 页签和下面第一行之间不要有横线
-                    .listRowSeparator(.hidden)
-                    // 上下留白收紧，别跟下面第一行隔一大块
-                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 0, trailing: 16))
-                    .onChange(of: modelTab) { _, newValue in
-                        if newValue == 1 { Task { await session.refreshCloudStatus() } }
-                    }
+                    // 页签自己画：高度和字号都能自己定
+                    // （系统的分段控件高度跟着 controlSize 变，字号又比界面里其它文字小）
+                    ModelTabBar(selection: $modelTab, titles: ["本地模型", "在线模型"])
+                        // 页签和下面第一行之间不要有横线
+                        .listRowSeparator(.hidden)
+                        // 顶部多留一点，离"模型管理"这个标题远一点；
+                        // 下面不留，跟第一行贴紧
+                        .listRowInsets(EdgeInsets(top: 24, leading: 16, bottom: 0, trailing: 16))
+                        .onChange(of: modelTab) { _, newValue in
+                            if newValue == 1 { Task { await session.refreshCloudStatus() } }
+                        }
 
                     if modelTab == 0 {
                         modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
@@ -716,6 +712,21 @@ struct CloudEditSheet: View {
                                 Text("SenseVoice + Whisper").tag("sensevoice+whisper")
                             }
                         }
+                        // 现在实际会走哪个地址，一眼看到，不用猜
+                        LabeledContent("实际地址") {
+                            Text(effectiveAddressText)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.trailing)
+                        }
+                        // 自己填的地址不通时，通用服务地址（8000）能顶上：
+                        // 给个一键切回去，省得手动改地址
+                        if !useDefault, !sharedAddressText.isEmpty {
+                            Button("改用通用服务地址") {
+                                useDefault = true
+                                address = ""
+                            }
+                            .font(.footnote)
+                        }
                     } else {
                         TextField("http://192.168.1.10:8000", text: $address)
                             .textInputAutocapitalization(.never)
@@ -764,14 +775,19 @@ struct CloudEditSheet: View {
         }
     }
 
+    /// 通用服务地址（8000 那个，三个模型都能用它）
+    private var sharedAddressText: String {
+        session.cloudAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// 现在实际用的地址（跟着"默认"开关实时变）
     /// 模型选了"默认"就用通用服务地址，没选就用这里填的
     private var effectiveAddressText: String {
         switch target {
         case .service:
-            return session.cloudAddress.isEmpty ? "还没填" : session.cloudAddress
+            return sharedAddressText.isEmpty ? "还没填" : sharedAddressText
         case .model:
-            let a = useDefault ? session.cloudAddress : address.trimmingCharacters(in: .whitespacesAndNewlines)
+            let a = useDefault ? sharedAddressText : address.trimmingCharacters(in: .whitespacesAndNewlines)
             return a.isEmpty ? "还没填" : a
         }
     }
@@ -795,28 +811,51 @@ struct CloudEditSheet: View {
         busy = true
         status = nil
         let own = address.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 单个模型选了"默认"，测的就是通用服务地址
-        let targetAddr: String
+        let shared = sharedAddressText
+        // 要试的地址：
+        //   服务地址 = 就这一个
+        //   模型地址 = 先试它实际会用的那个；不通的话再试通用服务地址
+        //            （通用服务 8000 会把请求转发给真正干活的模型服务，
+        //              所以单独填的 8081 / 8082 不通时，它照样能用）
+        var targets: [String] = []
         switch target {
-        case .service: targetAddr = own
-        case .model: targetAddr = useDefault ? session.cloudAddress : own
+        case .service:
+            if !own.isEmpty { targets.append(own) }
+        case .model:
+            let primary = useDefault ? shared : own
+            if !primary.isEmpty { targets.append(primary) }
+            if !shared.isEmpty && !targets.contains(shared) { targets.append(shared) }
         }
         Task {
-            if targetAddr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if targets.isEmpty {
                 busy = false
                 status = "还没填地址"
                 return
             }
-            var text = await CloudClient.diagnose(address: targetAddr)
+            var text = ""
+            var okAddr = ""
+            for a in targets {
+                let t = await CloudClient.diagnose(address: a)
+                if t.hasPrefix("连接正常") || t.hasPrefix("服务在加载") {
+                    okAddr = a
+                    text = t
+                    break
+                }
+                if text.isEmpty { text = t }
+            }
             // 连上了的话，把这个模型自己的状态也带出来
-            if text.hasPrefix("连接正常"), case .model(let m) = target,
-               let info = await CloudClient.probe(address: targetAddr) {
+            if !okAddr.isEmpty, case .model(let m) = target,
+               let info = await CloudClient.probe(address: okAddr) {
                 switch info.kind {
                 case .llamaServer:
                     // 单独的模型服务（8081 / 8082）：就绪就是就绪
                     text += "，\(m.title)：\(info.health["status"] ?? "就绪")"
                 case .aggregator:
                     text += "，\(m.title)：\(info.health[m.rawValue] ?? "就绪")"
+                }
+                // 不是用的自己填的那个地址，而是通用服务地址顶上的，说清楚
+                if okAddr != effectiveAddressText {
+                    text += "（现在走的是通用服务地址）"
                 }
             }
             busy = false
@@ -939,5 +978,56 @@ struct LocalModelSheet: View {
                 }
             }
         }
+    }
+}
+
+
+// MARK: - 模型管理的页签
+
+/// "本地模型 / 在线模型" 两个页签
+///
+/// 自己画，不用系统的分段控件：
+///   - 高度可以自己定（比系统默认矮约一成）
+///   - 字号用 .body，跟界面里其它文字一样大（系统的分段控件字偏小，看着不统一）
+///   - 深色模式下也是浅色圆角块，不会变成黑块
+struct ModelTabBar: View {
+    @Binding var selection: Int
+    let titles: [String]
+    @Environment(\.colorScheme) private var scheme
+
+    /// 整条页签的底色
+    private var trackColor: Color {
+        scheme == .dark ? Color(white: 0.13) : Color(white: 0.92)
+    }
+    /// 选中那一块的底色
+    private var pillColor: Color {
+        scheme == .dark ? Color(white: 0.32) : Color.white
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(titles.indices, id: \.self) { i in
+                Text(titles[i])
+                    .font(.body)
+                    .foregroundStyle(i == selection ? Color.primary : Color.secondary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 30)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(i == selection ? pillColor : Color.clear)
+                            .shadow(color: Color.black.opacity(i == selection && scheme != .dark ? 0.12 : 0),
+                                    radius: 1, x: 0, y: 0.5)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeOut(duration: 0.15)) { selection = i }
+                    }
+                    .accessibilityLabel(titles[i])
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityValue(i == selection ? "已选中" : "")
+            }
+        }
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(trackColor))
     }
 }

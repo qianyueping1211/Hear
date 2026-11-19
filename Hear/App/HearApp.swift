@@ -5,6 +5,14 @@ struct HearApp: App {
     @StateObject private var session = LiveSession()
 
     init() {
+        // 崩溃/被杀掉的诊断：越早装上越好
+        CrashGuard.shared.install()
+        // 退到后台：正常结束，把"正在运行"的标记删掉
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { _ in
+            CrashGuard.shared.clearMarker()
+        }
         // iCloud 同步：iCloud 上的设置比较新就先用上（要在 LiveSession 读设置之前）
         CloudSync.shared.applyCloudSettingsAtLaunch()
         // 在 LiveSession 读设置之前先调整默认值

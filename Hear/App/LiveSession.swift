@@ -100,6 +100,8 @@ final class LiveSession: ObservableObject {
     }
     /// 云端服务返回的各模型状态（asr / mt / clone）
     @Published private(set) var cloudStatus: [String: String] = [:]
+    /// 每个模型实际连上的地址（模型自己的地址不通、用通用服务地址顶上的，记通用那个）
+    @Published private(set) var cloudStatusAddress: [String: String] = [:]
     /// 声音克隆用云端模型（false = 用手机本地的 Qwen）
     @Published var voiceCloneCloud: Bool {
         didSet {
@@ -351,6 +353,7 @@ final class LiveSession: ObservableObject {
                 asr: Self.effectiveAddress(fallback: cloudAddr, own: cloudOwn[CloudModel.asr.rawValue] ?? ""),
                 mt: Self.effectiveAddress(fallback: cloudAddr, own: cloudOwn[CloudModel.mt.rawValue] ?? ""),
                 clone: Self.effectiveAddress(fallback: cloudAddr, own: cloudOwn[CloudModel.clone.rawValue] ?? ""))
+            await cloudClient.setSharedAddress(cloudAddr)
         }
         asrUseGPU = d.object(forKey: "asrUseGPU") as? Bool ?? true
         // 引擎默认都用苹果自带（不用下载模型，打开就能用）
@@ -400,6 +403,31 @@ final class LiveSession: ObservableObject {
             guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
                   let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
             Task { @MainActor in self?.routeChanged(reason) }
+        }
+
+        // iCloud 同步过来的设置：直接换上，不用提示用户重开 App
+        NotificationCenter.default.addObserver(
+            forName: .hearCloudSettingsApplied, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.reloadSyncedSettings()
+            }
+        }
+
+        // 内存不够了（系统要杀我们）：先把大模型卸掉，能保住 App 不退出
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                hearLog("收到内存不足警告：可用内存 \(Self.freeMB()) MB，先卸掉本地模型", .warning)
+                CrashGuard.shared.updateMarker(memoryWarning: true)
+                await self.asr.unload()
+                await self.sense.unload()
+                await self.translator.unload()
+                await self.cloner.unload()
+                hearLog("已卸载本地模型，可用内存 \(Self.freeMB()) MB")
+            }
         }
 
         // 来电、Siri 等打断音频时停止
@@ -675,6 +703,13 @@ final class LiveSession: ObservableObject {
 
     func bootstrap() async {
         guard phase == .checking || phase == .needsModels || phaseIsFailed else { return }
+        // 上次退出不正常（崩溃 / 被系统杀掉）：先查出来，提示用户
+        if let prev = CrashGuard.shared.checkPreviousRun() {
+            hearLog(prev, .warning)
+            showToast(prev, seconds: 6)
+        }
+        // 记下"这次在跑"，退出时删掉；下次打开还在就说明上次是不正常结束的
+        CrashGuard.shared.markRunning()
         // 上次加载声音克隆时 App 退出了（多半是内存不够）：这次先关掉，免得一打开就闪退
         let d = UserDefaults.standard
         if d.bool(forKey: Self.clonePendingKey) {
@@ -1305,6 +1340,8 @@ final class LiveSession: ObservableObject {
     func stop(readAfter: Bool = true) {
         let wasRunning = isRunning
         if wasRunning { hearLog("停止实时翻译") }
+        restartTask?.cancel()
+        restartTask = nil
         holding = nil
         holdReleasing = false
         holdGen += 1
@@ -2220,6 +2257,47 @@ final class LiveSession: ObservableObject {
         return o.isEmpty ? def : o
     }
 
+    /// iCloud 把设置同步过来了：把新设置直接换上，不用重开 App
+    func reloadSyncedSettings() {
+        let d = UserDefaults.standard
+        let a = Language.find(d.string(forKey: "langA") ?? "zh")
+        if a != langA { langA = a }
+        let b = Language.find(d.string(forKey: "langB") ?? "en")
+        if b != langB { langB = b }
+        let so = d.object(forKey: "speakOutput") as? Bool ?? true
+        if so != speakOutput { speakOutput = so }
+        let uc = d.object(forKey: "useContext") as? Bool ?? true
+        if uc != useContext { useContext = uc }
+        let sen = d.object(forKey: "sensitivity") as? Double ?? 12
+        if abs(sen - sensitivity) > 0.001 { sensitivity = sen }
+        let sil = d.object(forKey: "silenceMs") as? Double ?? 700
+        if abs(sil - silenceMs) > 0.001 { silenceMs = sil }
+        let gl = d.string(forKey: "glossary") ?? ""
+        if gl != glossary { glossary = gl }
+        let om = AudioOutput(rawValue: d.string(forKey: "outputMode") ?? "") ?? .speaker
+        if om != outputMode { outputMode = om }
+        let le = d.string(forKey: "leftEar") ?? "A"
+        if le != leftEar { leftEar = le }
+        let re = d.string(forKey: "rightEar") ?? "B"
+        if re != rightEar { rightEar = re }
+        let vc = d.object(forKey: "voiceClone") as? Bool ?? false
+        if vc != voiceClone { voiceClone = vc }
+        let gpu = d.object(forKey: "asrUseGPU") as? Bool ?? true
+        if gpu != asrUseGPU { asrUseGPU = gpu }
+        let eng = d.string(forKey: "asrEngine") ?? asrEngine
+        if eng != asrEngine { asrEngine = eng }
+        let vp = d.object(forKey: "voiceProcessing") as? Bool ?? true
+        if vp != voiceProcessing { voiceProcessing = vp }
+        let isrc = d.string(forKey: "inputSource") ?? "phone"
+        if isrc != inputSource { inputSource = isrc }
+        let tm = d.object(forKey: "talkMode") as? Bool ?? false
+        if tm != talkMode { talkMode = tm }
+        // 大模型配置、日志设置各自存着，让它们也重新读一遍
+        LLMSettings.shared.reloadFromDefaults()
+        AppLog.shared.reloadFromDefaults()
+        hearLog("iCloud 同步：设置已经直接换上")
+    }
+
     /// 把三个地址告诉客户端
     private func updateCloudAddresses() {
         let a = Self.effectiveAddress(fallback: cloudAddress, own: cloudOwnAddress(.asr))
@@ -2227,6 +2305,8 @@ final class LiveSession: ObservableObject {
         let c = Self.effectiveAddress(fallback: cloudAddress, own: cloudOwnAddress(.clone))
         Task {
             await cloud.setAddresses(asr: a, mt: m, clone: c)
+            // 通用服务地址也记下来：某个模型自己的地址连不上时，可以退回用它
+            await cloud.setSharedAddress(cloudAddress)
             await cloud.setASRScheme(cloudASRScheme)
         }
     }
@@ -2362,6 +2442,8 @@ final class LiveSession: ObservableObject {
             }
         }
 
+        var usedAddress: [String: String] = [:]
+
         // 共享服务地址
         if defAddr.isEmpty {
             status[Self.cloudServiceKey] = Self.cloudStatusUnset
@@ -2371,38 +2453,51 @@ final class LiveSession: ObservableObject {
 
         // 三个模型各自的地址（没填就用共享的）
         for m in CloudModel.allCases {
-            let addr = cloudEffectiveAddress(m)
-            if addr.isEmpty {
+            // 要试的地址：先它自己配的，不行再试通用服务地址
+            // （通用服务 8000 会把请求转发给真正干活的模型服务，
+            //   所以就算某个模型单独配的地址不通，用它也能正常工作）
+            var cands: [String] = []
+            let own = cloudEffectiveAddress(m)
+            if !own.isEmpty { cands.append(own) }
+            if !defAddr.isEmpty && !cands.contains(defAddr) { cands.append(defAddr) }
+            if cands.isEmpty {
                 status[m.rawValue] = Self.cloudStatusUnset
                 continue
             }
-            guard reachable.contains(addr) else {
-                status[m.rawValue] = Self.cloudStatusBad
-                continue
-            }
-            let health = models[addr] ?? [:]
             var ok = false
-            if kinds[addr] == .llamaServer {
-                // 单独的 llama-server（8081 翻译 / 8082 克隆）：
-                // /health 回的是 {"status":"ok"}，就绪了就算正常
-                // 但 llama-server 不做语音识别，那个接口只有 8000 的总服务有
-                // llama-server 的 /health 返回 {"status":"ok"}；
-                // 模型还在加载时是 {"status":"loading model"}，那不算就绪
-                ok = m != .asr && (health["status"]?.hasPrefix("ok") == true)
-            } else {
-                // 总服务（8000）：回的是 asr / mt / clone 各自的状态
-                // 服务端回的是"就绪（small）"、"外部服务"、"加载中（第一次要下识别模型）"、
-                // "未安装 faster-whisper"、"连不上（...）"这些
-                // 只有真的就绪了才算正常：还没装、还在下载、连不上都算异常
-                let s = health[m.rawValue] ?? ""
-                ok = s.hasPrefix("就绪") || s.hasPrefix("外部服务")
+            var used = ""
+            for addr in cands {
+                guard reachable.contains(addr) else { continue }
+                let health = models[addr] ?? [:]
+                let good: Bool
+                if kinds[addr] == .llamaServer {
+                    // 单独的 llama-server（8081 翻译 / 8082 克隆）：
+                    // /health 回的是 {"status":"ok"}，就绪了就算正常
+                    // 但 llama-server 不做语音识别，那个接口只有 8000 的总服务有
+                    // llama-server 的 /health 返回 {"status":"ok"}；
+                    // 模型还在加载时是 {"status":"loading model"}，那不算就绪
+                    good = m != .asr && (health["status"]?.hasPrefix("ok") == true)
+                } else {
+                    // 总服务（8000）：回的是 asr / mt / clone 各自的状态
+                    // 服务端回的是"就绪（small）"、"外部服务"、"加载中（第一次要下识别模型）"、
+                    // "未安装 faster-whisper"、"连不上（...）"这些
+                    // 只有真的就绪了才算正常：还没装、还在下载、连不上都算异常
+                    let s = health[m.rawValue] ?? ""
+                    good = s.hasPrefix("就绪") || s.hasPrefix("外部服务")
+                }
+                if good { ok = true; used = addr; break }
             }
             status[m.rawValue] = ok ? Self.cloudStatusOK : Self.cloudStatusBad
+            usedAddress[m.rawValue] = ok ? used : ""
         }
         cloudStatus = status
+        cloudStatusAddress = usedAddress
     }
 
     // MARK: - 云端失败时的保底
+
+    /// 云端失败换引擎后，重新开始聆听的任务（只能有一个，避免麦克风被开两次）
+    private var restartTask: Task<Void, Never>?
 
     /// 云端接口调用失败（网络不稳定、模型没起来、服务挂了）：
     /// 自动换回苹果自带引擎，别让翻译直接停摆。
@@ -2430,14 +2525,24 @@ final class LiveSession: ObservableObject {
         showToast(serverSide
                   ? "云端\(model.title)服务出错了，已经切换为苹果自带引擎"
                   : "由于网络不稳定或模型不可用，已经切换为苹果自带引擎", seconds: 4)
-        // 换引擎会停掉当前会话，接着把它起回来，翻译不中断
+        // 换引擎会停掉当前会话，接着把它起回来，翻译不中断。
+        // 注意：上面的 asrEngine/translationEngine 改动已经触发了 stop()，
+        // 这里必须等它真的停完再开始，否则麦克风会被开两次（AVAudioEngine 崩）。
         if wasRunning {
-            Task { @MainActor in
-                for _ in 0..<150 {
+            restartTask?.cancel()
+            restartTask = Task { @MainActor in
+                // 等 stop() 收尾
+                for _ in 0..<30 {
+                    if !self.isRunning { break }
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                // 等模型加载/卸载完
+                for _ in 0..<300 {
                     if !self.isAnyModelLoading { break }
                     try? await Task.sleep(nanoseconds: 100_000_000)
                 }
-                guard self.phase == .ready else { return }
+                guard !Task.isCancelled else { return }
+                guard self.phase == .ready, !self.isRunning else { return }
                 _ = await self.beginListening()
             }
         }

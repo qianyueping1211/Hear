@@ -26,6 +26,9 @@ $LlamaTag  = if ($env:HEAR_LLAMA_TAG) { $env:HEAR_LLAMA_TAG } else { "b12491" }
 $Port      = if ($env:HEAR_PORT)        { $env:HEAR_PORT }        else { "8000" }
 $MtPort    = if ($env:HEAR_MT_PORT)     { $env:HEAR_MT_PORT }     else { "8081" }
 $ClonePort = if ($env:HEAR_CLONE_PORT)  { $env:HEAR_CLONE_PORT }  else { "8082" }
+# 打印局域网地址的时候要用
+$script:MtPort = $MtPort
+$script:ClonePort = $ClonePort
 $MtDevice    = if ($env:HEAR_MT_DEVICE)    { $env:HEAR_MT_DEVICE }    else { "GPU" }
 $CloneDevice = if ($env:HEAR_CLONE_DEVICE) { $env:HEAR_CLONE_DEVICE } else { "GPU" }
 $MtQuant   = if ($env:HEAR_MT_QUANT)   { $env:HEAR_MT_QUANT }   else { "Q4_K_M" }
@@ -57,6 +60,35 @@ function Die($t)  { Write-Host "!! $t" -ForegroundColor Red; exit 1 }
 
 # 列出网卡（WLAN / 以太网）各自的 IP，让用户挑一个填到手机里。
 # 不能随便取第一个：VPN、虚拟网卡、WSL 的地址都可能出现，手机连不上。
+function Ensure-FirewallRule($ports) {
+    # 防火墙：手机连不上 8000/8081/8082，多半是 Windows 防火墙拦了入站。
+    # 管理员权限的话直接建好规则；不是管理员就把命令打印出来（复制到管理员 PowerShell 里跑一次就行）。
+    $isAdmin = $false
+    try {
+        $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $isAdmin = (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { $isAdmin = $false }
+
+    $ruleName = "Hear Cloud"
+    if ($isAdmin) {
+        try {
+            Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue |
+                Remove-NetFirewallRule -ErrorAction SilentlyContinue
+            New-NetFirewallRule -DisplayName $ruleName -Direction Inbound `
+                -LocalPort $ports -Protocol TCP -Action Allow -Profile Any | Out-Null
+            Write-Host "  防火墙已放行 $($ports -join ', ')（管理员权限自动设置好了）" -ForegroundColor Green
+            return
+        } catch {
+            Write-Host "  防火墙规则没建成：$($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+    Write-Host "  防火墙放行：用【管理员】PowerShell 执行一次下面这行就行" -ForegroundColor Yellow
+    Write-Host "      New-NetFirewallRule -DisplayName `"Hear Cloud`" -Direction Inbound -LocalPort $($ports -join ',') -Protocol TCP -Action Allow" -ForegroundColor Yellow
+    Write-Host ""
+}
+
+
 function Show-LanInfo($port) {
     $all = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
            Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" }
@@ -87,6 +119,14 @@ function Show-LanInfo($port) {
         foreach ($c in $choices) {
             Write-Host ("      {0}. {1,-8} {2}   http://{3}:{4}" -f $i, $c.Kind, $c.Name, $c.IP, $port) -ForegroundColor Green
             $i++
+        }
+        Write-Host ""
+        Write-Host "  三个模型用同一个通用服务地址就行（它会自己转发给翻译 / 克隆）：" -ForegroundColor DarkGray
+        Write-Host "      通用服务地址 = 上面的 http://电脑IP:8000" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "  想单独连某个模型服务（一般不用）：" -ForegroundColor DarkGray
+        foreach ($c in $choices) {
+            Write-Host ("      http://{0}:{1}  翻译模型      http://{0}:{2}  克隆模型" -f $c.IP, $script:MtPort, $script:ClonePort) -ForegroundColor DarkGray
         }
         Write-Host ""
         Write-Host "  （手机和电脑要连同一个 Wi-Fi）" -ForegroundColor DarkGray
@@ -439,8 +479,7 @@ $env:HEAR_ASR_MODEL = $AsrModel
 
 Show-LanInfo $Port
 Write-Host ""
-Write-Host "  防火墙放行（用管理员 PowerShell 执行一次）："
-Write-Host "      New-NetFirewallRule -DisplayName `"Hear Cloud`" -Direction Inbound -LocalPort $Port,$MtPort,$ClonePort -Protocol TCP -Action Allow"
+Ensure-FirewallRule @($Port, $MtPort, $ClonePort)
 Write-Host ""
 Write-Host "  关掉这个窗口就等于关掉服务。"
 Write-Host ""
