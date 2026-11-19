@@ -12,33 +12,12 @@ struct SettingsView: View {
     @ObservedObject private var llm = LLMSettings.shared
     @ObservedObject private var cloud = CloudSync.shared
     @State private var showCloudPicker = false
-    @State private var cloudTestResult: String?
-    @State private var cloudBusy = false
     /// 模型管理里的页签：0 = 本地模型，1 = 在线模型
     @State private var modelTab = 0
-    /// 正在配置哪个在线模型
-    @State private var cloudEdit: CloudModel?
+    /// 正在配置哪一项：服务（默认地址）或某个模型
+    @State private var cloudEdit: CloudEdit?
     /// 本地引擎互斥的提示
     @State private var conflictMessage: String?
-
-    private var cloudAddressBinding: Binding<String> {
-        Binding(
-            get: { session.cloudAddress },
-            set: { session.cloudAddress = $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        )
-    }
-
-    /// 连一下云端服务，看看三个模型的状态
-    @MainActor
-    private func testCloud() {
-        cloudBusy = true
-        cloudTestResult = nil
-        Task {
-            let s = await session.cloudHealth()
-            cloudBusy = false
-            cloudTestResult = s ?? "连不上：检查地址、端口和网络"
-        }
-    }
 
     /// 有云端引擎选了，但地址还没填
     private var cloudMissingAddress: Bool {
@@ -48,15 +27,17 @@ struct SettingsView: View {
         return false
     }
 
-    /// 在线模型里的一个：名字 + 接口状态 + 配置按钮
-    private func cloudRow(_ m: CloudModel) -> some View {
-        let st = session.cloudStatusText(m)
-        return HStack(spacing: 10) {
-            Image(systemName: m.icon).foregroundStyle(.secondary)
-            Text(m.title)
+    /// 在线模型里的一行：名字 + 状态（未填写 / 正常 / 异常）+ 配置按钮
+    private func cloudRow(title: String, icon: String, status: String, onConfig: @escaping () -> Void) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon).foregroundStyle(.secondary)
+            Text(title)
             Spacer()
-            Text(st).font(.footnote).foregroundStyle(st == "就绪" ? Color.green : Color.secondary)
-            Button("配置") { cloudEdit = m }
+            Text(status)
+                .font(.footnote)
+                .foregroundStyle(status == "正常" ? Color.green
+                                  : (status == "异常" ? Color.orange : Color.secondary))
+            Button("配置", action: onConfig)
                 .buttonStyle(.borderless)
                 .font(.footnote)
         }
@@ -126,24 +107,29 @@ struct SettingsView: View {
 
                 // MARK: 模型管理（本地模型 / 在线模型）
                 Section {
-                    // 自己做的分段控件：系统 Picker 在 Form 里太矮，点起来也不舒服
-                    HStack(spacing: 0) {
+                    // 自己做的页签：系统 Picker 在 Form 里太矮，点起来也不舒服。
+                    // 下面的横线左边跟"本地模型"这几个字对齐，不要缩在字的中间
+                    HStack(alignment: .bottom, spacing: 24) {
                         ForEach(0..<2, id: \.self) { i in
                             Button {
                                 withAnimation(.easeInOut(duration: 0.15)) { modelTab = i }
                                 if i == 1 { Task { await session.refreshCloudStatus() } }
                             } label: {
-                                Text(i == 0 ? "本地模型" : "在线模型")
-                                    .font(.subheadline.weight(modelTab == i ? .semibold : .regular))
-                                    .foregroundStyle(modelTab == i ? Color.white : Color.primary)
-                                    .frame(maxWidth: .infinity, minHeight: 38)
-                                    .background(modelTab == i ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                                VStack(spacing: 6) {
+                                    Text(i == 0 ? "本地模型" : "在线模型")
+                                        .font(.subheadline.weight(modelTab == i ? .semibold : .regular))
+                                        .foregroundStyle(modelTab == i ? Color.accentColor : Color.secondary)
+                                    // 选中项下面的一条线：左边跟文字对齐
+                                    Rectangle()
+                                        .fill(modelTab == i ? Color.accentColor : Color.clear)
+                                        .frame(height: 2)
+                                }
+                                .frame(minHeight: 40)
                             }
                             .buttonStyle(.plain)
                         }
                     }
-                    .padding(3)
-                    .background(Color(.systemGray5), in: RoundedRectangle(cornerRadius: 10))
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                     if modelTab == 0 {
                         modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
@@ -168,26 +154,16 @@ struct SettingsView: View {
                             .font(.footnote)
                         }
                     } else {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("服务地址").font(.subheadline)
-                            TextField("http://192.168.1.10:8000", text: cloudAddressBinding)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .keyboardType(.URL)
-                            Text("三个模型默认都用这个地址，单个模型可以在「配置」里改。")
-                                .font(.caption).foregroundStyle(.secondary)
+                        // 服务（三个模型共用的地址）
+                        cloudRow(title: "服务", icon: "server.rack",
+                                 status: session.cloudServiceStatusText) {
+                            cloudEdit = .service
                         }
+                        // 三个模型各自的接口
                         ForEach(CloudModel.allCases) { m in
-                            cloudRow(m)
-                        }
-                        HStack {
-                            Button("刷新状态") {
-                                Task { await session.refreshCloudStatus() }
-                            }
-                            if cloudBusy { ProgressView().controlSize(.small) }
-                            Spacer()
-                            if let s = cloudTestResult {
-                                Text(s).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+                            cloudRow(title: m.title, icon: m.icon,
+                                     status: session.cloudStatusText(m)) {
+                                cloudEdit = .model(m)
                             }
                         }
                     }
@@ -306,14 +282,26 @@ struct SettingsView: View {
             }
             .onAppear {
                 session.refreshHeadset()
+                if modelTab == 1 { Task { await session.refreshCloudStatus() } }
+            }
+            // 在线模型页每 2 秒自动更新一次状态，不用手动点刷新
+            .task(id: modelTab) {
+                guard modelTab == 1 else { return }
+                while !Task.isCancelled {
+                    await session.refreshCloudStatus()
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                }
             }
             .sheet(isPresented: $showCloudPicker) {
                 CloudFolderPicker { url in cloud.setFolder(url) }
                     .ignoresSafeArea()
             }
-            // 在线模型里某个模型的配置
-            .sheet(item: $cloudEdit) { m in
-                CloudModelSheet(model: m)
+            // 在线模型里某一项的配置
+            .sheet(item: $cloudEdit) { e in
+                CloudEditSheet(target: e)
+                    .environmentObject(session)
+                    .presentationDetents([.medium])
+                    .presentationDragIndicator(.visible)
             }
             .alert("设置冲突", isPresented: Binding(get: { conflictMessage != nil },
                                                    set: { if !$0 { conflictMessage = nil } })) {
@@ -635,22 +623,41 @@ private struct ProcessingDots: View {
 }
 
 
-/// 在线模型里某个模型的配置：地址、开关、接口状态
-struct CloudModelSheet: View {
+/// 在线模型里要配置的那一项：服务（默认地址）或某个模型
+enum CloudEdit: Identifiable, Hashable {
+    case service
+    case model(CloudModel)
+
+    var id: String {
+        switch self {
+        case .service: return "service"
+        case .model(let m): return m.rawValue
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .service: return "服务"
+        case .model(let m): return m.title
+        }
+    }
+}
+
+/// 配置窗口：填地址、测一下通不通
+struct CloudEditSheet: View {
     @EnvironmentObject var session: LiveSession
     @Environment(\.dismiss) private var dismiss
-    let model: CloudModel
+    let target: CloudEdit
 
     @State private var address: String = ""
     @State private var status: String? = nil
     @State private var busy = false
-    @State private var conflict: String? = nil
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("接口地址（留空用默认）", text: $address)
+                    TextField("http://192.168.1.10:8000", text: $address)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
@@ -658,36 +665,47 @@ struct CloudModelSheet: View {
                         Button("测试连接") { test() }
                         if busy { ProgressView().controlSize(.small) }
                         Spacer()
-                        if let s = status {
-                            Text(s).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
-                        }
                     }
-                    if let c = conflict {
-                        Text(c).font(.footnote).foregroundStyle(.red)
+                    if let s = status {
+                        Text(s).font(.footnote).foregroundStyle(.secondary).lineLimit(3)
                     }
                 } header: {
-                    Text(model.title)
+                    Text(target.title)
                 } footer: {
-                    Text("当前实际用的地址：\(session.cloudEffectiveAddress(model).isEmpty ? "还没填" : session.cloudEffectiveAddress(model))\n地址是电脑上那个服务的地址，手机和电脑要在同一个 Wi‑Fi 下。用不用这个模型，在上面「引擎管理」里选。")
+                    Text("地址是电脑上那个服务的地址，手机和电脑要在同一个 Wi-Fi 下。")
                 }
             }
-            .navigationTitle("在线模型 · \(model.title)")
+            .navigationTitle("配置 · \(target.title)")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { save(); dismiss() }
                 }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
             }
             .onAppear {
-                address = session.cloudOwnAddress(model)
+                address = current
             }
         }
     }
 
+    /// 现在实际用的地址
+    private var current: String {
+        switch target {
+        case .service: return session.cloudAddress
+        case .model(let m): return session.cloudOwnAddress(m)
+        }
+    }
+
     private func save() {
-        // 只保存地址；用不用云端由「引擎管理」里选的那个决定
-        session.setCloudOwnAddress(model, address)
-        conflict = nil
+        let v = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch target {
+        case .service: session.cloudAddress = v
+        case .model(let m): session.setCloudOwnAddress(m, v)
+        }
+        Task { await session.refreshCloudStatus() }
     }
 
     /// 测一下这个地址通不通
@@ -695,17 +713,27 @@ struct CloudModelSheet: View {
         busy = true
         status = nil
         let own = address.trimmingCharacters(in: .whitespacesAndNewlines)
-        let target = own.isEmpty ? session.cloudAddress : own
+        // 单个模型没填地址时，测的是共享的那个服务地址
+        let targetAddr: String
+        switch target {
+        case .service: targetAddr = own
+        case .model(let m): targetAddr = own.isEmpty ? session.cloudAddress : own
+        }
         Task {
-            if target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if targetAddr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 busy = false
                 status = "还没填地址"
                 return
             }
-            let info = await CloudClient.healthInfo(address: target)
+            let info = await CloudClient.healthInfo(address: targetAddr)
             busy = false
             if let info {
-                status = info[model.rawValue] ?? "已连接"
+                switch target {
+                case .service:
+                    status = "连接正常，服务在运行"
+                case .model(let m):
+                    status = info[m.rawValue] ?? "连接正常"
+                }
             } else {
                 status = "连不上：检查地址、端口和防火墙"
             }

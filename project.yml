@@ -36,6 +36,11 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSMicrophoneUsageDescription: 需要使用麦克风来识别你说的话并实时翻译（全部在本机完成）。
+        # 连接自己电脑上的云端模型服务（同一个 Wi-Fi 下的局域网地址，用 http 明文）
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: 需要访问你电脑上的云端模型服务（手机和电脑在同一个 Wi-Fi 下）。
         NSSpeechRecognitionUsageDescription: 使用 iOS 系统听写在说话时实时显示文字（在本机完成）。
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true

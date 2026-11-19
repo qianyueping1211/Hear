@@ -4,6 +4,23 @@ import AVFoundation
 import Translation
 import os
 
+/// 等克隆任务出结果用的盒子（后台任务写，主线程读）
+final class CloneOutcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: CloneAudio?
+    private var finished = false
+
+    func set(_ v: CloneAudio?) {
+        lock.lock(); value = v; finished = true; lock.unlock()
+    }
+    var result: CloneAudio? {
+        lock.lock(); defer { lock.unlock() }; return value
+    }
+    var isFinished: Bool {
+        lock.lock(); defer { lock.unlock() }; return finished
+    }
+}
+
 /// 整个实时翻译流程的调度中心：
 /// 麦克风 → 断句 → 判断语种 → 识别 → 翻译（流式显示）→ 朗读
 @MainActor
@@ -415,7 +432,11 @@ final class LiveSession: ObservableObject {
         }
         switch reason {
         case .newDeviceAvailable:
-            guard outputMode == .speaker else { return }
+            if outputMode == .headphones {
+                // 已经是耳机模式了：重新应用一次路由，让声音真的走耳机
+                AudioRoute.apply(.headphones)
+                return
+            }
             // 蓝牙耳机在扬声器模式下不一定看得到，所以再临时取消强制扬声器检查一次
             guard AudioRoute.headphonesLikelyConnected() || AudioRoute.detectHeadphones() else {
                 AudioRoute.apply(.speaker); return
@@ -1528,6 +1549,9 @@ final class LiveSession: ObservableObject {
                 }
             } catch {
                 hearLog("实时识别失败：\(error)", .error)
+                if usingCloudASR {
+                    cloudFallbackToApple(.asr, reason: error.localizedDescription)
+                }
                 continue
             }
             hearLog("实时识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(r.1.prefix(30))")
@@ -1581,8 +1605,12 @@ final class LiveSession: ObservableObject {
             if usingCloudMT {
                 let prompt = PromptBuilder.build(text: p.text, from: p.src, to: p.tgt, context: [],
                                                  glossary: PromptBuilder.parseGlossary(glossary))
-                let out = try? await cloud.translate(prompt: prompt, src: p.src.id, dst: p.tgt.id)
-                if let out, !out.isEmpty, gen == runGen, id == partialSeg, id > finishedSeg { partialTranslation = out }
+                do {
+                    let out = try await cloud.translate(prompt: prompt, src: p.src.id, dst: p.tgt.id)
+                    if !out.isEmpty, gen == runGen, id == partialSeg, id > finishedSeg { partialTranslation = out }
+                } catch {
+                    cloudFallbackToApple(.mt, reason: error.localizedDescription)
+                }
                 continue
             }
             // 本地翻译模型和 Whisper 共用 GPU：整句在识别/翻译时，预览翻译先让路
@@ -1609,7 +1637,12 @@ final class LiveSession: ObservableObject {
         let prompt = PromptBuilder.build(text: text, from: src, to: tgt, context: context,
                                          glossary: PromptBuilder.parseGlossary(glossary))
         if usingCloudMT {
-            return try await cloud.translate(prompt: prompt, src: src.id, dst: tgt.id)
+            do {
+                return try await cloud.translate(prompt: prompt, src: src.id, dst: tgt.id)
+            } catch {
+                cloudFallbackToApple(.mt, reason: error.localizedDescription)
+                throw error
+            }
         }
         return try await translator.translate(prompt: prompt) { partial in onPartial(partial) }
     }
@@ -1896,6 +1929,9 @@ final class LiveSession: ObservableObject {
             hearLog("整句识别（\(sv ? "SenseVoice" : "Whisper")）\(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(text.prefix(40))")
         } catch {
             hearLog("识别失败：\(error)", .error)
+            if usingCloudASR {
+                cloudFallbackToApple(.asr, reason: error.localizedDescription)
+            }
             if gen == runGen { activity = "识别失败"; removeItem(itemID) }
             return
         }
@@ -2022,6 +2058,21 @@ final class LiveSession: ObservableObject {
         return d >= 2 || (d == 1 && max(x.count, y.count) <= 8)
     }
 
+    /// 等克隆声音生成好，最多等这么久。
+    /// 超时了就先用系统声音念，克隆任务继续在后台跑（下次念同一句就直接有了）。
+    private func waitClone(_ task: Task<CloneAudio?, Never>, seconds: Double) async -> CloneAudio? {
+        let box = CloneOutcome()
+        // 后台等着克隆出结果
+        let watcher = Task { box.set(await task.value) }
+        let deadline = Date().addingTimeInterval(seconds)
+        while !box.isFinished, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        if box.isFinished { return box.result }
+        // 超时：不等了，先用系统声音
+        return nil
+    }
+
     /// 朗读一条译文：决定左右耳、声音和音高
     private func speak(_ item: TranslationItem) async {
         let text = item.translated
@@ -2049,13 +2100,7 @@ final class LiveSession: ObservableObject {
             if task == nil { task = await prepareClone(item.id) }
             if let t = task {
                 if cloneTasks[item.id] == nil { cloneTasks[item.id] = t }
-                cloned = await withTaskGroup(of: CloneAudio?.self) { g in
-                    g.addTask { await t.value }
-                    g.addTask { try? await Task.sleep(nanoseconds: cloneWait); return nil }
-                    let first = await g.next() ?? nil
-                    g.cancelAll()
-                    return first
-                }
+                cloned = await waitClone(t, seconds: Double(cloneWait) / 1_000_000_000)
                 if Task.isCancelled { return }
             }
         }
@@ -2224,34 +2269,113 @@ final class LiveSession: ObservableObject {
         Self.effectiveAddress(fallback: cloudAddress, own: cloudOwnAddress(model))
     }
 
-    /// 界面上显示的状态
+    /// 界面上显示的状态：未填写 / 正常 / 异常
+    /// （用不用云端由"引擎管理"决定，这里只看地址通不通）
     func cloudStatusText(_ model: CloudModel) -> String {
-        if !cloudEnabled(model) { return "未启用" }
-        if cloudEffectiveAddress(model).isEmpty { return "未配置" }
-        return cloudStatus[model.rawValue] ?? "未测试"
+        cloudStatus[model.rawValue] ?? "未填写"
     }
 
-    /// 刷新三个模型的状态
+    /// 共享服务地址（三个模型默认都用它）的状态
+    var cloudServiceStatusText: String {
+        cloudStatus[Self.cloudServiceKey] ?? "未填写"
+    }
+
+    /// 状态一共这三种
+    static let cloudStatusUnset = "未填写"
+    static let cloudStatusOK = "正常"
+    static let cloudStatusBad = "异常"
+    /// 共享服务地址在状态表里的名字
+    static let cloudServiceKey = "service"
+
+    /// 刷新服务地址和三个模型的状态
     func refreshCloudStatus() async {
-        var groups: [String: [CloudModel]] = [:]
+        var status: [String: String] = [:]
+        // 要问的地址（去重）：共享服务地址 + 三个模型实际用的地址
+        var wanted: [String] = []
+        let defAddr = cloudAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !defAddr.isEmpty { wanted.append(defAddr) }
         for m in CloudModel.allCases {
-            guard cloudEnabled(m) else { cloudStatus[m.rawValue] = "未启用"; continue }
-            let addr = cloudEffectiveAddress(m)
-            guard !addr.isEmpty else { cloudStatus[m.rawValue] = "未配置"; continue }
-            groups[addr, default: []].append(m)
+            let a = cloudEffectiveAddress(m)
+            if !a.isEmpty && !wanted.contains(a) { wanted.append(a) }
         }
-        for (addr, models) in groups {
-            if let info = await CloudClient.healthInfo(address: addr) {
-                for m in models { cloudStatus[m.rawValue] = info[m.rawValue] ?? "就绪" }
-            } else {
-                for m in models { cloudStatus[m.rawValue] = "连不上" }
+        // 同一个地址只问一次。reachable = 通不通，models = 各模型的状态
+        // 几个地址一起问，谁先回来谁先算，不排队等
+        var reachable: Set<String> = []
+        var models: [String: [String: String]] = [:]
+        await withTaskGroup(of: (String, [String: String]?).self) { g in
+            for a in wanted {
+                g.addTask { (a, await CloudClient.healthInfo(address: a)) }
+            }
+            for await (a, all) in g {
+                if let all {
+                    reachable.insert(a)
+                    models[a] = all
+                }
             }
         }
+
+        // 共享服务地址
+        if defAddr.isEmpty {
+            status[Self.cloudServiceKey] = Self.cloudStatusUnset
+        } else {
+            status[Self.cloudServiceKey] = reachable.contains(defAddr) ? Self.cloudStatusOK : Self.cloudStatusBad
+        }
+
+        // 三个模型各自的地址（没填就用共享的）
+        for m in CloudModel.allCases {
+            let addr = cloudEffectiveAddress(m)
+            if addr.isEmpty {
+                status[m.rawValue] = Self.cloudStatusUnset
+                continue
+            }
+            guard reachable.contains(addr) else {
+                status[m.rawValue] = Self.cloudStatusBad
+                continue
+            }
+            let s = models[addr]?[m.rawValue] ?? ""
+            // 服务端回的是"就绪（xxx）"这种，正常就算正常
+            let bad = s.contains("连不上") || s.contains("未安装")
+            status[m.rawValue] = (s.isEmpty || bad) ? Self.cloudStatusBad : Self.cloudStatusOK
+        }
+        cloudStatus = status
     }
 
-    /// 连一下云端服务，看看三个模型的状态（连不上返回 nil）
-    func cloudHealth() async -> String? {
-        await cloud.health()
+    // MARK: - 云端失败时的保底
+
+    /// 云端接口调用失败（网络不稳定、模型没起来、服务挂了）：
+    /// 自动换回苹果自带引擎，别让翻译直接停摆。
+    /// 返回 true 表示已经切换了。
+    @discardableResult
+    func cloudFallbackToApple(_ model: CloudModel, reason: String) -> Bool {
+        let wasRunning = isRunning
+        switch model {
+        case .asr:
+            guard asrEngine == "cloud" else { return false }
+            // 优先用苹果自带；苹果不可用（iOS 26 以下）就退回本地引擎
+            asrEngine = appleAvailable ? "apple" : (isInstalled(.senseVoice) ? "sensevoice" : "whisper")
+        case .mt:
+            guard translationEngine == "cloud" else { return false }
+            translationEngine = appleAvailable ? "apple" : "local"
+        case .clone:
+            guard voiceCloneCloud else { return false }
+            // 声音克隆退回苹果自带（不克隆，直接用系统声音读）
+            voiceClone = false
+            voiceCloneCloud = false
+        }
+        hearLog("云端\(model.title)调用失败，已改为苹果自带引擎：\(reason)", .warning)
+        showToast("由于网络不稳定或模型不可用，已经切换为苹果自带引擎", seconds: 4)
+        // 换引擎会停掉当前会话，接着把它起回来，翻译不中断
+        if wasRunning {
+            Task { @MainActor in
+                for _ in 0..<150 {
+                    if !self.isAnyModelLoading { break }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                guard self.phase == .ready else { return }
+                _ = await self.beginListening()
+            }
+        }
+        return true
     }
 
     /// 这个 App 现在还能用多少内存（MB）
@@ -2359,8 +2483,15 @@ final class LiveSession: ObservableObject {
                     hearLog("声音克隆（云端）：开始生成")
                     // 语言名要用模型认的那种写法（english/chinese），和本地跑的时候一样
                     let cloudLang = VoiceCloneGGUF.languageNames[lang] ?? lang
-                    let out = try await cloud.clone(text: text, lang: cloudLang,
+                    let out: CloneAudio
+                    do {
+                        out = try await cloud.clone(text: text, lang: cloudLang,
                                                     reference: ref.samples, referenceText: ref.text)
+                    } catch {
+                        let why = error.localizedDescription
+                        await MainActor.run { self.cloudFallbackToApple(.clone, reason: why) }
+                        return nil
+                    }
                     hearLog("声音克隆（云端）：生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
                     await CloneCache.shared.put(key, out)
                     return out

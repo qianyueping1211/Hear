@@ -15,22 +15,39 @@ enum AudioRoute {
     /// 声音来源：false = 手机麦克风（默认），true = 耳机麦克风
     static var useHeadsetMic = false
 
+    /// 用户选的输出方式（扬声器 / 耳机）。
+    /// 记下来是为了：重新激活音频会话以后再把它应用回去。
+    /// setCategory 会把"输出到哪"重置成 .defaultToSpeaker（扬声器），
+    /// 戴着耳机时声音就从手机喇叭出来了，耳机里听不到。
+    static private(set) var lastOutput: AudioOutput = .speaker
+    /// 上一次真正应用过的输出方式（用来避免重复改路由）
+    private static var appliedOutput: AudioOutput?
+
     /// 设置为“可录音 + 可播放”。
     /// 用手机麦克风时，蓝牙耳机走高音质 A2DP（只播放）；
     /// 用耳机麦克风时，需要蓝牙通话模式（HFP），耳机播放会变成单声道通话音质。
     static func activate() throws {
         let s = AVAudioSession.sharedInstance()
+        // .defaultToSpeaker：没有耳机时走扬声器（不是听筒）。
+        // 插着耳机时系统还是走耳机（除非用 overrideOutputAudioPort(.speaker) 强制）。
         var opts: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
         if useHeadsetMic { opts.insert(.allowBluetooth) }
-        if s.category != .playAndRecord || s.categoryOptions != opts {
+        // setCategory 会把"输出到哪"重置掉，只有真的改了类别才需要重新应用
+        let categoryChanged = (s.category != .playAndRecord || s.categoryOptions != opts)
+        if categoryChanged {
             try s.setCategory(.playAndRecord, mode: .default, options: opts)
         }
         try s.setActive(true)
-        applyInput()
+        // 换麦克风也会重置路由
+        if applyInput() { categoryChanged = true }
+        if categoryChanged { appliedOutput = nil }
+        apply(lastOutput)
     }
 
-    /// 按“声音来源”选择麦克风（已经是想要的就不动）
-    static func applyInput() {
+    /// 按“声音来源”选择麦克风（已经是想要的就不动）。
+    /// 返回 true 表示真的换了麦克风（换了的话输出路由也会被重置）。
+    @discardableResult
+    static func applyInput() -> Bool {
         let s = AVAudioSession.sharedInstance()
         let headsetPorts: Set<AVAudioSession.Port> = [.bluetoothHFP, .headsetMic, .usbAudio]
         let inputs = s.availableInputs ?? []
@@ -40,13 +57,15 @@ enum AudioRoute {
         } else {
             want = inputs.first { $0.portType == .builtInMic }
         }
-        guard let want else { return }
-        if s.currentRoute.inputs.first?.uid == want.uid { return }
+        guard let want else { return false }
+        if s.currentRoute.inputs.first?.uid == want.uid { return false }
         do {
             try s.setPreferredInput(want)
             hearLog("声音来源：\(want.portName)")
+            return true
         } catch {
             hearLog("切换声音来源失败：\(error)", .warning)
+            return false
         }
     }
 
@@ -58,6 +77,9 @@ enum AudioRoute {
         try? s.setActive(false, options: .notifyOthersOnDeactivation)
         try? s.setActive(true)
         applyInput()
+        // 会话重置以后输出路由也丢了，再应用一次
+        appliedOutput = nil
+        apply(lastOutput)
     }
 
     private static func routeHasHeadphones() -> Bool {
@@ -68,22 +90,33 @@ enum AudioRoute {
     /// 输出被强制到扬声器时，当前路由里看不到耳机，所以临时取消强制再检查一次。
     static func detectHeadphones() -> Bool {
         if routeHasHeadphones() { return true }
-        try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.none)
-        return routeHasHeadphones()
+        let s = AVAudioSession.sharedInstance()
+        let was = appliedOutput
+        try? s.overrideOutputAudioPort(.none)
+        let found = routeHasHeadphones()
+        // 恢复原来的设置
+        if let was { try? s.overrideOutputAudioPort(was == .speaker ? .speaker : .none) }
+        return found
     }
 
-    /// 按选择的输出方式切换路由。按当前实际路由判断，已经是想要的就不动，
-    /// 因为每次改路由都会打断正在播放的声音、让麦克风重新连接。
+    /// 按选择的输出方式切换路由。
+    /// - .speaker：强制走手机扬声器（插着耳机也走扬声器）
+    /// - .headphones：取消强制，让系统自己挑（插着耳机就走耳机）
+    ///
+    /// 每次改路由都会打断正在播放的声音、让麦克风重新连接，已经是对的就别动。
     static func apply(_ output: AudioOutput) {
+        lastOutput = output
+        guard appliedOutput != output else { return }
         let s = AVAudioSession.sharedInstance()
-        let onSpeaker = s.currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
         switch output {
         case .speaker:
-            guard !onSpeaker else { return }
+            // 强制走扬声器（插着耳机也走扬声器）
             try? s.overrideOutputAudioPort(.speaker)
+            appliedOutput = .speaker
         case .headphones:
-            guard onSpeaker else { return }
+            // 取消强制，系统就会走耳机（没插耳机时按 .defaultToSpeaker 走扬声器）
             try? s.overrideOutputAudioPort(.none)
+            appliedOutput = .headphones
         }
     }
 

@@ -41,6 +41,13 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         ) { [weak self] _ in
             self?.queue.async { self?.connectedFormat = nil }
         }
+        // 换了输出设备（插拔耳机、连上蓝牙）以后，引擎还锁在老路由上，
+        // 下次播之前要重新接一次
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            self?.queue.async { self?.connectedFormat = nil }
+        }
     }
 
     /// 朗读一段文字，读完（或被 stop 打断）后返回
@@ -85,35 +92,22 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     /// 返回 false 表示没能播出来（引擎起不来之类），调用方可以退回系统声音。
     func play(samples: [Float], sampleRate: Double, pan: Float) async -> Bool {
         stop()
+        // 重新激活音频会话会把"输出到哪"重置掉（setCategory 会清掉 override），
+        // 这里再应用一次，保证声音真的从耳机出来
         try? AudioRoute.activate()
+        AudioRoute.apply(AudioRoute.lastOutput)
         guard !samples.isEmpty else { return false }
 
-        // 接到主混音器上的话，输入声道数要跟主混音器一致（一般是双声道）。
-        // 用单声道格式接上去，有的系统版本会直接拒掉，放出来就是一片安静。
-        let outFmt = engine.outputNode.outputFormat(forBus: 0)
-        let channels = max(Int(outFmt.channelCount), 2)
-        guard let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate,
-                                      channels: AVAudioChannelCount(channels)),
-              let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(samples.count)),
-              let ch = buf.floatChannelData else {
-            hearLog("朗读：克隆声音的缓冲区创建失败", .error)
-            return false
-        }
-        buf.frameLength = AVAudioFrameCount(samples.count)
-        samples.withUnsafeBufferPointer { p in
-            if let base = p.baseAddress {
-                for c in 0..<channels { ch[c].update(from: base, count: samples.count) }
-            }
-        }
         // 音量过小的话听起来像没声音，放大到能听见的水平
-        var peak: Float = 0
-        for v in samples { let a = abs(v); if a > peak { peak = a } }
-        if peak > 0.0005, peak < 0.5 {
-            let g = 0.85 / peak
-            for c in 0..<channels {
-                for i in 0..<samples.count { ch[c][i] *= g }
-            }
+        var boosted = samples
+        var pk: Float = 0
+        for v in boosted { let a = abs(v); if a > pk { pk = a } }
+        if pk > 0.0005, pk < 0.5 {
+            let g = 0.85 / pk
+            for i in boosted.indices { boosted[i] *= g }
         }
+        let out = boosted
+        let peak = pk
 
         let gen: Int = queue.sync {
             generation += 1
@@ -129,8 +123,15 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             queue.sync { continuation = c }
             queue.async { [self] in
                 guard gen == generation else { return }
-                if !ensureEngine(format: fmt) {
+                // 一定要按硬件当前的输出格式来播：耳机是 44.1k、手机是 48k，
+                // 蓝牙通话模式还是单声道。格式对不上，引擎就起不来（一片安静）。
+                guard let hw = ensureEngine() else {
                     hearLog("朗读：克隆声音的音频引擎启动失败", .error)
+                    self.resume(gen)
+                    return
+                }
+                guard let buf = Self.makeBuffer(samples: out, sampleRate: sampleRate, target: hw) else {
+                    hearLog("朗读：克隆声音的缓冲区创建失败", .error)
                     self.resume(gen)
                     return
                 }
@@ -206,9 +207,11 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
                 return
             }
             guard let f = Self.toFloat(pcm) else { return }
-            ensureEngine(format: f.format)
+            // 同样转成硬件的输出格式再放
+            guard let hw = ensureEngine() else { return }
+            guard let target = Self.convert(f, to: hw) else { return }
             scheduled += 1
-            player.scheduleBuffer(f, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            player.scheduleBuffer(target, completionCallbackType: .dataPlayedBack) { [weak self] _ in
                 self?.queue.async {
                     guard let self, gen == self.generation else { return }
                     self.played += 1
@@ -219,17 +222,36 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
-    /// 接上播放节点并启动引擎。返回 false 表示没启动起来
-    @discardableResult
-    private func ensureEngine(format: AVAudioFormat) -> Bool {
+    /// 硬件当前的输出格式。
+    /// 耳机（蓝牙 44.1k、有线 48k）和手机扬声器（48k）都不一样，
+    /// 换成别的设备还会再变一次，所以每次播之前都要重新问一遍。
+    private func hardwareFormat() -> AVAudioFormat {
+        let f = engine.outputNode.outputFormat(forBus: 0)
+        if f.sampleRate > 0, f.channelCount > 0 { return f }
+        // 引擎还没准备好的时候，输出节点给不出格式，用音频会话的来兜底
+        let s = AVAudioSession.sharedInstance()
+        let rate = s.sampleRate > 0 ? s.sampleRate : 48_000
+        let ch = max(Int(s.channelCount), 1)
+        return AVAudioFormat(standardFormatWithSampleRate: rate, channels: AVAudioChannelCount(ch))!
+    }
+
+    /// 接上播放节点并启动引擎。
+    /// 返回硬件当前的输出格式（播放的缓冲区必须和它一模一样，不然放不出声音），
+    /// 启动失败返回 nil。
+    private func ensureEngine() -> AVAudioFormat? {
+        // 重新激活音频会话会把"输出到哪"重置掉（setCategory 会清掉 override），
+        // 这里再应用一次，保证声音真的从耳机出来
+        try? AudioRoute.activate()
+        AudioRoute.apply(AudioRoute.lastOutput)
+        let hw = hardwareFormat()
         if connectedFormat == nil
-            || connectedFormat!.sampleRate != format.sampleRate
-            || connectedFormat!.channelCount != format.channelCount {
+            || connectedFormat!.sampleRate != hw.sampleRate
+            || connectedFormat!.channelCount != hw.channelCount {
             if engine.isRunning { engine.stop() }
             // 已经接过一次的话要先断开，否则重复连接会出问题
             if connectedFormat != nil { engine.disconnectNodeOutput(player) }
-            engine.connect(player, to: engine.mainMixerNode, format: format)
-            connectedFormat = format
+            engine.connect(player, to: engine.mainMixerNode, format: hw)
+            connectedFormat = hw
         }
         player.pan = currentPan
         if !engine.isRunning {
@@ -238,16 +260,55 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
                 try engine.start()
             } catch {
                 hearLog("朗读：音频引擎启动失败 \(error)", .error)
-                return false
+                return nil
             }
         }
-        return engine.isRunning
+        return engine.isRunning ? hw : nil
     }
 
     private func checkDone(_ gen: Int) {
         guard finished, played >= scheduled else { return }
         if scheduled == 0 { hearLog("朗读：系统语音没有生成声音（可能没有安装该语言的语音）", .warning) }
         resume(gen)
+    }
+
+    /// 一段单声道的声音 → 硬件要的格式（采样率、声道数都可能变）
+    private static func makeBuffer(samples: [Float], sampleRate: Double,
+                                   target: AVAudioFormat) -> AVAudioPCMBuffer? {
+        guard let src = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+              let inBuf = AVAudioPCMBuffer(pcmFormat: src, frameCapacity: AVAudioFrameCount(samples.count)),
+              let ch = inBuf.floatChannelData else { return nil }
+        inBuf.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { p in
+            if let base = p.baseAddress { ch[0].update(from: base, count: samples.count) }
+        }
+        return convert(inBuf, to: target)
+    }
+
+    /// 任意格式 → 目标格式（顺便做重采样和声道转换）
+    private static func convert(_ src: AVAudioPCMBuffer, to dst: AVAudioFormat) -> AVAudioPCMBuffer? {
+        if src.format.sampleRate == dst.sampleRate,
+           src.format.channelCount == dst.channelCount,
+           src.format.commonFormat == dst.commonFormat {
+            return src
+        }
+        guard let conv = AVAudioConverter(from: src.format, to: dst) else { return nil }
+        let ratio = dst.sampleRate / src.format.sampleRate
+        let cap = AVAudioFrameCount(Double(src.frameLength) * ratio) + 1024
+        guard let out = AVAudioPCMBuffer(pcmFormat: dst, frameCapacity: cap) else { return nil }
+        var consumed = false
+        var error: NSError?
+        conv.convert(to: out, error: &error) { _, status in
+            if consumed {
+                status.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            status.pointee = .haveData
+            return src
+        }
+        guard error == nil, out.frameLength > 0 else { return nil }
+        return out
     }
 
     /// 语音合成输出可能是 Int16，播放器需要 Float32
