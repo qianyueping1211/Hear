@@ -190,8 +190,63 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/health"):
             self._send_json(self.health())
+        elif self.path.startswith("/ping"):
+            self._send_json({"pong": True, "time": time.time()})
+        elif self.path.startswith("/"):
+            self._send_html(self.test_page())
         else:
             self._error("没有这个接口", 404)
+
+    def _send_html(self, html):
+        data = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def test_page(self):
+        """手机浏览器打开首页，能打开就说明手机到电脑的网络是通的（跟 App 无关）"""
+        import socket
+        ips = []
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("10.255.255.255", 1))
+            ips.append(s.getsockname()[0])
+            s.close()
+        except Exception:
+            pass
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if not ip.startswith("127.") and ip not in ips:
+                    ips.append(ip)
+        except Exception:
+            pass
+        rows = "".join(
+            "<tr><td>%s</td><td><a href=\"http://%s:%d/\">http://%s:%d/</a></td></tr>" % (ip, ip, PORT, ip, PORT)
+            for ip in ips)
+        return """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>听见 云端服务</title>
+<style>
+body{font:16px -apple-system,system-ui,sans-serif;margin:24px;background:#f6f6f7;color:#111}
+h1{font-size:20px}
+p{color:#555}
+table{border-collapse:collapse;width:100%%;background:#fff;border-radius:12px;overflow:hidden}
+td{padding:12px 14px;border-bottom:1px solid #eee}
+a{color:#007aff;text-decoration:none}
+.ok{color:#1a9e3c;font-weight:600}
+</style></head><body>
+<h1>听见 App 云端服务</h1>
+<p class="ok">连上了！说明你的手机能访问这台电脑。</p>
+<p>下面这些地址在手机浏览器里也能打开（不同手机显示的 IP 不一样，选能打开的那个）：</p>
+<table>%s</table>
+<p>服务端口：%d</p>
+<p>如果这个页面能打开，但 App 里还提示连不上，去手机
+设置 → 隐私与安全性 → 本地网络，把"听见"打开。</p>
+</body></html>""" % (rows, PORT)
 
     def health(self):
         out = {}

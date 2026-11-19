@@ -155,10 +155,15 @@ actor CloudClient {
             case .appTransportSecurityRequiresSecureConnection:
                 return "被系统拦下了（不允许 http 明文），请用 0.4.19 以上的版本"
             case .cannotConnectToHost:
-                let port = URL(string: s)?.port.map(String.init) ?? "这个端口"
-                return "连不上（\(port) 没有在监听）：确认服务已经启动。三个模型都填同一个地址 http://192.168.x.x:8000，8081、8082 只在你电脑上监听，手机访问不了"
+                let u = URL(string: s)
+                let host = u?.host ?? "电脑的IP"
+                let port = u?.port.map(String.init) ?? "这个端口"
+                return "连不上（\(port) 没有在监听）：确认服务已经启动。三个模型都填同一个地址 http://192.168.x.x:8000，8081、8082 只在你电脑上监听，手机访问不了。也可以在手机浏览器打开 http://\(host):\(port)/ 看看"
             case .timedOut:
-                return "超时：可能被防火墙挡了，或者手机和电脑不在同一个网段"
+                let u = URL(string: s)
+                let host = u?.host ?? "电脑的IP"
+                let port = u?.port ?? 8000
+                return "超时，手机没收到回应。先在手机浏览器打开 http://\(host):\(port)/ 试试：能打开说明是 App 的「本地网络」权限没给（设置 → 隐私与安全性 → 本地网络），打不开说明网络不通。"
             case .cannotFindHost:
                 return "找不到这个地址：IP 写错了？"
             case .notConnectedToInternet:

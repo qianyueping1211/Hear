@@ -74,8 +74,7 @@ struct SettingsView: View {
     private static func cloudStatusColor(_ status: String, configured: Bool) -> Color {
         if !configured { return .secondary }
         if status == "正常" { return .green }
-        if status == "异常" { return .orange }
-        return .secondary
+        return .secondary          // 异常也是灰色，不要黄色
     }
 
     var body: some View {
@@ -142,29 +141,32 @@ struct SettingsView: View {
 
                 // MARK: 模型管理（本地模型 / 在线模型）
                 Section {
-                    // 自己做的页签：系统 Picker 在 Form 里太矮，点起来也不舒服。
-                    // 选中用浅色底表示，不要再画横线（横线和 Form 的分隔线混在一起很乱）
-                    HStack(spacing: 8) {
+                    // 分段控件：两个页签各占一半，字居中（不要挤在左边，右边空一大块）
+                    // 切换的时候不要动画，否则高度会晃一下，很奇怪
+                    HStack(spacing: 0) {
                         ForEach(0..<2, id: \.self) { i in
                             Button {
-                                withAnimation(.easeInOut(duration: 0.15)) { modelTab = i }
+                                modelTab = i
                                 if i == 1 { Task { await session.refreshCloudStatus() } }
                             } label: {
                                 Text(i == 0 ? "本地模型" : "在线模型")
                                     .font(.subheadline.weight(modelTab == i ? .semibold : .regular))
-                                    .foregroundStyle(modelTab == i ? Color.accentColor : Color.secondary)
-                                    .padding(.horizontal, 14)
+                                    .foregroundStyle(modelTab == i ? Color.primary : Color.secondary)
+                                    .frame(maxWidth: .infinity)
                                     .padding(.vertical, 7)
                                     .background(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .fill(modelTab == i ? Color.accentColor.opacity(0.14) : Color.clear)
+                                        RoundedRectangle(cornerRadius: 7)
+                                            .fill(modelTab == i ? Color(.systemBackground) : Color.clear)
+                                            .shadow(color: .black.opacity(modelTab == i ? 0.08 : 0),
+                                                    radius: 2, y: 1)
                                     )
-                                    .contentShape(RoundedRectangle(cornerRadius: 8))
+                                    .contentShape(RoundedRectangle(cornerRadius: 7))
                             }
                             .buttonStyle(.plain)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(3)
+                    .background(Color(.systemGray5), in: RoundedRectangle(cornerRadius: 9))
                     // 页签和下面第一行之间不要有横线
                     .listRowSeparator(.hidden)
 
@@ -177,19 +179,7 @@ struct SettingsView: View {
                                  status: session.translationStatus)
                         modelRow(.voiceClone, title: "声音克隆（Qwen-TTS-VC）", icon: "person.wave.2",
                                  status: session.cloneStatus)
-                        if session.installedGGUFs.count > 1 {
-                            Picker("使用的翻译模型", selection: ggufSelection) {
-                                ForEach(session.installedGGUFs, id: \.self) { url in
-                                    Text(url.lastPathComponent).tag(url.lastPathComponent)
-                                }
-                            }
-                        }
-                        if session.voiceClone {
-                            Button("清空声音克隆缓存") {
-                                Task { await CloneCache.shared.clear() }
-                            }
-                            .font(.footnote)
-                        }
+                        // 选哪个 .gguf、清缓存，都放到各自的"配置"窗口里
                     } else {
                         // 通用服务地址（三个模型共用的地址）
                         cloudRow(title: "通用服务地址", icon: "server.rack",
@@ -346,6 +336,11 @@ struct SettingsView: View {
             .sheet(item: $localEdit, onDismiss: { applyLocalEditAction() }) { e in
                 LocalModelSheet(kind: e.kind, title: e.title,
                                 installed: isInstalled(e.kind),
+                                detail: detailText(e.kind),
+                                downloading: session.bgDownloadKind == e.kind,
+                                progress: session.bgDownloadProgress,
+                                gguf: ggufSelection,
+                                onClearCache: { Task { await CloneCache.shared.clear() } },
                                 onPick: { download in
                                     localEditAction = download
                                         ? .download(e.kind) : .importFile(e.kind)
@@ -530,7 +525,8 @@ struct SettingsView: View {
                         if status.installed && !downloading {
                             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                         } else {
-                            Image(systemName: "checkmark.circle").foregroundStyle(.secondary)
+                            // 跟在线模型一样：没配置就是灰色圆圈感叹号
+                            Image(systemName: "exclamationmark.circle").foregroundStyle(.secondary)
                             if downloading || waiting { ProcessingDots() }
                         }
                     }
@@ -563,27 +559,21 @@ struct SettingsView: View {
                         .minimumScaleFactor(0.8)
                 }
             }
-            if downloading {
-                HStack(spacing: 8) {
-                    ProgressView(value: session.bgDownloadProgress)
-                    Text(String(format: "%.0f%%", session.bgDownloadProgress * 100))
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.leading, 38)
-            } else if status.installed {
-                Text("\(status.name) · \(status.detail)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.leading, 38)
-            } else if waiting {
-                Text("等待下载").font(.caption).foregroundStyle(.secondary).padding(.leading, 38)
-            }
+            // 模型的文件名、大小、下载进度都放到"配置"窗口里，这里不显示
         }
         .padding(.vertical, 2)
+    }
+
+    /// 本地模型的详情："文件名 · 大小"
+    private func detailText(_ kind: LiveSession.ModelKind) -> String {
+        let st: LiveSession.ModelStatus
+        switch kind {
+        case .translation: st = session.translationStatus
+        case .speech: st = session.speechStatus
+        case .senseVoice: st = session.senseStatus
+        case .voiceClone: st = session.cloneStatus
+        }
+        return "\(st.name) · \(st.detail)"
     }
 
     /// 配置窗口关掉之后再做动作（免得跟窗口打架）
@@ -877,13 +867,55 @@ struct LocalModelSheet: View {
     @Environment(\.dismiss) private var dismiss
     let kind: LiveSession.ModelKind
     let title: String
+    /// 已经下载或导入过
     let installed: Bool
-    /// true = 下载 / 重新下载，false = 本地导入
+    /// 已有模型的详情："文件名 · 大小"
+    let detail: String
+    let downloading: Bool
+    let progress: Double
+    /// 翻译模型：装了好几个 .gguf 时选一个
+    let gguf: Binding<String>
+    /// 声音克隆：清缓存
+    let onClearCache: () -> Void
+    /// true = 下载 / 重新下载，false = 本地导入 / 重新导入
     let onPick: (Bool) -> Void
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    if installed {
+                        // 已经有模型了：最上面写清楚是哪个、多大
+                        LabeledContent("本地模型") {
+                            Text(detail)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    if downloading {
+                        HStack(spacing: 8) {
+                            ProgressView(value: progress)
+                            Text(String(format: "%.0f%%", progress * 100))
+                                .font(.caption)
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if kind == .translation, session.installedGGUFs.count > 1 {
+                        Picker("使用的翻译模型", selection: gguf) {
+                            ForEach(session.installedGGUFs, id: \.self) { url in
+                                Text(url.lastPathComponent).tag(url.lastPathComponent)
+                            }
+                        }
+                    }
+                } header: {
+                    Text(title)
+                } footer: {
+                    Text(kind == .translation
+                         ? "本地导入：选一个 .gguf 模型文件。"
+                         : "本地导入：选这个模型的文件夹。")
+                }
+
                 Section {
                     Button {
                         onPick(true)
@@ -896,14 +928,14 @@ struct LocalModelSheet: View {
                         onPick(false)
                         dismiss()
                     } label: {
-                        Label("本地导入", systemImage: "square.and.arrow.up")
+                        Label(installed ? "重新导入" : "本地导入",
+                              systemImage: "square.and.arrow.up")
                     }
-                } header: {
-                    Text(title)
-                } footer: {
-                    Text(kind == .translation
-                         ? "本地导入：选一个 .gguf 模型文件。"
-                         : "本地导入：选这个模型的文件夹。")
+                    if kind == .voiceClone {
+                        Button("清空声音克隆缓存", role: .destructive) {
+                            onClearCache()
+                        }
+                    }
                 }
             }
             .navigationTitle("配置")
