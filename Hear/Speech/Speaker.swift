@@ -231,7 +231,8 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         // 引擎还没准备好的时候，输出节点给不出格式，用音频会话的来兜底
         let s = AVAudioSession.sharedInstance()
         let rate = s.sampleRate > 0 ? s.sampleRate : 48_000
-        let ch = max(Int(s.channelCount), 1)
+        // 声道数从当前输出路由里拿（耳机/扬声器/蓝牙都不一样）
+        let ch = max(s.currentRoute.outputs.first?.channels?.count ?? 2, 1)
         return AVAudioFormat(standardFormatWithSampleRate: rate, channels: AVAudioChannelCount(ch))!
     }
 
