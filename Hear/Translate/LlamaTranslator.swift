@@ -123,14 +123,14 @@ actor LlamaTranslator {
 
         // 处理提示词：分批喂进去，最后一个 token 标记为要输出 logits
         // （不标记的话不会产生 logits，采样会读到无效数据）
-        let batchSize = Int(llama_n_batch(ctx))
+        let batchSize = Int32(llama_n_batch(ctx))
         var pos = llama_pos(0)
         var i = 0
         while i < tokens.count {
-            let n = min(batchSize, tokens.count - i)
+            let n = Int32(min(Int(batchSize), tokens.count - i))
             llama_batch_ext_clear(batch)
             var lastIdx = -1
-            for k in 0..<n {
+            for k in 0..<Int(n) {
                 let idx = llama_batch_ext_add_token(batch, 0, tokens[i + k])
                 if idx < 0 { throw TranslatorError.decodeFailed }
                 var p = pos + llama_pos(k)
@@ -138,13 +138,13 @@ actor LlamaTranslator {
                 lastIdx = idx
             }
             // 只有最后一批的最后一个 token 要 logits
-            if i + n >= tokens.count {
+            if i + Int(n) >= tokens.count {
                 llama_batch_ext_set_output_logits(batch, lastIdx, true)
             }
             let rc = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch)
             guard rc == 0 else { throw TranslatorError.decodeFailed }
-            pos += llama_pos(n)
-            i += n
+            pos += n
+            i += Int(n)
         }
 
         var output = ""
