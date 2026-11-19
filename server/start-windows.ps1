@@ -321,8 +321,9 @@ if (-not $cloneServer) { $cloneServer = Server-For "CPU" }
 if (-not $cloneServer) { Die "没找到 llama-server.exe" }
 $procs = @()
 
+# 监听 0.0.0.0（不是 127.0.0.1），这样手机才能直接连 8081 / 8082
 $mtArgs = @("-m", (Join-Path $ModelDir "Hy-MT2-1.8B-$MtQuant.gguf"),
-             "--host", "127.0.0.1", "--port", $MtPort, "-c", $Context, "--no-warmup")
+             "--host", "0.0.0.0", "--port", $MtPort, "-c", $Context, "--no-warmup")
 if ($MtDevice -eq "NPU") {
     # OpenVINO 后端：NPU 只支持无状态执行，-np 只能是 1，-c 必须明确给
     $env:GGML_OPENVINO_DEVICE = "NPU"
@@ -340,7 +341,7 @@ $procs += $mt
 
 $cloneArgs = @("-m", (Join-Path $ModelDir "Qwen3-TTS-12Hz-0.6B-Base-Q4_K_M.gguf"),
                 "--mmproj", (Join-Path $ModelDir "mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf"),
-                "--host", "127.0.0.1", "--port", $ClonePort, "-c", $Context, "--no-warmup")
+                "--host", "0.0.0.0", "--port", $ClonePort, "-c", $Context, "--no-warmup")
 if ($CloneDevice -eq "GPU") { $cloneArgs += "--device", "Vulkan" }
 
 Say "起声音克隆模型（Qwen3-TTS，后端 $CloneDevice，端口 $ClonePort）"

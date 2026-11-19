@@ -2298,18 +2298,20 @@ final class LiveSession: ObservableObject {
             let a = cloudEffectiveAddress(m)
             if !a.isEmpty && !wanted.contains(a) { wanted.append(a) }
         }
-        // 同一个地址只问一次。reachable = 通不通，models = 各模型的状态
-        // 几个地址一起问，谁先回来谁先算，不排队等
+        // 同一个地址只问一次。kind = 上面跑的是总服务还是单独的 llama-server，
+        // health = 各模型的状态。几个地址一起问，谁先回来谁先算，不排队等
         var reachable: Set<String> = []
         var models: [String: [String: String]] = [:]
-        await withTaskGroup(of: (String, [String: String]?).self) { g in
+        var kinds: [String: CloudClient.ServiceKind] = [:]
+        await withTaskGroup(of: (String, (kind: CloudClient.ServiceKind, health: [String: String])?).self) { g in
             for a in wanted {
-                g.addTask { (a, await CloudClient.healthInfo(address: a)) }
+                g.addTask { (a, await CloudClient.probe(address: a)) }
             }
-            for await (a, all) in g {
-                if let all {
+            for await (a, info) in g {
+                if let info {
                     reachable.insert(a)
-                    models[a] = all
+                    kinds[a] = info.kind
+                    models[a] = info.health
                 }
             }
         }
@@ -2332,11 +2334,23 @@ final class LiveSession: ObservableObject {
                 status[m.rawValue] = Self.cloudStatusBad
                 continue
             }
-            let s = models[addr]?[m.rawValue] ?? ""
-            // 服务端回的是"就绪（small）"、"外部服务"、"加载中（第一次要下识别模型）"、
-            // "未安装 faster-whisper"、"连不上（...）"这些
-            // 只有真的就绪了才算正常：还没装、还在下载、连不上都算异常
-            let ok = s.hasPrefix("就绪") || s.hasPrefix("外部服务")
+            let health = models[addr] ?? [:]
+            var ok = false
+            if kinds[addr] == .llamaServer {
+                // 单独的 llama-server（8081 翻译 / 8082 克隆）：
+                // /health 回的是 {"status":"ok"}，就绪了就算正常
+                // 但 llama-server 不做语音识别，那个接口只有 8000 的总服务有
+                // llama-server 的 /health 返回 {"status":"ok"}；
+                // 模型还在加载时是 {"status":"loading model"}，那不算就绪
+                ok = m != .asr && (health["status"]?.hasPrefix("ok") == true)
+            } else {
+                // 总服务（8000）：回的是 asr / mt / clone 各自的状态
+                // 服务端回的是"就绪（small）"、"外部服务"、"加载中（第一次要下识别模型）"、
+                // "未安装 faster-whisper"、"连不上（...）"这些
+                // 只有真的就绪了才算正常：还没装、还在下载、连不上都算异常
+                let s = health[m.rawValue] ?? ""
+                ok = s.hasPrefix("就绪") || s.hasPrefix("外部服务")
+            }
             status[m.rawValue] = ok ? Self.cloudStatusOK : Self.cloudStatusBad
         }
         cloudStatus = status

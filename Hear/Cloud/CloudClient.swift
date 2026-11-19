@@ -57,10 +57,26 @@ actor CloudClient {
     private var mtAddress = ""
     private var cloneAddress = ""
 
+    /// 每个地址是哪种服务（改了地址就清掉缓存）
+    private var kinds: [String: ServiceKind] = [:]
+
+    /// 这个地址上跑的是哪种服务
+    /// （探测失败时不缓存：可能只是暂时连不上，下次还要再问一次）
+    func kind(of address: String) async -> ServiceKind {
+        let a = Self.cleanURL(address)
+        if let k = kinds[a] { return k }
+        if let info = await Self.probe(address: a) {
+            kinds[a] = info.kind
+            return info.kind
+        }
+        return .aggregator
+    }
+
     /// 三个模型用同一个地址时最省事，所以也可以一次性设置
     func setAddress(_ s: String) {
         let a = s.trimmingCharacters(in: .whitespacesAndNewlines)
         asrAddress = a; mtAddress = a; cloneAddress = a
+        kinds.removeAll()
     }
 
     /// 分别设置三个模型的接口地址
@@ -68,6 +84,7 @@ actor CloudClient {
         asrAddress = asr.trimmingCharacters(in: .whitespacesAndNewlines)
         mtAddress = mt.trimmingCharacters(in: .whitespacesAndNewlines)
         cloneAddress = clone.trimmingCharacters(in: .whitespacesAndNewlines)
+        kinds.removeAll()
     }
 
     var currentAddress: String { asrAddress }
@@ -118,20 +135,59 @@ actor CloudClient {
         return dict
     }
 
-    // MARK: - 状态
+    /// 请求并返回原始数据（不是 JSON）
+    private func rawData(_ path: String, address: String, method: String = "GET", body: Data? = nil,
+                         contentType: String = "application/json",
+                         timeout: TimeInterval = 60) async throws -> Data {
+        let req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(code) else {
+            let msg = String(data: data.prefix(400), encoding: .utf8) ?? ""
+            throw CloudError.http(code, msg)
+        }
+        return data
+    }
+
+    // MARK: - 服务类型
+
+    /// 地址上跑的是哪种服务
+    enum ServiceKind: Sendable, Equatable {
+        /// 8000 那个总服务（hear_cloud.py）：/v1/asr、/v1/translate、/v1/clone 都有
+        case aggregator
+        /// 8081 / 8082 那种单独的 llama-server：只有 OpenAI 那套接口（或 /tts）
+        case llamaServer
+    }
 
     /// 读某个地址上的 /health，拿到各模型的状态。连不上返回 nil
     static func healthInfo(address: String) async -> [String: String]? {
+        await probe(address: address)?.health
+    }
+
+    /// 顺便看一下这个地址上跑的是哪种服务
+    static func probe(address: String) async -> (kind: ServiceKind, health: [String: String])? {
         let s = cleanURL(address)
         guard !s.isEmpty, let url = URL(string: s + "/health") else { return nil }
         var req = URLRequest(url: url)
         req.timeoutInterval = 5
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              let code = (resp as? HTTPURLResponse)?.statusCode, (200..<300).contains(code),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+              let code = (resp as? HTTPURLResponse)?.statusCode else { return nil }
         var out: [String: String] = [:]
-        for (k, v) in obj { if let t = v as? String { out[k] = t } }
-        return out
+        if let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            for (k, v) in obj { if let t = v as? String { out[k] = t } }
+        }
+        // 总服务回的是 asr / mt / clone；llama-server 回的是 status
+        if out["asr"] != nil || out["mt"] != nil || out["clone"] != nil {
+            return (.aggregator, out)
+        }
+        if out["status"] != nil {
+            return (.llamaServer, out)
+        }
+        // 别的服务：能不能连上算连上了
+        if (200..<300).contains(code) || code == 503 {
+            return (.llamaServer, out)
+        }
+        return nil
     }
 
     /// 连一下某个地址，把失败的原因说清楚（设置界面"测试连接"用）
@@ -193,6 +249,10 @@ actor CloudClient {
     /// 16 kHz 单声道声音 → 识别结果
     /// - Parameter candidates: 可能的语言（zh/en…），服务端会优先按这些判断
     func transcribe(samples: [Float], candidates: [String], fallback: String) async throws -> (lang: String, text: String) {
+        // 单独的 llama-server 没有识别接口，识别只能用 8000 的总服务
+        if await kind(of: asrAddress) == .llamaServer {
+            throw CloudError.badResponse("这个地址是单独的模型服务，不提供语音识别；识别请用 8000 的总服务地址")
+        }
         let wav = Wav.encode(samples: samples, sampleRate: 16_000)
         var req = try makeRequest("/v1/asr", address: asrAddress, method: "POST", body: wav,
                                   contentType: "audio/wav", timeout: 120)
@@ -215,6 +275,25 @@ actor CloudClient {
 
     /// prompt 是 App 拼好的提示词（和本地模型用的是同一套格式）
     func translate(prompt: String, src: String, dst: String) async throws -> String {
+        // 地址上跑的是单独的 llama-server（8081 那种）时，用 OpenAI 那套接口
+        if await kind(of: mtAddress) == .llamaServer {
+            let body: [String: Any] = [
+                "messages": [["role": "user", "content": prompt]],
+                "stream": false,
+                "max_tokens": 512,
+                "top_k": 20,
+                "top_p": 0.6,
+                "temperature": 0.7,
+            ]
+            let obj = try await json("/v1/chat/completions", address: mtAddress, method: "POST",
+                                     body: try JSONSerialization.data(withJSONObject: body), timeout: 120)
+            if let choices = obj["choices"] as? [[String: Any]],
+               let msg = choices.first?["message"] as? [String: Any],
+               let text = msg["content"] as? String, !text.isEmpty {
+                return text
+            }
+            throw CloudError.badResponse("llama-server 没有返回翻译结果")
+        }
         let body: [String: Any] = ["prompt": prompt, "src": src, "dst": dst]
         let obj = try await json("/v1/translate", address: mtAddress, method: "POST",
                                  body: try JSONSerialization.data(withJSONObject: body), timeout: 120)
@@ -229,6 +308,21 @@ actor CloudClient {
     /// 用参考音频里的声音念一句话
     func clone(text: String, lang: String, reference: [Float], referenceText: String) async throws -> CloneAudio {
         let refWav = Wav.encode(samples: reference, sampleRate: 16_000)
+        // 地址上跑的是单独的 llama-server（8082 那种）时，用 /tts，返回的是 wav 原始数据
+        if await kind(of: cloneAddress) == .llamaServer {
+            let body: [String: Any] = [
+                "input": text,
+                "lang": lang,
+                "speaker_ref_b64": refWav.base64EncodedString(),
+                "speaker_ref_text": referenceText,
+            ]
+            let data = try await rawData("/tts", address: cloneAddress, method: "POST",
+                                         body: try JSONSerialization.data(withJSONObject: body), timeout: 300)
+            guard let decoded = Wav.decode(data) else {
+                throw CloudError.badResponse("llama-server 返回的不是 wav 音频")
+            }
+            return CloneAudio(samples: decoded.samples, sampleRate: decoded.sampleRate)
+        }
         let body: [String: Any] = [
             "text": text,
             "lang": lang,

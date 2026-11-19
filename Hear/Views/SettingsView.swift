@@ -141,36 +141,19 @@ struct SettingsView: View {
 
                 // MARK: 模型管理（本地模型 / 在线模型）
                 Section {
-                    // 页签：灰色条 + 白色圆角块，选中的是白底
-                    // 行间距自己控制，不要跟下面第一行隔太开
-                    HStack(spacing: 0) {
-                        ForEach(0..<2, id: \.self) { i in
-                            Button {
-                                modelTab = i
-                                if i == 1 { Task { await session.refreshCloudStatus() } }
-                            } label: {
-                                Text(i == 0 ? "本地模型" : "在线模型")
-                                    .font(.subheadline.weight(modelTab == i ? .semibold : .regular))
-                                    .foregroundStyle(modelTab == i ? Color.primary : Color.secondary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 7)
-                                            .fill(modelTab == i ? Color(.systemBackground) : Color.clear)
-                                            .shadow(color: .black.opacity(modelTab == i ? 0.08 : 0),
-                                                    radius: 2, y: 1)
-                                    )
-                                    .contentShape(RoundedRectangle(cornerRadius: 7))
-                            }
-                            .buttonStyle(.plain)
-                        }
+                    // 页签用系统的分段控件：深色模式下也是浅色圆角块，不会变成黑块
+                    Picker("", selection: $modelTab) {
+                        Text("本地模型").tag(0)
+                        Text("在线模型").tag(1)
                     }
-                    .padding(3)
-                    .background(Color(.systemGray5), in: RoundedRectangle(cornerRadius: 9))
+                    .pickerStyle(.segmented)
                     // 页签和下面第一行之间不要有横线
                     .listRowSeparator(.hidden)
                     // 上下留白收紧，别跟下面第一行隔一大块
-                    .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
+                    .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 0, trailing: 16))
+                    .onChange(of: modelTab) { _, newValue in
+                        if newValue == 1 { Task { await session.refreshCloudStatus() } }
+                    }
 
                     if modelTab == 0 {
                         modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
@@ -719,6 +702,13 @@ struct CloudEditSheet: View {
                                 .autocorrectionDisabled()
                                 .keyboardType(.URL)
                                 .disabled(useDefault)
+                                // 自己填了地址就自动把"默认"关掉，不然填了也不生效
+                                .onChange(of: address) { _, newValue in
+                                    if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                                       useDefault {
+                                        useDefault = false
+                                    }
+                                }
                         }
                     } else {
                         TextField("http://192.168.1.10:8000", text: $address)
@@ -732,7 +722,7 @@ struct CloudEditSheet: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("当前实际使用的地址：\(effectiveAddressText)")
                         Text("地址是电脑上那个服务的地址，手机和电脑要在同一个 Wi-Fi 下。")
-                        Text("只填 8000 就行：8081（翻译）和 8082（克隆）只在你电脑上监听，手机访问不了。")
+                        Text("三个模型都填 8000 就行（那是电脑上的总服务）。也可以单独填 8081（翻译）或 8082（克隆），那两个是单独的模型服务。")
                         Text("连不上的话看看手机有没有弹过“本地网络”的提示，选了“不允许”就没法访问，设置 → 隐私与安全性 → 本地网络 里打开。")
                     }
                 }
@@ -774,12 +764,14 @@ struct CloudEditSheet: View {
         }
     }
 
-    /// 现在实际用的地址（模型自己填了就用它，没填就用通用服务地址）
+    /// 现在实际用的地址（跟着"默认"开关实时变）
+    /// 模型选了"默认"就用通用服务地址，没选就用这里填的
     private var effectiveAddressText: String {
         switch target {
-        case .service: return session.cloudAddress.isEmpty ? "还没填" : session.cloudAddress
-        case .model(let m):
-            let a = session.cloudEffectiveAddress(m)
+        case .service:
+            return session.cloudAddress.isEmpty ? "还没填" : session.cloudAddress
+        case .model:
+            let a = useDefault ? session.cloudAddress : address.trimmingCharacters(in: .whitespacesAndNewlines)
             return a.isEmpty ? "还没填" : a
         }
     }
@@ -790,7 +782,8 @@ struct CloudEditSheet: View {
         case .service:
             session.cloudAddress = v
         case .model(let m):
-            // 选了"默认"就把自己填的清掉，用通用服务地址
+            // 选了"默认"就把自己填的清掉，用通用服务地址；
+            // 没选就存自己填的（这样填 8081 / 8082 就能单独用那个模型服务）
             session.setCloudOwnAddress(m, useDefault ? "" : v)
         }
         Task { await session.refreshCloudStatus() }
@@ -816,8 +809,14 @@ struct CloudEditSheet: View {
             var text = await CloudClient.diagnose(address: targetAddr)
             // 连上了的话，把这个模型自己的状态也带出来
             if text.hasPrefix("连接正常"), case .model(let m) = target,
-               let info = await CloudClient.healthInfo(address: targetAddr) {
-                text += "，\(m.title)：\(info[m.rawValue] ?? "就绪")"
+               let info = await CloudClient.probe(address: targetAddr) {
+                switch info.kind {
+                case .llamaServer:
+                    // 单独的模型服务（8081 / 8082）：就绪就是就绪
+                    text += "，\(m.title)：\(info.health["status"] ?? "就绪")"
+                case .aggregator:
+                    text += "，\(m.title)：\(info.health[m.rawValue] ?? "就绪")"
+                }
             }
             busy = false
             status = text
