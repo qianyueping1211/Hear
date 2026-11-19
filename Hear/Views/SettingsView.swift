@@ -27,19 +27,48 @@ struct SettingsView: View {
         return false
     }
 
-    /// 在线模型里的一行：名字 + 状态（未填写 / 正常 / 异常）+ 配置按钮
-    private func cloudRow(title: String, icon: String, status: String, onConfig: @escaping () -> Void) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon).foregroundStyle(.secondary)
-            Text(title)
-            Spacer()
-            // 状态和"配置"的字体、字号跟左边的名字统一，不要一小一大
-            Text(status)
-                .foregroundStyle(status == "正常" ? Color.green
-                                  : (status == "异常" ? Color.orange : Color.secondary))
-            Button("配置", action: onConfig)
-                .buttonStyle(.borderless)
+    /// 在线模型里的一行：名字 + 状态图标（跟本地模型的状态按钮一样）+ 配置入口
+    private func cloudRow(title: String, icon: String, status: String,
+                          configured: Bool, onConfig: @escaping () -> Void) -> some View {
+        LabeledContent {
+            HStack(spacing: 8) {
+                // 状态图标：跟本地模型那一行的圆圈打勾一样
+                Image(systemName: Self.cloudStatusIcon(status, configured: configured))
+                    .font(.title3)
+                    .foregroundStyle(Self.cloudStatusColor(status, configured: configured))
+                // 配置：已配置 / 未配置，后面跟一个箭头
+                Button(action: onConfig) {
+                    HStack(spacing: 4) {
+                        Text(configured ? "已配置" : "未配置")
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        } label: {
+            Label {
+                Text(title)
+            } icon: {
+                Image(systemName: icon).foregroundStyle(.tint)
+            }
         }
+    }
+
+    /// 状态图标：没配置是灰圆圈感叹号，配好了是灰圆圈打勾，正常是绿圆圈打勾
+    private static func cloudStatusIcon(_ status: String, configured: Bool) -> String {
+        if !configured { return "exclamationmark.circle" }
+        if status == "正常" { return "checkmark.circle.fill" }
+        if status == "异常" { return "exclamationmark.circle.fill" }
+        return "checkmark.circle"
+    }
+
+    private static func cloudStatusColor(_ status: String, configured: Bool) -> Color {
+        if !configured { return .secondary }
+        if status == "正常" { return .green }
+        if status == "异常" { return .orange }
+        return .secondary
     }
 
     var body: some View {
@@ -157,13 +186,15 @@ struct SettingsView: View {
                     } else {
                         // 通用服务地址（三个模型共用的地址）
                         cloudRow(title: "通用服务地址", icon: "server.rack",
-                                 status: session.cloudServiceStatusText) {
+                                 status: session.cloudServiceStatusText,
+                                 configured: !session.cloudAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
                             cloudEdit = .service
                         }
                         // 三个模型各自的接口
                         ForEach(CloudModel.allCases) { m in
                             cloudRow(title: m.title, icon: m.icon,
-                                     status: session.cloudStatusText(m)) {
+                                     status: session.cloudStatusText(m),
+                                     configured: !session.cloudEffectiveAddress(m).isEmpty) {
                                 cloudEdit = .model(m)
                             }
                         }
@@ -650,25 +681,41 @@ struct CloudEditSheet: View {
     @Environment(\.dismiss) private var dismiss
     let target: CloudEdit
 
+    /// 自己填的地址
     @State private var address: String = ""
+    /// 单个模型：是不是用通用服务地址（"默认"）
+    @State private var useDefault = true
     @State private var status: String? = nil
     @State private var busy = false
+
+    /// 配的是某个模型（才有"默认 / 自定义"）
+    private var isModel: Bool {
+        if case .model = target { return true }
+        return false
+    }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("http://192.168.1.10:8000", text: $address)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                    HStack {
-                        Button("测试连接") { test() }
-                        if busy { ProgressView().controlSize(.small) }
-                        Spacer()
-                    }
-                    if let s = status {
-                        Text(s).font(.footnote).foregroundStyle(.secondary).lineLimit(3)
+                    if isModel {
+                        // 第一行"默认"：选了是，下面"自定义"就不能填了
+                        Toggle("默认", isOn: $useDefault)
+                        HStack {
+                            Text("自定义")
+                            Spacer(minLength: 8)
+                            TextField("http://192.168.1.10:8000", text: $address)
+                                .multilineTextAlignment(.trailing)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .keyboardType(.URL)
+                                .disabled(useDefault)
+                        }
+                    } else {
+                        TextField("http://192.168.1.10:8000", text: $address)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.URL)
                     }
                 } header: {
                     Text(target.title)
@@ -678,6 +725,18 @@ struct CloudEditSheet: View {
                         Text("地址是电脑上那个服务的地址，手机和电脑要在同一个 Wi-Fi 下。")
                         Text("只填 8000 就行：8081（翻译）和 8082（克隆）只在你电脑上监听，手机访问不了。")
                         Text("连不上的话看看手机有没有弹过“本地网络”的提示，选了“不允许”就没法访问，设置 → 隐私与安全性 → 本地网络 里打开。")
+                    }
+                }
+
+                // 测试连接放最后
+                Section {
+                    HStack {
+                        Button("测试连接") { test() }
+                        if busy { ProgressView().controlSize(.small) }
+                        Spacer()
+                    }
+                    if let s = status {
+                        Text(s).font(.footnote).foregroundStyle(.secondary).lineLimit(4)
                     }
                 }
             }
@@ -692,7 +751,16 @@ struct CloudEditSheet: View {
                 }
             }
             .onAppear {
-                address = current
+                switch target {
+                case .service:
+                    address = session.cloudAddress
+                    useDefault = true
+                case .model(let m):
+                    let own = session.cloudOwnAddress(m)
+                    // 自己没填地址 = 用默认（通用服务地址）
+                    useDefault = own.isEmpty
+                    address = own
+                }
             }
         }
     }
@@ -707,19 +775,14 @@ struct CloudEditSheet: View {
         }
     }
 
-    /// 现在实际用的地址
-    private var current: String {
-        switch target {
-        case .service: return session.cloudAddress
-        case .model(let m): return session.cloudOwnAddress(m)
-        }
-    }
-
     private func save() {
         let v = address.trimmingCharacters(in: .whitespacesAndNewlines)
         switch target {
-        case .service: session.cloudAddress = v
-        case .model(let m): session.setCloudOwnAddress(m, v)
+        case .service:
+            session.cloudAddress = v
+        case .model(let m):
+            // 选了"默认"就把自己填的清掉，用通用服务地址
+            session.setCloudOwnAddress(m, useDefault ? "" : v)
         }
         Task { await session.refreshCloudStatus() }
     }
@@ -729,11 +792,11 @@ struct CloudEditSheet: View {
         busy = true
         status = nil
         let own = address.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 单个模型没填地址时，测的是共享的那个服务地址
+        // 单个模型选了"默认"，测的就是通用服务地址
         let targetAddr: String
         switch target {
         case .service: targetAddr = own
-        case .model(let m): targetAddr = own.isEmpty ? session.cloudAddress : own
+        case .model: targetAddr = useDefault ? session.cloudAddress : own
         }
         Task {
             if targetAddr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
