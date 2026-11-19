@@ -254,12 +254,27 @@ final class LiveSession: ObservableObject {
         rightEar = d.string(forKey: "rightEar") ?? "B"
         voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
         asrUseGPU = d.object(forKey: "asrUseGPU") as? Bool ?? true
+        // 引擎默认都用苹果自带（不用下载模型，打开就能用）
+        let canApple = LiveTextEngineFactory.isSupported
+
         // 迁移旧版本：原来只有一个 engineMode（apple/local 同时管识别和翻译），拆成独立的翻译引擎
         let oldEngine = d.string(forKey: "engineMode") ?? ""
-        translationEngine = d.string(forKey: "translationEngine")
-            ?? (oldEngine == "apple" ? "apple" : (oldEngine == "local" ? "local" : ""))
-        // 识别引擎：老用户沿用原来的选择，全新用户留空，等用户在设置里选
-        asrEngine = d.string(forKey: "asrEngine") ?? ""
+        let savedTranslation = d.string(forKey: "translationEngine") ?? ""
+        if !savedTranslation.isEmpty {
+            translationEngine = savedTranslation
+        } else if oldEngine == "local" {
+            translationEngine = "local"          // 老用户选了本地模型，保留
+        } else {
+            translationEngine = canApple ? "apple" : "local"
+        }
+
+        // 识别引擎：老用户沿用原来的选择，新用户默认苹果自带
+        let savedASR = d.string(forKey: "asrEngine") ?? ""
+        if !savedASR.isEmpty {
+            asrEngine = savedASR
+        } else {
+            asrEngine = canApple ? "apple" : "sensevoice"
+        }
         voiceProcessing = d.object(forKey: "voiceProcessing") as? Bool ?? true
         inputSource = d.string(forKey: "inputSource") ?? "phone"
         talkMode = d.object(forKey: "talkMode") as? Bool ?? false
@@ -568,16 +583,19 @@ final class LiveSession: ObservableObject {
         }
         hearLog("启动：可用内存 \(Self.freeMB()) MB")
         defer { if voiceClone { scheduleCloneLoad(delay: 3) } }   // 其他模型准备好以后再加载声音克隆
-        // 还没选引擎：不自动加载模型，等用户在设置里选（开始翻译时会提示）
+        // 还没选引擎（老版本数据异常）：不自动加载模型，等用户在设置里选
         if asrEngine.isEmpty || translationEngine.isEmpty {
             phase = .ready
             return
         }
-        if modelsInstalled {
-            await loadModels()
-        } else if usingAppleASR && usingAppleTranslation {
+        // 全都用苹果自带：不需要任何模型，检查一下苹果翻译的语言包就行
+        if usingAppleASR && usingAppleTranslation {
             phase = .ready
             prepareAppleTranslation()
+            return
+        }
+        if modelsInstalled {
+            await loadModels()
         } else {
             phase = .needsModels
         }
@@ -600,8 +618,7 @@ final class LiveSession: ObservableObject {
 
     /// 首次使用选择“下载”：下载翻译模型和识别模型
     func chooseLocalAndDownload() async {
-        if asrEngine.isEmpty { asrEngine = appleAvailable ? "apple" : "whisper" }
-        translationEngine = "local"
+        // 只下载当前引擎选择真正需要的模型
         await downloadModels()
     }
 

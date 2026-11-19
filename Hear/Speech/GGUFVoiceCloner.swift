@@ -101,35 +101,19 @@ enum VoiceCloneGGUF {
     }
 
     /// 从 HF 下载单个文件（支持 hf-mirror 镜像）
+    /// 用 FileDownloader（下载任务，不会因为传输慢而超时）
     private static func downloadFile(repo: String, path: String, to dst: URL,
                                      host: String, progress: @escaping @Sendable (Double) -> Void,
                                      from p0: Double, to p1: Double) async throws {
         let base = host == "huggingface.co"
             ? "https://huggingface.co"
             : "https://\(host)"
-        let url = URL(string: "\(base)/\(repo)/resolve/main/\(path)")!
-        var req = URLRequest(url: url)
-        req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-        let (bytes, response) = try await URLSession.shared.bytes(for: req)
-        let http = response as? HTTPURLResponse
-        guard let http, http.statusCode == 200 else {
-            throw NSError(domain: "Hear", code: 20, userInfo: [NSLocalizedDescriptionKey:
-                "下载失败（HTTP \(http?.statusCode ?? 0)）：\(path)"])
+        let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+        let url = URL(string: "\(base)/\(repo)/resolve/main/\(encoded)")!
+        // 进度要合并成整段（骨架占前一半，mmproj 占后一半）
+        try await FileDownloader().download(url, to: dst) { frac in
+            progress(p0 + frac * (p1 - p0))
         }
-        let total = Int(http.expectedContentLength)
-        var out = Data()
-        out.reserveCapacity(total > 0 ? total : 1 << 20)
-        var got = 0
-        for try await b in bytes {
-            out.append(b)
-            got += 1
-            if total > 0 {
-                let frac = Double(got) / Double(total)
-                progress(p0 + frac * (p1 - p0))
-            }
-        }
-        try out.write(to: dst)
-        progress(p1)
     }
 
     /// 导入本地已下载的两个 gguf 文件（在一个文件夹里）

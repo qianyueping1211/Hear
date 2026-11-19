@@ -182,7 +182,11 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
     func download(_ url: URL, to dst: URL, progress: @escaping (Double) -> Void) async throws {
         destination = dst
         self.progress = progress
-        let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+        // 超时放宽：大文件在网络慢的时候容易触发默认的 60 秒超时
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 120
+        cfg.timeoutIntervalForResource = 60 * 60 * 2      // 整个下载最多 2 小时
+        let session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
             continuation = c

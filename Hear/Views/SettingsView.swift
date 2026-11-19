@@ -39,10 +39,9 @@ struct SettingsView: View {
                     Text("iCloud 同步")
                 }
 
-                // MARK: 引擎（语音识别 → 文本翻译 → 声音克隆）
+                // MARK: 引擎管理（语音识别 / 文本翻译 / 声音克隆）
                 Section {
-                    Picker("语音识别引擎", selection: asrEngineBinding) {
-                        Text("未选择").tag("")
+                    Picker("语音识别", selection: asrEngineBinding) {
                         if session.appleAvailable {
                             Text("苹果自带").tag("apple")
                         }
@@ -50,41 +49,24 @@ struct SettingsView: View {
                         Text("本地最准：Whisper").tag("whisper")
                         Text("SenseVoice + Whisper").tag("hybrid")
                     }
-                } header: {
-                    Text("语音识别引擎")
-                } footer: {
-                    Text(session.asrEngine.isEmpty ? "请选择语音识别引擎。" : asrNote)
-                }
-
-                Section {
-                    Picker("文本翻译引擎", selection: translationEngineBinding) {
-                        Text("未选择").tag("")
+                    Picker("文本翻译", selection: translationEngineBinding) {
                         if session.appleAvailable {
                             Text("苹果自带").tag("apple")
                         }
                         Text("本地引擎：MT").tag("local")
                     }
-                    if session.translationEngine == "local", !session.isInstalled(.translation) {
-                        Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
-                    }
-                } header: {
-                    Text("文本翻译引擎")
-                } footer: {
-                    Text(translationFooter)
-                }
-
-                Section {
-                    Picker("声音克隆引擎", selection: voiceCloneEngineBinding) {
+                    Picker("声音克隆", selection: voiceCloneEngineBinding) {
                         Text("苹果自带").tag("apple")
                         Text("本地引擎：Qwen").tag("local")
+                    }
+                    if session.translationEngine == "local", !session.isInstalled(.translation) {
+                        Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
                     }
                     if session.voiceClone, !session.isInstalled(.voiceClone) {
                         Text("声音克隆模型还没下载").font(.footnote).foregroundStyle(.orange)
                     }
                 } header: {
-                    Text("声音克隆引擎")
-                } footer: {
-                    Text(voiceCloneFooter)
+                    Text("引擎管理")
                 }
 
                 // 本地模型加载进度显示在这里（首页不再提示）
@@ -338,35 +320,6 @@ struct SettingsView: View {
         return "这个识别引擎需要 \(names.joined(separator: "、")) 语音识别模型。下载期间继续用现在的引擎，下载完成后自动切换。请连接 Wi‑Fi，并保持 App 在前台。"
     }
 
-    /// 语音识别引擎的说明
-    private var asrNote: String {
-        switch session.asrEngine {
-        case "sensevoice":
-            return "本地最快：说完马上出字，不会卡住。只支持中文、英语、日语、韩语。"
-        case "hybrid":
-            return "先用 SenseVoice 马上出结果，空闲时再用 Whisper 校正；有明显差别就替换并重新翻译。只支持中文、英语、日语、韩语。"
-        case "apple":
-            return "苹果自带：用 iOS 系统听写逐字显示，说话就出字。"
-        case "whisper":
-            return "本地最准：标点和长句更好，说完一句后识别，稍慢。"
-        default:
-            return "请选择语音识别引擎。"
-        }
-    }
-
-    private var translationFooter: String {
-        switch session.translationEngine {
-        case "apple": return "苹果自带：用 iOS 系统翻译，不用下载模型；不支持术语表和结合上文。"
-        case "local": return "本地引擎：Hy-MT2 在手机本地运行，支持术语表和结合上文。"
-        default: return "请选择翻译引擎。"
-        }
-    }
-
-    private var voiceCloneFooter: String {
-        session.voiceClone
-            ? "本地 Qwen3-TTS（GGUF，和翻译模型共用 llama.cpp）：用说话人的原声朗读。模型约 760 MB，占内存少，和翻译模型可以一起用；生成不了时自动用系统声音。"
-            : "苹果自带：用系统声音朗读，不额外占内存。"
-    }
     /// 最近一次要下载的模型（确认框收起的动画里文字不会突然变空）
     @State private var lastKind: LiveSession.ModelKind = .translation
 
