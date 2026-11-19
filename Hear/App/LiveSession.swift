@@ -2245,7 +2245,7 @@ final class LiveSession: ObservableObject {
               !item.translated.isEmpty, !item.translated.hasPrefix("（翻译失败"),
               VoiceCloneGGUF.languageNames[item.target.id] != nil else { return nil }
         let text = item.translated, lang = item.target.id
-        let key = Self.cloneCacheKey(lang: lang, text: text)
+        let key = cloneCacheKey(lang: lang, text: text)
         // 之前生成过一样的，直接拿来放，不用再等模型算一遍
         if let cached = await CloneCache.shared.get(key) {
             hearLog("声音克隆：命中缓存，直接播放")
