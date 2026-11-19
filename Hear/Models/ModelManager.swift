@@ -269,14 +269,15 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let e = error ?? moveError {
             // 拿到系统的续传数据（网络中断时会给），下次从断点继续
-            let rd = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data
-            if let rd, rd.count > 0 { resumeData = rd }
+            let ns = e as NSError
+            if let rd = ns.userInfo[NSURLSessionDownloadTaskResumeData] as? Data, rd.count > 0 {
+                resumeData = rd
+            }
             // 已经下载了一部分的话，进度要算上
-            if let task = task as? URLSessionDownloadTask,
-               let resp = task.response as? HTTPURLResponse,
-               resp.expectedContentLength > 0,
-               let done = task.countOfBytesReceived {
-                alreadyDone = Double(done) / Double(resp.expectedContentLength)
+            if let dlTask = task as? URLSessionDownloadTask,
+               let resp = dlTask.response as? HTTPURLResponse,
+               resp.expectedContentLength > 0 {
+                alreadyDone = Double(dlTask.countOfBytesReceived) / Double(resp.expectedContentLength)
             }
             continuation?.resume(throwing: e)
         } else {
