@@ -77,19 +77,21 @@ iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话
 App 默认什么都跑在手机上。也可以把模型放到自己的电脑上跑，手机通过局域网调用，
 三个模型（识别 / 翻译 / 声音克隆）**各自独立**，可以分别选本地或云端。
 
-Windows 上先装 WSL2（`wsl --install -d Ubuntu`），然后：
+**Windows 上直接跑（推荐）**：装好 Python 和 Git 之后，
 
-```bash
+```powershell
 git clone https://github.com/qianyueping1211/Hear.git
 cd Hear
-./server/start.sh
+powershell -ExecutionPolicy Bypass -File server\start-windows.ps1
 ```
 
-脚本会编译 llama.cpp、下载三个模型、装 faster-whisper，最后打印一个地址，
-填到手机 App 的 **功能设置 → 云端模型** 里，再把「引擎管理」里需要的模型
-改成「云端：自己电脑上的服务」。
+脚本会自己下载 llama.cpp 的运行包、三个模型、faster-whisper，不用编译也不用装 WSL，
+最后打印一个地址，填到手机 App 的 **功能设置 → 模型管理 → 在线模型** 里，
+再把「引擎管理」里需要的模型改成「云端：自己电脑上的服务」。
 
-完整说明（端口、防火墙、性能、常见问题）看 [server/README.md](server/README.md)。
+Intel 核显（NPU 也行）机器上，翻译可以走核显的 Vulkan 或 NPU 的 OpenVINO 后端；
+WSL2 里访问不到 NPU，所以想用满硬件就别装 WSL。完整说明（端口、防火墙、性能、常见问题）
+看 [server/README.md](server/README.md)。
 
 ---
 
