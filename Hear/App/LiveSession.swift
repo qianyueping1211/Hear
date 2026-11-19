@@ -2379,7 +2379,11 @@ final class LiveSession: ObservableObject {
             voiceCloneCloud = false
         }
         hearLog("云端\(model.title)调用失败，已改为苹果自带引擎：\(reason)", .warning)
-        showToast("由于网络不稳定或模型不可用，已经切换为苹果自带引擎", seconds: 4)
+        // 服务端自己报错（500 之类）和网络不通，说的话不一样
+        let serverSide = reason.contains("云端服务返回")
+        showToast(serverSide
+                  ? "云端\(model.title)服务出错了，已经切换为苹果自带引擎"
+                  : "由于网络不稳定或模型不可用，已经切换为苹果自带引擎", seconds: 4)
         // 换引擎会停掉当前会话，接着把它起回来，翻译不中断
         if wasRunning {
             Task { @MainActor in

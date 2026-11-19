@@ -186,6 +186,26 @@ def decode_wav(data):
     return samples, rate
 
 
+def to_float32(samples, rate):
+    """列表 -> numpy float32 数组（16 kHz 单声道），faster-whisper 直接吃这个"""
+    try:
+        import numpy as np
+    except Exception:
+        return samples
+    try:
+        a = np.asarray(samples, dtype=np.float32)
+        # 不是 16 kHz 就先重采样（手机那边发过来的是 16 kHz）
+        if rate and rate != 16000 and len(a) > 0:
+            n = int(round(len(a) * 16000.0 / float(rate)))
+            if n > 0:
+                idx = np.linspace(0, len(a) - 1, n)
+                a = np.interp(idx, np.arange(len(a)), a).astype(np.float32)
+        return a
+    except Exception as e:
+        log("转成 numpy 失败：%s" % e)
+        return samples
+
+
 def wav_sample_rate(data):
     """从 wav 头里读采样率（读不出来就按 24 kHz 算）"""
     try:
@@ -346,7 +366,12 @@ a{color:#007aff;text-decoration:none}
             samples, rate = decode_wav(body)
             model = get_whisper()
             language = langs[0] if len(langs) == 1 else None
-            segments, info = model.transcribe(samples, language=language, beam_size=1, vad_filter=False)
+            # 必须给 numpy 的 float32 数组：
+            # faster-whisper 只有在拿到 ndarray 时才跳过重新解码，
+            # 给普通 list 它会当成文件去 av.open()，老版本 av 会直接报
+            # "open() got an unexpected keyword argument 'metadata_errors'"。
+            audio = to_float32(samples, rate)
+            segments, info = model.transcribe(audio, language=language, beam_size=1, vad_filter=False)
             text = "".join(s.text for s in segments).strip()
             lang = info.language or fallback
         log("识别 %.1fs：%s" % (time.time() - t0, text[:40]))

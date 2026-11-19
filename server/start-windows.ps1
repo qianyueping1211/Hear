@@ -350,16 +350,67 @@ $clone = Start-Process -FilePath $cloneServer -ArgumentList $cloneArgs -PassThru
             -RedirectStandardOutput $cloneLog -RedirectStandardError "$cloneLog.err"
 $procs += $clone
 
-function Wait-Health($url, $name, $logName) {
-    for ($i = 0; $i -lt 150; $i++) {
-        try { if ((Invoke-WebRequest -UseBasicParsing "$url/health" -TimeoutSec 3).StatusCode -eq 200) { Say "$name 好了"; return } }
+function Wait-Health($url, $name, $logName, $proc) {
+    # 模型大的时候要加载一会儿，给足 10 分钟
+    for ($i = 0; $i -lt 300; $i++) {
+        try { if ((Invoke-WebRequest -UseBasicParsing "$url/health" -TimeoutSec 3).StatusCode -eq 200) { Say "$name 好了"; return $true } }
         catch {}
+        # 进程自己退出了就别等了，直接看日志
+        if ($proc -and $proc.HasExited) {
+            Say "$name 进程退出了（退出码 $($proc.ExitCode)），下面是日志最后几行："
+            Show-LogTail $logName
+            return $false
+        }
         Start-Sleep -Seconds 2
     }
-    Say "$name 两分钟内没就绪，看看 $logName"
+    Say "$name 十分钟内没就绪，看看 $logName"
+    Show-LogTail $logName
+    return $false
 }
-Wait-Health "http://127.0.0.1:$MtPort" "翻译模型" "mt.log"
-Wait-Health "http://127.0.0.1:$ClonePort" "声音克隆模型" "clone.log"
+
+function Show-LogTail($logName) {
+    # 直接把日志最后几行打出来，省得再去翻文件
+    $lp = Join-Path $ServerDir $logName
+    foreach ($f in @($lp, "$lp.err")) {
+        if (Test-Path $f) {
+            Write-Host "    ---- $(Split-Path $f -Leaf) 最后几行 ----" -ForegroundColor DarkGray
+            Get-Content $f -Tail 15 -ErrorAction SilentlyContinue |
+                ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray }
+        }
+    }
+}
+$mtOk = Wait-Health "http://127.0.0.1:$MtPort" "翻译模型" "mt.log" $mt
+if (-not $mtOk -and $MtDevice -ne "CPU") {
+    # 核显 / NPU 起不来（驱动、OpenVINO、显存都不够），退回 CPU 也能用，只是慢一点
+    Say "$MtDevice 后端没起来，改用 CPU 跑翻译模型"
+    try { Stop-Process -Id $mt.Id -Force -ErrorAction SilentlyContinue } catch {}
+    Start-Sleep -Seconds 2
+    $cpuMt = Server-For "CPU"
+    if ($cpuMt) {
+        $cpuArgs = @("-m", (Join-Path $ModelDir "Hy-MT2-1.8B-$MtQuant.gguf"),
+                     "--host", "0.0.0.0", "--port", $MtPort, "-c", $Context, "--no-warmup")
+        $mt = Start-Process -FilePath $cpuMt -ArgumentList $cpuArgs -PassThru -NoNewWindow `
+                -RedirectStandardOutput $mtLog -RedirectStandardError "$mtLog.err"
+        $procs += $mt
+        Wait-Health "http://127.0.0.1:$MtPort" "翻译模型（CPU）" "mt.log" $mt | Out-Null
+    }
+}
+$cloneOk = Wait-Health "http://127.0.0.1:$ClonePort" "声音克隆模型" "clone.log" $clone
+if (-not $cloneOk -and $CloneDevice -ne "CPU") {
+    Say "$CloneDevice 后端没起来，改用 CPU 跑声音克隆模型"
+    try { Stop-Process -Id $clone.Id -Force -ErrorAction SilentlyContinue } catch {}
+    Start-Sleep -Seconds 2
+    $cpuClone = Server-For "CPU"
+    if ($cpuClone) {
+        $cpuArgs = @("-m", (Join-Path $ModelDir "Qwen3-TTS-12Hz-0.6B-Base-Q4_K_M.gguf"),
+                     "--mmproj", (Join-Path $ModelDir "mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf"),
+                     "--host", "0.0.0.0", "--port", $ClonePort, "-c", $Context, "--no-warmup")
+        $clone = Start-Process -FilePath $cpuClone -ArgumentList $cpuArgs -PassThru -NoNewWindow `
+                -RedirectStandardOutput $cloneLog -RedirectStandardError "$cloneLog.err"
+        $procs += $clone
+        Wait-Health "http://127.0.0.1:$ClonePort" "声音克隆模型（CPU）" "clone.log" $clone | Out-Null
+    }
+}
 
 $env:HEAR_PORT = $Port
 $env:HEAR_MT_URL = "http://127.0.0.1:$MtPort"

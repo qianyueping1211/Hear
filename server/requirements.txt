@@ -1,2 +1,5 @@
 # 语音识别用（翻译和声音克隆走 llama.cpp，不需要 Python 包）
-faster-whisper>=1.0.0
+faster-whisper>=1.1.0
+# av 要 >= 12：老版本没有 metadata_errors 参数，faster-whisper 解码会报错
+av>=12.0.0
+numpy>=1.24
