@@ -141,8 +141,8 @@ struct SettingsView: View {
 
                 // MARK: 模型管理（本地模型 / 在线模型）
                 Section {
-                    // 分段控件：两个页签各占一半，字居中（不要挤在左边，右边空一大块）
-                    // 切换的时候不要动画，否则高度会晃一下，很奇怪
+                    // 页签：灰色条 + 白色圆角块，选中的是白底
+                    // 行间距自己控制，不要跟下面第一行隔太开
                     HStack(spacing: 0) {
                         ForEach(0..<2, id: \.self) { i in
                             Button {
@@ -153,7 +153,7 @@ struct SettingsView: View {
                                     .font(.subheadline.weight(modelTab == i ? .semibold : .regular))
                                     .foregroundStyle(modelTab == i ? Color.primary : Color.secondary)
                                     .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 7)
+                                    .padding(.vertical, 6)
                                     .background(
                                         RoundedRectangle(cornerRadius: 7)
                                             .fill(modelTab == i ? Color(.systemBackground) : Color.clear)
@@ -169,6 +169,8 @@ struct SettingsView: View {
                     .background(Color(.systemGray5), in: RoundedRectangle(cornerRadius: 9))
                     // 页签和下面第一行之间不要有横线
                     .listRowSeparator(.hidden)
+                    // 上下留白收紧，别跟下面第一行隔一大块
+                    .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 2, trailing: 16))
 
                     if modelTab == 0 {
                         modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
@@ -201,10 +203,6 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("模型管理")
-                } footer: {
-                    if modelTab == 1 {
-                        Text("自己电脑上跑的服务（仓库 server 目录里有安装说明和脚本）。手机和电脑要在同一个 Wi‑Fi 下，地址填电脑的局域网 IP。")
-                    }
                 }
 
                 // MARK: 语音识别（收音 → 断句 → 运行方式）
@@ -517,51 +515,46 @@ struct SettingsView: View {
                           status: LiveSession.ModelStatus) -> some View {
         let downloading = session.bgDownloadKind == kind
         let waiting = !downloading && session.bgDownloading && session.bgQueue.contains(kind)
-        VStack(alignment: .leading, spacing: 6) {
-            LabeledContent {
-                HStack(spacing: 8) {
-                    // 状态：已下载是绿色对勾；没下载是灰色对勾；下载中（或排队等下载）灰色对勾外面转一圈灰点
-                    ZStack {
-                        if status.installed && !downloading {
-                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                        } else {
-                            // 跟在线模型一样：没配置就是灰色圆圈感叹号
-                            Image(systemName: "exclamationmark.circle").foregroundStyle(.secondary)
-                            if downloading || waiting { ProcessingDots() }
-                        }
+        // 跟在线模型那一行一模一样的结构，两个页签高度才一样
+        LabeledContent {
+            HStack(spacing: 8) {
+                // 状态：已下载是绿色对勾；没配置是灰色圆圈感叹号；下载中转圈
+                ZStack {
+                    if status.installed && !downloading {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    } else {
+                        Image(systemName: "exclamationmark.circle").foregroundStyle(.secondary)
+                        if downloading || waiting { ProcessingDots() }
                     }
-                    .font(.title3)
-                    .frame(width: 34, height: 34)
-                    .accessibilityLabel(downloading ? "正在下载" : (waiting ? "等待下载" : (status.installed ? "已下载" : "未下载")))
-                    // 配置入口：跟"大模型 API"那一行一样，后面是"已配置 / 未配置"加一个箭头
-                    // 没下过也没导入过 = 未配置；下载或导入完成任意一个 = 已配置
-                    Button {
-                        localEdit = .model(kind, title)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(status.installed ? "已配置" : "未配置")
-                            Image(systemName: "chevron.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.tertiary)
-                        }
+                }
+                .font(.title3)
+                .frame(width: 34, height: 34)
+                .accessibilityLabel(downloading ? "正在下载" : (waiting ? "等待下载" : (status.installed ? "已下载" : "未下载")))
+                // 配置入口：跟"大模型 API"那一行一样，后面是"已配置 / 未配置"加一个箭头
+                Button {
+                    localEdit = .model(kind, title)
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(status.installed ? "已配置" : "未配置")
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(session.isBusyWithModels)
                 }
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: icon)
-                        .font(.title3)
-                        .foregroundStyle(.tint)
-                        .frame(width: 28)
-                    Text(title)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
+                .buttonStyle(.plain)
+                .disabled(session.isBusyWithModels)
             }
-            // 模型的文件名、大小、下载进度都放到"配置"窗口里，这里不显示
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundStyle(.tint)
+                    .frame(width: 28)
+                Text(title)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
         }
-        .padding(.vertical, 2)
     }
 
     /// 本地模型的详情："文件名 · 大小"
