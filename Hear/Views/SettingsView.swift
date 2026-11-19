@@ -95,19 +95,19 @@ struct SettingsView: View {
                         Text("本地极速：SenseVoice").tag("sensevoice")
                         Text("本地最准：Whisper").tag("whisper")
                         Text("SenseVoice + Whisper").tag("hybrid")
-                        Text("云端：自己电脑上的服务").tag("cloud")
+                        Text("云端服务引擎").tag("cloud")
                     }
                     Picker("文本翻译", selection: translationEngineBinding) {
                         if session.appleAvailable {
                             Text("苹果自带").tag("apple")
                         }
                         Text("本地引擎：MT").tag("local")
-                        Text("云端：自己电脑上的服务").tag("cloud")
+                        Text("云端服务引擎").tag("cloud")
                     }
                     Picker("声音克隆", selection: voiceCloneEngineBinding) {
                         Text("苹果自带").tag("apple")
                         Text("本地引擎：Qwen").tag("local")
-                        Text("云端：自己电脑上的服务").tag("cloud")
+                        Text("云端服务引擎").tag("cloud")
                     }
                     if session.translationEngine == "local", !session.isInstalled(.translation) {
                         Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
