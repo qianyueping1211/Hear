@@ -58,6 +58,20 @@ enum VoiceCloneGGUF {
     static let mmprojRepo = "Shlomo426/Qwen3-TTS-12Hz-0.6B-Base-GGUF"
     static let mmprojPath = "mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf"
 
+    /// 两个 gguf 放在磁盘上的总大小（MB）。
+    /// 放 GPU 时 Metal 里还要再存一份，所以实际占用的内存比这个数字大得多。
+    static var totalMB: Int {
+        let fm = FileManager.default
+        var total = 0
+        for url in [backboneURL, mmprojURL] {
+            if let attrs = try? fm.attributesOfItem(atPath: url.path),
+               let bytes = attrs[.size] as? Int {
+                total += bytes
+            }
+        }
+        return total / 1_048_576
+    }
+
     /// 两部分都下载好了
     static var installed: Bool {
         FileManager.default.fileExists(atPath: backboneURL.path)
@@ -205,8 +219,13 @@ actor GGUFVoiceCloner {
     var isLoading: Bool { loading }
     private var loading = false
 
+    /// 当前是不是放在 GPU 上跑的
+    private(set) var usingGPU = true
+
     /// 加载骨架模型 + mmproj
-    func load() async throws {
+    /// useGPU = false 时整个模型都放 CPU：
+    /// 内存紧张时用，Metal 里的权重是常驻的、不可回收，mmap 出来的文件页还能被系统回收。
+    func load(useGPU: Bool = true) async throws {
         guard model == nil else { return }
         guard !loading else { return }
         loading = true
@@ -220,9 +239,10 @@ actor GGUFVoiceCloner {
         // 这里绝不能调 llama_backend_free()：翻译模型还在用，释放了会把它的运行时一起关掉。
         LlamaBackend.ensureReady()
 
-        // 骨架模型：和翻译模型一样全部放 GPU
+        // 骨架模型：内存够就整个放 GPU
+        usingGPU = useGPU
         var mp = llama_model_default_params()
-        mp.n_gpu_layers = 999
+        mp.n_gpu_layers = useGPU ? 999 : 0
         guard let m = llama_model_load_from_file(VoiceCloneGGUF.backboneURL.path, mp) else {
             throw VoiceCloneGGUFError.loadFailed("backbone")
         }
@@ -245,7 +265,7 @@ actor GGUFVoiceCloner {
 
         // mmproj：语音 tokenizer 的编码器 + 解码器
         var mp2 = mtmd_context_params_default()
-        mp2.use_gpu = true
+        mp2.use_gpu = useGPU
         guard let mc = mtmd_init_from_file(VoiceCloneGGUF.mmprojURL.path, m, mp2) else {
             llama_free(c); ctx = nil
             llama_model_free(m); model = nil
@@ -269,7 +289,7 @@ actor GGUFVoiceCloner {
             throw VoiceCloneGGUFError.loadFailed("gen")
         }
         gen = g
-        hearLog("声音克隆（GGUF）：加载完成")
+        hearLog("声音克隆（GGUF）：加载完成\(useGPU ? "" : "（CPU 运行：内存紧张，速度较慢）")")
     }
 
     func unload() {

@@ -70,15 +70,28 @@ final class AudioCapture {
         }
         _ = engine.mainMixerNode   // 让引擎有完整的输入输出链路（语音增强需要）
 
-        do {
-            try installTapAndStart()
-        } catch where input.isVoiceProcessingEnabled {
-            // 个别情况下语音增强启动失败：关掉再试一次
-            hearLog("开启语音增强后麦克风启动失败（\(error)），改为普通模式", .warning)
-            engine.stop()
-            try? input.setVoiceProcessingEnabled(false)
-            try installTapAndStart()
+        // 麦克风起不来时重试几次：
+        // 刚加载完模型（内存紧张）、或音频会话状态和实际路由对不上时，
+        // 硬件会拒绝启动（'nope'），重新激活一次音频会话通常就能恢复。
+        var lastError: Error?
+        for attempt in 1...3 {
+            do {
+                try installTapAndStart()
+                lastError = nil
+                break
+            } catch {
+                lastError = error
+                hearLog("麦克风启动失败（第 \(attempt)/3 次）：\(error)", .warning)
+                engine.stop()
+                if input.isVoiceProcessingEnabled {
+                    // 个别情况下语音增强启动失败：关掉再试一次
+                    try? input.setVoiceProcessingEnabled(false)
+                }
+                AudioRoute.reset()
+                Thread.sleep(forTimeInterval: 0.3 * Double(attempt))
+            }
         }
+        if let lastError = lastError { throw lastError }
         queue.async { [segmenter] in segmenter.reset() }
         isRunning = true
         let f = input.outputFormat(forBus: 0)
@@ -118,10 +131,16 @@ final class AudioCapture {
         let f = engine.inputNode.outputFormat(forBus: 0)
         hearLog("音频路由变化，重新连接麦克风（\(Int(f.sampleRate)) Hz）", .warning)
         engine.stop()
-        do {
-            try installTapAndStart()
-        } catch {
-            hearLog("重新连接麦克风失败：\(error)", .error)
+        // 路由刚变，硬件有时还没准备好，失败就重新激活会话再来一次
+        for attempt in 1...2 {
+            do {
+                try installTapAndStart()
+                return
+            } catch {
+                hearLog("重新连接麦克风失败（第 \(attempt)/2 次）：\(error)", .error)
+                engine.stop()
+                AudioRoute.reset()
+            }
         }
     }
 

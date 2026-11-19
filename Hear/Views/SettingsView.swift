@@ -69,19 +69,6 @@ struct SettingsView: View {
                     Text("引擎管理")
                 }
 
-                // 本地模型加载进度显示在这里（首页不再提示）
-                if let msg = session.loadingHint {
-                    Section {
-                        HStack(spacing: 10) {
-                            ProgressView()
-                            Text(msg)
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                        }
-                    }
-                }
-
                 // MARK: 模型管理（语音识别 → 翻译 → 下载源）
                 Section {
                     modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
@@ -90,7 +77,7 @@ struct SettingsView: View {
                              status: session.senseStatus)
                     modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
                              status: session.translationStatus)
-                    modelRow(.voiceClone, title: "声音克隆（Qwen3-TTS GGUF）", icon: "person.wave.2",
+                    modelRow(.voiceClone, title: "声音克隆（Qwen-TTS-VC）", icon: "person.wave.2",
                              status: session.cloneStatus)
                     if session.installedGGUFs.count > 1 {
                         Picker("使用的翻译模型", selection: ggufSelection) {
@@ -338,7 +325,7 @@ struct SettingsView: View {
         case .translation: return "翻译模型（MT）"
         case .speech: return "语音识别模型（Whisper）"
         case .senseVoice: return "语音识别模型（SenseVoice）"
-        case .voiceClone: return "声音克隆模型（Qwen3-TTS GGUF）"
+        case .voiceClone: return "声音克隆模型（Qwen-TTS-VC）"
         }
     }
 

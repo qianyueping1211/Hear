@@ -67,6 +67,8 @@ final class LiveSession: ObservableObject {
         }
     }
     @Published private(set) var cloneLoading = false
+    /// 声音克隆模型这次是放在 CPU 上跑的（内存紧张时的保底，速度较慢）
+    @Published private(set) var cloneOnCPU = false
     /// 本地模型刚加载好（用来提示用户，过几秒自动消失）
     @Published private(set) var modelsJustLoaded = false
     /// 正在加载的东西（界面上显示进度用）
@@ -463,9 +465,10 @@ final class LiveSession: ObservableObject {
     var cloneStatus: ModelStatus {
         _ = modelFiles()            // 模型变动后让大小缓存重新计算
         if cloneInstalled {
-            return .init(name: "Qwen3-TTS 0.6B",
-                         detail: ModelManager.format(cachedSize(VoiceCloneGGUF.base, folder: true)) + (cloneLoading ? " · 加载中" : ""),
-                         installed: true)
+            var detail = ModelManager.format(cachedSize(VoiceCloneGGUF.base, folder: true))
+            if cloneLoading { detail += " · 加载中" }
+            else if cloneOnCPU { detail += " · CPU 运行（内存紧张，较慢）" }
+            return .init(name: "Qwen3-TTS 0.6B", detail: detail, installed: true)
         }
         return .init(name: "Qwen3-TTS 0.6B", detail: "未下载", installed: false)
     }
@@ -724,7 +727,7 @@ final class LiveSession: ObservableObject {
         case .translation: return "翻译模型 Hy-MT2"
         case .speech: return "语音识别模型 Whisper"
         case .senseVoice: return "语音识别模型 SenseVoice"
-        case .voiceClone: return "声音克隆模型 Qwen3-TTS（GGUF）"
+        case .voiceClone: return "声音克隆模型 Qwen-TTS-VC"
         }
     }
 
@@ -1057,6 +1060,17 @@ final class LiveSession: ObservableObject {
             activity = "请在 设置 → 听见 里允许使用麦克风"
             return false
         }
+        // 声音克隆模型正在加载时先等它加载完：
+        // 那会儿 Metal 正在分配显存，麦克风很容易起不来（硬件直接拒绝启动）。
+        let cloneBusy = await cloner.isLoading
+        if cloneLoading || cloneBusy {
+            showToast("正在加载声音克隆模型…", seconds: 3)
+            for _ in 0..<300 {                     // 最多等 30 秒
+                let busy = await cloner.isLoading
+                if !busy { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
         // 已经插着耳机就用耳机朗读（除非用户手动选了扬声器）；耳机已拔掉就改回扬声器
         // 注意：这里不强制改输出路由，避免开始聆听时麦克风被重新配置
         try? AudioRoute.activate()
@@ -1072,23 +1086,37 @@ final class LiveSession: ObservableObject {
         if outputMode == .speaker { stopReading() }
         do {
             try capture.start()
-            if outputMode == .headphones { AudioRoute.apply(.headphones) }
-            isRunning = true
-            if dualLive { startAppleASR() }
-            if talkMode, let l = talkLang {
-                hearLog("对话翻译：按住说\(l.displayName)")
-                activity = "正在听\(l.name)"
-            } else {
-                hearLog("开始实时翻译：\(langA.displayName) ⇄ \(langB.displayName)，朗读\(outputMode == .speaker ? "扬声器" : "耳机")")
-                activity = "正在聆听"
-            }
-            UIApplication.shared.isIdleTimerDisabled = true
-            return true
         } catch {
-            hearLog("麦克风启动失败：\(error)", .error)
-            activity = "麦克风启动失败：\(error.localizedDescription)"
-            return false
+            // 刚加载完声音克隆模型时，内存紧张会让麦克风起不来（硬件直接拒绝启动）：
+            // 先把声音克隆模型卸掉再试一次，麦克风通常就能正常起来
+            if await cloner.isLoaded {
+                hearLog("麦克风启动失败，先卸载声音克隆模型再试一次", .warning)
+                await cloner.unload()
+                do {
+                    try capture.start()
+                } catch {
+                    hearLog("麦克风启动失败：\(error)", .error)
+                    activity = "麦克风启动失败：\(error.localizedDescription)"
+                    return false
+                }
+            } else {
+                hearLog("麦克风启动失败：\(error)", .error)
+                activity = "麦克风启动失败：\(error.localizedDescription)"
+                return false
+            }
         }
+        if outputMode == .headphones { AudioRoute.apply(.headphones) }
+        isRunning = true
+        if dualLive { startAppleASR() }
+        if talkMode, let l = talkLang {
+            hearLog("对话翻译：按住说\(l.displayName)")
+            activity = "正在听\(l.name)"
+        } else {
+            hearLog("开始实时翻译：\(langA.displayName) ⇄ \(langB.displayName)，朗读\(outputMode == .speaker ? "扬声器" : "耳机")")
+            activity = "正在聆听"
+        }
+        UIApplication.shared.isIdleTimerDisabled = true
+        return true
     }
 
     /// 在实时翻译按钮上方显示几秒钟的提示
@@ -1976,12 +2004,16 @@ final class LiveSession: ObservableObject {
     private func loadClonerIfNeeded() async {
         guard voiceClone, VoiceCloneGGUF.installed, !cloneLoading else { return }
         if case .loading = phase { return }                 // 识别、翻译模型还在加载，等它们好了会再叫
-        // GGUF 版模型约 763 MB，走 mmap 映射，实际常驻更少；
-        // 留 800 MB 就够了（1800 MB 是以前 MLX 版的数字，模型要整个搬进内存）
+        // GGUF 版模型走 mmap 映射，磁盘上约 760 MB。
+        // 但放 GPU 时 Metal 里会再存一份（常驻、不可回收），mmap 的文件页也要占一份（可回收）。
+        // 翻译模型已经占了 GPU，内存不够就整个放 CPU：慢一点，
+        // 但系统压力大的时候文件页还能被回收，不会被系统直接杀掉。
         let free = Self.freeMB()
-        hearLog("声音克隆：准备加载，可用内存 \(free) MB")
-        guard free >= 800 else {
-            hearLog("声音克隆：可用内存不够（\(free) MB，需要约 800 MB），先用系统声音朗读", .warning)
+        let need = VoiceCloneGGUF.totalMB
+        let useGPU = free >= need * 2 + 300
+        hearLog("声音克隆：准备加载，可用内存 \(free) MB，模型约 \(need) MB\(useGPU ? "，放 GPU" : "，放 CPU")")
+        guard free >= need + 300 else {
+            hearLog("声音克隆：可用内存不够（\(free) MB，需要约 \(need + 300) MB），先用系统声音朗读", .warning)
             showToast("内存不够，声音克隆暂时用系统声音")
             return
         }
@@ -1994,9 +2026,11 @@ final class LiveSession: ObservableObject {
         d.set(true, forKey: Self.clonePendingKey)
         d.synchronize()
         do {
-            try await cloner.load()
+            try await cloner.load(useGPU: useGPU)
+            cloneOnCPU = !useGPU
+            modelsRevision += 1
             hearLog("声音克隆：加载后可用内存 \(Self.freeMB()) MB")
-            showToast("声音克隆模型加载完成", seconds: 5)
+            showToast(useGPU ? "声音克隆模型加载完成" : "内存紧张，声音克隆改用 CPU 运行（较慢）", seconds: 5)
         } catch {
             hearLog("声音克隆：模型加载失败 \(error)", .error)
             showToast("声音克隆模型加载失败，先用系统声音朗读")

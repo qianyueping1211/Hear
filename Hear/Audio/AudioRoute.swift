@@ -50,6 +50,16 @@ enum AudioRoute {
         }
     }
 
+    /// 重新激活一次音频会话：麦克风启动失败时用。
+    /// 硬件拒绝启动（'nope'）多半是会话状态和实际路由对不上了，
+    /// 彻底关掉再打开一次，麦克风通常就能正常起来。
+    static func reset() {
+        let s = AVAudioSession.sharedInstance()
+        try? s.setActive(false, options: .notifyOthersOnDeactivation)
+        try? s.setActive(true)
+        applyInput()
+    }
+
     private static func routeHasHeadphones() -> Bool {
         AVAudioSession.sharedInstance().currentRoute.outputs.contains { headphonePorts.contains($0.portType) }
     }
