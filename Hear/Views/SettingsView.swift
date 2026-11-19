@@ -126,11 +126,24 @@ struct SettingsView: View {
 
                 // MARK: 模型管理（本地模型 / 在线模型）
                 Section {
-                    Picker("模型", selection: $modelTab) {
-                        Text("本地模型").tag(0)
-                        Text("在线模型").tag(1)
+                    // 自己做的分段控件：系统 Picker 在 Form 里太矮，点起来也不舒服
+                    HStack(spacing: 0) {
+                        ForEach(0..<2, id: \.self) { i in
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.15)) { modelTab = i }
+                                if i == 1 { Task { await session.refreshCloudStatus() } }
+                            } label: {
+                                Text(i == 0 ? "本地模型" : "在线模型")
+                                    .font(.subheadline.weight(modelTab == i ? .semibold : .regular))
+                                    .foregroundStyle(modelTab == i ? Color.white : Color.primary)
+                                    .frame(maxWidth: .infinity, minHeight: 38)
+                                    .background(modelTab == i ? Color.accentColor : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
-                    .pickerStyle(.segmented)
+                    .padding(3)
+                    .background(Color(.systemGray5), in: RoundedRectangle(cornerRadius: 10))
 
                     if modelTab == 0 {
                         modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
@@ -308,9 +321,7 @@ struct SettingsView: View {
             } message: {
                 Text(conflictMessage ?? "")
             }
-            .onChange(of: modelTab) { _, t in
-                if t == 1 { Task { await session.refreshCloudStatus() } }
-            }
+
             .navigationTitle("功能设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -631,7 +642,6 @@ struct CloudModelSheet: View {
     let model: CloudModel
 
     @State private var address: String = ""
-    @State private var enabled: Bool = false
     @State private var status: String? = nil
     @State private var busy = false
     @State private var conflict: String? = nil
@@ -640,7 +650,6 @@ struct CloudModelSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    Toggle("用云端模型", isOn: $enabled)
                     TextField("接口地址（留空用默认）", text: $address)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -659,7 +668,7 @@ struct CloudModelSheet: View {
                 } header: {
                     Text(model.title)
                 } footer: {
-                    Text("当前实际用的地址：\(session.cloudEffectiveAddress(model).isEmpty ? "还没填" : session.cloudEffectiveAddress(model))\n地址是电脑上那个服务的地址，手机和电脑要在同一个 Wi‑Fi 下。")
+                    Text("当前实际用的地址：\(session.cloudEffectiveAddress(model).isEmpty ? "还没填" : session.cloudEffectiveAddress(model))\n地址是电脑上那个服务的地址，手机和电脑要在同一个 Wi‑Fi 下。用不用这个模型，在上面「引擎管理」里选。")
                 }
             }
             .navigationTitle("在线模型 · \(model.title)")
@@ -671,20 +680,14 @@ struct CloudModelSheet: View {
             }
             .onAppear {
                 address = session.cloudOwnAddress(model)
-                enabled = session.cloudEnabled(model)
             }
         }
     }
 
     private func save() {
+        // 只保存地址；用不用云端由「引擎管理」里选的那个决定
         session.setCloudOwnAddress(model, address)
-        // 本地声音克隆和别的本地引擎互斥，冲突的话不改并提示
-        if let msg = session.setCloudEnabled(model, enabled) {
-            enabled = session.cloudEnabled(model)
-            conflict = msg
-        } else {
-            conflict = nil
-        }
+        conflict = nil
     }
 
     /// 测一下这个地址通不通

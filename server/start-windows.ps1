@@ -31,10 +31,13 @@ $AsrModel  = if ($env:HEAR_ASR_MODEL)  { $env:HEAR_ASR_MODEL }  else { "small" }
 $Context   = if ($env:HEAR_CTX)        { $env:HEAR_CTX }        else { "4096" }
 $HF        = if ($env:HF_ENDPOINT)     { $env:HF_ENDPOINT }     else { "https://huggingface.co" }
 
-trap { Write-Host ""
-       Write-Host "!! 出错了：$_" -ForegroundColor Red
-       Write-Host "   （如果是下载失败，多半是网络问题；国内可以先设 `$env:HF_ENDPOINT='https://hf-mirror.com' 再跑一次）" -ForegroundColor Red
-       exit 1 }
+trap {
+    Write-Host ""
+    Write-Host "!! 出错了：$_" -ForegroundColor Red
+    Write-Host "   网络问题的话换个网络/代理再跑一次就行，已经下好的东西不会重下。" -ForegroundColor Red
+    Write-Host "   也可以设 `$env:HF_ENDPOINT='https://hf-mirror.com' 用国内镜像。" -ForegroundColor Red
+    exit 1
+}
 
 function Say($t)  { Write-Host "==> $t" -ForegroundColor Cyan }
 function Step($t) { Write-Host "    $t" -ForegroundColor DarkGray }
@@ -45,16 +48,25 @@ Say "模型目录：$ModelDir"
 New-Item -ItemType Directory -Force -Path $ModelDir, $BinDir | Out-Null
 
 # ---------------------------------------------------------------- 下载解压
-function Get-File($url, $out) {
+# 网络不通的时候换别的办法再来一遍，不要一失败就整个退出。
+# $urls 可以给多个（第一个是主地址，后面是备用）
+function Get-File($urls, $out) {
     if (Test-Path $out) { Step "已有 $(Split-Path $out -Leaf)"; return $out }
-    Say "下载 $(Split-Path $out -Leaf)"
-    & curl.exe -fL --retry 5 --retry-delay 3 -o "$out.part" $url
-    if ($LASTEXITCODE -ne 0) {
+    if ($urls -is [string]) { $urls = @($urls) }
+    $name = Split-Path $out -Leaf
+    $i = 0
+    foreach ($url in $urls) {
+        $i++
+        if ($i -eq 1) { Say "下载 $name" } else { Say "下载 $name（第 $i 次，换个地址试试）" }
+        & curl.exe -fL --connect-timeout 20 --retry 3 --retry-delay 3 -o "$out.part" $url
+        if ($LASTEXITCODE -eq 0) {
+            Move-Item "$out.part" $out
+            return $out
+        }
         Remove-Item "$out.part" -ErrorAction SilentlyContinue
-        throw "下载失败：$url"
+        Step "这个地址不行：$url"
     }
-    Move-Item "$out.part" $out
-    return $out
+    throw "下载失败：$name（试了 $i 个地址都不行）"
 }
 function Expand-Zip($zip, $dest) {
     if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
@@ -107,7 +119,13 @@ if (-not (Find-Exe "llama-server.exe" "")) {
             $url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LlamaTag/$name"
         }
         $zip = Join-Path $BinDir $name
-        Get-File $url $zip | Out-Null
+        # GitHub 打不开的话换代理再试
+        $mirrors = @($url)
+        if ($url -like "https://github.com/*") {
+            $mirrors += ($url -replace "^https://github.com", "https://gh-proxy.com")
+            $mirrors += ($url -replace "^https://github.com", "https://ghproxy.net")
+        }
+        Get-File $mirrors $zip | Out-Null
         Say "解压 $name"
         Expand-Zip $zip (Join-Path $BinDir ([IO.Path]::GetFileNameWithoutExtension($name)))
     }
@@ -136,14 +154,22 @@ if (-not $py) {
 }
 Say "Python：$py"
 
-$venv = Join-Path $ServerDir ".venv\Scripts\python.exe"
-if (-not (Test-Path $venv)) {
+# venv 是一个"文件夹"，不是 python.exe 的路径（之前写错，venv 建到了 python.exe 上，
+# 结果 python.exe 根本不存在）
+$venvDir = Join-Path $ServerDir ".venv"
+$venvPy  = Join-Path $venvDir "Scripts\python.exe"
+if (-not (Test-Path $venvPy)) {
     Say "建虚拟环境并装 faster-whisper（识别模型用）"
-    & $py -m venv $venv
-    if ($LASTEXITCODE -ne 0) { Die "建虚拟环境失败" }
+    if (Test-Path $venvDir) { Remove-Item -Recurse -Force $venvDir -ErrorAction SilentlyContinue }
+    & $py -m venv $venvDir
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPy)) {
+        Say "建虚拟环境失败，退回用系统 Python（可能要管理员权限）"
+        $venvPy = $py
+    }
 }
-$venvPy = $venv
+if (-not (Test-Path $venvPy)) { Die "找不到可用的 Python" }
 & $venvPy -m pip install --upgrade pip --quiet
+if ($LASTEXITCODE -ne 0) { Say "pip 升级失败，先用现有的 pip 继续" }
 & $venvPy -m pip install -r (Join-Path $ServerDir "requirements.txt") --quiet
 if ($LASTEXITCODE -ne 0) {
     Say "faster-whisper 没装上，语音识别会不可用（翻译和克隆不受影响）"
@@ -154,13 +180,15 @@ if ($LASTEXITCODE -ne 0) {
 function Get-Model($repo, $file) {
     $out = Join-Path $ModelDir $file
     if (Test-Path $out) { Step "已有 $file"; return $out }
-    Say "下载 $file"
-    & curl.exe -fL --retry 5 --retry-delay 3 -o "$out.part" "$HF/$repo/resolve/main/$file"
-    if ($LASTEXITCODE -ne 0) {
-        Remove-Item "$out.part" -ErrorAction SilentlyContinue
-        throw "模型下载失败：$file（国内网络慢的话，先设 `$env:HF_ENDPOINT='https://hf-mirror.com' 再跑一次）"
+    # 主地址 + 国内镜像 + 另一个镜像：哪个通用哪个
+    $mirrors = @(
+        "$HF/$repo/resolve/main/$file",
+        "https://hf-mirror.com/$repo/resolve/main/$file"
+    )
+    if ($HF -ne "https://huggingface.co") {
+        $mirrors += "https://huggingface.co/$repo/resolve/main/$file"
     }
-    Move-Item "$out.part" $out
+    Get-File $mirrors $out | Out-Null
     return $out
 }
 Get-Model "tencent/Hy-MT2-1.8B-GGUF" "Hy-MT2-1.8B-$MtQuant.gguf" | Out-Null

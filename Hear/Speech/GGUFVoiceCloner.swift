@@ -315,6 +315,7 @@ actor GGUFVoiceCloner {
     /// 返回 24 kHz 单声道 PCM
     func synthesize(text: String, language: String,
                    reference: [Float], referenceText: String) throws -> CloneAudio {
+        let t0 = Date()
         guard let model, let ctx, let mctx, let gen else {
             throw VoiceCloneGGUFError.notLoaded
         }
@@ -322,6 +323,12 @@ actor GGUFVoiceCloner {
             throw VoiceCloneGGUFError.unsupportedLanguage
         }
         guard !text.isEmpty else { return CloneAudio(samples: [], sampleRate: VoiceCloneGGUF.sampleRate) }
+
+        // 0) 先把上下文清空
+        //    Qwen3-TTS 这条管线在生成完以后不会自己清 KV 缓存，
+        //    上一次如果失败（或者生成了一半），这次再跑就会在 step_prompt 挂掉。
+        //    每次生成前清一次，就不会有这个问题。
+        llama_memory_clear(llama_get_memory(ctx), true)
 
         // 1) 参考音频编码成 bitmap（语音 tokenizer 编码）
         //    mtmd 的接口要文件路径，这里先把 16 kHz PCM 写成临时 wav
@@ -376,7 +383,10 @@ actor GGUFVoiceCloner {
         let batch = Int32(llama_n_batch(ctx))
         while true {
             let r = mtmd_helper_gen_audio_step_prompt(gen, batch)
-            if r < 0 { throw VoiceCloneGGUFError.generateFailed("step_prompt") }
+            if r < 0 {
+                failed = true
+                throw VoiceCloneGGUFError.generateFailed("step_prompt")
+            }
             if r == 0 { break }
         }
 
@@ -386,6 +396,11 @@ actor GGUFVoiceCloner {
         let maxFrames = mtmd_helper_gen_audio_max_frames(gen)
         var nFrames = 0
         var stop = false
+        var failed = false
+        defer {
+            // 生成失败的话上下文是脏的，清掉，下次重来
+            if failed { llama_memory_clear(llama_get_memory(ctx), true) }
+        }
         // 先采一个 token
         var sampled = sampleToken(ctx, model)
         guard sampled >= 0 else {
@@ -400,6 +415,7 @@ actor GGUFVoiceCloner {
             var hNext: UnsafePointer<Float>?
             let rc2 = mtmd_helper_gen_audio_step_gen(gen, sampled, hState, &hNext, &stop)
             guard rc2 == 0 else {
+                failed = true
                 throw VoiceCloneGGUFError.generateFailed("step_gen")
             }
             // 结束信号：这一帧没有产出，hNext 为空
@@ -423,7 +439,6 @@ actor GGUFVoiceCloner {
         // 裸 PCM：字节数 = 样本数 × 4（F32）
         let pcm = Self.pcmToFloat32(data: data, byteCount: dataLen)
         let rate = Int(sampleRate) > 0 ? Int(sampleRate) : VoiceCloneGGUF.sampleRate
-        let t0 = Date()
         let secs = Double(pcm.count) / Double(rate)
 
         // 参考音频也要看一眼：麦克风没录到东西的话，克隆出来的声音也是没声音的
@@ -450,10 +465,13 @@ actor GGUFVoiceCloner {
     /// 语音本身基本不动，所以不会把说话声也削掉。
     static func denoise(_ samples: [Float], sampleRate: Int = 16_000) -> [Float] {
         guard samples.count > 512 else { return samples }
+        let origPeak = peak(of: samples)
         var out = [Float](repeating: 0, count: samples.count)
-        // 高通
+
+        // 1) 一阶高通（80 Hz）：去掉隆隆声、直流偏置
+        //    rc = 1/(2*pi*fc) 是秒，dt = 1/fs 也是秒，两者单位一致
         let dt = 1.0 / Float(sampleRate)
-        let rc = 1.0 / (2.0 * Float.pi * 80.0 * Float(sampleRate))
+        let rc = 1.0 / (2.0 * Float.pi * 80.0)
         let a = rc / (rc + dt)
         var prevIn: Float = 0
         var prevOut: Float = 0
@@ -464,7 +482,8 @@ actor GGUFVoiceCloner {
             prevIn = x
             prevOut = y
         }
-        // 底噪估计：20 ms 一段，取能量较低的 20% 当底噪
+
+        // 2) 底噪估计：20 ms 一段，取能量较低的 20% 当底噪
         let win = max(1, sampleRate / 50)
         var levels: [Float] = []
         var i = 0
@@ -478,20 +497,38 @@ actor GGUFVoiceCloner {
         let sorted = levels.sorted()
         let idx = max(0, Int(Double(sorted.count) * 0.2) - 1)
         let floorLevel = sorted[idx]
-        let gate = max(floorLevel * 1.8, 0.003)
-        // 比底噪还安静的部分压下去（最多压到三成，不是一刀切）
-        var j = 0
-        while j + win <= out.count {
-            var sum: Float = 0
-            for k in j..<(j + win) { sum += out[k] * out[k] }
-            let rms = sqrt(sum / Float(win))
-            if rms < gate, gate > 0 {
-                let k = 0.3 + 0.7 * (rms / gate)
-                for idx2 in j..<(j + win) { out[idx2] *= k }
+        // 底噪比说话声低很多时才做门限，否则说明一直在说话，别乱压
+        let median = sorted[sorted.count / 2]
+        if floorLevel > 0, median > floorLevel * 4 {
+            let gate = max(floorLevel * 2.0, 0.002)
+            var j = 0
+            while j + win <= out.count {
+                var sum: Float = 0
+                for k in j..<(j + win) { sum += out[k] * out[k] }
+                let rms = sqrt(sum / Float(win))
+                if rms < gate {
+                    // 压到底噪的一半，不是一刀切静音（免得把字头也削掉）
+                    let k = 0.5 + 0.5 * (rms / gate)
+                    for idx2 in j..<(j + win) { out[idx2] *= k }
+                }
+                j += win
             }
-            j += win
+        }
+
+        // 3) 安全检查：处理完不能明显变小，否则说明滤过头了，用原声
+        let newPeak = peak(of: out)
+        if newPeak < origPeak * 0.5 || newPeak < 0.0001 {
+            hearLog("声音克隆：降噪后声音太小，改用原始参考音频", .warning)
+            return samples
         }
         return out
+    }
+
+    /// 一段声音的最大绝对值
+    private static func peak(of samples: [Float]) -> Float {
+        var p: Float = 0
+        for s in samples { let a = abs(s); if a > p { p = a } }
+        return p
     }
 
     /// 把声音调整到能听见的音量，并去掉头尾的咔哒声

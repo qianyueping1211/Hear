@@ -858,7 +858,26 @@ final class LiveSession: ObservableObject {
         if case .downloading(let n, _) = phase, n == name { phase = .downloading(name, p) }
     }
 
+    /// 正在加载模型的次数（>0 说明还有模型在加载）
+    private var modelLoadCount = 0
+    /// 每次加载的编号：只有最新那次的结果算数，旧的不要覆盖状态
+    private var loadGen = 0
+
+    /// 是不是还有模型在加载（识别/翻译都算）。
+    /// 声音克隆不算：克隆在加载的时候是"等它加载完再开始"，不是不让开始。
+    var isAnyModelLoading: Bool {
+        if isLoadingPhase { return true }
+        return modelLoadCount > 0
+    }
+
     func loadModels() async {
+        // 每次加载都拿一个新编号：同时来了好几次加载（换引擎、下载完成等）时，
+        // 只有最后一次的结果算数，不然旧的那次会先把"加载完成"提示弹出来，
+        // 但其实还有模型在加载，一按翻译键又被拦下。
+        loadGen += 1
+        let gen = loadGen
+        modelLoadCount += 1
+        defer { modelLoadCount -= 1 }
         let need = Self.engineNeeds(asrEngine)
         let wf = ModelManager.whisperFolder()
         let sf = SenseVoiceRecognizer.installedFolder()
@@ -879,7 +898,10 @@ final class LiveSession: ObservableObject {
         let needSV = need.sense && !svLoaded
         let mtLoaded = await translator.isLoaded
         let needMT = needLocalMT && !mtLoaded
-        if !needASR && !needSV && !needMT { phase = .ready; return }
+        if !needASR && !needSV && !needMT {
+            if gen == loadGen { phase = .ready }
+            return
+        }
         // 加载识别和翻译模型前，先等声音克隆结束再卸掉：
         // 声音克隆（约 3 GB）和识别/翻译模型一起加载，App 的内存额度会被撑爆，直接被系统杀掉
         cloneLoadTask?.cancel()
@@ -911,17 +933,46 @@ final class LiveSession: ObservableObject {
                 }
                 var msg = "正在准备模型 · \(secs) 秒"
                 if needASR && !gpu && secs > 20 { msg += " · 神经引擎第一次要编译，可能要几分钟" }
-                if case .loading = phase { phase = .loading(msg) }
+                // 旧的加载任务别去改状态（新一轮加载已经在跑了）
+                if gen == loadGen, case .loading = phase { phase = .loading(msg) }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
         defer { ticker.cancel() }
-        phase = .loading("正在准备模型…")
+        if gen == loadGen { phase = .loading("正在准备模型…") }
         do {
             // 一个一个加载：同时加载几个大模型，内存峰值太高会被系统强制退出
             try await loadMTIfNeeded(needMT, path: ModelManager.currentGGUF()?.path ?? "")
             try await loadSVIfNeeded(needSV, folder: sf)
             try await loadASRIfNeeded(needASR, folder: wf, gpu: gpu)
+            // 又来了新的加载任务：这次的结果作废，交给新的那次去设状态
+            guard gen == loadGen else {
+                hearLog("有新的模型加载任务，忽略这次的结果", .warning)
+                return
+            }
+            // 声音克隆是单独一个任务，可能还在加载：等它好了再说"可以开始翻译"
+            if voiceClone, !voiceCloneCloud {
+                var busy = cloneLoading
+                if await cloner.isLoading { busy = true }
+                var waited = 0
+                while busy, waited < 120 {
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    busy = cloneLoading
+                    if await cloner.isLoading { busy = true }
+                    waited += 1
+                }
+                if busy {
+                    hearLog("声音克隆还在加载，先不提示可以开始翻译", .warning)
+                    return
+                }
+            }
+            // 弹提示之前再确认一次：真的没有别的模型在加载了。
+            // 不然会先弹"可以开始翻译"，用户一按又被打回"还在加载中"。
+            // modelLoadCount 是 1 = 只有我自己在跑
+            if modelLoadCount > 1 {
+                hearLog("还有别的模型在加载，先不提示可以开始翻译", .warning)
+                return
+            }
             phase = .ready
             hearLog("全部就绪，用时 \(Int(Date().timeIntervalSince(start)))s，可用内存 \(Self.freeMB()) MB")
             // 加载好了，提示一下（5 秒；用户按了按钮就立刻消失）
@@ -930,7 +981,9 @@ final class LiveSession: ObservableObject {
         } catch {
             hearLog("模型加载失败：\(error)", .error)
             if isRunning { stop(readAfter: false) }
-            phase = .failed("模型加载失败：\(error.localizedDescription)\n可以在 设置 → 运行日志 查看详情。")
+            if gen == loadGen {
+                phase = .failed("模型加载失败：\(error.localizedDescription)\n可以在 设置 → 运行日志 查看详情。")
+            }
         }
     }
 
@@ -1109,7 +1162,9 @@ final class LiveSession: ObservableObject {
             return false
         }
         // 本地模型还没加载好：不开始，在按钮上方提示一下
-        if isLoadingPhase {
+        // 用 isAnyModelLoading（把声音克隆也算进去），不然刚提示"可以开始翻译"、
+        // 其实还有模型在加载的时候，一按就说不让开始
+        if isAnyModelLoading {
             showToast("本地模型正在加载，请稍等…", seconds: 5)
             return false
         }
