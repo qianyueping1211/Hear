@@ -85,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\你的用户名\Downloads\Hea
       http://192.168.1.10:8000
 ```
 
-所有下载的东���都在 `server\bin`（llama.cpp）和 `server\models`（模型）里，删了重跑就重新下。
+所有下载的东西都在 `server\bin`（llama.cpp）和 `server\models`（模型）里，删了重跑就重新下。
 日志在 `server\mt.log`（翻译）和 `server\clone.log`（克隆）。
 
 ### 想换后端
