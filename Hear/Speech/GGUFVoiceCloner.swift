@@ -325,7 +325,9 @@ actor GGUFVoiceCloner {
 
         // 1) 参考音频编码成 bitmap（语音 tokenizer 编码）
         //    mtmd 的接口要文件路径，这里先把 16 kHz PCM 写成临时 wav
-        let refPath = try writeTempWav(samples: reference, sampleRate: 16000)
+        //    克隆会把参考音频里的环境音也一起学过去，先降一遍噪
+        let cleanRef = Self.denoise(reference)
+        let refPath = try writeTempWav(samples: cleanRef, sampleRate: 16000)
         defer { try? FileManager.default.removeItem(atPath: refPath) }
 
         var opt = mtmd_helper_init_opt_default()
@@ -426,7 +428,7 @@ actor GGUFVoiceCloner {
 
         // 参考音频也要看一眼：麦克风没录到东西的话，克隆出来的声音也是没声音的
         var refPeak: Float = 0
-        for s in reference { let a = abs(s); if a > refPeak { refPeak = a } }
+        for s in cleanRef { let a = abs(s); if a > refPeak { refPeak = a } }
         hearLog("声音克隆（\(usingGPU ? "GPU" : "CPU")）：生成 \(String(format: "%.1f", secs)) 秒声音（\(rate) Hz），"
                 + "参考音频 \(String(format: "%.1f", Double(reference.count) / 16000)) 秒 峰值 \(String(format: "%.3f", refPeak))，"
                 + "用时 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
@@ -440,6 +442,56 @@ actor GGUFVoiceCloner {
             throw VoiceCloneGGUFError.generateFailed("生成的声音是静音")
         }
         return CloneAudio(samples: norm.pcm, sampleRate: rate)
+    }
+
+    /// 简单降噪参考音频：
+    /// 1) 一阶高通（80 Hz）去掉隆隆声和直流偏置
+    /// 2) 按 20 ms 一段估底噪，把比底噪还安静的部分压下去（环境音里的大多是这种）
+    /// 语音本身基本不动，所以不会把说话声也削掉。
+    static func denoise(_ samples: [Float], sampleRate: Int = 16_000) -> [Float] {
+        guard samples.count > 512 else { return samples }
+        var out = [Float](repeating: 0, count: samples.count)
+        // 高通
+        let dt = 1.0 / Float(sampleRate)
+        let rc = 1.0 / (2.0 * Float.pi * 80.0 * Float(sampleRate))
+        let a = rc / (rc + dt)
+        var prevIn: Float = 0
+        var prevOut: Float = 0
+        for i in samples.indices {
+            let x = samples[i]
+            let y = a * (prevOut + x - prevIn)
+            out[i] = y
+            prevIn = x
+            prevOut = y
+        }
+        // 底噪估计：20 ms 一段，取能量较低的 20% 当底噪
+        let win = max(1, sampleRate / 50)
+        var levels: [Float] = []
+        var i = 0
+        while i + win <= out.count {
+            var sum: Float = 0
+            for k in i..<(i + win) { sum += out[k] * out[k] }
+            levels.append(sqrt(sum / Float(win)))
+            i += win
+        }
+        guard !levels.isEmpty else { return out }
+        let sorted = levels.sorted()
+        let idx = max(0, Int(Double(sorted.count) * 0.2) - 1)
+        let floorLevel = sorted[idx]
+        let gate = max(floorLevel * 1.8, 0.003)
+        // 比底噪还安静的部分压下去（最多压到三成，不是一刀切）
+        var j = 0
+        while j + win <= out.count {
+            var sum: Float = 0
+            for k in j..<(j + win) { sum += out[k] * out[k] }
+            let rms = sqrt(sum / Float(win))
+            if rms < gate, gate > 0 {
+                let k = 0.3 + 0.7 * (rms / gate)
+                for idx2 in j..<(j + win) { out[idx2] *= k }
+            }
+            j += win
+        }
+        return out
     }
 
     /// 把声音调整到能听见的音量，并去掉头尾的咔哒声

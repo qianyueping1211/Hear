@@ -146,6 +146,12 @@ struct SettingsView: View {
                                 }
                             }
                         }
+                        if session.voiceClone {
+                            Button("清空声音克隆缓存") {
+                                Task { await CloneCache.shared.clear() }
+                            }
+                            .font(.footnote)
+                        }
                     } else {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("服务地址").font(.subheadline)

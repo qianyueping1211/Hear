@@ -1982,16 +1982,21 @@ final class LiveSession: ObservableObject {
         // 放 CPU 跑的时候慢一些，多给点时间
         let cloneWait: UInt64 = cloneOnCPU ? 40_000_000_000 : 20_000_000_000
         var cloned: CloneAudio?
-        if voiceClone, let t = cloneTasks[item.id] ?? prepareClone(item.id) {
-            if cloneTasks[item.id] == nil { cloneTasks[item.id] = t }
-            cloned = await withTaskGroup(of: CloneAudio?.self) { g in
-                g.addTask { await t.value }
-                g.addTask { try? await Task.sleep(nanoseconds: cloneWait); return nil }
-                let first = await g.next() ?? nil
-                g.cancelAll()
-                return first
+        if voiceClone {
+            // ?? 的右边不能带 await（自动闭包里不支持异步），所以分开写
+            var task = cloneTasks[item.id]
+            if task == nil { task = await prepareClone(item.id) }
+            if let t = task {
+                if cloneTasks[item.id] == nil { cloneTasks[item.id] = t }
+                cloned = await withTaskGroup(of: CloneAudio?.self) { g in
+                    g.addTask { await t.value }
+                    g.addTask { try? await Task.sleep(nanoseconds: cloneWait); return nil }
+                    let first = await g.next() ?? nil
+                    g.cancelAll()
+                    return first
+                }
+                if Task.isCancelled { return }
             }
-            if Task.isCancelled { return }
         }
         hearLog("朗读：\(item.target.displayName)，\(outputMode == .speaker ? "扬声器" : (pan < 0 ? "左耳" : (pan > 0 ? "右耳" : "双耳")))，\(cloned != nil ? "克隆原声" : "系统声音")")
         if mute { capture.muted = true }
@@ -2051,7 +2056,7 @@ final class LiveSession: ObservableObject {
         items[i].done = done
         // 译文定稿后马上在后台生成克隆声音，轮到朗读时就不用等
         if done, voiceClone, speakOutput, changed || cloneTasks[id] == nil {
-            cloneTasks[id] = prepareClone(id)
+            cloneTasks[id] = await prepareClone(id)
         }
     }
 
@@ -2227,13 +2232,25 @@ final class LiveSession: ObservableObject {
         }
     }
 
+    /// 声音克隆的缓存键：语言 + 文字。
+    /// v2 = 参考音频降噪之后的效果（换了降噪方式缓存要重算）
+    private func cloneCacheKey(lang: String, text: String) -> String {
+        "v2|\(lang)|\(text)"
+    }
+
     /// 在后台生成这句译文的克隆声音；没有样本、不支持这种语言或模型没加载时返回 nil
-    private func prepareClone(_ id: UUID) -> Task<CloneAudio?, Never>? {
+    private func prepareClone(_ id: UUID) async -> Task<CloneAudio?, Never>? {
         guard let ref = cloneRefs[id],
               let item = items.first(where: { $0.id == id }),
               !item.translated.isEmpty, !item.translated.hasPrefix("（翻译失败"),
               VoiceCloneGGUF.languageNames[item.target.id] != nil else { return nil }
         let text = item.translated, lang = item.target.id
+        let key = Self.cloneCacheKey(lang: lang, text: text)
+        // 之前生成过一样的，直接拿来放，不用再等模型算一遍
+        if let cached = await CloneCache.shared.get(key) {
+            hearLog("声音克隆：命中缓存，直接播放")
+            return Task<CloneAudio?, Never> { cached }
+        }
         let cloner = self.cloner
         let cloud = self.cloud
         let useCloud = usingCloudClone
@@ -2246,10 +2263,14 @@ final class LiveSession: ObservableObject {
                     let out = try await cloud.clone(text: text, lang: cloudLang,
                                                     reference: ref.samples, referenceText: ref.text)
                     hearLog("声音克隆（云端）：生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
+                    await CloneCache.shared.put(key, out)
                     return out
                 }
-                return try await cloner.synthesize(text: text, language: lang,
-                                                   reference: ref.samples, referenceText: ref.text)
+                let out = try await cloner.synthesize(text: text, language: lang,
+                                                      reference: ref.samples, referenceText: ref.text)
+                // 存进缓存，下次同一句话直接播放
+                await CloneCache.shared.put(key, out)
+                return out
             } catch {
                 hearLog("声音克隆生成失败：\(error)", .error)
                 return nil
