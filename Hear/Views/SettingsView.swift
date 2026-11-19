@@ -33,13 +33,12 @@ struct SettingsView: View {
             Image(systemName: icon).foregroundStyle(.secondary)
             Text(title)
             Spacer()
+            // 状态和"配置"的字体、字号跟左边的名字统一，不要一小一大
             Text(status)
-                .font(.footnote)
                 .foregroundStyle(status == "正常" ? Color.green
                                   : (status == "异常" ? Color.orange : Color.secondary))
             Button("配置", action: onConfig)
                 .buttonStyle(.borderless)
-                .font(.footnote)
         }
     }
 
@@ -108,28 +107,30 @@ struct SettingsView: View {
                 // MARK: 模型管理（本地模型 / 在线模型）
                 Section {
                     // 自己做的页签：系统 Picker 在 Form 里太矮，点起来也不舒服。
-                    // 下面的横线左边跟"本地模型"这几个字对齐，不要缩在字的中间
-                    HStack(alignment: .bottom, spacing: 24) {
+                    // 选中用浅色底表示，不要再画横线（横线和 Form 的分隔线混在一起很乱）
+                    HStack(spacing: 8) {
                         ForEach(0..<2, id: \.self) { i in
                             Button {
                                 withAnimation(.easeInOut(duration: 0.15)) { modelTab = i }
                                 if i == 1 { Task { await session.refreshCloudStatus() } }
                             } label: {
-                                VStack(spacing: 6) {
-                                    Text(i == 0 ? "本地模型" : "在线模型")
-                                        .font(.subheadline.weight(modelTab == i ? .semibold : .regular))
-                                        .foregroundStyle(modelTab == i ? Color.accentColor : Color.secondary)
-                                    // 选中项下面的一条线：左边跟文字对齐
-                                    Rectangle()
-                                        .fill(modelTab == i ? Color.accentColor : Color.clear)
-                                        .frame(height: 2)
-                                }
-                                .frame(minHeight: 40)
+                                Text(i == 0 ? "本地模型" : "在线模型")
+                                    .font(.subheadline.weight(modelTab == i ? .semibold : .regular))
+                                    .foregroundStyle(modelTab == i ? Color.accentColor : Color.secondary)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 7)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .fill(modelTab == i ? Color.accentColor.opacity(0.14) : Color.clear)
+                                    )
+                                    .contentShape(RoundedRectangle(cornerRadius: 8))
                             }
                             .buttonStyle(.plain)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    // 页签和下面第一行之间不要有横线
+                    .listRowSeparator(.hidden)
 
                     if modelTab == 0 {
                         modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
@@ -154,8 +155,8 @@ struct SettingsView: View {
                             .font(.footnote)
                         }
                     } else {
-                        // 服务（三个模型共用的地址）
-                        cloudRow(title: "服务", icon: "server.rack",
+                        // 通用服务地址（三个模型共用的地址）
+                        cloudRow(title: "通用服务地址", icon: "server.rack",
                                  status: session.cloudServiceStatusText) {
                             cloudEdit = .service
                         }
@@ -637,7 +638,7 @@ enum CloudEdit: Identifiable, Hashable {
 
     var title: String {
         switch self {
-        case .service: return "服务"
+        case .service: return "通用服务地址"
         case .model(let m): return m.title
         }
     }
