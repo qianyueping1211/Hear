@@ -16,6 +16,8 @@
 # 不需要 Visual Studio、不需要编译、不需要 WSL。
 
 $ErrorActionPreference = "Stop"
+$tempCloud = $null      # 临时服务进程（出错时要停掉）
+$cloud = $null          # 正式服务进程
 $ServerDir = $PSScriptRoot                                  # ...\Hear\server
 $RepoRoot  = Split-Path -Parent $ServerDir                 # ...\Hear
 $ModelDir  = Join-Path $ServerDir "models"
@@ -32,6 +34,13 @@ $Context   = if ($env:HEAR_CTX)        { $env:HEAR_CTX }        else { "4096" }
 $HF        = if ($env:HF_ENDPOINT)     { $env:HF_ENDPOINT }     else { "https://huggingface.co" }
 
 trap {
+    # 出错了就把临时服务也停掉，别留下一个占着 8000 端口的孤儿
+    if ($tempCloud -and -not $tempCloud.HasExited) {
+        try { Stop-Process -Id $tempCloud.Id -Force } catch {}
+    }
+    if ($cloud -and -not $cloud.HasExited) {
+        try { Stop-Process -Id $cloud.Id -Force } catch {}
+    }
     Write-Host ""
     Write-Host "!! 出错了：$_" -ForegroundColor Red
     Write-Host "   网络问题的话换个网络/代理再跑一次就行，已经下好的东西不会重下。" -ForegroundColor Red
@@ -85,6 +94,12 @@ function Show-LanInfo($port) {
 
 Say "仓库目录：$RepoRoot"
 Say "模型目录：$ModelDir"
+
+# 上一次没关窗口的话，8000 端口还被占着，先提醒一下
+$busy0 = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+if ($busy0) {
+    Write-Host "    （端口 $Port 已经被占着，可能是上次的服务还在跑；下面会处理）" -ForegroundColor DarkGray
+}
 New-Item -ItemType Directory -Force -Path $ModelDir, $BinDir | Out-Null
 
 # 先把手机要填的地址打印出来，不用等模型下完
@@ -135,6 +150,54 @@ function Server-For($backend) {
     }
 }
 
+# ---------------------------------------------------------------- Python（识别模型）
+function Find-Python {
+    $venv = Join-Path $ServerDir ".venv\Scripts\python.exe"
+    if (Test-Path $venv) { return $venv }
+    foreach ($cand in @("python", "python3", "py")) {
+        $cmd = Get-Command $cand -ErrorAction SilentlyContinue
+        if (-not $cmd) { continue }
+        # 微软商店的假 python（会弹商店窗口）跳过
+        if ($cmd.Source -like "*WindowsApps*") { continue }
+        try {
+            $v = (& $cand --version 2>&1) -join " "
+            if ($v -match "Python 3\.") { return $cand }
+        } catch {}
+    }
+    return $null
+}
+$py = Find-Python
+if (-not $py) {
+    Die "没找到 Python。请到 https://www.python.org/downloads/windows/ 装 Python 3.9 以上（安装时勾上 Add python.exe to PATH），装完重开 PowerShell 再跑。"
+}
+# ---------------------------------------------------------------- 先起个临时服务
+# hear_cloud.py 只用标准库就能跑（识别模型是懒加载的），
+# 所以先用系统 Python 把它起起来，几秒钟后就能在手机浏览器上测网络了，
+# 不用等 llama.cpp 和几个 G 的模型下完。
+$cloudScript = Join-Path $ServerDir "hear_cloud.py"
+$tempCloud = $null
+$py0 = Find-Python
+if ($py0) {
+    $env:HEAR_PORT = $Port
+    $env:HEAR_MT_URL = "http://127.0.0.1:$MtPort"
+    $env:HEAR_CLONE_URL = "http://127.0.0.1:$ClonePort"
+    $env:HEAR_ASR_MODEL = $AsrModel
+    try {
+        $tempCloud = Start-Process -FilePath $py0 -ArgumentList "`"$cloudScript`"" `
+                        -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $ServerDir "cloud.log") `
+                        -RedirectStandardError (Join-Path $ServerDir "cloud.log.err")
+        Start-Sleep -Seconds 2
+        Say "临时服务已启动（端口 $Port），现在就能在手机浏览器上测网络"
+        Write-Host "    电脑浏览器： http://127.0.0.1:$Port/" -ForegroundColor Cyan
+        Write-Host "    手机浏览器：下面这些地址，随便挑一个能打开的" -ForegroundColor Cyan
+        Show-LanInfo $Port
+        Write-Host "  （模型还在下，下完之后会自动换成完整的服务）" -ForegroundColor DarkGray
+        Write-Host ""
+    } catch {
+        Step "临时服务没起来（不影响后面）"
+    }
+}
+
 # ---------------------------------------------------------------- llama.cpp
 $needOv   = ($MtDevice -eq "NPU")
 $needVulk = ($MtDevice -eq "GPU" -or $CloneDevice -eq "GPU")
@@ -175,26 +238,6 @@ if (-not (Find-Exe "llama-server.exe" "")) {
 }
 if (-not (Find-Exe "llama-server.exe" "")) { Die "没找到 llama-server.exe" }
 
-# ---------------------------------------------------------------- Python（识别模型）
-function Find-Python {
-    $venv = Join-Path $ServerDir ".venv\Scripts\python.exe"
-    if (Test-Path $venv) { return $venv }
-    foreach ($cand in @("python", "python3", "py")) {
-        $cmd = Get-Command $cand -ErrorAction SilentlyContinue
-        if (-not $cmd) { continue }
-        # 微软商店的假 python（会弹商店窗口）跳过
-        if ($cmd.Source -like "*WindowsApps*") { continue }
-        try {
-            $v = (& $cand --version 2>&1) -join " "
-            if ($v -match "Python 3\.") { return $cand }
-        } catch {}
-    }
-    return $null
-}
-$py = Find-Python
-if (-not $py) {
-    Die "没找到 Python。请到 https://www.python.org/downloads/windows/ 装 Python 3.9 以上（安装时勾上 Add python.exe to PATH），装完重开 PowerShell 再跑。"
-}
 Say "Python：$py"
 
 # venv 是一个"文件夹"，不是 python.exe 的路径（之前写错，venv 建到了 python.exe 上，
@@ -227,6 +270,22 @@ $env:HEAR_MT_URL = "http://127.0.0.1:$MtPort"
 $env:HEAR_CLONE_URL = "http://127.0.0.1:$ClonePort"
 $env:HEAR_ASR_MODEL = $AsrModel
 $cloudScript = Join-Path $ServerDir "hear_cloud.py"
+# 端口上可能还留着上一次跑的临时服务，先把它停掉再起正式的
+# （正式的服务用 venv 里的 Python，带 faster-whisper）
+$busy = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+if ($busy) {
+    foreach ($c in $busy) {
+        $owner = (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue)
+        if ($owner -and $owner.ProcessName -match "python") {
+            Step "停掉占着端口 $Port 的旧服务"
+            try { Stop-Process -Id $c.OwningProcess -Force } catch {}
+        }
+    }
+    Start-Sleep -Seconds 1
+}
+if ($tempCloud -and -not $tempCloud.HasExited) {
+    try { Stop-Process -Id $tempCloud.Id -Force } catch {}
+}
 $cloud = Start-Process -FilePath $venvPy -ArgumentList "`"$cloudScript`"" `
             -PassThru -NoNewWindow
 Start-Sleep -Seconds 3
