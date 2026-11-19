@@ -1938,7 +1938,7 @@ final class LiveSession: ObservableObject {
         // 模型还在加载：先把这句话留着，加载好马上识别
         if phase != .ready {
             // 上面已经有"正在准备模型 · N 秒"的提示了，这里不再重复
-            activity = nil
+            activity = ""
             while isLoadingPhase, gen == runGen {
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
