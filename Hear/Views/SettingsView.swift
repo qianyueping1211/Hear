@@ -854,7 +854,7 @@ struct CloudEditSheet: View {
                     text += "，\(m.title)：\(info.health[m.rawValue] ?? "就绪")"
                 }
                 // 不是用的自己填的那个地址，而是通用服务地址顶上的，说清楚
-                if okAddr != effectiveAddressText {
+                if okAddr != self.effectiveAddressText {
                     text += "（现在走的是通用服务地址）"
                 }
             }

@@ -56,16 +56,17 @@ final class CrashGuard {
 
     /// ObjC 异常（比如音频引擎的 precondition 失败）走这里
     private func installExceptionHandler() {
-        let previous = NSSetUncaughtExceptionHandler { exception in
+        // NSSetUncaughtExceptionHandler 的返回值在 Swift 里是 Void，
+        // 接不上系统原来那个处理程序，所以这里只负责把原因写进日志。
+        // 处理程序返回后，系统照样会终止 App（只是没有系统的崩溃报告文件），
+        // 我们自己的日志里有完整的调用栈，够查了。
+        NSSetUncaughtExceptionHandler { exception in
             let reason = exception.reason ?? "没有原因"
             let name = exception.name.rawValue
             let trace = exception.callStackSymbols.prefix(15).joined(separator: "\n")
             let text = "崩溃：\(name)\n原因：\(reason)\n调用栈：\n\(trace)\n"
             CrashGuard.shared.record(text)
-            // 交给原来的处理程序（系统会据此生成崩溃报告）
-            if let previous { previous(exception) }
         }
-        _ = previous
     }
 
     /// Swift 运行时的错误（数组越界、强制解包 nil 等）会发 SIGILL/SIGTRAP
