@@ -1912,13 +1912,15 @@ final class LiveSession: ObservableObject {
         AudioRoute.apply(outputMode)
         // 聆听中用扬声器读（只有点句子时才会）：暂停麦克风，避免把喇叭声音再识别一遍
         let mute = outputMode == .speaker && isRunning
-        // 声音克隆：等提前生成好的克隆声音（最多等 20 秒），没有就用系统声音
+        // 声音克隆：等提前生成好的克隆声音，没有就用系统声音。
+        // 放 CPU 跑的时候慢一些，多给点时间
+        let cloneWait: UInt64 = cloneOnCPU ? 40_000_000_000 : 20_000_000_000
         var cloned: [Float]?
         if voiceClone, let t = cloneTasks[item.id] ?? prepareClone(item.id) {
             if cloneTasks[item.id] == nil { cloneTasks[item.id] = t }
             cloned = await withTaskGroup(of: [Float]?.self) { g in
                 g.addTask { await t.value }
-                g.addTask { try? await Task.sleep(nanoseconds: 20_000_000_000); return nil }
+                g.addTask { try? await Task.sleep(nanoseconds: cloneWait); return nil }
                 let first = await g.next() ?? nil
                 g.cancelAll()
                 return first
