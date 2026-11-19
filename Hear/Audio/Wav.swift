@@ -13,7 +13,7 @@ enum Wav {
         func u32(_ v: UInt32) -> Data { var x = v.littleEndian; return withUnsafeBytes(of: &x) { Data($0) } }
         func u16(_ v: UInt16) -> Data { var x = v.littleEndian; return withUnsafeBytes(of: &x) { Data($0) } }
         data.append(contentsOf: Array("RIFF".utf8))
-        data.append(u32(36 + samples.count * 2))
+        data.append(u32(UInt32(36 + samples.count * 2)))
         data.append(contentsOf: Array("WAVE".utf8))
         data.append(contentsOf: Array("fmt ".utf8))
         data.append(u32(16))
@@ -24,7 +24,7 @@ enum Wav {
         data.append(u16(blockAlign))
         data.append(u16(bits))
         data.append(contentsOf: Array("data".utf8))
-        data.append(u32(n * 2))
+        data.append(u32(n &* 2))
         // 采样数据
         var pcm = [Int16](repeating: 0, count: samples.count)
         for i in samples.indices {

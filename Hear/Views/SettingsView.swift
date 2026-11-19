@@ -12,8 +12,12 @@ struct SettingsView: View {
     @ObservedObject private var llm = LLMSettings.shared
     @ObservedObject private var cloud = CloudSync.shared
     @State private var showCloudPicker = false
-    @State private var cloudStatus: String?
+    @State private var cloudTestResult: String?
     @State private var cloudBusy = false
+    /// 模型管理里的页签：0 = 本地模型，1 = 在线模型
+    @State private var modelTab = 0
+    /// 正在配置哪个在线模型
+    @State private var cloudEdit: CloudModel?
 
     private var cloudAddressBinding: Binding<String> {
         Binding(
@@ -26,11 +30,33 @@ struct SettingsView: View {
     @MainActor
     private func testCloud() {
         cloudBusy = true
-        cloudStatus = nil
+        cloudTestResult = nil
         Task {
             let s = await session.cloudHealth()
             cloudBusy = false
-            cloudStatus = s ?? "连不上：检查地址、端口和网络"
+            cloudTestResult = s ?? "连不上：检查地址、端口和网络"
+        }
+    }
+
+    /// 有云端引擎选了，但地址还没填
+    private var cloudMissingAddress: Bool {
+        for m in CloudModel.allCases where session.cloudEnabled(m) {
+            if session.cloudEffectiveAddress(m).isEmpty { return true }
+        }
+        return false
+    }
+
+    /// 在线模型里的一个：名字 + 接口状态 + 配置按钮
+    private func cloudRow(_ m: CloudModel) -> some View {
+        let st = session.cloudStatusText(m)
+        return HStack(spacing: 10) {
+            Image(systemName: m.icon).foregroundStyle(.secondary)
+            Text(m.title)
+            Spacer()
+            Text(st).font(.footnote).foregroundStyle(st == "就绪" ? Color.green : Color.secondary)
+            Button("配置") { cloudEdit = m }
+                .buttonStyle(.borderless)
+                .font(.footnote)
         }
     }
 
@@ -89,29 +115,58 @@ struct SettingsView: View {
                     if session.voiceClone, !session.voiceCloneCloud, !session.isInstalled(.voiceClone) {
                         Text("声音克隆模型还没下载").font(.footnote).foregroundStyle(.orange)
                     }
-                    if session.usingCloudASR || session.usingCloudMT || session.usingCloudClone {
-                        if session.cloudAddress.isEmpty {
-                            Text("选了云端引擎，但还没填云端模型地址").font(.footnote).foregroundStyle(.orange)
-                        }
+                    if cloudMissingAddress {
+                        Text("选了云端引擎，但还没填云端模型地址").font(.footnote).foregroundStyle(.orange)
                     }
                 } header: {
                     Text("引擎管理")
                 }
 
-                // MARK: 模型管理（语音识别 → 翻译 → 下载源）
+                // MARK: 模型管理（本地模型 / 在线模型）
                 Section {
-                    modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
-                             status: session.speechStatus)
-                    modelRow(.senseVoice, title: "语音识别（SenseVoice）", icon: "hare",
-                             status: session.senseStatus)
-                    modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
-                             status: session.translationStatus)
-                    modelRow(.voiceClone, title: "声音克隆（Qwen-TTS-VC）", icon: "person.wave.2",
-                             status: session.cloneStatus)
-                    if session.installedGGUFs.count > 1 {
-                        Picker("使用的翻译模型", selection: ggufSelection) {
-                            ForEach(session.installedGGUFs, id: \.self) { url in
-                                Text(url.lastPathComponent).tag(url.lastPathComponent)
+                    Picker("模型", selection: $modelTab) {
+                        Text("本地模型").tag(0)
+                        Text("在线模型").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+
+                    if modelTab == 0 {
+                        modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
+                                 status: session.speechStatus)
+                        modelRow(.senseVoice, title: "语音识别（SenseVoice）", icon: "hare",
+                                 status: session.senseStatus)
+                        modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
+                                 status: session.translationStatus)
+                        modelRow(.voiceClone, title: "声音克隆（Qwen-TTS-VC）", icon: "person.wave.2",
+                                 status: session.cloneStatus)
+                        if session.installedGGUFs.count > 1 {
+                            Picker("使用的翻译模型", selection: ggufSelection) {
+                                ForEach(session.installedGGUFs, id: \.self) { url in
+                                    Text(url.lastPathComponent).tag(url.lastPathComponent)
+                                }
+                            }
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("服务地址").font(.subheadline)
+                            TextField("http://192.168.1.10:8000", text: cloudAddressBinding)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .keyboardType(.URL)
+                            Text("三个模型默认都用这个地址，单个模型可以在「配置」里改。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        ForEach(CloudModel.allCases) { m in
+                            cloudRow(m)
+                        }
+                        HStack {
+                            Button("刷新状态") {
+                                Task { await session.refreshCloudStatus() }
+                            }
+                            if cloudBusy { ProgressView().controlSize(.small) }
+                            Spacer()
+                            if let s = cloudTestResult {
+                                Text(s).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
                             }
                         }
                     }
@@ -120,6 +175,10 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("模型管理")
+                } footer: {
+                    if modelTab == 1 {
+                        Text("自己电脑上跑的服务（仓库 server 目录里有安装说明和脚本）。手机和电脑要在同一个 Wi‑Fi 下，地址填电脑的局域网 IP。")
+                    }
                 }
 
                 // MARK: 语音识别（收音 → 断句 → 运行方式）
@@ -162,26 +221,6 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("翻译与总结")
-                }
-
-                // MARK: 云端模型（自己电脑上跑的服务）
-                Section {
-                    TextField("http://192.168.1.10:8000", text: cloudAddressBinding)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                    HStack {
-                        Button("测试连接") { testCloud() }
-                        if cloudBusy { ProgressView().controlSize(.small) }
-                        Spacer()
-                        if let s = cloudStatus {
-                            Text(s).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
-                        }
-                    }
-                } header: {
-                    Text("云端模型")
-                } footer: {
-                    Text("自己电脑上跑的服务（仓库 server 目录里有安装说明和脚本）。手机和电脑要在同一个 Wi‑Fi 下，地址填电脑的局域网 IP，例如 http://192.168.1.10:8000。三个模型各用各的接口，可以分别选本地或云端。")
                 }
 
                 // MARK: 朗读（出声 → 音色 → 耳机左右耳）
@@ -250,6 +289,13 @@ struct SettingsView: View {
             .sheet(isPresented: $showCloudPicker) {
                 CloudFolderPicker { url in cloud.setFolder(url) }
                     .ignoresSafeArea()
+            }
+            // 在线模型里某个模型的配置
+            .sheet(item: $cloudEdit) { m in
+                CloudModelSheet(model: m)
+            }
+            .onChange(of: modelTab) { _, t in
+                if t == 1 { Task { await session.refreshCloudStatus() } }
             }
             .navigationTitle("功能设置")
             .navigationBarTitleDisplayMode(.inline)
@@ -551,5 +597,82 @@ private struct ProcessingDots: View {
             .animation(.linear(duration: 2.4).repeatForever(autoreverses: false), value: spin)
             .onAppear { spin = true }
             .accessibilityHidden(true)
+    }
+}
+
+
+/// 在线模型里某个模型的配置：地址、开关、接口状态
+struct CloudModelSheet: View {
+    @EnvironmentObject var session: LiveSession
+    @Environment(\.dismiss) private var dismiss
+    let model: CloudModel
+
+    @State private var address: String = ""
+    @State private var enabled: Bool = false
+    @State private var status: String? = nil
+    @State private var busy = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Toggle("用云端模型", isOn: $enabled)
+                    TextField("接口地址（留空用默认）", text: $address)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                    HStack {
+                        Button("测试连接") { test() }
+                        if busy { ProgressView().controlSize(.small) }
+                        Spacer()
+                        if let s = status {
+                            Text(s).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    }
+                } header: {
+                    Text(model.title)
+                } footer: {
+                    Text("当前实际用的地址：\(session.cloudEffectiveAddress(model).isEmpty ? "还没填" : session.cloudEffectiveAddress(model))\n地址是电脑上那个服务的地址，手机和电脑要在同一个 Wi‑Fi 下。")
+                }
+            }
+            .navigationTitle("在线模型 · \(model.title)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { save(); dismiss() }
+                }
+            }
+            .onAppear {
+                address = session.cloudOwnAddress(model)
+                enabled = session.cloudEnabled(model)
+            }
+        }
+    }
+
+    private func save() {
+        session.setCloudOwnAddress(model, address)
+        session.setCloudEnabled(model, enabled)
+    }
+
+    /// 测一下这个地址通不通
+    private func test() {
+        busy = true
+        status = nil
+        let own = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = own.isEmpty ? session.cloudAddress : own
+        Task {
+            if target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                busy = false
+                status = "还没填地址"
+                return
+            }
+            let info = await CloudClient.healthInfo(address: target)
+            busy = false
+            if let info {
+                status = info[model.rawValue] ?? "已连接"
+            } else {
+                status = "连不上：检查地址、端口和防火墙"
+            }
+        }
     }
 }

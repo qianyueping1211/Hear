@@ -52,10 +52,18 @@ final class LiveSession: ObservableObject {
     @Published var cloudAddress: String {
         didSet {
             save("cloudAddress", cloudAddress)
-            let a = cloudAddress
-            Task { await cloud.setAddress(a) }
+            updateCloudAddresses()
         }
     }
+    /// 每个云端模型自己的接口地址（留空就用上面的默认地址）
+    @Published var cloudModelAddress: [String: String] = [:] {
+        didSet {
+            save("cloudModelAddress", cloudModelAddress)
+            updateCloudAddresses()
+        }
+    }
+    /// 云端服务返回的各模型状态（asr / mt / clone）
+    @Published private(set) var cloudStatus: [String: String] = [:]
     /// 声音克隆用云端模型（false = 用手机本地的 Qwen）
     @Published var voiceCloneCloud: Bool {
         didSet {
@@ -296,10 +304,17 @@ final class LiveSession: ObservableObject {
         voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
         voiceCloneCloud = d.object(forKey: "voiceCloneCloud") as? Bool ?? false
         cloudAddress = d.string(forKey: "cloudAddress") ?? ""
+        cloudModelAddress = d.object(forKey: "cloudModelAddress") as? [String: String] ?? [:]
         // init 里还没完全初始化，不能直接捕获 self
         let cloudClient = cloud
         let cloudAddr = cloudAddress
-        Task { await cloudClient.setAddress(cloudAddr) }
+        let cloudOwn = cloudModelAddress
+        Task {
+            await cloudClient.setAddresses(
+                asr: Self.effectiveAddress(fallback: cloudAddr, own: cloudOwn[CloudModel.asr.rawValue] ?? ""),
+                mt: Self.effectiveAddress(fallback: cloudAddr, own: cloudOwn[CloudModel.mt.rawValue] ?? ""),
+                clone: Self.effectiveAddress(fallback: cloudAddr, own: cloudOwn[CloudModel.clone.rawValue] ?? ""))
+        }
         asrUseGPU = d.object(forKey: "asrUseGPU") as? Bool ?? true
         // 引擎默认都用苹果自带（不用下载模型，打开就能用）
         let canApple = LiveTextEngineFactory.isSupported
@@ -1444,7 +1459,7 @@ final class LiveSession: ObservableObject {
             let r: (String, String)
             do {
                 if usingCloudASR {
-                    r = try await cloud.transcribe(clip, candidates: cands, fallback: fallback)
+                    r = try await cloud.transcribe(samples: clip, candidates: cands, fallback: fallback)
                 } else if sv {
                     r = try await sense.recognize(clip, candidates: cands, fallback: fallback)
                 } else {
@@ -1809,7 +1824,7 @@ final class LiveSession: ObservableObject {
             let sv = useSense
             let r: (String, String)
             if usingCloudASR {
-                r = try await cloud.transcribe(samples, candidates: cands, fallback: fallback)
+                r = try await cloud.transcribe(samples: samples, candidates: cands, fallback: fallback)
             } else if sv {
                 r = try await sense.recognize(samples, candidates: cands, fallback: fallback)
             } else {
@@ -2044,6 +2059,91 @@ final class LiveSession: ObservableObject {
 
     private static let clonePendingKey = "cloneLoadPending"
     private var cloneLoadTask: Task<Void, Never>?
+
+    /// 自己填的地址优先，没填就用默认地址
+    static func effectiveAddress(fallback def: String, own: String) -> String {
+        let o = own.trimmingCharacters(in: .whitespacesAndNewlines)
+        return o.isEmpty ? def : o
+    }
+
+    /// 把三个地址告诉客户端
+    private func updateCloudAddresses() {
+        let a = Self.effectiveAddress(fallback: cloudAddress, own: cloudOwnAddress(.asr))
+        let m = Self.effectiveAddress(fallback: cloudAddress, own: cloudOwnAddress(.mt))
+        let c = Self.effectiveAddress(fallback: cloudAddress, own: cloudOwnAddress(.clone))
+        Task { await cloud.setAddresses(asr: a, mt: m, clone: c) }
+    }
+
+    // MARK: - 在线模型（三个接口）
+
+    /// 这个模型现在是不是走云端
+    func cloudEnabled(_ model: CloudModel) -> Bool {
+        switch model {
+        case .asr: return usingCloudASR
+        case .mt: return usingCloudMT
+        case .clone: return usingCloudClone
+        }
+    }
+
+    /// 打开/关掉某个模型的云端
+    func setCloudEnabled(_ model: CloudModel, _ on: Bool) {
+        switch model {
+        case .asr:
+            if on { asrEngine = "cloud" }
+            else if asrEngine == "cloud" { asrEngine = "sensevoice" }
+        case .mt:
+            if on { translationEngine = "cloud" }
+            else if translationEngine == "cloud" { translationEngine = "local" }
+        case .clone:
+            voiceCloneCloud = on
+            if on { voiceClone = true }
+        }
+    }
+
+    /// 这个模型自己填的地址（空 = 用默认地址）
+    func cloudOwnAddress(_ model: CloudModel) -> String {
+        cloudModelAddress[model.rawValue] ?? ""
+    }
+
+    func setCloudOwnAddress(_ model: CloudModel, _ addr: String) {
+        var d = cloudModelAddress
+        if addr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            d.removeValue(forKey: model.rawValue)
+        } else {
+            d[model.rawValue] = addr
+        }
+        cloudModelAddress = d
+    }
+
+    /// 这个模型实际用的地址
+    func cloudEffectiveAddress(_ model: CloudModel) -> String {
+        Self.effectiveAddress(fallback: cloudAddress, own: cloudOwnAddress(model))
+    }
+
+    /// 界面上显示的状态
+    func cloudStatusText(_ model: CloudModel) -> String {
+        if !cloudEnabled(model) { return "未启用" }
+        if cloudEffectiveAddress(model).isEmpty { return "未配置" }
+        return cloudStatus[model.rawValue] ?? "未测试"
+    }
+
+    /// 刷新三个模型的状态
+    func refreshCloudStatus() async {
+        var groups: [String: [CloudModel]] = [:]
+        for m in CloudModel.allCases {
+            guard cloudEnabled(m) else { cloudStatus[m.rawValue] = "未启用"; continue }
+            let addr = cloudEffectiveAddress(m)
+            guard !addr.isEmpty else { cloudStatus[m.rawValue] = "未配置"; continue }
+            groups[addr, default: []].append(m)
+        }
+        for (addr, models) in groups {
+            if let info = await CloudClient.healthInfo(address: addr) {
+                for m in models { cloudStatus[m.rawValue] = info[m.rawValue] ?? "就绪" }
+            } else {
+                for m in models { cloudStatus[m.rawValue] = "连不上" }
+            }
+        }
+    }
 
     /// 连一下云端服务，看看三个模型的状态（连不上返回 nil）
     func cloudHealth() async -> String? {
