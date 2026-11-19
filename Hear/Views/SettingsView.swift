@@ -8,6 +8,10 @@ struct SettingsView: View {
     @State private var importKind: LiveSession.ModelKind?
     @State private var lastImportKind: LiveSession.ModelKind = .translation
     @State private var confirmKind: LiveSession.ModelKind?
+    /// 正在配置哪个本地模型
+    @State private var localEdit: LocalEdit?
+    /// 配置窗口里选了什么（下载 / 本地导入）
+    @State private var localEditAction: LocalEditAction?
     @ObservedObject private var log = AppLog.shared
     @ObservedObject private var llm = LLMSettings.shared
     @ObservedObject private var cloud = CloudSync.shared
@@ -36,6 +40,7 @@ struct SettingsView: View {
                 Image(systemName: Self.cloudStatusIcon(status, configured: configured))
                     .font(.title3)
                     .foregroundStyle(Self.cloudStatusColor(status, configured: configured))
+                    .frame(width: 34, height: 34)
                 // 配置：已配置 / 未配置，后面跟一个箭头
                 Button(action: onConfig) {
                     HStack(spacing: 4) {
@@ -48,10 +53,12 @@ struct SettingsView: View {
                 .buttonStyle(.plain)
             }
         } label: {
-            Label {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundStyle(.tint)
+                    .frame(width: 28)
                 Text(title)
-            } icon: {
-                Image(systemName: icon).foregroundStyle(.tint)
             }
         }
     }
@@ -335,6 +342,18 @@ struct SettingsView: View {
                     .presentationDetents([.medium])
                     .presentationDragIndicator(.visible)
             }
+            // 本地模型的配置窗口（下载 / 本地导入）
+            .sheet(item: $localEdit, onDismiss: { applyLocalEditAction() }) { e in
+                LocalModelSheet(kind: e.kind, title: e.title,
+                                installed: isInstalled(e.kind),
+                                onPick: { download in
+                                    localEditAction = download
+                                        ? .download(e.kind) : .importFile(e.kind)
+                                })
+                    .environmentObject(session)
+                    .presentationDetents([.medium])
+                    .presentationDragIndicator(.visible)
+            }
             .alert("设置冲突", isPresented: Binding(get: { conflictMessage != nil },
                                                    set: { if !$0 { conflictMessage = nil } })) {
                 Button("知道了", role: .cancel) { conflictMessage = nil }
@@ -504,52 +523,44 @@ struct SettingsView: View {
         let downloading = session.bgDownloadKind == kind
         let waiting = !downloading && session.bgDownloading && session.bgQueue.contains(kind)
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.title3)
-                    .foregroundStyle(.tint)
-                    .frame(width: 28)
-                Text(title)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                Spacer(minLength: 4)
-                // 状态：已下载是绿色对勾；没下载是灰色对勾；下载中（或排队等下载）灰色对勾外面转一圈灰点
-                ZStack {
-                    if status.installed && !downloading {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                    } else {
-                        Image(systemName: "checkmark.circle").foregroundStyle(.secondary)
-                        if downloading || waiting { ProcessingDots() }
+            LabeledContent {
+                HStack(spacing: 8) {
+                    // 状态：已下载是绿色对勾；没下载是灰色对勾；下载中（或排队等下载）灰色对勾外面转一圈灰点
+                    ZStack {
+                        if status.installed && !downloading {
+                            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                        } else {
+                            Image(systemName: "checkmark.circle").foregroundStyle(.secondary)
+                            if downloading || waiting { ProcessingDots() }
+                        }
                     }
+                    .font(.title3)
+                    .frame(width: 34, height: 34)
+                    .accessibilityLabel(downloading ? "正在下载" : (waiting ? "等待下载" : (status.installed ? "已下载" : "未下载")))
+                    // 配置（下载 / 重新下载、本地导入）
+                    Button {
+                        localEdit = .model(kind, title)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("配置")
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(session.isBusyWithModels)
                 }
-                .font(.title3)
-                .frame(width: 34, height: 34)
-                .accessibilityLabel(downloading ? "正在下载" : (waiting ? "等待下载" : (status.installed ? "已下载" : "未下载")))
-                // 下载 / 重新下载
-                Button {
-                    lastKind = kind
-                    confirmKind = kind
-                } label: {
-                    // 没有模型（包括正在下载）是下载图标；下载完成后变成刷新（重新下载）图标
-                    Image(systemName: status.installed && !downloading ? "arrow.clockwise" : "arrow.down.circle")
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: icon)
                         .font(.title3)
-                        .frame(width: 34, height: 34)
+                        .foregroundStyle(.tint)
+                        .frame(width: 28)
+                    Text(title)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
-                .buttonStyle(.borderless)
-                .disabled(session.isBusyWithModels)
-                .accessibilityLabel(status.installed ? "重新下载" : "下载")
-                // 导入（翻译模型选 .gguf 文件；语音识别、声音克隆选文件夹）
-                Button {
-                    lastImportKind = kind
-                    importKind = kind
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.title3)
-                        .frame(width: 34, height: 34)
-                }
-                .buttonStyle(.borderless)
-                .disabled(session.isBusyWithModels)
-                .accessibilityLabel("导入")
             }
             if downloading {
                 HStack(spacing: 8) {
@@ -572,6 +583,20 @@ struct SettingsView: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// 配置窗口关掉之后再做动作（免得跟窗口打架）
+    private func applyLocalEditAction() {
+        guard let a = localEditAction else { return }
+        localEditAction = nil
+        switch a {
+        case .download(let k):
+            lastKind = k
+            confirmKind = k
+        case .importFile(let k):
+            lastImportKind = k
+            importKind = k
+        }
     }
 
     private var translationEngineBinding: Binding<String> {
@@ -812,6 +837,81 @@ struct CloudEditSheet: View {
             }
             busy = false
             status = text
+        }
+    }
+}
+
+// MARK: - 本地模型的配置窗口
+
+/// 要配置哪个本地模型
+enum LocalEdit: Identifiable, Hashable {
+    case model(LiveSession.ModelKind, String)
+
+    var id: String {
+        switch self {
+        case .model(let k, _): return String(describing: k)
+        }
+    }
+    var kind: LiveSession.ModelKind {
+        switch self {
+        case .model(let k, _): return k
+        }
+    }
+    var title: String {
+        switch self {
+        case .model(_, let t): return t
+        }
+    }
+}
+
+/// 配置窗口里选了什么
+enum LocalEditAction {
+    case download(LiveSession.ModelKind)
+    case importFile(LiveSession.ModelKind)
+}
+
+/// 本地模型的配置：下载 / 重新下载、本地导入
+struct LocalModelSheet: View {
+    @EnvironmentObject var session: LiveSession
+    @Environment(\.dismiss) private var dismiss
+    let kind: LiveSession.ModelKind
+    let title: String
+    let installed: Bool
+    /// true = 下载 / 重新下载，false = 本地导入
+    let onPick: (Bool) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Button {
+                        onPick(true)
+                        dismiss()
+                    } label: {
+                        Label(installed ? "重新下载" : "下载",
+                              systemImage: installed ? "arrow.clockwise" : "arrow.down.circle")
+                    }
+                    Button {
+                        onPick(false)
+                        dismiss()
+                    } label: {
+                        Label("本地导入", systemImage: "square.and.arrow.up")
+                    }
+                } header: {
+                    Text(title)
+                } footer: {
+                    Text(kind == .translation
+                         ? "本地导入：选一个 .gguf 模型文件。"
+                         : "本地导入：选这个模型的文件夹。")
+                }
+            }
+            .navigationTitle("配置")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+            }
         }
     }
 }

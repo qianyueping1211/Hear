@@ -43,9 +43,52 @@ function Say($t)  { Write-Host "==> $t" -ForegroundColor Cyan }
 function Step($t) { Write-Host "    $t" -ForegroundColor DarkGray }
 function Die($t)  { Write-Host "!! $t" -ForegroundColor Red; exit 1 }
 
+# 列出网卡（WLAN / 以太网）各自的 IP，让用户挑一个填到手机里。
+# 不能随便取第一个：VPN、虚拟网卡、WSL 的地址都可能出现，手机连不上。
+function Show-LanInfo($port) {
+    $all = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+           Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" }
+    $ifaces = Get-NetAdapter -ErrorAction SilentlyContinue
+    $choices = @()
+    foreach ($a in $all) {
+        $ad = $ifaces | Where-Object { $_.ifIndex -eq $a.InterfaceIndex } | Select-Object -First 1
+        if (-not $ad) { continue }
+        # 虚拟网卡（VPN、WSL、Hyper-V、VMware 等）不要
+        if ($ad.Name -match "vEthernet|WSL|VMware|VirtualBox|Tailscale|Loopback|Tunnel|VPN|Hyper-V") { continue }
+        # NdisPhysicalMedium: 1 = 802.3（以太网），9 / 15 = 无线（802.11）
+        $kind = "其它"
+        if ($ad.NdisPhysicalMedium -eq 9 -or $ad.NdisPhysicalMedium -eq 15) { $kind = "WLAN" }
+        elseif ($ad.NdisPhysicalMedium -eq 1 -or $ad.InterfaceDescription -match "Ethernet|以太网") { $kind = "以太网" }
+        $choices += [PSCustomObject]@{ Kind = $kind; Name = $ad.Name; IP = $a.IPAddress }
+    }
+    Write-Host ""
+    Say "云端服务监听 0.0.0.0:$port"
+    Write-Host ""
+    if ($choices.Count -eq 0) {
+        Write-Host "  没有找到可用的局域网 IP。" -ForegroundColor Yellow
+        Write-Host "  请确认电脑已经连上 Wi-Fi 或插了网线，然后重新运行本文件。" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "  手机 App 里「功能设置 → 模型管理 → 在线模型 → 通用服务地址」填：" -ForegroundColor Green
+        Write-Host ""
+        $i = 1
+        foreach ($c in $choices) {
+            Write-Host ("      {0}. {1,-8} {2}   http://{3}:{4}" -f $i, $c.Kind, $c.Name, $c.IP, $port) -ForegroundColor Green
+            $i++
+        }
+        Write-Host ""
+        Write-Host "  （手机和电脑要连同一个 Wi-Fi）" -ForegroundColor DarkGray
+    }
+    Write-Host ""
+}
+
+
 Say "仓库目录：$RepoRoot"
 Say "模型目录：$ModelDir"
 New-Item -ItemType Directory -Force -Path $ModelDir, $BinDir | Out-Null
+
+# 先把手机要填的地址打印出来，不用等模型下完
+Show-LanInfo $Port
 
 # ---------------------------------------------------------------- 下载解压
 # 网络不通的时候换别的办法再来一遍，不要一失败就整个退出。
@@ -247,42 +290,7 @@ $env:HEAR_MT_URL = "http://127.0.0.1:$MtPort"
 $env:HEAR_CLONE_URL = "http://127.0.0.1:$ClonePort"
 $env:HEAR_ASR_MODEL = $AsrModel
 
-# 列出网卡（WLAN / 以太网）各自的 IP，让用户挑一个填到手机里。
-# 不能随便取第一个：VPN、虚拟网卡、WSL 的地址都可能出现，手机连不上。
-$all = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-       Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" }
-$ifaces = Get-NetAdapter -ErrorAction SilentlyContinue
-$choices = @()
-foreach ($a in $all) {
-    $ad = $ifaces | Where-Object { $_.ifIndex -eq $a.InterfaceIndex } | Select-Object -First 1
-    if (-not $ad) { continue }
-    # 虚拟网卡（VPN、WSL、Hyper-V、VMware 等）不要
-    if ($ad.Name -match "vEthernet|WSL|VMware|VirtualBox|Tailscale|Loopback|Tunnel|VPN|Hyper-V") { continue }
-    # NdisPhysicalMedium: 1 = 802.3（以太网），9 / 15 = 无线（802.11）
-    $kind = "其它"
-    if ($ad.NdisPhysicalMedium -eq 9 -or $ad.NdisPhysicalMedium -eq 15) { $kind = "WLAN" }
-    elseif ($ad.NdisPhysicalMedium -eq 1 -or $ad.InterfaceDescription -match "Ethernet|以太网") { $kind = "以太网" }
-    $choices += [PSCustomObject]@{ Kind = $kind; Name = $ad.Name; IP = $a.IPAddress }
-}
-
-Write-Host ""
-Say "云端服务监听 0.0.0.0:$Port"
-Write-Host ""
-if ($choices.Count -eq 0) {
-    Write-Host "  没有找到可用的局域网 IP。" -ForegroundColor Yellow
-    Write-Host "  请确认电脑已经连上 Wi-Fi 或插了网线，然后重新运行本文件。" -ForegroundColor Yellow
-}
-else {
-    Write-Host "  手机 App 里「功能设置 → 模型管理 → 在线模型」填：" -ForegroundColor Green
-    Write-Host ""
-    $i = 1
-    foreach ($c in $choices) {
-        Write-Host ("      {0}. {1,-8} {2}   http://{3}:{4}" -f $i, $c.Kind, $c.Name, $c.IP, $Port) -ForegroundColor Green
-        $i++
-    }
-    Write-Host ""
-    Write-Host "  （手机和电脑要连同一个 Wi-Fi）" -ForegroundColor DarkGray
-}
+Show-LanInfo $Port
 Write-Host ""
 Write-Host "  防火墙放行（用管理员 PowerShell 执行一次）："
 Write-Host "      New-NetFirewallRule -DisplayName `"Hear Cloud`" -Direction Inbound -LocalPort $Port,$MtPort,$ClonePort -Protocol TCP -Action Allow"
