@@ -9,6 +9,31 @@
 | 文本翻译 | Hy-MT2 (GGUF) | llama.cpp 的 `llama-server` |
 | 声音克隆 | Qwen3-TTS (GGUF) | llama.cpp 的 `llama-server`（`/tts` 接口，带参考音频克隆音色） |
 
+## 三个模型分别是怎么起来的
+
+启动的时候你会看到两行 `==>`：
+
+```
+==> 起翻译模型（Hy-MT2，后端 GPU，端口 8081）
+==> 起声音克隆模型（Qwen3-TTS，后端 GPU，端口 8082）
+```
+
+**语音识别没有这一行**，因为它不是独立进程：它跑在 8000 端口那个 Python 服务里
+（`hear_cloud.py`），用 faster-whisper，默认 `small` 模型、CPU int8。
+
+而且**识别模型的权重不在"下载模型"那一步**——脚本只下三个 GGUF（翻译、克隆、克隆的 mmproj），
+faster-whisper 的模型是**服务启动后在后台下载**的（几百 MB，缓存到
+`C:\Users\你的用户名\.cache\huggingface`，只下一次）。
+
+所以：
+
+- 刚起来的头几分钟，手机 App 里「语音识别」那一行会显示**异常**，
+  打开「配置 → 测试连接」能看到服务端回的是 `加载中（第一次要下识别模型）`，
+  等模型下完就变成**正常**了。这是正常的，不是配错了。
+- 想快一点可以把模型改小：`set HEAR_ASR_MODEL=tiny` 或 `base`（识别准确率会差一些）。
+- 想用别的识别服务（比如 whisper.cpp 的 whisper-server）：
+  `set HEAR_ASR_URL=http://127.0.0.1:8083`，设了以后就不装 faster-whisper 了。
+
 ## 先说硬件：CUDA、NPU、核显怎么选
 
 | 你的机器 | 能用哪个后端 |

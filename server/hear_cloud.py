@@ -50,6 +50,9 @@ TEMPERATURE = float(os.environ.get("HEAR_TEMPERATURE", "0.7"))
 
 _whisper = None
 _whisper_lock = threading.Lock()
+# 识别模型的状态：未加载 / 加载中 / 就绪 / 失败
+# 加载放在后台线程里，/health 不用等它（第一次要下载模型，要等好几分钟）
+_whisper_state = {"status": "未加载", "detail": ""}
 
 
 def log(*args):
@@ -68,12 +71,43 @@ def get_whisper():
             try:
                 from faster_whisper import WhisperModel
             except Exception as e:      # 没装 faster-whisper
-                log("没有装 faster-whisper，语音识别用不了：", e)
+                _whisper_state["status"] = "失败"
+                _whisper_state["detail"] = "没有装 faster-whisper：%s" % e
+                log(_whisper_state["detail"])
                 raise
-            log("正在加载识别模型", ASR_MODEL, "…")
-            _whisper = WhisperModel(ASR_MODEL, device=ASR_DEVICE, compute_type=ASR_COMPUTE)
+            _whisper_state["status"] = "加载中"
+            log("正在加载识别模型", ASR_MODEL, "…（第一次要下载模型，等一会儿）")
+            try:
+                _whisper = WhisperModel(ASR_MODEL, device=ASR_DEVICE, compute_type=ASR_COMPUTE)
+            except Exception as e:      # 下载失败 / 模型不对
+                _whisper_state["status"] = "失败"
+                _whisper_state["detail"] = "识别模型加载失败：%s" % e
+                log(_whisper_state["detail"])
+                raise
+            _whisper_state["status"] = "就绪"
             log("识别模型好了")
     return _whisper
+
+
+def whisper_status():
+    """识别模型现在什么状态（不阻塞）。"""
+    st = _whisper_state.get("status", "未加载")
+    if st == "就绪":
+        return "就绪（%s）" % ASR_MODEL
+    if st == "加载中":
+        return "加载中（第一次要下识别模型）"
+    if st == "失败":
+        return "未安装 faster-whisper"
+    return "未加载"
+
+
+def preload_whisper():
+    """后台把识别模型准备好（第一次要下模型），别让 /health 干等着。"""
+    try:
+        get_whisper()
+    except Exception:
+        pass
+
 
 
 def decode_wav(data):
@@ -164,11 +198,7 @@ class Handler(BaseHTTPRequestHandler):
         if ASR_URL:
             out["asr"] = "外部服务" if backend_alive(ASR_URL) else "外部服务连不上"
         else:
-            try:
-                get_whisper()
-                out["asr"] = "就绪（%s）" % ASR_MODEL
-            except Exception:
-                out["asr"] = "未安装 faster-whisper"
+            out["asr"] = whisper_status()
         out["mt"] = "就绪" if backend_alive(MT_URL) else "连不上（%s）" % MT_URL
         out["clone"] = "就绪" if backend_alive(CLONE_URL) else "连不上（%s）" % CLONE_URL
         return out
@@ -277,6 +307,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    # 识别模型在后台加载（第一次要下载模型），服务不等它，先起来
+    if not ASR_URL:
+        threading.Thread(target=preload_whisper, daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     log("服务起来了，监听 %s:%d" % (HOST, PORT))
     log("翻译后端：%s" % MT_URL)

@@ -2333,9 +2333,11 @@ final class LiveSession: ObservableObject {
                 continue
             }
             let s = models[addr]?[m.rawValue] ?? ""
-            // 服务端回的是"就绪（xxx）"这种，正常就算正常
-            let bad = s.contains("连不上") || s.contains("未安装")
-            status[m.rawValue] = (s.isEmpty || bad) ? Self.cloudStatusBad : Self.cloudStatusOK
+            // 服务端回的是"就绪（small）"、"外部服务"、"加载中（第一次要下识别模型）"、
+            // "未安装 faster-whisper"、"连不上（...）"这些
+            // 只有真的就绪了才算正常：还没装、还在下载、连不上都算异常
+            let ok = s.hasPrefix("就绪") || s.hasPrefix("外部服务")
+            status[m.rawValue] = ok ? Self.cloudStatusOK : Self.cloudStatusBad
         }
         cloudStatus = status
     }
