@@ -120,17 +120,32 @@ actor LlamaTranslator {
         // 用新的扩展批接口（llama_decode/llama_batch_get_one 已弃用）
         guard let batch = llama_batch_ext_init(ctx) else { throw TranslatorError.decodeFailed }
         defer { llama_batch_ext_free(batch) }
-        llama_batch_ext_clear(batch)
-        var ok = true
-        for (i, t) in tokens.enumerated() {
-            let idx = llama_batch_ext_add_token(batch, 0, t)
-            if idx < 0 { ok = false; break }
-            var pos = llama_pos(i)
-            if !llama_batch_ext_set_pos(batch, idx, &pos) { ok = false; break }
+
+        // 处理提示词：分批喂进去，最后一个 token 标记为要输出 logits
+        // （不标记的话不会产生 logits，采样会读到无效数据）
+        let batchSize = Int(llama_n_batch(ctx))
+        var pos = llama_pos(0)
+        var i = 0
+        while i < tokens.count {
+            let n = min(batchSize, tokens.count - i)
+            llama_batch_ext_clear(batch)
+            var lastIdx = -1
+            for k in 0..<n {
+                let idx = llama_batch_ext_add_token(batch, 0, tokens[i + k])
+                if idx < 0 { throw TranslatorError.decodeFailed }
+                var p = pos + llama_pos(k)
+                if !llama_batch_ext_set_pos(batch, idx, &p) { throw TranslatorError.decodeFailed }
+                lastIdx = idx
+            }
+            // 只有最后一批的最后一个 token 要 logits
+            if i + n >= tokens.count {
+                llama_batch_ext_set_output_logits(batch, lastIdx, true)
+            }
+            let rc = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch)
+            guard rc == 0 else { throw TranslatorError.decodeFailed }
+            pos += llama_pos(n)
+            i += n
         }
-        if !ok { throw TranslatorError.decodeFailed }
-        let rc = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch)
-        guard rc == 0 else { throw TranslatorError.decodeFailed }
 
         var output = ""
         var pending: [UInt8] = []
@@ -153,9 +168,12 @@ actor LlamaTranslator {
             llama_batch_ext_clear(batch)
             let idx = llama_batch_ext_add_token(batch, 0, tok)
             if idx < 0 { break }
-            var pos = llama_pos(tokens.count + nGenerated)
-            if !llama_batch_ext_set_pos(batch, idx, &pos) { break }
+            var p = pos
+            if !llama_batch_ext_set_pos(batch, idx, &p) { break }
+            // 每生成一个 token 都要它的 logits，才能继续采样下一个
+            llama_batch_ext_set_output_logits(batch, idx, true)
             let r = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch)
+            pos += 1
             nGenerated += 1
             if r != 0 { break }
         }

@@ -70,7 +70,7 @@ struct SettingsView: View {
                 }
 
                 // 本地模型加载进度显示在这里（首页不再提示）
-                if let msg = session.loadingText {
+                if let msg = session.loadingHint {
                     Section {
                         HStack(spacing: 10) {
                             ProgressView()

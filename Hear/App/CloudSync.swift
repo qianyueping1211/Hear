@@ -110,13 +110,12 @@ final class CloudSync: ObservableObject {
     static func isICloudRoot(_ url: URL) -> Bool {
         let path = url.path
         let n = url.lastPathComponent
-        // 容器内部名
-        if n == "com~app~CloudDocs" || n.hasSuffix(".CloudDocs") { return true }
+        // iCloud 云盘根在 App 里显示成 com~apple~CloudDocs（不同系统版本也可能是
+        // com~app~CloudDocs），这些容器内部名都当成根节点
+        if n.contains("CloudDocs") { return true }
         // 就是容器的 Documents（iCloud 云盘根）
         if n == "Documents" {
-            // 路径里带 CloudDocs / Mobile Documents / CloudKit 容器路径的才算
             if path.contains("CloudDocs") || path.contains("Mobile Documents") { return true }
-            // 跟 iCloud 容器根目录一致也算
             if let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) {
                 if path == container.path || path == container.appendingPathComponent("Documents").path { return true }
             }

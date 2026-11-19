@@ -353,10 +353,16 @@ actor GGUFVoiceCloner {
         }
 
         // 4) 逐帧生成
+        //    注意：Qwen3-TTS 必须先从骨架模型采样出一个 token 才能进 step_gen，
+        //    传空 token（LLAMA_TOKEN_NULL）会直接失败。
         let maxFrames = mtmd_helper_gen_audio_max_frames(gen)
         var nFrames = 0
         var stop = false
-        var sampled = llama_token(-1)
+        // 先采一个 token
+        var sampled = sampleToken(ctx, model)
+        guard sampled >= 0 else {
+            throw VoiceCloneGGUFError.generateFailed("拿不到第一个 token")
+        }
         guard let hStateRaw = llama_get_embeddings_ith(ctx, -1) else {
             throw VoiceCloneGGUFError.generateFailed("拿不到 embedding")
         }
@@ -368,11 +374,13 @@ actor GGUFVoiceCloner {
             guard rc2 == 0 else {
                 throw VoiceCloneGGUFError.generateFailed("step_gen")
             }
+            // 结束信号：这一帧没有产出，hNext 为空
             guard let h = hNext else { break }
             nFrames += 1
             hState = h
             // 从 logits 采样下一个语义 token
             sampled = sampleToken(ctx, model)
+            if sampled < 0 { break }
         }
 
         // 5) 取音频

@@ -67,6 +67,14 @@ final class LiveSession: ObservableObject {
         }
     }
     @Published private(set) var cloneLoading = false
+    /// 本地模型刚加载好（用来提示用户，过几秒自动消失）
+    @Published private(set) var modelsJustLoaded = false
+    /// 正在加载的东西（界面上显示进度用）
+    var loadingHint: String? {
+        if cloneLoading { return "正在加载声音克隆模型…" }
+        if isLoadingPhase { return loadingText }
+        return nil
+    }
     // 语音识别用 GPU（加载快）还是神经引擎（省电，首次编译慢）
     @Published var asrUseGPU: Bool { didSet { save("asrUseGPU", asrUseGPU) } }
     // 识别引擎："apple" 苹果自带（系统听写）/ "whisper" 本地最准 /
@@ -855,6 +863,9 @@ final class LiveSession: ObservableObject {
             try await loadASRIfNeeded(needASR, folder: wf, gpu: gpu)
             phase = .ready
             hearLog("全部就绪，用时 \(Int(Date().timeIntervalSince(start)))s，可用内存 \(Self.freeMB()) MB")
+            // 加载好了，提示一下（5 秒；用户按了按钮就立刻消失）
+            modelsJustLoaded = true
+            showToast("模型加载完成，可以开始翻译了", seconds: 5)
         } catch {
             hearLog("模型加载失败：\(error)", .error)
             if isRunning { stop(readAfter: false) }
@@ -960,6 +971,9 @@ final class LiveSession: ObservableObject {
     // MARK: - 开始 / 停止
 
     func toggle() async {
+        // 用户动手了就不用再提示"加载完成"
+        dismissToast()
+        modelsJustLoaded = false
         if isRunning { stop(); return }
         _ = await beginListening()
     }
@@ -967,6 +981,9 @@ final class LiveSession: ObservableObject {
     /// 对话翻译模式：按下某种语言的按钮
     func holdBegan(_ lang: Language) async {
         guard holding == nil else { return }
+        // 用户动手了就不用再提示"加载完成"
+        dismissToast()
+        modelsJustLoaded = false
         if isRunning { stop(readAfter: false) }
         holding = lang
         talkLang = lang
@@ -1032,7 +1049,7 @@ final class LiveSession: ObservableObject {
         }
         // 本地模型还没加载好：不开始，在按钮上方提示一下
         if isLoadingPhase {
-            showToast("由于本地模型加载中，请稍等。")
+            showToast("本地模型正在加载，请稍等…", seconds: 5)
             return false
         }
         guard phase == .ready else { return false }
@@ -1075,14 +1092,21 @@ final class LiveSession: ObservableObject {
     }
 
     /// 在实时翻译按钮上方显示几秒钟的提示
-    func showToast(_ text: String) {
+    func showToast(_ text: String, seconds: Double = 2.5) {
         toast = text
         toastTask?.cancel()
         toastTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             guard !Task.isCancelled else { return }
             self?.toast = nil
         }
+    }
+
+    /// 立刻收起提示（用户点了按钮就不要再占着屏幕）
+    func dismissToast() {
+        toastTask?.cancel()
+        toastTask = nil
+        toast = nil
     }
 
     /// readAfter：停止后是否接着朗读没读的句子（只有用户自己点停止时才读）
@@ -1952,11 +1976,12 @@ final class LiveSession: ObservableObject {
     private func loadClonerIfNeeded() async {
         guard voiceClone, VoiceCloneGGUF.installed, !cloneLoading else { return }
         if case .loading = phase { return }                 // 识别、翻译模型还在加载，等它们好了会再叫
-        // 声音克隆模型加载和生成要 1.5 GB 左右内存；不够就先不加载，用系统声音
+        // GGUF 版模型约 763 MB，走 mmap 映射，实际常驻更少；
+        // 留 800 MB 就够了（1800 MB 是以前 MLX 版的数字，模型要整个搬进内存）
         let free = Self.freeMB()
         hearLog("声音克隆：准备加载，可用内存 \(free) MB")
-        guard free >= 1800 else {
-            hearLog("声音克隆：可用内存不够（\(free) MB，需要约 1800 MB），先用系统声音朗读", .warning)
+        guard free >= 800 else {
+            hearLog("声音克隆：可用内存不够（\(free) MB，需要约 800 MB），先用系统声音朗读", .warning)
             showToast("内存不够，声音克隆暂时用系统声音")
             return
         }
@@ -1971,6 +1996,7 @@ final class LiveSession: ObservableObject {
         do {
             try await cloner.load()
             hearLog("声音克隆：加载后可用内存 \(Self.freeMB()) MB")
+            showToast("声音克隆模型加载完成", seconds: 5)
         } catch {
             hearLog("声音克隆：模型加载失败 \(error)", .error)
             showToast("声音克隆模型加载失败，先用系统声音朗读")

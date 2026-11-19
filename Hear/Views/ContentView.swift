@@ -259,10 +259,6 @@ struct LanguageMenu: View {
                     }
                 }
             }
-            if session.supportedLanguages.count < Language.all.count {
-                Divider()
-                Text("更多语言：在功能设置里换识别引擎")
-            }
         } label: {
             HStack(spacing: 6) {
                 Text(selection.flag)
@@ -519,16 +515,29 @@ struct ControlBar: View {
         )
         // 按钮上方的短暂提示（例如本地模型还在加载）
         .overlay(alignment: .top) {
-            if let t = session.toast {
-                Text(t)
-                    .font(.subheadline.weight(.medium))
+            VStack(spacing: 8) {
+                // 正在加载：一直显示到加载完
+                if let hint = session.loadingHint {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text(hint).font(.subheadline.weight(.medium))
+                    }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .background(.regularMaterial, in: Capsule())
                     .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
-                    .offset(y: -30)
-                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
+                if let t = session.toast {
+                    Text(t)
+                        .font(.subheadline.weight(.medium))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.regularMaterial, in: Capsule())
+                        .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
+                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
             }
+            .offset(y: -30)
         }
         .animation(.spring(duration: 0.25), value: session.toast)
     }
