@@ -1,6 +1,11 @@
 import Foundation
 import UIKit
-import os
+
+/// 现在还能用多少内存（字节）。
+/// os_proc_available_memory 在 <os/proc.h> 里，Swift 侧不一定 import 得到，
+/// 这里直接按 C 符号引进来（这个名字是本文件专用的，不会和 SDK 里的重名）。
+@_silgen_name("os_proc_available_memory")
+private func hearProcAvailableMemory() -> UInt64
 
 /// 闪退/被系统杀掉的诊断。
 ///
@@ -25,7 +30,7 @@ final class CrashGuard {
     }
 
     /// 现在还能用多少内存（MB）。信号处理程序里也能安全调用
-    private static var freeMBNow: Int { Int(os_proc_available_memory() / 1_048_576) }
+    private static var freeMBNow: Int { Int(hearProcAvailableMemory() / 1_048_576) }
 
     /// 上次退出前记录的状态（写进标记文件，下次打开时读出来告诉用户）
     private struct Marker: Codable {
@@ -89,12 +94,12 @@ final class CrashGuard {
         }
     }
 
+    /// 信号处理程序里直接写文件，不走 queue：
+    /// 万一信号正好在 queue.sync 里来，再 sync 一次就死等不动了
     private func recordSignal(_ signo: Int32) {
-        queue.sync {
-            let line = "[\(Date())] 收到信号 \(signo)（崩溃）\n"
-            append(line, to: crashURL)
-            append(line, to: Self.logFileURL)
-        }
+        let line = "[\(Date())] 收到信号 \(signo)（崩溃）\n"
+        append(line, to: crashURL)
+        append(line, to: Self.logFileURL)
     }
 
     private func append(_ line: String, to url: URL) {
@@ -114,18 +119,19 @@ final class CrashGuard {
     /// App 启动时调用：上次留下标记说明上次是不正常退出的
     /// 返回上次异常退出时记下来的原因（没有则返回 nil）
     func checkPreviousRun() -> String? {
-        guard let data = try? Data(contentsOf: markerURL),
-              let m = try? JSONDecoder().decode(Marker.self, from: data) else { return nil }
+        let m = (try? Data(contentsOf: markerURL)).flatMap { try? JSONDecoder().decode(Marker.self, from: $0) }
         // 上次崩溃时写下的原因（如果有）
-        var detail = ""
-        if let crash = try? String(contentsOf: crashURL, encoding: .utf8), !crash.isEmpty {
-            detail = crash
-            try? FileManager.default.removeItem(at: crashURL)
-        }
+        let detail = (((try? String(contentsOf: crashURL, encoding: .utf8)) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines))
         try? FileManager.default.removeItem(at: markerURL)
+        if !detail.isEmpty { try? FileManager.default.removeItem(at: crashURL) }
+        // 标记文件在（说明上次没正常收尾）和崩溃记录，都算异常
+        guard m != nil || !detail.isEmpty else { return nil }
         var text = "上次退出不正常（可能是崩溃或被系统杀掉）"
-        if m.memoryWarning { text += "，退出前收到过内存不足警告" }
-        if m.freeMB > 0 { text += "，退出前可用内存 \(m.freeMB) MB" }
+        if let m {
+            if m.memoryWarning { text += "，退出前收到过内存不足警告" }
+            if m.freeMB > 0 { text += "，退出前可用内存 \(m.freeMB) MB" }
+        }
         if !detail.isEmpty { text += "\n\(detail)" }
         return text
     }

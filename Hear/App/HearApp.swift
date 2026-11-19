@@ -13,6 +13,13 @@ struct HearApp: App {
         ) { _ in
             CrashGuard.shared.clearMarker()
         }
+        // 回到前台：重新记上"正在运行"，
+        // 这样在后台被系统杀掉（内存不够）也能在下次打开时看出来
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { _ in
+            CrashGuard.shared.markRunning()
+        }
         // iCloud 同步：iCloud 上的设置比较新就先用上（要在 LiveSession 读设置之前）
         CloudSync.shared.applyCloudSettingsAtLaunch()
         // 在 LiveSession 读设置之前先调整默认值
