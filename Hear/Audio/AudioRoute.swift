@@ -33,7 +33,7 @@ enum AudioRoute {
         var opts: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
         if useHeadsetMic { opts.insert(.allowBluetooth) }
         // setCategory 会把"输出到哪"重置掉，只有真的改了类别才需要重新应用
-        let categoryChanged = (s.category != .playAndRecord || s.categoryOptions != opts)
+        var categoryChanged = (s.category != .playAndRecord || s.categoryOptions != opts)
         if categoryChanged {
             try s.setCategory(.playAndRecord, mode: .default, options: opts)
         }
