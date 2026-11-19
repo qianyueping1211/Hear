@@ -35,23 +35,47 @@ llama.cpp 对 Intel 机器有两条：
 
 ## 方法 A：Windows 上直接跑（推荐）
 
-不需要装 WSL、不需要编译、不需要 Visual Studio：
+不需要装 WSL、不需要编译、不需要 Visual Studio。
 
-1. 装 [Python 3.10 以上](https://www.python.org/downloads/windows/)（安装时勾上 “Add to PATH”）。
-2. 装 [Git](https://git-scm.com/download/win)。
-3. 把仓库 clone 到本地，然后在这个目录里开一个 PowerShell（普通权限就行）：
+### 1. 装 Python
+
+到 [python.org](https://www.python.org/downloads/windows/) 下载安装，
+**安装第一页底部要勾上 “Add python.exe to PATH”**，否则脚本找不到 Python。
+装完把 PowerShell 关掉重开（让 PATH 生效）。
+
+### 2. 拿到仓库
+
+有 Git 就 `git clone`，没有就到 [Releases](https://github.com/qianyueping1211/Hear/releases) 下源码 zip 解压。
+假设放在 `C:\Users\你的用户名\Downloads\Hear`。
+
+### 3. 在仓库根目录里运行
+
+**位置很重要**：要在有 `README.md` 和 `server` 文件夹的那一层，右键这个文件夹
+→ “在终端中打开”，或者自己 `cd` 过去：
 
 ```powershell
-cd Hear
+cd C:\Users\你的用户名\Downloads\Hear
 powershell -ExecutionPolicy Bypass -File server\start-windows.ps1
 ```
 
-脚本会自动：
+也可以用绝对路径，从哪儿运行都行：
 
-- 从 llama.cpp 的官方发行版下载 **Vulkan 版**（核显）和 **OpenVINO 版**（NPU）的 `llama-server.exe`；
-- 从 Intel 官网下载 OpenVINO 运行库（要用 NPU 才有必要）；
+```powershell
+powershell -ExecutionPolicy Bypass -File "C:\Users\你的用户名\Downloads\Hear\server\start-windows.ps1"
+```
+
+脚本开头会打印它认到的目录，不用怕跑错地方：
+
+```
+==> 仓库目录：C:\Users\你的用户名\Downloads\Hear
+==> 模型目录：C:\Users\你的用户名\Downloads\Hear\server\models
+```
+
+### 4. 脚本会自动做的事
+
+- 从 llama.cpp 官方发行版下载 **Vulkan 版**（核显）和 **OpenVINO 版**（NPU，OpenVINO 运行库已经打包在里面了）；
 - 下载三个模型（Hy-MT2 1.1 GB、Qwen3-TTS 两个文件共约 800 MB）；
-- 装 faster-whisper（识别模型，第一次跑会再下几百 MB）；
+- 建虚拟环境并装 faster-whisper（识别模型，第一次跑会再下几百 MB）；
 - 起三个服务，最后打印一个地址，填到手机 App 里就行。
 
 跑起来屏幕上会打印：
@@ -60,6 +84,9 @@ powershell -ExecutionPolicy Bypass -File server\start-windows.ps1
   手机 App 里「功能设置 → 模型管理 → 在线模型」填：
       http://192.168.1.10:8000
 ```
+
+所有下载的东���都在 `server\bin`（llama.cpp）和 `server\models`（模型）里，删了重跑就重新下。
+日志在 `server\mt.log`（翻译）和 `server\clone.log`（克隆）。
 
 ### 想换后端
 
