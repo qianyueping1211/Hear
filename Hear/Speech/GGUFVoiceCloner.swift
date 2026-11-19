@@ -379,6 +379,13 @@ actor GGUFVoiceCloner {
             throw VoiceCloneGGUFError.generateFailed("set_input 返回 \(rc)")
         }
 
+        // 生成失败的话上下文是脏的（Qwen3-TTS 这条管线自己不清 KV 缓存），
+        // 清掉，下次重来就不会在 step_prompt 挂掉。
+        var failed = false
+        defer {
+            if failed { llama_memory_clear(llama_get_memory(ctx), true) }
+        }
+
         // 3) 处理提示词（把文字喂进骨架模型）
         let batch = Int32(llama_n_batch(ctx))
         while true {
@@ -396,11 +403,6 @@ actor GGUFVoiceCloner {
         let maxFrames = mtmd_helper_gen_audio_max_frames(gen)
         var nFrames = 0
         var stop = false
-        var failed = false
-        defer {
-            // 生成失败的话上下文是脏的，清掉，下次重来
-            if failed { llama_memory_clear(llama_get_memory(ctx), true) }
-        }
         // 先采一个 token
         var sampled = sampleToken(ctx, model)
         guard sampled >= 0 else {
