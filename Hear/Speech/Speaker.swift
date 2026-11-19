@@ -28,6 +28,8 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     private var usingEngine = false
     private var current: AVSpeechUtterance?
     private var connectedFormat: AVAudioFormat?
+    /// 这次播放有没有真的开始（只在 queue 上读写）
+    private var playStarted = false
     private var currentPan: Float = 0
 
     override init() {
@@ -79,24 +81,47 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
-    /// 播放一段已经生成好的声音（声音克隆朗读用），播完（或被 stop 打断）后返回
-    func play(samples: [Float], sampleRate: Double, pan: Float) async {
+    /// 播放一段已经生成好的声音（声音克隆朗读用），播完（或被 stop 打断）后返回。
+    /// 返回 false 表示没能播出来（引擎起不来之类），调用方可以退回系统声音。
+    func play(samples: [Float], sampleRate: Double, pan: Float) async -> Bool {
         stop()
         try? AudioRoute.activate()
-        guard !samples.isEmpty,
-              let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+        guard !samples.isEmpty else { return false }
+
+        // 接到主混音器上的话，输入声道数要跟主混音器一致（一般是双声道）。
+        // 用单声道格式接上去，有的系统版本会直接拒掉，放出来就是一片安静。
+        let outFmt = engine.outputNode.outputFormat(forBus: 0)
+        let channels = max(Int(outFmt.channelCount), 2)
+        guard let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate,
+                                      channels: AVAudioChannelCount(channels)),
               let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(samples.count)),
-              let ch = buf.floatChannelData else { return }
+              let ch = buf.floatChannelData else {
+            hearLog("朗读：克隆声音的缓冲区创建失败", .error)
+            return false
+        }
         buf.frameLength = AVAudioFrameCount(samples.count)
         samples.withUnsafeBufferPointer { p in
-            if let base = p.baseAddress { ch[0].update(from: base, count: samples.count) }
+            if let base = p.baseAddress {
+                for c in 0..<channels { ch[c].update(from: base, count: samples.count) }
+            }
         }
+        // 音量过小的话听起来像没声音，放大到能听见的水平
+        var peak: Float = 0
+        for v in samples { let a = abs(v); if a > peak { peak = a } }
+        if peak > 0.0005, peak < 0.5 {
+            let g = 0.85 / peak
+            for c in 0..<channels {
+                for i in 0..<samples.count { ch[c][i] *= g }
+            }
+        }
+
         let gen: Int = queue.sync {
             generation += 1
             scheduled = 0; played = 0; finished = true
             currentPan = pan
             usingEngine = true
             current = nil
+            playStarted = false
             return generation
         }
         let limit = 5 + Double(samples.count) / sampleRate * 1.5
@@ -104,7 +129,12 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             queue.sync { continuation = c }
             queue.async { [self] in
                 guard gen == generation else { return }
-                ensureEngine(format: fmt)
+                if !ensureEngine(format: fmt) {
+                    hearLog("朗读：克隆声音的音频引擎启动失败", .error)
+                    self.resume(gen)
+                    return
+                }
+                self.playStarted = true
                 scheduled = 1
                 player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
                     self?.queue.async {
@@ -121,6 +151,11 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
                 self.resume(gen)
             }
         }
+        let started = queue.sync { playStarted }
+        if started {
+            hearLog("朗读：克隆声音 \(String(format: "%.1f", Double(samples.count) / sampleRate)) 秒，\(Int(sampleRate)) Hz，峰值 \(String(format: "%.2f", peak))")
+        }
+        return started
     }
 
     /// 立即停止当前朗读
@@ -184,19 +219,29 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         }
     }
 
-    private func ensureEngine(format: AVAudioFormat) {
+    /// 接上播放节点并启动引擎。返回 false 表示没启动起来
+    @discardableResult
+    private func ensureEngine(format: AVAudioFormat) -> Bool {
         if connectedFormat == nil
             || connectedFormat!.sampleRate != format.sampleRate
             || connectedFormat!.channelCount != format.channelCount {
             if engine.isRunning { engine.stop() }
+            // 已经接过一次的话要先断开，否则重复连接会出问题
+            if connectedFormat != nil { engine.disconnectNodeOutput(player) }
             engine.connect(player, to: engine.mainMixerNode, format: format)
             connectedFormat = format
         }
         player.pan = currentPan
         if !engine.isRunning {
             engine.prepare()
-            do { try engine.start() } catch { hearLog("朗读：音频引擎启动失败 \(error)", .error) }
+            do {
+                try engine.start()
+            } catch {
+                hearLog("朗读：音频引擎启动失败 \(error)", .error)
+                return false
+            }
         }
+        return engine.isRunning
     }
 
     private func checkDone(_ gen: Int) {

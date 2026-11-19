@@ -12,6 +12,27 @@ struct SettingsView: View {
     @ObservedObject private var llm = LLMSettings.shared
     @ObservedObject private var cloud = CloudSync.shared
     @State private var showCloudPicker = false
+    @State private var cloudStatus: String?
+    @State private var cloudBusy = false
+
+    private var cloudAddressBinding: Binding<String> {
+        Binding(
+            get: { session.cloudAddress },
+            set: { session.cloudAddress = $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        )
+    }
+
+    /// 连一下云端服务，看看三个模型的状态
+    @MainActor
+    private func testCloud() {
+        cloudBusy = true
+        cloudStatus = nil
+        Task {
+            let s = await session.cloudHealth()
+            cloudBusy = false
+            cloudStatus = s ?? "连不上：检查地址、端口和网络"
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -48,22 +69,30 @@ struct SettingsView: View {
                         Text("本地极速：SenseVoice").tag("sensevoice")
                         Text("本地最准：Whisper").tag("whisper")
                         Text("SenseVoice + Whisper").tag("hybrid")
+                        Text("云端：自己电脑上的服务").tag("cloud")
                     }
                     Picker("文本翻译", selection: translationEngineBinding) {
                         if session.appleAvailable {
                             Text("苹果自带").tag("apple")
                         }
                         Text("本地引擎：MT").tag("local")
+                        Text("云端：自己电脑上的服务").tag("cloud")
                     }
                     Picker("声音克隆", selection: voiceCloneEngineBinding) {
                         Text("苹果自带").tag("apple")
                         Text("本地引擎：Qwen").tag("local")
+                        Text("云端：自己电脑上的服务").tag("cloud")
                     }
                     if session.translationEngine == "local", !session.isInstalled(.translation) {
                         Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
                     }
-                    if session.voiceClone, !session.isInstalled(.voiceClone) {
+                    if session.voiceClone, !session.voiceCloneCloud, !session.isInstalled(.voiceClone) {
                         Text("声音克隆模型还没下载").font(.footnote).foregroundStyle(.orange)
+                    }
+                    if session.usingCloudASR || session.usingCloudMT || session.usingCloudClone {
+                        if session.cloudAddress.isEmpty {
+                            Text("选了云端引擎，但还没填云端模型地址").font(.footnote).foregroundStyle(.orange)
+                        }
                     }
                 } header: {
                     Text("引擎管理")
@@ -133,6 +162,26 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("翻译与总结")
+                }
+
+                // MARK: 云端模型（自己电脑上跑的服务）
+                Section {
+                    TextField("http://192.168.1.10:8000", text: cloudAddressBinding)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                    HStack {
+                        Button("测试连接") { testCloud() }
+                        if cloudBusy { ProgressView().controlSize(.small) }
+                        Spacer()
+                        if let s = cloudStatus {
+                            Text(s).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    }
+                } header: {
+                    Text("云端模型")
+                } footer: {
+                    Text("自己电脑上跑的服务（仓库 server 目录里有安装说明和脚本）。手机和电脑要在同一个 Wi‑Fi 下，地址填电脑的局域网 IP，例如 http://192.168.1.10:8000。三个模型各用各的接口，可以分别选本地或云端。")
                 }
 
                 // MARK: 朗读（出声 → 音色 → 耳机左右耳）
@@ -269,8 +318,14 @@ struct SettingsView: View {
 
     private var voiceCloneEngineBinding: Binding<String> {
         Binding(
-            get: { session.voiceClone ? "local" : "apple" },
+            get: { session.voiceCloneCloud ? "cloud" : (session.voiceClone ? "local" : "apple") },
             set: { v in
+                if v == "cloud" {
+                    session.voiceCloneCloud = true
+                    session.voiceClone = true
+                    return
+                }
+                session.voiceCloneCloud = false
                 let on = v == "local"
                 if on == session.voiceClone { return }
                 if !on { session.voiceClone = false; return }

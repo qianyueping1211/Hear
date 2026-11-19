@@ -206,6 +206,12 @@ enum VoiceCloneGGUF {
     }
 }
 
+/// 声音克隆生成的一段声音
+struct CloneAudio: Sendable {
+    var samples: [Float]
+    var sampleRate: Int
+}
+
 /// 用 llama.cpp 跑 Qwen3-TTS 的声音克隆。
 /// 单独一个 actor：llama 的 context 不允许跨线程使用。
 actor GGUFVoiceCloner {
@@ -308,14 +314,14 @@ actor GGUFVoiceCloner {
     /// reference：16 kHz 单声道 PCM（说话人的原声）；referenceText：说话人说的那句话（ICL 用）
     /// 返回 24 kHz 单声道 PCM
     func synthesize(text: String, language: String,
-                   reference: [Float], referenceText: String) throws -> [Float] {
+                   reference: [Float], referenceText: String) throws -> CloneAudio {
         guard let model, let ctx, let mctx, let gen else {
             throw VoiceCloneGGUFError.notLoaded
         }
         guard let lang = VoiceCloneGGUF.languageNames[language] else {
             throw VoiceCloneGGUFError.unsupportedLanguage
         }
-        guard !text.isEmpty else { return [] }
+        guard !text.isEmpty else { return CloneAudio(samples: [], sampleRate: VoiceCloneGGUF.sampleRate) }
 
         // 1) 参考音频编码成 bitmap（语音 tokenizer 编码）
         //    mtmd 的接口要文件路径，这里先把 16 kHz PCM 写成临时 wav
@@ -414,11 +420,58 @@ actor GGUFVoiceCloner {
         }
         // 裸 PCM：字节数 = 样本数 × 4（F32）
         let pcm = Self.pcmToFloat32(data: data, byteCount: dataLen)
+        let rate = Int(sampleRate) > 0 ? Int(sampleRate) : VoiceCloneGGUF.sampleRate
         let t0 = Date()
-        let secs = Double(pcm.count) / Double(max(Int(sampleRate), 1))
-        hearLog("声音克隆（GGUF）：生成 \(String(format: "%.1f", secs)) 秒声音，用时 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
-        return pcm
+        let secs = Double(pcm.count) / Double(rate)
+
+        // 参考音频也要看一眼：麦克风没录到东西的话，克隆出来的声音也是没声音的
+        var refPeak: Float = 0
+        for s in reference { let a = abs(s); if a > refPeak { refPeak = a } }
+        hearLog("声音克隆（\(usingGPU ? "GPU" : "CPU")）：生成 \(String(format: "%.1f", secs)) 秒声音（\(rate) Hz），"
+                + "参考音频 \(String(format: "%.1f", Double(reference.count) / 16000)) 秒 峰值 \(String(format: "%.3f", refPeak))，"
+                + "用时 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
+
+        // 模型输出的音量有时很小，直接放会听不到：统一调到能听见的水平
+        let norm = Self.normalize(pcm, rate: rate)
+        hearLog("声音克隆：输出峰值 \(String(format: "%.3f", norm.peak))，均方根 \(String(format: "%.3f", norm.rms))"
+                + (norm.gain > 1 ? "，已放大 \(String(format: "%.1f", norm.gain)) 倍" : ""))
+        if norm.peak < 0.0005 {
+            // 全是静音：宁可退回系统声音，也不要一片安静
+            throw VoiceCloneGGUFError.generateFailed("生成的声音是静音")
+        }
+        return CloneAudio(samples: norm.pcm, sampleRate: rate)
     }
+
+    /// 把声音调整到能听见的音量，并去掉头尾的咔哒声
+    private static func normalize(_ pcm: [Float], rate: Int) -> (pcm: [Float], peak: Float, rms: Float, gain: Float) {
+        guard !pcm.isEmpty else { return ([], 0, 0, 1) }
+        var peak: Float = 0
+        var sum: Float = 0
+        for s in pcm {
+            let a = abs(s)
+            if a > peak { peak = a }
+            sum += s * s
+        }
+        let rms = sqrt(sum / Float(pcm.count))
+        var out = pcm
+        var gain: Float = 1
+        // 峰值太小就整体放大（模型输出的音量偏小的情况）
+        if peak > 0.0005, peak < 0.5 {
+            gain = 0.85 / peak
+            for i in out.indices { out[i] *= gain }
+        }
+        // 头尾各淡入淡出 5 毫秒
+        let fade = min(out.count / 2, max(2, rate / 200))    // 5 毫秒
+        if fade > 1 {
+            for i in 0..<fade {
+                let k = Float(i) / Float(fade)
+                out[i] *= k
+                out[out.count - 1 - i] *= k
+            }
+        }
+        return (out, peak, rms, gain)
+    }
+
 
     /// 从 logits 里采样一个 token（贪心，最稳）
     private func sampleToken(_ ctx: OpaquePointer, _ model: OpaquePointer) -> llama_token {

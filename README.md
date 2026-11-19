@@ -72,6 +72,27 @@ iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话
 - 对话页长按某一句可以修改原文并重新翻译；在历史记录里长按可以复制或重新朗读。
 - 想让朗读更自然：**设置 → 辅助功能 → 朗读内容 → 声音**，下载“增强版/高级版”中英文语音。
 
+## 云端模型（想用电脑的算力）
+
+App 默认什么都跑在手机上。也可以把模型放到自己的电脑上跑，手机通过局域网调用，
+三个模型（识别 / 翻译 / 声音克隆）**各自独立**，可以分别选本地或云端。
+
+Windows 上先装 WSL2（`wsl --install -d Ubuntu`），然后：
+
+```bash
+git clone https://github.com/qianyueping1211/Hear.git
+cd Hear
+./server/start.sh
+```
+
+脚本会编译 llama.cpp、下载三个模型、装 faster-whisper，最后打印一个地址，
+填到手机 App 的 **功能设置 → 云端模型** 里，再把「引擎管理」里需要的模型
+改成「云端：自己电脑上的服务」。
+
+完整说明（端口、防火墙、性能、常见问题）看 [server/README.md](server/README.md)。
+
+---
+
 ## 项目结构
 
 ```
@@ -84,10 +105,13 @@ Hear/
 ├── Translate/LlamaTranslator.swift  llama.cpp 运行 Hy-MT2
 ├── Translate/PromptBuilder.swift    官方提示词格式（上下文、术语）
 ├── Models/                      语言列表、模型下载与管理
+├── Cloud/CloudClient.swift      云端模型服务客户端（识别/翻译/克隆三个接口）
+├── Audio/Wav.swift              wav 编解码（传声音用）
 └── Views/                       界面
 project.yml                      XcodeGen 工程描述
 setup.sh                         Mac 一键生成工程
 scripts/fetch_llama.sh           下载 llama.cpp 的 iOS 框架
+server/                          云端模型服务（WSL2 上跑，README 在里面）
 .github/workflows/build-ipa.yml  GitHub 自动打包 ipa
 ```
 

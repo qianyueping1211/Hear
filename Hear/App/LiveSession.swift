@@ -48,6 +48,35 @@ final class LiveSession: ObservableObject {
     @Published var silenceMs: Double { didSet { save("silenceMs", silenceMs); pushConfig() } }
     @Published var glossary: String { didSet { save("glossary", glossary) } }
     @Published var hfHost: String { didSet { save("hfHost", hfHost) } }
+    /// 云端模型服务地址（自己电脑上跑的服务），例如 http://192.168.1.10:8000
+    @Published var cloudAddress: String {
+        didSet {
+            save("cloudAddress", cloudAddress)
+            let a = cloudAddress
+            Task { await cloud.setAddress(a) }
+        }
+    }
+    /// 声音克隆用云端模型（false = 用手机本地的 Qwen）
+    @Published var voiceCloneCloud: Bool {
+        didSet {
+            save("voiceCloneCloud", voiceCloneCloud)
+            guard voiceCloneCloud != oldValue else { return }
+            hearLog("声音克隆引擎改为\(voiceCloneCloud ? "云端" : "本地")")
+            cloneTasks.removeAll()
+            if voiceCloneCloud {
+                // 不用本地模型了，卸掉省内存
+                Task { await cloner.unload() }
+            } else if voiceClone {
+                scheduleCloneLoad(delay: 0.5)
+            }
+        }
+    }
+    /// 语音识别走云端
+    var usingCloudASR: Bool { asrEngine == "cloud" }
+    /// 文本翻译走云端
+    var usingCloudMT: Bool { translationEngine == "cloud" }
+    /// 声音克隆走云端
+    var usingCloudClone: Bool { voiceClone && voiceCloneCloud }
 
     // 朗读输出：扬声器 / 耳机；耳机时左右耳各播哪种语言（"A" / "B" / "off"）
     @Published var outputMode: AudioOutput { didSet { save("outputMode", outputMode.rawValue) } }
@@ -59,7 +88,7 @@ final class LiveSession: ObservableObject {
             save("voiceClone", voiceClone)
             guard voiceClone != oldValue else { return }
             hearLog("声音克隆朗读：\(voiceClone ? "开" : "关")")
-            if voiceClone { scheduleCloneLoad(delay: 0.3) } else {
+            if voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 0.3) } else {
                 cloneLoadTask?.cancel()
                 cloneTasks.removeAll()
                 Task { await cloner.unload() }
@@ -201,11 +230,13 @@ final class LiveSession: ObservableObject {
     private let speaker = Speaker()
     private let systemTranslator = SystemTranslator()
     private let cloner = GGUFVoiceCloner()
+    /// 云端模型服务（自己电脑上跑的那台）
+    private let cloud = CloudClient()
     // 声音克隆：每句话的样本（声音 + 文字），以及提前生成好的克隆朗读
     private var cloneRefs: [UUID: (samples: [Float], text: String)] = [:]
     private var cloneRefOrder: [UUID] = []
     private var lastCloneRef: [String: (samples: [Float], text: String)] = [:]   // 每种语言最近一句够长的样本
-    private var cloneTasks: [UUID: Task<[Float]?, Never>] = [:]
+    private var cloneTasks: [UUID: Task<CloneAudio?, Never>] = [:]
     private var appleEngines: [LiveTextEngine] = []   // 苹果自带模式：每种语言一个系统听写
 
     private var queue: [(itemID: UUID, segID: Int, samples: [Float])] = []
@@ -263,6 +294,12 @@ final class LiveSession: ObservableObject {
         leftEar = d.string(forKey: "leftEar") ?? "A"
         rightEar = d.string(forKey: "rightEar") ?? "B"
         voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
+        voiceCloneCloud = d.object(forKey: "voiceCloneCloud") as? Bool ?? false
+        cloudAddress = d.string(forKey: "cloudAddress") ?? ""
+        // init 里还没完全初始化，不能直接捕获 self
+        let cloudClient = cloud
+        let cloudAddr = cloudAddress
+        Task { await cloudClient.setAddress(cloudAddr) }
         asrUseGPU = d.object(forKey: "asrUseGPU") as? Bool ?? true
         // 引擎默认都用苹果自带（不用下载模型，打开就能用）
         let canApple = LiveTextEngineFactory.isSupported
@@ -593,7 +630,7 @@ final class LiveSession: ObservableObject {
             }
         }
         hearLog("启动：可用内存 \(Self.freeMB()) MB")
-        defer { if voiceClone { scheduleCloneLoad(delay: 3) } }   // 其他模型准备好以后再加载声音克隆
+        defer { if voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 3) } }   // 其他模型准备好以后再加载声音克隆
         // 还没选引擎（老版本数据异常）：不自动加载模型，等用户在设置里选
         if asrEngine.isEmpty || translationEngine.isEmpty {
             phase = .ready
@@ -841,7 +878,7 @@ final class LiveSession: ObservableObject {
             cloneHasModel = await cloner.isLoaded
             if cloneHasModel { await cloner.unload() }
         }
-        defer { if voiceClone { scheduleCloneLoad(delay: 3) } }
+        defer { if voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 3) } }
         // 每秒刷新一次已用时间，让用户知道没有卡死
         let ticker = Task { @MainActor in
             var warned = false
@@ -958,7 +995,7 @@ final class LiveSession: ObservableObject {
             modelsRevision += 1
             bgDownloadError = nil
             hearLog("已导入声音克隆模型（GGUF）")
-            if voiceClone { scheduleCloneLoad(delay: 0.5) }
+            if voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 0.5) }
         } catch {
             hearLog("导入声音克隆模型失败：\(error)", .error)
             bgDownloadError = "导入失败：\(error.localizedDescription)"
@@ -1406,7 +1443,9 @@ final class LiveSession: ObservableObject {
             let t0 = Date()
             let r: (String, String)
             do {
-                if sv {
+                if usingCloudASR {
+                    r = try await cloud.transcribe(clip, candidates: cands, fallback: fallback)
+                } else if sv {
                     r = try await sense.recognize(clip, candidates: cands, fallback: fallback)
                 } else {
                     r = try await asr.recognize(clip, candidates: cands, fallback: fallback, preview: true)
@@ -1463,6 +1502,13 @@ final class LiveSession: ObservableObject {
                 if let out, !out.isEmpty, gen == runGen, id == partialSeg, id > finishedSeg { partialTranslation = out }
                 continue
             }
+            if usingCloudMT {
+                let prompt = PromptBuilder.build(text: p.text, from: p.src, to: p.tgt, context: [],
+                                                 glossary: PromptBuilder.parseGlossary(glossary))
+                let out = try? await cloud.translate(prompt: prompt, src: p.src.id, dst: p.tgt.id)
+                if let out, !out.isEmpty, gen == runGen, id == partialSeg, id > finishedSeg { partialTranslation = out }
+                continue
+            }
             // 本地翻译模型和 Whisper 共用 GPU：整句在识别/翻译时，预览翻译先让路
             if working { continue }
             let epoch = translator.currentPreviewEpoch
@@ -1486,6 +1532,9 @@ final class LiveSession: ObservableObject {
         }
         let prompt = PromptBuilder.build(text: text, from: src, to: tgt, context: context,
                                          glossary: PromptBuilder.parseGlossary(glossary))
+        if usingCloudMT {
+            return try await cloud.translate(prompt: prompt, src: src.id, dst: tgt.id)
+        }
         return try await translator.translate(prompt: prompt) { partial in onPartial(partial) }
     }
 
@@ -1749,7 +1798,7 @@ final class LiveSession: ObservableObject {
         }
         guard gen == runGen, phase == .ready else { return }
         let a = langA, b = langB
-        activity = useSense ? "SenseVoice 识别中…" : "Whisper 识别中…"
+        activity = usingCloudASR ? "云端识别中…" : (useSense ? "SenseVoice 识别中…" : "Whisper 识别中…")
         let forced = forcedItemLang(itemID)
         let fallback = forced?.id ?? ((lastLangID == b.id) ? b.id : a.id)
         let cands = forced.map { [$0.id] } ?? [a.id, b.id]
@@ -1759,7 +1808,9 @@ final class LiveSession: ObservableObject {
         do {
             let sv = useSense
             let r: (String, String)
-            if sv {
+            if usingCloudASR {
+                r = try await cloud.transcribe(samples, candidates: cands, fallback: fallback)
+            } else if sv {
                 r = try await sense.recognize(samples, candidates: cands, fallback: fallback)
             } else {
                 r = try await asr.recognize(samples, candidates: cands, fallback: fallback)
@@ -1915,10 +1966,10 @@ final class LiveSession: ObservableObject {
         // 声音克隆：等提前生成好的克隆声音，没有就用系统声音。
         // 放 CPU 跑的时候慢一些，多给点时间
         let cloneWait: UInt64 = cloneOnCPU ? 40_000_000_000 : 20_000_000_000
-        var cloned: [Float]?
+        var cloned: CloneAudio?
         if voiceClone, let t = cloneTasks[item.id] ?? prepareClone(item.id) {
             if cloneTasks[item.id] == nil { cloneTasks[item.id] = t }
-            cloned = await withTaskGroup(of: [Float]?.self) { g in
+            cloned = await withTaskGroup(of: CloneAudio?.self) { g in
                 g.addTask { await t.value }
                 g.addTask { try? await Task.sleep(nanoseconds: cloneWait); return nil }
                 let first = await g.next() ?? nil
@@ -1930,7 +1981,11 @@ final class LiveSession: ObservableObject {
         hearLog("朗读：\(item.target.displayName)，\(outputMode == .speaker ? "扬声器" : (pan < 0 ? "左耳" : (pan > 0 ? "右耳" : "双耳")))，\(cloned != nil ? "克隆原声" : "系统声音")")
         if mute { capture.muted = true }
         if let cloned {
-            await speaker.play(samples: cloned, sampleRate: Double(VoiceCloneGGUF.sampleRate), pan: pan)
+            let ok = await speaker.play(samples: cloned.samples, sampleRate: Double(cloned.sampleRate), pan: pan)
+            if !ok {
+                // 克隆声音放不出来，退回系统声音，别让用户听个寂寞
+                await speaker.speak(SpeakRequest(text: text, locale: item.target.tts, pan: pan))
+            }
         } else {
             await speaker.speak(SpeakRequest(text: text, locale: item.target.tts, pan: pan))
         }
@@ -1990,6 +2045,11 @@ final class LiveSession: ObservableObject {
     private static let clonePendingKey = "cloneLoadPending"
     private var cloneLoadTask: Task<Void, Never>?
 
+    /// 连一下云端服务，看看三个模型的状态（连不上返回 nil）
+    func cloudHealth() async -> String? {
+        await cloud.health()
+    }
+
     /// 这个 App 现在还能用多少内存（MB）
     static func freeMB() -> Int { Int(os_proc_available_memory() / 1_048_576) }
 
@@ -2004,7 +2064,7 @@ final class LiveSession: ObservableObject {
     }
 
     private func loadClonerIfNeeded() async {
-        guard voiceClone, VoiceCloneGGUF.installed, !cloneLoading else { return }
+        guard voiceClone, !voiceCloneCloud, VoiceCloneGGUF.installed, !cloneLoading else { return }
         if case .loading = phase { return }                 // 识别、翻译模型还在加载，等它们好了会再叫
         // GGUF 版模型走 mmap 映射，磁盘上约 760 MB。
         // 但放 GPU 时 Metal 里会再存一份（常驻、不可回收），mmap 的文件页也要占一份（可回收）。
@@ -2068,15 +2128,26 @@ final class LiveSession: ObservableObject {
     }
 
     /// 在后台生成这句译文的克隆声音；没有样本、不支持这种语言或模型没加载时返回 nil
-    private func prepareClone(_ id: UUID) -> Task<[Float]?, Never>? {
+    private func prepareClone(_ id: UUID) -> Task<CloneAudio?, Never>? {
         guard let ref = cloneRefs[id],
               let item = items.first(where: { $0.id == id }),
               !item.translated.isEmpty, !item.translated.hasPrefix("（翻译失败"),
               VoiceCloneGGUF.languageNames[item.target.id] != nil else { return nil }
         let text = item.translated, lang = item.target.id
         let cloner = self.cloner
+        let cloud = self.cloud
+        let useCloud = usingCloudClone
         return Task.detached(priority: .userInitiated) {
             do {
+                if useCloud {
+                    hearLog("声音克隆（云端）：开始生成")
+                    // 语言名要用模型认的那种写法（english/chinese），和本地跑的时候一样
+                    let cloudLang = VoiceCloneGGUF.languageNames[lang] ?? lang
+                    let out = try await cloud.clone(text: text, lang: cloudLang,
+                                                    reference: ref.samples, referenceText: ref.text)
+                    hearLog("声音克隆（云端）：生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
+                    return out
+                }
                 return try await cloner.synthesize(text: text, language: lang,
                                                    reference: ref.samples, referenceText: ref.text)
             } catch {
