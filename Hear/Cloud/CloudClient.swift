@@ -134,6 +134,45 @@ actor CloudClient {
         return out
     }
 
+    /// 连一下某个地址，把失败的原因说清楚（设置界面"测试连接"用）
+    /// 不只说"连不上"，要说清楚是被系统拦了、对方没开、还是被防火墙挡了
+    static func diagnose(address: String) async -> String {
+        let s = cleanURL(address)
+        if s.isEmpty { return "还没填地址" }
+        guard let url = URL(string: s + "/health") else { return "地址格式不对：\(s)" }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 6
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            guard (200..<300).contains(code) else {
+                let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
+                return "连上了，但服务返回 \(code)：\(body)"
+            }
+            return "连接正常，服务在运行"
+        } catch let e as URLError {
+            switch e.code {
+            case .appTransportSecurityRequiresSecureConnection:
+                return "被系统拦下了（不允许 http 明文），请用 0.4.19 以上的版本"
+            case .cannotConnectToHost:
+                let port = URL(string: s)?.port.map(String.init) ?? "这个端口"
+                return "连不上（\(port) 没有在监听）：确认服务已经启动。三个模型都填同一个地址 http://192.168.x.x:8000，8081、8082 只在你电脑上监听，手机访问不了"
+            case .timedOut:
+                return "超时：可能被防火墙挡了，或者手机和电脑不在同一个网段"
+            case .cannotFindHost:
+                return "找不到这个地址：IP 写错了？"
+            case .notConnectedToInternet:
+                return "手机现在没有联网"
+            case .networkConnectionLost:
+                return "连接断开了：服务可能刚重启，或者 Wi-Fi 断了"
+            default:
+                return "连不上（\(e.code)）：\(e.localizedDescription)"
+            }
+        } catch {
+            return "连不上：\(error.localizedDescription)"
+        }
+    }
+
     /// 连不上服务时返回 nil（不抛错，设置界面用来显示“连不上”）
     func health() async -> String? {
         guard let info = await Self.healthInfo(address: asrAddress) else { return nil }

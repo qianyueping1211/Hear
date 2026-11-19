@@ -673,7 +673,12 @@ struct CloudEditSheet: View {
                 } header: {
                     Text(target.title)
                 } footer: {
-                    Text("地址是电脑上那个服务的地址，手机和电脑要在同一个 Wi-Fi 下。")
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("当前实际使用的地址：\(effectiveAddressText)")
+                        Text("地址是电脑上那个服务的地址，手机和电脑要在同一个 Wi-Fi 下。")
+                        Text("只填 8000 就行：8081（翻译）和 8082（克隆）只在你电脑上监听，手机访问不了。")
+                        Text("连不上的话看看手机有没有弹过“本地网络”的提示，选了“不允许”就没法访问，设置 → 隐私与安全性 → 本地网络 里打开。")
+                    }
                 }
             }
             .navigationTitle("配置 · \(target.title)")
@@ -689,6 +694,16 @@ struct CloudEditSheet: View {
             .onAppear {
                 address = current
             }
+        }
+    }
+
+    /// 现在实际用的地址（模型自己填了就用它，没填就用通用服务地址）
+    private var effectiveAddressText: String {
+        switch target {
+        case .service: return session.cloudAddress.isEmpty ? "还没填" : session.cloudAddress
+        case .model(let m):
+            let a = session.cloudEffectiveAddress(m)
+            return a.isEmpty ? "还没填" : a
         }
     }
 
@@ -726,18 +741,14 @@ struct CloudEditSheet: View {
                 status = "还没填地址"
                 return
             }
-            let info = await CloudClient.healthInfo(address: targetAddr)
-            busy = false
-            if let info {
-                switch target {
-                case .service:
-                    status = "连接正常，服务在运行"
-                case .model(let m):
-                    status = info[m.rawValue] ?? "连接正常"
-                }
-            } else {
-                status = "连不上：检查地址、端口和防火墙"
+            var text = await CloudClient.diagnose(address: targetAddr)
+            // 连上了的话，把这个模型自己的状态也带出来
+            if text.hasPrefix("连接正常"), case .model(let m) = target,
+               let info = await CloudClient.healthInfo(address: targetAddr) {
+                text += "，\(m.title)：\(info[m.rawValue] ?? "就绪")"
             }
+            busy = false
+            status = text
         }
     }
 }
