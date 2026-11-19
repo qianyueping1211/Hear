@@ -129,7 +129,8 @@ actor LlamaTranslator {
         while i < tokens.count {
             let n = Int32(min(Int(batchSize), tokens.count - i))
             llama_batch_ext_clear(batch)
-            var lastIdx = -1
+            // 注意：llama_batch_ext_add_token 返回 int32_t（Swift 里是 Int32）
+            var lastIdx = Int32(-1)
             for k in 0..<Int(n) {
                 let idx = llama_batch_ext_add_token(batch, 0, tokens[i + k])
                 if idx < 0 { throw TranslatorError.decodeFailed }
