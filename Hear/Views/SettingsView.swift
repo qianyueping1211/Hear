@@ -701,14 +701,8 @@ struct CloudEditSheet: View {
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .keyboardType(.URL)
+                                // 选了"默认"就不能改这一行，要单独填地址先把它关掉
                                 .disabled(useDefault)
-                                // 自己填了地址就自动把"默认"关掉，不然填了也不生效
-                                .onChange(of: address) { _, newValue in
-                                    if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                                       useDefault {
-                                        useDefault = false
-                                    }
-                                }
                         }
                     } else {
                         TextField("http://192.168.1.10:8000", text: $address)
