@@ -3,3 +3,5 @@ faster-whisper>=1.1.0
 # av 要 >= 12：老版本没有 metadata_errors 参数，faster-whisper 解码会报错
 av>=12.0.0
 numpy>=1.24
+# SenseVoice（云端识别"快速方案"用），Windows 也有对应的包
+sherpa-onnx>=1.10.0

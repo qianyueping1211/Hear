@@ -147,6 +147,8 @@ struct SettingsView: View {
                         Text("在线模型").tag(1)
                     }
                     .pickerStyle(.segmented)
+                    // 页签高一点，好点得着
+                    .controlSize(.large)
                     // 页签和下面第一行之间不要有横线
                     .listRowSeparator(.hidden)
                     // 上下留白收紧，别跟下面第一行隔一大块
@@ -677,6 +679,8 @@ struct CloudEditSheet: View {
     @State private var address: String = ""
     /// 单个模型：是不是用通用服务地址（"默认"）
     @State private var useDefault = true
+    /// 语音识别的方案
+    @State private var asrScheme = "sensevoice+whisper"
     @State private var status: String? = nil
     @State private var busy = false
 
@@ -704,6 +708,14 @@ struct CloudEditSheet: View {
                                 // 选了"默认"就不能改这一行，要单独填地址先把它关掉
                                 .disabled(useDefault)
                         }
+                        // 语音识别：在"自定义"下面选识别方案
+                        if case .model(let m) = target, m == .asr {
+                            Picker("识别方案", selection: $asrScheme) {
+                                Text("最快：SenseVoice").tag("sensevoice")
+                                Text("最准：Whisper").tag("whisper")
+                                Text("SenseVoice + Whisper").tag("sensevoice+whisper")
+                            }
+                        }
                     } else {
                         TextField("http://192.168.1.10:8000", text: $address)
                             .textInputAutocapitalization(.never)
@@ -712,13 +724,6 @@ struct CloudEditSheet: View {
                     }
                 } header: {
                     Text(target.title)
-                } footer: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("当前实际使用的地址：\(effectiveAddressText)")
-                        Text("地址是电脑上那个服务的地址，手机和电脑要在同一个 Wi-Fi 下。")
-                        Text("三个模型都填 8000 就行（那是电脑上的总服务）。也可以单独填 8081（翻译）或 8082（克隆），那两个是单独的模型服务。")
-                        Text("连不上的话看看手机有没有弹过“本地网络”的提示，选了“不允许”就没法访问，设置 → 隐私与安全性 → 本地网络 里打开。")
-                    }
                 }
 
                 // 测试连接放最后
@@ -753,6 +758,7 @@ struct CloudEditSheet: View {
                     // 自己没填地址 = 用默认（通用服务地址）
                     useDefault = own.isEmpty
                     address = own
+                    if m == .asr { asrScheme = session.cloudASRScheme }
                 }
             }
         }
@@ -779,6 +785,7 @@ struct CloudEditSheet: View {
             // 选了"默认"就把自己填的清掉，用通用服务地址；
             // 没选就存自己填的（这样填 8081 / 8082 就能单独用那个模型服务）
             session.setCloudOwnAddress(m, useDefault ? "" : v)
+            if m == .asr { session.cloudASRScheme = asrScheme }
         }
         Task { await session.refreshCloudStatus() }
     }

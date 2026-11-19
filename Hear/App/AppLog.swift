@@ -68,17 +68,31 @@ final class AppLog: ObservableObject {
         write(e.line + "\n")
     }
 
+    /// 写文件在后台队列做，别在主线程上做磁盘 IO（不然会影响交互流畅度）
+    private let writeQueue = DispatchQueue(label: "hear.log.write", qos: .utility)
+
     private func write(_ s: String) {
         guard let data = s.data(using: .utf8) else { return }
-        if let h = try? FileHandle(forWritingTo: fileURL) {
-            h.seekToEndOfFile()
-            h.write(data)
-            try? h.close()
-        } else {
-            try? data.write(to: fileURL)
+        let n = Int64(data.count)
+        let url = fileURL
+        let old = oldURL
+        let limit = Int64(maxMB) * 1_000_000 / 2
+        writeQueue.async {
+            if let h = try? FileHandle(forWritingTo: url) {
+                h.seekToEndOfFile()
+                h.write(data)
+                try? h.close()
+            } else {
+                try? data.write(to: url)
+            }
+            // 超过一半就转成"旧日志"，顺手清掉更老的
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+            if size > limit {
+                try? FileManager.default.removeItem(at: old)
+                try? FileManager.default.moveItem(at: url, to: old)
+            }
         }
-        fileBytes += Int64(data.count)
-        rotateIfNeeded()
+        fileBytes += n
     }
 
     /// 当前文件超过上限的一半时，把它变成“旧日志”，旧的旧日志删除。

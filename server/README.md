@@ -44,6 +44,30 @@ App 会自己看这个地址上跑的是哪种服务，用对应的接口去调�
    App 连不上就是 iOS 的「本地网络」权限没给：
    设置 → 隐私与安全性 → 本地网络，打开「听见」。
 
+## 云端语音识别有三种方案（可以选）
+
+服务端同时支持三种识别方案，在 App 的
+「功能设置 → 模型管理 → 在线模型 → 语音识别 → 配置 → 识别方案」里选：
+
+| 方案 | 说明 |
+|---|---|
+| **最快：SenseVoice** | 只用 SenseVoice（阿里 FunASR，ONNX，CPU 也能跑，约 230 MB） |
+| **最准：Whisper** | 只用 faster-whisper（准，但慢一点） |
+| **SenseVoice + Whisper** | SenseVoice 先出结果，Whisper 再修正（推荐） |
+
+选哪个方案，App 会在请求里带上 `X-ASR-Scheme` 头，服务端按它来跑；
+App 的运行日志和服务端日志都会写清楚这次用的是哪个方案。
+
+服务端默认用 `sensevoice+whisper`，也可以用环境变量改：
+
+| 环境变量 | 说明 | 默认 |
+|---|---|---|
+| `HEAR_ASR_SCHEME` | 识别方案 | `sensevoice+whisper` |
+| `HEAR_ASR_MODEL` | Whisper 模型（tiny/base/small/medium/large-v3） | `small` |
+
+SenseVoice 模型放在 `server/models/sensevoice/`（`model.int8.onnx` + `tokens.txt`），
+脚本会自动下载。
+
 ## 三个模型分别是怎么起来的
 
 启动的时候你会看到两行 `==>`：

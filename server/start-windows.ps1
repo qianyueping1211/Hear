@@ -30,6 +30,9 @@ $MtDevice    = if ($env:HEAR_MT_DEVICE)    { $env:HEAR_MT_DEVICE }    else { "GP
 $CloneDevice = if ($env:HEAR_CLONE_DEVICE) { $env:HEAR_CLONE_DEVICE } else { "GPU" }
 $MtQuant   = if ($env:HEAR_MT_QUANT)   { $env:HEAR_MT_QUANT }   else { "Q4_K_M" }
 $AsrModel  = if ($env:HEAR_ASR_MODEL)  { $env:HEAR_ASR_MODEL }  else { "small" }
+# 识别方案：whisper / sensevoice / sensevoice+whisper
+$AsrScheme = if ($env:HEAR_ASR_SCHEME) { $env:HEAR_ASR_SCHEME } else { "sensevoice+whisper" }
+$SvDir     = Join-Path $ModelDir "sensevoice"
 $Context   = if ($env:HEAR_CTX)        { $env:HEAR_CTX }        else { "4096" }
 $HF        = if ($env:HF_ENDPOINT)     { $env:HF_ENDPOINT }     else { "https://huggingface.co" }
 
@@ -182,6 +185,8 @@ if ($py0) {
     $env:HEAR_MT_URL = "http://127.0.0.1:$MtPort"
     $env:HEAR_CLONE_URL = "http://127.0.0.1:$ClonePort"
     $env:HEAR_ASR_MODEL = $AsrModel
+$env:HEAR_ASR_SCHEME = $AsrScheme
+$env:HEAR_SENSEVOICE_DIR = $SvDir
     try {
         $tempCloud = Start-Process -FilePath $py0 -ArgumentList "`"$cloudScript`"" `
                         -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $ServerDir "cloud.log") `
@@ -309,6 +314,21 @@ function Get-Model($repo, $file) {
     Get-File $mirrors $out | Out-Null
     return $out
 }
+# SenseVoice（云端识别的"快"方案用；约 230 MB）
+if (-not (Test-Path (Join-Path $SvDir "model.int8.onnx"))) {
+    Say "下载 SenseVoice 模型（云端识别的快速方案）"
+    New-Item -ItemType Directory -Force -Path $SvDir | Out-Null
+    $svRepo = "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
+    Get-Model $svRepo "model.int8.onnx" | Out-Null
+    Get-Model $svRepo "tokens.txt" | Out-Null
+    # Get-Model 存到 ModelDir 根目录，挪到 sensevoice 子目录去
+    foreach ($n in @("model.int8.onnx", "tokens.txt")) {
+        $src = Join-Path $ModelDir $n
+        if (Test-Path $src) { Move-Item $src (Join-Path $SvDir $n) -Force }
+    }
+}
+else { Step "已有 SenseVoice 模型" }
+
 Get-Model "tencent/Hy-MT2-1.8B-GGUF" "Hy-MT2-1.8B-$MtQuant.gguf" | Out-Null
 Get-Model "Shlomo426/Qwen3-TTS-12Hz-0.6B-Base-GGUF" "Qwen3-TTS-12Hz-0.6B-Base-Q4_K_M.gguf" | Out-Null
 Get-Model "Shlomo426/Qwen3-TTS-12Hz-0.6B-Base-GGUF" "mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf" | Out-Null

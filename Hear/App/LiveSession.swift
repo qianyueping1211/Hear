@@ -79,6 +79,25 @@ final class LiveSession: ObservableObject {
             updateCloudAddresses()
         }
     }
+    /// 云端语音识别用哪个方案：
+    ///   whisper              只用 Whisper（准，慢）
+    ///   sensevoice           只用 SenseVoice（快）
+    ///   sensevoice+whisper   SenseVoice 先出，Whisper 再修正（推荐）
+    @Published var cloudASRScheme: String {
+        didSet {
+            save("cloudASRScheme", cloudASRScheme)
+            updateCloudAddresses()
+        }
+    }
+    /// 云端识别方案的中文名（日志里用）
+    static func cloudSchemeName(_ scheme: String) -> String {
+        switch scheme {
+        case "whisper": return "Whisper"
+        case "sensevoice": return "SenseVoice"
+        case "sensevoice+whisper": return "SenseVoice+Whisper"
+        default: return scheme
+        }
+    }
     /// 云端服务返回的各模型状态（asr / mt / clone）
     @Published private(set) var cloudStatus: [String: String] = [:]
     /// 声音克隆用云端模型（false = 用手机本地的 Qwen）
@@ -323,6 +342,7 @@ final class LiveSession: ObservableObject {
         // init 里属性还没初始化完，只能用局部变量，不能直接读 self.cloudAddress
         let cloudAddr = d.string(forKey: "cloudAddress") ?? ""
         cloudAddress = cloudAddr
+        cloudASRScheme = d.string(forKey: "cloudASRScheme") ?? "sensevoice+whisper"
         let cloudOwn = d.object(forKey: "cloudModelAddress") as? [String: String] ?? [:]
         cloudModelAddress = cloudOwn
         let cloudClient = cloud
@@ -810,6 +830,15 @@ final class LiveSession: ObservableObject {
         }
     }
 
+    /// 苹果翻译真的失败了：这时才提示用户
+    private func appleTranslationFailed() {
+        guard usingAppleTranslation else { return }
+        let a = langA, b = langB
+        let msg = "苹果翻译暂不支持 \(a.name) 到 \(b.name)，可以在设置里改用本地翻译引擎"
+        appleNote = msg
+        hearLog(msg, .warning)
+    }
+
     /// 检查苹果翻译的语言包；没下载就让系统弹出下载
     func prepareAppleTranslation() {
         guard usingAppleTranslation else { return }
@@ -824,8 +853,9 @@ final class LiveSession: ObservableObject {
                 translationPrepConfig = TranslationSession.Configuration(source: a.appleLanguage,
                                                                          target: b.appleLanguage)
             case .unsupported:
-                appleNote = "苹果翻译暂不支持 \(a.name) ⇄ \(b.name)，可以在设置里改用本地翻译引擎"
-                hearLog(appleNote ?? "", .warning)
+                // 系统的可用性检查对中文→英文这类会误报"不支持"（其实能用），
+                // 所以先不提示，等真的翻译失败时再说。
+                appleNote = nil
             }
         }
     }
@@ -1186,7 +1216,7 @@ final class LiveSession: ObservableObject {
         // 用 isAnyModelLoading（把声音克隆也算进去），不然刚提示"可以开始翻译"、
         // 其实还有模型在加载的时候，一按就说不让开始
         if isAnyModelLoading {
-            showToast("本地模型正在加载，请稍等…", seconds: 5)
+            // 按钮上方本来就显示"正在准备模型 · N 秒"，不用再弹一次提示
             return false
         }
         guard phase == .ready else { return false }
@@ -1541,7 +1571,14 @@ final class LiveSession: ObservableObject {
             let r: (String, String)
             do {
                 if usingCloudASR {
-                    r = try await cloud.transcribe(samples: clip, candidates: cands, fallback: fallback)
+                    // 云端识别：先用本地的 SenseVoice 快速出字（预览要快），
+                    // 整句识别再交给云端 Whisper 定稿。
+                    // 本地没装 SenseVoice 就直接用云端。
+                    if await sense.isLoaded {
+                        r = try await sense.recognize(clip, candidates: cands, fallback: fallback)
+                    } else {
+                        r = try await cloud.transcribe(samples: clip, candidates: cands, fallback: fallback)
+                    }
                 } else if sv {
                     r = try await sense.recognize(clip, candidates: cands, fallback: fallback)
                 } else {
@@ -1814,7 +1851,7 @@ final class LiveSession: ObservableObject {
         } catch {
             hearLog("翻译失败：\(error)", .error)
             if let j = items.firstIndex(where: { $0.id == prevID }) { items[j].done = true }
-            prepareAppleTranslation()
+            if usingAppleTranslation { appleTranslationFailed() } else { prepareAppleTranslation() }
         }
         persist()
         activity = isRunning ? "正在聆听" : ""
@@ -1855,7 +1892,7 @@ final class LiveSession: ObservableObject {
         } catch {
             hearLog("翻译失败：\(error)", .error)
             update(itemID, "（翻译失败：\(error.localizedDescription)）", done: true)
-            prepareAppleTranslation()
+            if usingAppleTranslation { appleTranslationFailed() } else { prepareAppleTranslation() }
         }
         persist()
         activity = isRunning ? "正在聆听" : ""
@@ -1900,7 +1937,8 @@ final class LiveSession: ObservableObject {
     private func process(_ samples: [Float], itemID: UUID, gen: Int) async {
         // 模型还在加载：先把这句话留着，加载好马上识别
         if phase != .ready {
-            activity = "模型准备好后马上识别"
+            // 上面已经有"正在准备模型 · N 秒"的提示了，这里不再重复
+            activity = nil
             while isLoadingPhase, gen == runGen {
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
@@ -1918,7 +1956,20 @@ final class LiveSession: ObservableObject {
             let sv = useSense
             let r: (String, String)
             if usingCloudASR {
-                r = try await cloud.transcribe(samples: samples, candidates: cands, fallback: fallback)
+                // 云端识别：先用本地 SenseVoice 快速出结果（"初步显示"），
+                // 再用云端 Whisper 修正（更准）。本地没装 SenseVoice 就只用云端。
+                if await sense.isLoaded {
+                    let fast = try await sense.recognize(samples, candidates: cands, fallback: fallback)
+                    // 云端 Whisper 定稿
+                    r = try await cloud.transcribe(samples: samples, candidates: cands, fallback: fallback)
+                    if r.1.isEmpty { r = fast }
+                    else {
+                        let secs = String(format: "%.1f", Date().timeIntervalSince(t0))
+                        hearLog("云端 Whisper 修正 \(secs)s：「\(fast.1.prefix(30))」→「\(r.1.prefix(30))」")
+                    }
+                } else {
+                    r = try await cloud.transcribe(samples: samples, candidates: cands, fallback: fallback)
+                }
             } else if sv {
                 r = try await sense.recognize(samples, candidates: cands, fallback: fallback)
             } else {
@@ -1926,7 +1977,14 @@ final class LiveSession: ObservableObject {
             }
             detected = r.0
             text = r.1
-            hearLog("整句识别（\(sv ? "SenseVoice" : "Whisper")）\(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(text.prefix(40))")
+            // 日志里写清楚这次用的是哪个引擎（云端就写"云端"和用的哪个方案）
+            let engineName: String
+            if usingCloudASR {
+                engineName = "云端·\(Self.cloudSchemeName(cloudASRScheme))"
+            } else {
+                engineName = sv ? "SenseVoice" : "Whisper"
+            }
+            hearLog("整句识别（\(engineName)）\(String(format: "%.1f", Date().timeIntervalSince(t0)))s：\(text.prefix(40))")
         } catch {
             hearLog("识别失败：\(error)", .error)
             if usingCloudASR {
@@ -1982,6 +2040,9 @@ final class LiveSession: ObservableObject {
             return
         }
         guard gen == runGen else { return }              // 翻译中途被停止：stop() 已经收尾
+        if usingCloudMT {
+            hearLog("云端翻译：\(result.prefix(40))")
+        }
         update(id, result, done: true)
         persist()
         activity = isRunning ? "正在聆听" : ""
@@ -2182,7 +2243,10 @@ final class LiveSession: ObservableObject {
         let a = Self.effectiveAddress(fallback: cloudAddress, own: cloudOwnAddress(.asr))
         let m = Self.effectiveAddress(fallback: cloudAddress, own: cloudOwnAddress(.mt))
         let c = Self.effectiveAddress(fallback: cloudAddress, own: cloudOwnAddress(.clone))
-        Task { await cloud.setAddresses(asr: a, mt: m, clone: c) }
+        Task {
+            await cloud.setAddresses(asr: a, mt: m, clone: c)
+            await cloud.setASRScheme(cloudASRScheme)
+        }
     }
 
     // MARK: - 本地引擎互斥

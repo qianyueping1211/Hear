@@ -153,7 +153,14 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
                                  isFinal: r.isFinal, gen: gen)
                 }
             } catch {
-                hearLog("系统听写结束：\(error)", .warning)
+                // 退出/切换语言时正常会取消，不是错误，别刷警告
+                let ns = error as NSError
+                let cancelled = ns.domain == NSCocoaErrorDomain && ns.code == NSUserCancelledError
+                    || (error is CancellationError)
+                    || (ns.domain == "kAFErrorDomain" && ns.code == -999)
+                if !cancelled {
+                    hearLog("系统听写结束：\(error)", .warning)
+                }
             }
         }
         hearLog("系统听写：开始（\(loc.identifier)，\(Int(fmt.sampleRate)) Hz）")

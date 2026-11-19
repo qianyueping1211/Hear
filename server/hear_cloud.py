@@ -41,6 +41,13 @@ MT_URL = os.environ.get("HEAR_MT_URL", "http://127.0.0.1:8081").rstrip("/")
 CLONE_URL = os.environ.get("HEAR_CLONE_URL", "http://127.0.0.1:8082").rstrip("/")
 ASR_URL = os.environ.get("HEAR_ASR_URL", "").rstrip("/")
 ASR_MODEL = os.environ.get("HEAR_ASR_MODEL", "small")
+# 识别用哪个方案：
+#   whisper         只用 faster-whisper（准，但慢一点）
+#   sensevoice      只用 SenseVoice（快，擅长中英日韩粤）
+#   sensevoice+whisper  SenseVoice 先出初步结果，Whisper 再修正（推荐）
+ASR_SCHEME = os.environ.get("HEAR_ASR_SCHEME", "sensevoice+whisper")
+SENSEVOICE_DIR = os.environ.get(
+    "HEAR_SENSEVOICE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "sensevoice"))
 ASR_DEVICE = os.environ.get("HEAR_ASR_DEVICE", "cpu")
 ASR_COMPUTE = os.environ.get("HEAR_ASR_COMPUTE", "int8")
 # 和 App 本地翻译用的采样参数保持一致（Hy-MT2 官方推荐）
@@ -121,6 +128,79 @@ def get_whisper():
     return _whisper
 
 
+_sense = None
+_sense_lock = threading.Lock()
+
+
+def get_sensevoice():
+    """懒加载 sherpa-onnx 的 SenseVoice（ONNX，CPU 也能跑）"""
+    global _sense
+    if _sense is not None:
+        return _sense
+    with _sense_lock:
+        if _sense is not None:
+            return _sense
+        try:
+            import sherpa_onnx
+        except Exception as e:
+            log("没装 sherpa-onnx，SenseVoice 方案用不了：%s" % e)
+            return None
+        model = os.path.join(SENSEVOICE_DIR, "model.int8.onnx")
+        tokens = os.path.join(SENSEVOICE_DIR, "tokens.txt")
+        if not (os.path.isfile(model) and os.path.isfile(tokens)):
+            log("SenseVoice 模型没下好（%s）" % SENSEVOICE_DIR)
+            return None
+        try:
+            log("正在加载 SenseVoice…")
+            _sense = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                model=model, tokens=tokens, num_threads=2, use_itn=True)
+            log("SenseVoice 加载完成")
+            return _sense
+        except Exception as e:
+            log("SenseVoice 加载失败：%s" % e)
+            return None
+
+
+def sensevoice_transcribe(samples, rate):
+    """用 SenseVoice 识别。返回 (语言代码, 文字)"""
+    rec = get_sensevoice()
+    if rec is None:
+        return ("", "")
+    try:
+        import numpy as np
+        audio = np.asarray(samples, dtype=np.float32)
+        if rate and rate != 16000 and len(audio) > 0:
+            n = int(round(len(audio) * 16000.0 / float(rate)))
+            if n > 0:
+                idx = np.linspace(0, len(audio) - 1, n)
+                audio = np.interp(idx, np.arange(len(audio)), audio).astype(np.float32)
+        stream = rec.create_stream()
+        stream.accept_waveform(16000, audio)
+        rec.decode_stream(stream)
+        text = (stream.result.text or "").strip()
+        # SenseVoice 的结果里带语言和情绪标记，例如 <|zh|><|NEUTRAL|><|zh|><|withitn|>你好
+        lang = ""
+        if "<|zh|>" in text or "<|yue|>" in text:
+            lang = "zh"
+        elif "<|en|>" in text:
+            lang = "en"
+        elif "<|ja|>" in text:
+            lang = "ja"
+        elif "<|ko|>" in text:
+            lang = "ko"
+        for tag in ("<|zh|>", "<|en|>", "<|ja|>", "<|ko|>", "<|yue|>",
+                    "<|NEUTRAL|>", "<|HAPPY|>", "<|SAD|>", "<|ANGRY|>", "<|FEARFUL|>",
+                    "<|DISGUSTED|>", "<|SURPRISED|>", "<|withitn|>", "<|woitn|>"):
+            text = text.replace(tag, "")
+        text = text.strip()
+        if "<|nospeech|>" in text or not text:
+            return (lang, "")
+        return (lang, text)
+    except Exception as e:
+        log("SenseVoice 识别失败：%s" % e)
+        return ("", "")
+
+
 def whisper_status():
     """识别模型现在什么状态（不阻塞）。"""
     st = _whisper_state.get("status", "未加载")
@@ -184,6 +264,52 @@ def decode_wav(data):
     if channels > 1:
         samples = samples[::channels]
     return samples, rate
+
+
+def recognize(samples, rate, language, fallback, scheme=None):
+    """按方案选识别：
+       whisper              只用 Whisper
+       sensevoice           只用 SenseVoice
+       sensevoice+whisper   SenseVoice 先出，Whisper 再修正
+    返回 (语言, 文字)"""
+    scheme = (scheme or ASR_SCHEME or "whisper").strip().lower()
+
+    if scheme == "sensevoice":
+        lang, text = sensevoice_transcribe(samples, rate)
+        if not text:                     # SenseVoice 没听出来，退回 Whisper
+            text, lang = whisper_transcribe(samples, rate, language, fallback)
+        return (lang or fallback, text)
+
+    if scheme == "sensevoice+whisper":
+        # 先用 SenseVoice 快速出结果（快）
+        fast_lang, fast_text = sensevoice_transcribe(samples, rate)
+        # 再用 Whisper 修正（准）
+        slow_text, slow_lang = whisper_transcribe(samples, rate, language, fallback)
+        if not slow_text:
+            return (fast_lang or fallback, fast_text)
+        if not fast_text:
+            return (slow_lang or fallback, slow_text)
+        # 两个结果差很多就以 Whisper 为准，一样就用 SenseVoice 的（更快）
+        if fast_text != slow_text:
+            log("Whisper 修正：「%s」→「%s」" % (fast_text[:30], slow_text[:30]))
+            return (slow_lang or fast_lang or fallback, slow_text)
+        return (fast_lang or slow_lang or fallback, fast_text)
+
+    # 默认：只用 Whisper
+    return whisper_transcribe(samples, rate, language, fallback)
+
+
+def whisper_transcribe(samples, rate, language, fallback):
+    """只用 faster-whisper 识别"""
+    model = get_whisper()
+    # 必须给 numpy 的 float32 数组：
+    # faster-whisper 只有在拿到 ndarray 时才跳过重新解码，
+    # 给普通 list 它会当成文件去 av.open()，老版本 av 会直接报
+    # "open() got an unexpected keyword argument 'metadata_errors'"。
+    audio = to_float32(samples, rate)
+    segments, info = model.transcribe(audio, language=language, beam_size=1, vad_filter=False)
+    text = "".join(s.text for s in segments).strip()
+    return (text, info.language or fallback)
 
 
 def to_float32(samples, rate):
@@ -328,6 +454,7 @@ a{color:#007aff;text-decoration:none}
             out["asr"] = "外部服务" if backend_alive(ASR_URL) else "外部服务连不上"
         else:
             out["asr"] = whisper_status()
+            out["asr_scheme"] = ASR_SCHEME
         out["mt"] = "就绪" if backend_alive(MT_URL) else "连不上（%s）" % MT_URL
         out["clone"] = "就绪" if backend_alive(CLONE_URL) else "连不上（%s）" % CLONE_URL
         return out
@@ -359,22 +486,18 @@ a{color:#007aff;text-decoration:none}
     def asr(self, body):
         langs = [x.strip() for x in (self.headers.get("X-Languages") or "").split(",") if x.strip()]
         fallback = self.headers.get("X-Fallback-Language") or ""
+        # 手机可以临时指定用哪个方案（不带就用服务默认的）
+        scheme = (self.headers.get("X-ASR-Scheme") or "").strip().lower()
+        if scheme not in ("whisper", "sensevoice", "sensevoice+whisper"):
+            scheme = ASR_SCHEME
         t0 = time.time()
         if ASR_URL:
             text, lang = self.asr_proxy(body, langs, fallback)
         else:
             samples, rate = decode_wav(body)
-            model = get_whisper()
             language = langs[0] if len(langs) == 1 else None
-            # 必须给 numpy 的 float32 数组：
-            # faster-whisper 只有在拿到 ndarray 时才跳过重新解码，
-            # 给普通 list 它会当成文件去 av.open()，老版本 av 会直接报
-            # "open() got an unexpected keyword argument 'metadata_errors'"。
-            audio = to_float32(samples, rate)
-            segments, info = model.transcribe(audio, language=language, beam_size=1, vad_filter=False)
-            text = "".join(s.text for s in segments).strip()
-            lang = info.language or fallback
-        log("识别 %.1fs：%s" % (time.time() - t0, text[:40]))
+            text, lang = recognize(samples, rate, language, fallback, scheme)
+        log("识别（%s）%.1fs：%s" % (scheme, time.time() - t0, text[:40]))
         self._send_json({"lang": lang or fallback, "text": text})
 
     def asr_proxy(self, body, langs, fallback):

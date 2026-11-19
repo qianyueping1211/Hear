@@ -248,6 +248,15 @@ actor CloudClient {
 
     /// 16 kHz 单声道声音 → 识别结果
     /// - Parameter candidates: 可能的语言（zh/en…），服务端会优先按这些判断
+    /// 用哪个识别方案（服务端认这三个）
+    private var asrScheme = "sensevoice+whisper"
+
+    /// 设置识别方案：whisper / sensevoice / sensevoice+whisper
+    func setASRScheme(_ s: String) {
+        let v = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !v.isEmpty { asrScheme = v }
+    }
+
     func transcribe(samples: [Float], candidates: [String], fallback: String) async throws -> (lang: String, text: String) {
         // 单独的 llama-server 没有识别接口，识别只能用 8000 的总服务
         if await kind(of: asrAddress) == .llamaServer {
@@ -258,6 +267,8 @@ actor CloudClient {
                                   contentType: "audio/wav", timeout: 120)
         req.setValue(candidates.joined(separator: ","), forHTTPHeaderField: "X-Languages")
         req.setValue(fallback, forHTTPHeaderField: "X-Fallback-Language")
+        // 告诉服务端用哪个识别方案
+        req.setValue(asrScheme, forHTTPHeaderField: "X-ASR-Scheme")
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
