@@ -1,11 +1,6 @@
 import Foundation
 import UIKit
-
-/// 现在还能用多少内存（字节）。
-/// os_proc_available_memory 在 <os/proc.h> 里，Swift 侧不一定 import 得到，
-/// 这里直接按 C 符号引进来（这个名字是本文件专用的，不会和 SDK 里的重名）。
-@_silgen_name("os_proc_available_memory")
-private func hearProcAvailableMemory() -> UInt64
+import os
 
 /// 闪退/被系统杀掉的诊断。
 ///
@@ -30,7 +25,7 @@ final class CrashGuard {
     }
 
     /// 现在还能用多少内存（MB）。信号处理程序里也能安全调用
-    private static var freeMBNow: Int { Int(hearProcAvailableMemory() / 1_048_576) }
+    private static var freeMBNow: Int { Int(os_proc_available_memory() / 1_048_576) }
 
     /// 上次退出前记录的状态（写进标记文件，下次打开时读出来告诉用户）
     private struct Marker: Codable {
