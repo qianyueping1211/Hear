@@ -303,12 +303,12 @@ final class LiveSession: ObservableObject {
         rightEar = d.string(forKey: "rightEar") ?? "B"
         voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
         voiceCloneCloud = d.object(forKey: "voiceCloneCloud") as? Bool ?? false
-        cloudAddress = d.string(forKey: "cloudAddress") ?? ""
-        cloudModelAddress = d.object(forKey: "cloudModelAddress") as? [String: String] ?? [:]
-        // init 里还没完全初始化，不能直接捕获 self
+        // init 里属性还没初始化完，只能用局部变量，不能直接读 self.cloudAddress
+        let cloudAddr = d.string(forKey: "cloudAddress") ?? ""
+        cloudAddress = cloudAddr
+        let cloudOwn = d.object(forKey: "cloudModelAddress") as? [String: String] ?? [:]
+        cloudModelAddress = cloudOwn
         let cloudClient = cloud
-        let cloudAddr = cloudAddress
-        let cloudOwn = cloudModelAddress
         Task {
             await cloudClient.setAddresses(
                 asr: Self.effectiveAddress(fallback: cloudAddr, own: cloudOwn[CloudModel.asr.rawValue] ?? ""),
