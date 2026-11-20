@@ -388,19 +388,29 @@ if ($busy) {
 if ($tempCloud -and -not $tempCloud.HasExited) {
     try { Stop-Process -Id $tempCloud.Id -Force } catch {}
 }
-# 自签证书：有了它同一个端口上 http 和 https 都能用
-# （私钥只留在本机，不进仓库）
-try {
-    & $venvPy (Join-Path $ServerDir "make_cert.py") | Out-Null
-} catch {
-    Step "证书没生成成，这次只用 http"
+# 自签证书：App 只走 https，没有证书手机就连不上，
+# 所以这一步要看得见，失败了要马上说清楚（私钥只留在本机，不进仓库）
+$certFile = Join-Path $ServerDir "certs\cert.pem"
+if (-not (Test-Path $certFile)) {
+    Write-Host ""
+    Say "生成自签证书（手机要用 https 连）"
+    & $venvPy (Join-Path $ServerDir "make_cert.py")
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $certFile)) {
+        Write-Host ""
+        Write-Host "!! 证书没生成成，手机（App 只走 https）就连不上" -ForegroundColor Red
+        Write-Host "   原因多半是缺 cryptography 这个包，手动装一次：& `"$venvPy`" -m pip install cryptography" -ForegroundColor Red
+        Write-Host "   装完再跑一次本文件就行。" -ForegroundColor Red
+        Write-Host ""
+    }
+} else {
+    Step "已有证书 certs\cert.pem"
 }
 
 $cloud = Start-Process -FilePath $venvPy -ArgumentList "`"$cloudScript`"" `
             -PassThru -NoNewWindow
 Start-Sleep -Seconds 3
 Say "云端服务已启动（端口 $Port），模型还在准备中"
-Write-Host "    电脑浏览器打开 http://127.0.0.1:$Port/ 看看服务在不在" -ForegroundColor Cyan
+Write-Host "    电脑浏览器打开 https://127.0.0.1:$Port/ 看看服务在不在（自签证书，浏览器会提示不安全，点继续就行）" -ForegroundColor Cyan
 Write-Host "    手机浏览器打开下面打印的地址，能打开就说明手机到电脑是通的" -ForegroundColor Cyan
 Show-LanInfo $Port
 

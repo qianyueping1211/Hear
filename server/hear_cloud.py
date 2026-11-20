@@ -496,6 +496,15 @@ a{color:#007aff;text-decoration:none}
             out["clone"] = "连不上（%s）" % CLONE_URL
         return out
 
+    def send_error(self, code, message=None, explain=None):
+        # 400 多半是 https 的 TLS 握手打到了 http 的解析器（服务没生成证书），
+        # 说清楚一点，不然日志里一堆乱码看不懂
+        if code == 400 and message and "Bad request version" in str(message):
+            message = ("这个不是 HTTP 请求：多半是 https 的 TLS 握手打到了这里。"
+                       "服务没有证书（server/certs/cert.pem），"
+                       "跑一次 python server/make_cert.py 生成，再重启服务")
+        super().send_error(code, message, explain)
+
     # -- POST --
 
     def do_POST(self):

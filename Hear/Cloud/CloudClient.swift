@@ -318,6 +318,12 @@ actor CloudClient {
                 let host = u?.host ?? "电脑的IP"
                 let port = u?.port ?? 8000
                 return "超时，手机没收到回应。先在手机浏览器打开 https://\(host):\(port)/ 试试：能打开说明是 App 的「本地网络」权限没给（设置 → 隐私与安全性 → 本地网络），打不开说明网络不通。"
+            case .secureConnectionFailed, .serverCertificateUntrusted,
+                 .serverCertificateHasUnknownRoot, .serverCertificateHasBadDate,
+                 .serverCertificateNotYetValid, .clientCertificateRejected:
+                // 自签证书握手不上：多半是电脑上还没生成证书
+                hearLog("云端连接证书握手失败：\(s)（\(e.code.rawValue)）", .warning)
+                return "服务地址不可用，请确认：连不上多半是电脑上还没生成证书（server/certs/cert.pem），重新跑一次 start-windows.ps1 就会生成"
             case .cannotFindHost:
                 return "找不到这个地址：IP 写错了？"
             case .notConnectedToInternet:
