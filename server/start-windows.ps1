@@ -16,6 +16,16 @@
 # 不需要 Visual Studio、不需要编译、不需要 WSL。
 
 $ErrorActionPreference = "Stop"
+
+# ---------------------------------------------------------------- 中文显示
+# 现在的 Python（3.15 起）默认用 UTF-8 输出，而中文版 Windows 的 cmd 默认是 GBK，
+# 于是每个汉字都被拆成两个乱码字符（"听听见见"这种）。
+# 把控制台代码页改成 UTF-8 就好了。
+try { chcp 65001 > $null } catch {}
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
+# 让 Python 一定用 UTF-8 写日志（不管系统是什么语言）
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
 $tempCloud = $null      # 临时服务进程（出错时要停掉）
 $cloud = $null          # 正式服务进程
 $ServerDir = $PSScriptRoot                                  # ...\Hear\server
@@ -193,6 +203,38 @@ function Server-For($backend) {
     }
 }
 
+# 问 llama-server 有哪些显卡设备可用。
+# 它的 --device 要写它自己报出来的名字（"Vulkan0"、"CUDA0" 这种），
+# 写 "Vulkan" 它不认，会直接报 "invalid device: Vulkan" 然后退出。
+function Get-GpuDevice($exe) {
+    if (-not $exe) { return $null }
+    $out = ""
+    $old = $ErrorActionPreference
+    try {
+        # llama-server 往 stderr 写东西时 PowerShell 会当成错误，
+        # 这里临时改成 Continue，不然会被 $ErrorActionPreference = Stop 打断
+        $ErrorActionPreference = "Continue"
+        $out = (& $exe --list-devices 2>&1 | Out-String)
+    } catch {
+        $out = ""
+    } finally {
+        $ErrorActionPreference = $old
+    }
+    $names = @()
+    foreach ($line in ($out -split "`r?`n")) {
+        # 设备行长这样："  Vulkan0: NVIDIA GeForce RTX 4090 (24564 MiB, ...)"
+        if ($line -match '^\s*([^:\s]+):') { $names += $Matches[1] }
+    }
+    $names = @($names | Where-Object { $_ -ne "CPU" -and $_ -ne "" })
+    if ($names.Count -eq 0) { return $null }
+    # 优先 Vulkan（N 卡 / AMD / Intel 都能用），其次 CUDA
+    $v = $names | Where-Object { $_ -like "Vulkan*" } | Select-Object -First 1
+    if ($v) { return $v }
+    $c = $names | Where-Object { $_ -like "CUDA*" } | Select-Object -First 1
+    if ($c) { return $c }
+    return ($names | Select-Object -First 1)
+}
+
 # ---------------------------------------------------------------- Python（识别模型）
 function Find-Python {
     $venv = Join-Path $ServerDir ".venv\Scripts\python.exe"
@@ -247,11 +289,20 @@ $env:HEAR_SENSEVOICE_DIR = $SvDir
 $needOv   = ($MtDevice -eq "NPU")
 $needVulk = ($MtDevice -eq "GPU" -or $CloneDevice -eq "GPU")
 
-if (-not (Find-Exe "llama-server.exe" "")) {
-    $want = @()
-    if ($needOv)   { $want += "llama-$LlamaTag-bin-win-openvino-*.zip" }
-    if ($needVulk) { $want += "llama-$LlamaTag-bin-win-vulkan-x64.zip" }
+# 缺哪个补哪个：
+# 之前是"只要找到一个 llama-server.exe 就不下了"，所以先跑过 CPU 模式的话，
+# 后面想用显卡也永远没有 Vulkan 那个版本。
+$want = @()
+if ($needVulk -and -not (Find-Exe "llama-server.exe" "win-vulkan")) {
+    $want += "llama-$LlamaTag-bin-win-vulkan-x64.zip"
+}
+if ($needOv -and -not (Find-Exe "llama-server.exe" "win-openvino")) {
+    $want += "llama-$LlamaTag-bin-win-openvino-*.zip"
+}
+if (-not (Find-Exe "llama-server.exe" "win-cpu")) {
     $want += "llama-$LlamaTag-bin-win-cpu-x64.zip"
+}
+if ($want.Count -gt 0) {
     foreach ($pattern in $want) {
         $url = $null
         if ($pattern.Contains("*")) {
@@ -374,9 +425,31 @@ Get-Model "Shlomo426/Qwen3-TTS-12Hz-0.6B-Base-GGUF" "Qwen3-TTS-12Hz-0.6B-Base-Q4
 Get-Model "Shlomo426/Qwen3-TTS-12Hz-0.6B-Base-GGUF" "mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf" | Out-Null
 
 # ---------------------------------------------------------------- 起服务
-$mtServer    = Server-For $MtDevice
-$cloneServer = Server-For $CloneDevice
-if (-not $mtServer)    { Die "没找到 $MtDevice 后端的 llama-server.exe" }
+# 先问清楚这个 llama-server 认得的显卡设备名（"Vulkan0"、"CUDA0"……）
+$gpuDevice = $null
+$gpuServer = $null
+if ($MtDevice -eq "GPU" -or $CloneDevice -eq "GPU") {
+    # 候选：Vulkan 版本（兼容性最好），还有本机已经有的 CUDA 版本
+    foreach ($cand in @((Server-For "GPU"), (Find-Exe "llama-server.exe" "win-cuda"))) {
+        if (-not $cand) { continue }
+        $d = Get-GpuDevice $cand
+        if ($d) { $gpuDevice = $d; $gpuServer = $cand; break }
+    }
+    if ($gpuDevice) {
+        Say "GPU 设备：$gpuDevice"
+    } else {
+        Step "llama-server 没认到显卡设备（显卡驱动不支持 Vulkan？），这次用 CPU"
+        Write-Host "      N 卡也可以试试：装好 CUDA 驱动后再跑一次" -ForegroundColor DarkGray
+    }
+}
+# 没认到显卡就老实用 CPU，别再传 --device 让它报错退出
+if ($MtDevice    -eq "GPU" -and -not $gpuDevice) { $MtDevice    = "CPU" }
+if ($CloneDevice -eq "GPU" -and -not $gpuDevice) { $CloneDevice = "CPU" }
+
+$mtServer    = if ($MtDevice    -eq "GPU") { $gpuServer } else { Server-For $MtDevice }
+$cloneServer = if ($CloneDevice -eq "GPU") { $gpuServer } else { Server-For $CloneDevice }
+if (-not $mtServer)    { $mtServer = Server-For "CPU"; $MtDevice = "CPU" }
+if (-not $mtServer)    { Die "没找到 llama-server.exe" }
 if (-not $cloneServer) { $cloneServer = Server-For "CPU" }
 if (-not $cloneServer) { Die "没找到 llama-server.exe" }
 $procs = @()
@@ -390,7 +463,8 @@ if ($MtDevice -eq "NPU") {
     $env:GGML_OPENVINO_CACHE_DIR = Join-Path $BinDir "ov_cache"
     $mtArgs += "-np", "1"
 } elseif ($MtDevice -eq "GPU") {
-    $mtArgs += "--device", "Vulkan"
+    # 设备名要用 llama-server 自己报的那个（"Vulkan0" 这种）
+    $mtArgs += "--device", $gpuDevice
 }
 
 Say "起翻译模型（Hy-MT2，后端 $MtDevice，端口 $MtPort）"
@@ -402,7 +476,7 @@ $procs += $mt
 $cloneArgs = @("-m", (Join-Path $ModelDir "Qwen3-TTS-12Hz-0.6B-Base-Q4_K_M.gguf"),
                 "--mmproj", (Join-Path $ModelDir "mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf"),
                 "--host", "0.0.0.0", "--port", $ClonePort, "-c", $Context, "--no-warmup")
-if ($CloneDevice -eq "GPU") { $cloneArgs += "--device", "Vulkan" }
+if ($CloneDevice -eq "GPU") { $cloneArgs += "--device", $gpuDevice }
 
 Say "起声音克隆模型（Qwen3-TTS，后端 $CloneDevice，端口 $ClonePort）"
 $cloneLog = Join-Path $ServerDir "clone.log"
@@ -482,6 +556,7 @@ Write-Host ""
 Ensure-FirewallRule @($Port, $MtPort, $ClonePort)
 Write-Host ""
 Write-Host "  关掉这个窗口就等于关掉服务。"
+Write-Host "  （日志文件是 UTF-8 编码，换个窗口看中文乱码的话先执行 chcp 65001）" -ForegroundColor DarkGray
 Write-Host ""
 
 Write-Host "  模型都准备好了，识别 / 翻译 / 克隆三个接口现在都能用。" -ForegroundColor Green

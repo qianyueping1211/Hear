@@ -5,8 +5,11 @@ on:
   push:
     branches: [main]
     # 只改“旧版本号改名”工作流时不打包
+    # 只改电脑上的服务端脚本（server/）时也不用重新打包 App
     paths-ignore:
       - .github/workflows/rename-releases.yml
+      - 'server/**'
+      - README.md
 
 permissions:
   contents: write
