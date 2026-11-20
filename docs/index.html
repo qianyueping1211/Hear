@@ -873,9 +873,13 @@ section.band{scroll-margin-top:62px}
              在里面放一个「听见」。用户不用选目录，也不用改目录，界面上也不显示同步位置。
              老版本用的「听见同步」文件夹会在升级后自动改名成「听见」。</p>
           <p><strong>打开开关不会再弹「请选择文件夹」</strong>：位置永远是「听见」。
-             授权用<strong>带安全权限的书签</strong>（<code>bookmarkData(options: .withSecurityScope)</code>），
-             App 重启之后权限还在，不用每次重新选；只有系统完全没给过云盘权限时，
-             设置里才会出现一个「授权 iCloud 云盘（只此一次）」的按钮。</p>
+             授权用的是<strong>普通书签</strong>（<code>URL.bookmarkData(options:)</code>，
+             iOS 上没有 macOS 那种带安全权限的选项），关键在于
+             <strong>书签解析出来的 URL 实例要用到底</strong>：同一份书签解析两次会得到两个 URL，
+             只有开过 <code>startAccessingSecurityScopedResource()</code> 的那一个能动里面的东西，
+             之前的版本解析了两次，于是每次都以为「没权限」，又要让用户重新选。
+             现在权限在整个 App 运行期间一直开着，
+             只有系统完全没给过云盘权限时，设置里才会出现一个「授权 iCloud 云盘（只此一次）」的按钮。</p>
           <p>同步三类数据：<code>settings.plist</code>（设置，26 个键，用 SHA256 指纹判断是否被改过；
              「实时翻译 / 对话翻译」这个模式<strong>只存在本机</strong>，不跟 iCloud 走，
              否则每次启动都会被云盘里的旧值改回去；
