@@ -28,7 +28,6 @@ import io
 import ipaddress
 import json
 import os
-import select
 import socket
 import ssl
 import sys
@@ -50,6 +49,8 @@ ASR_MODEL = os.environ.get("HEAR_ASR_MODEL", "small")
 _HERE = os.path.dirname(os.path.abspath(__file__))
 TLS_CERT = os.environ.get("HEAR_TLS_CERT", os.path.join(_HERE, "certs", "cert.pem"))
 TLS_KEY = os.environ.get("HEAR_TLS_KEY", os.path.join(_HERE, "certs", "key.pem"))
+# 接到连接后偷看第一个字节，最多等这么久（等太久就当这个连接没用了）
+TLS_PEEK_TIMEOUT = float(os.environ.get("HEAR_TLS_PEEK_TIMEOUT", "8"))
 # 识别用哪个方案：
 #   whisper         只用 faster-whisper（准，但慢一点）
 #   sensevoice      只用 SenseVoice（快，擅长中英日韩粤）
@@ -73,6 +74,19 @@ _whisper_state = {"status": "未加载", "detail": ""}
 
 def log(*args):
     print("[听见]", *args, flush=True)
+
+
+def primary_ip():
+    """这台电脑对外的那个 IP（手机要连的就是它；连不出去就返回空）"""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return ""
 
 
 def local_ips():
@@ -411,6 +425,10 @@ def backend_alive(url):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "HearCloud/1.0"
+    # 用 HTTP/1.1：手机那边能复用同一个连接，
+    # 不用每发一个请求就重新做一次 TLS 握手（握手多最容易出"卡住"）
+    protocol_version = "HTTP/1.1"
+    timeout = 65            # 空闲连接挂 65 秒就收掉
 
     def log_message(self, fmt, *args):
         # 请求行里可能有二进制（TLS 握手打到 http 端口时就是一堆乱码），
@@ -635,6 +653,32 @@ a{color:#007aff;text-decoration:none}
         })
 
 
+def cert_covers_ip():
+    """现有证书里有没有这台电脑现在的 IP。
+
+    换了网络、路由器重新分配了 IP，旧证书里就没有新 IP 了，
+    手机会直接拒绝（certificate unknown）—— 这种时候要重新生成。
+    """
+    ip = primary_ip()
+    if not ip:
+        return True, ""
+    try:
+        from cryptography import x509
+        with open(TLS_CERT, "rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        have = set()
+        for name in san:
+            if isinstance(name, x509.IPAddress):
+                have.add(str(name.value))
+        if ip not in have:
+            return False, ip
+        return True, ""
+    except Exception:
+        # 看不出来就先当没问题（别把还能用的证书弄没了）
+        return True, ""
+
+
 def ensure_cert():
     """确保有自签证书；没有就自己生成一份。
 
@@ -642,7 +686,10 @@ def ensure_cert():
     就不会因为"某个文件没下载下来"而没有证书。
     """
     if os.path.exists(TLS_CERT) and os.path.exists(TLS_KEY):
-        return True
+        ok, missing = cert_covers_ip()
+        if ok:
+            return True
+        log("本机 IP 变成 %s 了（旧证书里没有），重新生成证书" % missing)
     try:
         from cryptography import x509
         from cryptography.x509.oid import NameOID
@@ -711,39 +758,67 @@ class MixedServer(ThreadingHTTPServer):
     TLS 握手的第一个字节固定是 0x16，是 TLS 就套上 TLS，否则按普通 http 处理。
     这样手机里填 http://192.168.x.x:8000 或者 https://192.168.x.x:8000 都能连，
     不用来回改。
+
+    【关键】偷看字节和 TLS 握手都放在【工作线程】里做，不能放在 accept 线程里。
+    放在 accept 线程里的话，一个连上不吭声的客户端（或者一个握手慢的）就能把
+    整个服务堵住，手机那边就表现成"卡住了"。放线程里就各干各的，互不影响。
     """
 
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 64     # 排队等着的连接数（手机会同时开好几个连接）
 
     def __init__(self, addr, handler, ssl_context=None):
         super().__init__(addr, handler)
         self.ssl_context = ssl_context
 
-    def process_request(self, request, client_address):
-        # 握手在起线程之前做，这样一个慢连接不会挡住别人
+    def process_request_thread(self, request, client_address):
+        # ThreadingHTTPServer 会给每个连接起一个线程跑这里，
+        # 握手放在线程里做，accept 线程只管收连接
         if self.ssl_context is not None:
-            sock = request
-            try:
-                ready, _, _ = select.select([sock], [], [], 5)
-            except (OSError, ValueError):
-                ready = []
-            if ready:
-                try:
-                    first = sock.recv(1, socket.MSG_PEEK)
-                except OSError:
-                    first = b""
-                if first == b"\x16":
-                    try:
-                        request = self.ssl_context.wrap_socket(sock, server_side=True)
-                    except Exception as e:
-                        log("TLS 握手失败：%s" % e)
-                        try:
-                            sock.close()
-                        except Exception:
-                            pass
-                        return
-        super().process_request(request, client_address)
+            request = self._wrap_tls(request)
+            if request is None:
+                return
+        super().process_request_thread(request, client_address)
+
+    def _wrap_tls(self, sock):
+        """看第一个字节判断是 http 还是 https；是 https 就套上 TLS。"""
+        try:
+            sock.settimeout(TLS_PEEK_TIMEOUT)
+            first = sock.recv(1, socket.MSG_PEEK)
+        except socket.timeout:
+            # 连上不说话就走了（手机偶尔会试探性地连一下又断开）
+            log("有个连接连上没说话，已断开")
+            self._close(sock)
+            return None
+        except OSError:
+            self._close(sock)
+            return None
+        if first != b"\x16":
+            sock.settimeout(None)       # 普通 http
+            return sock
+        try:
+            wrapped = self.ssl_context.wrap_socket(sock, server_side=True)
+            wrapped.settimeout(None)
+            return wrapped
+        except ssl.SSLError as e:
+            # 常见两种：手机不认自签证书（certificate unknown）、
+            # 手机自己先断开了（EOF）。都不是服务本身坏了，记一笔就行
+            log("TLS 握手失败：%s" % e)
+            self._close(sock)
+            return None
+        except OSError as e:
+            log("TLS 握手失败：%s" % e)
+            self._close(sock)
+            return None
+
+    @staticmethod
+    def _close(sock):
+        try:
+            sock.close()
+        except OSError:
+            pass
+
 
 
 def main():

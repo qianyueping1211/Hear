@@ -373,7 +373,7 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>当前版本</dt><dd>0.4.37</dd></div>
+        <div><dt>当前版本</dt><dd>0.4.38</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
         <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
         <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
@@ -576,6 +576,14 @@ section.band{scroll-margin-top:62px}
               并在日志里记下原因，不会悄悄换成系统声音。</li>
           <li><b>等得到再放弃</b>　云端克隆要等电脑那边算完，最多等 60 秒；
               同一句只发一次请求（发两次会排队，等太久就超时退回系统声音）。</li>
+          <li><b>没有样本时说清楚原因</b>　克隆要拿说话人的原声当样本：
+              太短（不足 1.5 秒）或太长（超过 12 秒）的那一句，
+              会自动<strong>借用同一种语言上一句完整的声音</strong>（还是同一个人的音色）；
+              实在拿不到样本时，日志会写明是「录音时开关是关的」还是「这句太长了」，
+              而不是笼统一句「没有声音样本」。</li>
+          <li><b>克隆只会说几种语言</b>　参考音频用源语言（可以是英文），
+              念出来的是译文那门语言（跨语言克隆）；
+              阿拉伯语、泰语、越南语这些目前不在克隆模型的语种里，会直接说明。</li>
           <li><b>克隆缓存</b>　内存 LRU 60 条 + 磁盘 WAV 长期留存，按 SHA256 命名。</li>
           <li><b>音色选择</b>　系统朗读优选高质量音色，过滤个人音色与 novelty 音色。</li>
         </ul>
@@ -1163,9 +1171,24 @@ section.band{scroll-margin-top:62px}
           <p>总服务在 8000 端口上<strong>同时接两种协议</strong>：接到连接先偷看第一个字节，
              TLS 握手的第一个字节固定是 <code>0x16</code>，是 TLS 就套上 TLS，否则按普通 http 处理。
              这样浏览器自检页面还能用 http 打开，App 则一律走 <code>https://</code>。</p>
+          <p><strong>握手放在工作线程里做</strong>（这一步很关键）。
+             偷看字节和 TLS 握手都<strong>不在 accept 线程里</strong>：
+             放在那里的话，一个连上不吭声的客户端、或者一个握手慢的手机，
+             就能把整个服务堵住（每个最多 5 秒），手机那边表现就是「有时卡住了」。
+             实测：旧写法被 3 个慢连接堵住时，一个 <code>/health</code> 要等 <strong>14.6 秒</strong>；
+             现在是 <strong>0.02 秒</strong>。</p>
+          <p><strong>用 HTTP/1.1 长连接</strong>：手机可以复用同一个连接，
+             不用每发一个请求就重做一次 TLS 握手。握手次数少，
+             「握手失败」（<code>certificate unknown</code>、<code>EOF</code>）和卡顿都跟着少。</p>
+          <p><strong>证书会自己更新</strong>：换了网络、路由器重新分配了 IP 之后，
+             旧证书里没有新 IP，手机会直接拒绝（<code>certificate unknown</code>）。
+             现在服务启动时会检查证书里有没有本机当前的 IP，没有就地重新生成一张。</p>
           <p>App 侧只对<strong>内网地址</strong>（私有网段、<code>.local</code>、<code>localhost</code>）
              放行自签证书，公网域名照常走系统校验；
              同时用自带的会话而不是系统共享会话，因为共享会话没法挂证书处理程序。</p>
+          <p>内网自签证书是<strong>按内网地址放行、不校验主机名</strong>的：
+             证书里的 IP 是生成那一刻的，电脑换网络、IP 变了也照样连得上，
+             不用每次换网络都重新装证书。</p>
           <p>地址写成 <code>http://</code> 也会被自动换成 <code>https://</code>，
              根本没写协议的（只写 <code>192.168.x.x:8000</code>）则补上 <code>https://</code>。</p>
           <p><strong>声音克隆可以直接回原始 wav</strong>：手机在请求头里带 <code>X-Hear-Audio: wav</code>，
@@ -1405,7 +1428,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.37</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.38</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>

@@ -298,6 +298,7 @@ final class LiveSession: ObservableObject {
     private var cloneRefOrder: [UUID] = []
     private var lastCloneRef: [String: (samples: [Float], text: String)] = [:]   // 每种语言最近一句够长的样本
     private var cloneTasks: [UUID: Task<CloneAudio?, Never>] = [:]
+    private var cloneNote: [UUID: String] = [:]      // 每句样本的情况说明（写日志用）
     private var appleEngines: [LiveTextEngine] = []   // 苹果自带模式：每种语言一个系统听写
 
     private var queue: [(itemID: UUID, segID: Int, samples: [Float])] = []
@@ -1664,6 +1665,10 @@ final class LiveSession: ObservableObject {
                         rememberReference(fid, samples: samples, text: items[idx].sourceText,
                                           lang: items[idx].source.id)
                         hearLog("暂停：这一段声音留给声音克隆用")
+                        // 样本到手了就赶紧去生成（等到朗读时现做，要多等好几秒）
+                        if items[idx].done, !items[idx].translated.isEmpty {
+                            _ = prepareClone(fid)
+                        }
                     }
                 }
                 finishedSeg = max(finishedSeg, id)
@@ -2314,8 +2319,8 @@ final class LiveSession: ObservableObject {
                     showToast("声音克隆服务不可用，已改用系统声音朗读", seconds: 4)
                 }
             } else {
-                // 连请求都没发：这句话没有声音样本（说得太短、太长，或者开关刚打开）
-                hearLog("这句没有声音样本，改用系统声音朗读", .warning)
+                // 连请求都没发：说清楚是什么原因（说得太短、太长、开关当时关着……）
+                hearLog("这句没有声音样本，改用系统声音朗读（\(cloneMissingReason(item))）", .warning)
             }
         } else if cloned != nil {
             cloneUnavailableNotified = false
@@ -2760,17 +2765,31 @@ final class LiveSession: ObservableObject {
 
     /// 记下这句话的声音和文字，给声音克隆当样本（只留最近 30 句）
     private func rememberReference(_ id: UUID, samples: [Float], text: String, lang: String) {
-        guard voiceClone else { return }
         let secs = Double(samples.count) / 16_000
-        // 太长的只取前 12 秒会和文字对不上，就不当样本；太短（不到 1.5 秒）声音特征不够
-        guard secs <= 12 else { return }
-        if secs >= 1.5 {
+        guard voiceClone else {
+            // 录音的时候声音克隆开关是关的：这一句没有样本
+            cloneNote[id] = "录音的时候声音克隆开关是关的"
+            return
+        }
+        if secs >= 1.5 && secs <= 12 {
+            // 1.5 秒以上、12 秒以内：这一句自己就能当样本
             cloneRefs[id] = (samples, text)
             lastCloneRef[lang] = (samples, text)
+            cloneNote[id] = nil
         } else if let last = lastCloneRef[lang] {
-            cloneRefs[id] = last          // 太短：借用同一种语言最近一句的声音
-        } else {
+            // 太短（不到 1.5 秒，声音特征不够）或者太长（超过 12 秒，
+            // 截一段出来和整句文字对不上）：
+            // 借用同一种语言最近一句完整的声音（同一个人的声音，效果一样）
+            cloneRefs[id] = last
+            cloneNote[id] = secs > 12 ? "这句太长了（超过 12 秒），用了上一句的声音"
+                                     : "这句太短了，用了上一句的声音"
+        } else if secs <= 12 {
+            // 还没有别的样本可以借，只能用它自己的
             cloneRefs[id] = (samples, text)
+            cloneNote[id] = nil
+        } else {
+            // 又太短又太长，一句能用的都没有
+            cloneNote[id] = "这句太长了（超过 12 秒），没有可用的声音样本"
         }
         cloneRefOrder.removeAll { $0 == id }
         cloneRefOrder.append(id)
@@ -2778,7 +2797,22 @@ final class LiveSession: ObservableObject {
             let old = cloneRefOrder.removeFirst()
             cloneRefs[old] = nil
             cloneTasks[old] = nil
+            cloneNote[old] = nil
         }
+    }
+
+    /// 这句为什么没能用克隆声音（写进日志，别只说一句"没有样本"）
+    private func cloneMissingReason(_ item: TranslationItem) -> String {
+        if item.translated.isEmpty { return "这句还没有译文" }
+        if item.translated.hasPrefix("（翻译失败") { return "这句翻译失败了" }
+        // 克隆模型只会说这几门语言（说译文那门语言，样本是源语言的，这是跨语言克隆）
+        if VoiceCloneGGUF.languageNames[item.target.id] == nil {
+            return "\(item.target.displayName)这个语言声音克隆不支持"
+        }
+        if cloneRefs[item.id] == nil {
+            return cloneNote[item.id] ?? "这句没有留到声音样本"
+        }
+        return "克隆任务没有启动"
     }
 
     /// 声音克隆的缓存键：语言 + 文字。

@@ -40,11 +40,42 @@ def local_ips():
     return out
 
 
+def cert_covers_ip():
+    """现有证书里有没有本机现在的 IP（换了网络、IP 变了就得重新生成）"""
+    ip = ""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+    if not ip:
+        return True, ""
+    try:
+        from cryptography import x509
+        with open(CERT_FILE, "rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+        have = set()
+        for name in san:
+            if isinstance(name, x509.IPAddress):
+                have.add(str(name.value))
+        if ip not in have:
+            return False, ip
+        return True, ""
+    except Exception:
+        return True, ""
+
+
 def main():
     force = "--force" in sys.argv
     if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE) and not force:
-        print("证书已经有了：%s（要重新生成就加 --force）" % CERT_FILE)
-        return 0
+        ok, missing = cert_covers_ip()
+        if ok:
+            print("证书已经有了：%s（要重新生成就加 --force）" % CERT_FILE)
+            return 0
+        print("本机 IP 变成 %s 了（旧证书里没有），重新生成" % missing)
     try:
         from cryptography import x509
         from cryptography.x509.oid import NameOID

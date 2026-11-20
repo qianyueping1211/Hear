@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// 云端模型服务客户端。
 ///
@@ -51,7 +52,21 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
             return
         }
         if Self.isLocalHost(challenge.protectionSpace.host) {
-            completionHandler(.useCredential, URLCredential(trust: trust))
+            // 内网自签证书：把证书本身当成自己的根，并且不校验主机名。
+            // （证书里的 IP 是生成证书那一刻的，电脑换了网络、IP 变了，
+            //   旧证书里就没有新 IP，手机会直接拒绝：
+            //   "certificate unknown"——这里放开，省得每次换网络都要重装证书）
+            var t = trust
+            if let cert = SecTrustGetCertificateAtIndex(trust, 0) {
+                var relaxed = trust
+                SecTrustSetAnchorCertificates(relaxed, [cert] as CFArray)
+                SecTrustSetPolicies(relaxed, [SecPolicyCreateSSL(true, nil)])
+                var err: CFError?
+                if SecTrustEvaluateWithError(relaxed, &err) {
+                    t = relaxed
+                }
+            }
+            completionHandler(.useCredential, URLCredential(trust: t))
         } else {
             completionHandler(.performDefaultHandling, nil)
         }
