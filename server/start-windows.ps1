@@ -374,16 +374,26 @@ $env:HEAR_ASR_MODEL = $AsrModel
 $cloudScript = Join-Path $ServerDir "hear_cloud.py"
 # 端口上可能还留着上一次跑的临时服务，先把它停掉再起正式的
 # （正式的服务用 venv 里的 Python，带 faster-whisper）
-$busy = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if ($busy) {
-    foreach ($c in $busy) {
-        $owner = (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue)
-        if ($owner -and $owner.ProcessName -match "python") {
-            Step "停掉占着端口 $Port 的旧服务"
-            try { Stop-Process -Id $c.OwningProcess -Force } catch {}
+#
+# 【重要】三个端口都要清：8000（总服务）、8081（翻译模型）、8082（克隆模型）。
+# 只清 8000 是不够的：Windows 上绑在具体地址（127.0.0.1）的套接字
+# 会优先于绑 0.0.0.0 的，所以上一个窗口没关干净、残留了一个
+# 监听 127.0.0.1:8082 的旧 llama-server 时，
+# 总服务（走 127.0.0.1）会连到那个旧实例上，
+# 而手机（走局域网地址）连到的是新实例——
+# 两边表现不一样，克隆出来的声音会是乱的，而且慢十倍。
+foreach ($p in @($Port, $MtPort, $ClonePort)) {
+    $busy = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
+    if ($busy) {
+        foreach ($c in $busy) {
+            $owner = (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue)
+            if ($owner -and $owner.ProcessName -match "python|llama") {
+                Step "停掉占着端口 $p 的旧进程"
+                try { Stop-Process -Id $c.OwningProcess -Force } catch {}
+            }
         }
+        Start-Sleep -Seconds 1
     }
-    Start-Sleep -Seconds 1
 }
 if ($tempCloud -and -not $tempCloud.HasExited) {
     try { Stop-Process -Id $tempCloud.Id -Force } catch {}

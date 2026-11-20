@@ -421,6 +421,35 @@ def backend_alive(url):
     return backend_state(url) != "连不上"
 
 
+_backend_model_cache = {}
+
+
+def backend_model(url):
+    """后端跑的是哪个模型（从 llama-server 的 /props 里拿，结果缓存 10 秒）
+
+    这个很要紧：Windows 上如果上一个窗口没关干净，
+    127.0.0.1:8082 上可能还留着旧的 llama-server。
+    总服务走 127.0.0.1，手机走局域网地址，两边连到的不是同一个实例，
+    表现就会对不上（克隆出来是乱的，还慢十倍）。
+    把模型名报出来，一眼就能看出连的是哪个。
+    """
+    key = url.rstrip("/")
+    now = time.time()
+    hit = _backend_model_cache.get(key)
+    if hit and now - hit[0] < 10:
+        return hit[1]
+    name = ""
+    try:
+        with urllib.request.urlopen(key + "/props", timeout=3) as resp:
+            obj = json.loads(resp.read().decode("utf-8"))
+        path = obj.get("model_path") or ""
+        name = path.replace("\\", "/").split("/")[-1]
+    except Exception:
+        name = ""
+    _backend_model_cache[key] = (now, name)
+    return name
+
+
 # ---------------------------------------------------------------- HTTP
 
 class Handler(BaseHTTPRequestHandler):
@@ -443,19 +472,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, obj, code=200):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError) as e:
+            # 手机那边断开了（等太久放弃、App 被切走、网断了）：
+            # 这种时候回什么都送不到，记一笔就行，别刷一屏堆栈
+            log("客户端已断开（%s）：%s" % (type(e).__name__, e))
 
     def _send_wav(self, wav, code=200):
         """直接发 wav 原始数据（手机端要原始音频时用，省掉 base64，内存小很多）"""
-        self.send_response(code)
-        self.send_header("Content-Type", "audio/wav")
-        self.send_header("Content-Length", str(len(wav)))
-        self.end_headers()
-        self.wfile.write(wav)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(wav)))
+            self.end_headers()
+            self.wfile.write(wav)
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError) as e:
+            # 手机等不及先断了（见 _send_json 的说明）
+            log("客户端已断开（%s）：%s" % (type(e).__name__, e))
 
     def _error(self, msg, code=400):
         self._send_json({"error": str(msg)}, code)
@@ -528,6 +566,13 @@ a{color:#007aff;text-decoration:none}
         out["clone"] = backend_state(CLONE_URL)
         if out["clone"] == "连不上":
             out["clone"] = "连不上（%s）" % CLONE_URL
+        else:
+            # 把后端跑的是哪个模型报出来
+            m = backend_model(CLONE_URL)
+            if m:
+                out["clone"] += "（%s）" % m
+                if "tts" not in m.lower():
+                    out["clone"] += " 模型不对！应该是 Qwen3-TTS"
         return out
 
     def send_error(self, code, message=None, explain=None):
@@ -643,6 +688,11 @@ a{color:#007aff;text-decoration:none}
         t0 = time.time()
         log("克隆 开始：%d 字，参考音频 %d 字节"
             % (len(payload.get("input", "")), len(payload.get("speaker_ref_b64", "")) * 3 // 4))
+        # 后端跑的是哪个模型：不是 TTS 模型的话，出来的是一堆乱响
+        m = backend_model(CLONE_URL)
+        if m and "tts" not in m.lower():
+            log("！！克隆后端跑的不是 TTS 模型（%s）：出来的声音会是乱的。"
+                "多半是上一个窗口没关干净，端口上留着旧的 llama-server" % m)
         data = json.dumps(payload).encode("utf-8")
         r = urllib.request.Request(CLONE_URL + "/tts", data=data,
                                    headers={"Content-Type": "application/json"})

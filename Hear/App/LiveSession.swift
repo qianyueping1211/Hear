@@ -2897,10 +2897,23 @@ final class LiveSession: ObservableObject {
         return "克隆任务没有启动"
     }
 
-    /// 声音克隆的缓存键：语言 + 文字。
-    /// v3 = 云端那条路也开始用降噪后的参考音频了（跟本地一致），缓存要重算
-    private func cloneCacheKey(lang: String, text: String) -> String {
-        "v3|\(lang)|\(text)"
+    /// 声音克隆的缓存键：语言 + 文字 + 参考音频的指纹。
+    ///
+    /// 参考音频一定要算进去：同一句话换了说话人（或者换了参考音频），
+    /// 克隆出来的声音是不一样的。只用"语言+文字"当键的话，
+    /// 换个人说话就会命中上一个人的缓存——听着像别人的声音。
+    ///
+    /// v4 = 键里加上了参考音频的指纹
+    private func cloneCacheKey(lang: String, text: String, ref: [Float]) -> String {
+        // 指纹：隔几个采样取一个，算个 FNV-1a（不用整个音频算，太慢）
+        var fp: UInt64 = 1469598103934665603
+        var i = 0
+        while i < ref.count {
+            let q = Int(ref[i] * 32767) & 0xFF
+            fp = (fp ^ UInt64(q)) &* 1099511628211
+            i += 37
+        }
+        return "v4|\(lang)|\(text)|\(fp)"
     }
 
     /// 在后台生成这句译文的克隆声音；没有样本、不支持这种语言或模型没加载时返回 nil
@@ -2924,7 +2937,7 @@ final class LiveSession: ObservableObject {
         // 克隆会把参考音频里的环境音一起学过去，
         // 不降噪的话环境音就跟着念出来，听着是"有杂的声音"
         let refSamples = usingCloudClone ? GGUFVoiceCloner.denoise(ref.samples) : ref.samples
-        let key = cloneCacheKey(lang: lang, text: text)
+        let key = cloneCacheKey(lang: lang, text: text, ref: ref.samples)
         let cloner = self.cloner
         let cloud = self.cloud
         let useCloud = usingCloudClone
