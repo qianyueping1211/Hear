@@ -83,8 +83,7 @@ struct SettingsView: View {
                 // MARK: iCloud 同步
                 Section {
                     Toggle("iCloud 同步", isOn: cloudBinding)
-                    if cloud.enabled, !cloud.displayPath.isEmpty {
-                        LabeledContent("同步位置", value: cloud.displayPath)
+                    if cloud.enabled {
                         LabeledContent("上次同步") {
                             if cloud.syncing {
                                 ProgressView()
@@ -99,7 +98,6 @@ struct SettingsView: View {
                             Button("重新上传设置") { cloud.reuploadSettings() }
                                 .disabled(cloud.syncing)
                         }
-                        Button("更换同步位置") { showCloudPicker = true }
                     }
                     if let m = cloud.message {
                         Text(m).font(.footnote).foregroundStyle(.orange)
@@ -701,7 +699,10 @@ struct CloudEditSheet: View {
                         HStack {
                             Text("自定义")
                             Spacer(minLength: 8)
-                            TextField("https://192.168.1.10:8000", text: $address)
+                            // 选了"默认"时，这一行显示通用服务地址（也就是实际会用的那个）；
+                            // 不选"默认"时显示自己填的地址。
+                            // 不再有单独的"实际地址"一行了。
+                            TextField("https://192.168.1.10:8000", text: addressBinding)
                                 .multilineTextAlignment(.trailing)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
@@ -716,12 +717,6 @@ struct CloudEditSheet: View {
                                 Text("最准：Whisper").tag("whisper")
                                 Text("SenseVoice + Whisper").tag("sensevoice+whisper")
                             }
-                        }
-                        // 现在实际会走哪个地址，一眼看到，不用猜
-                        LabeledContent("实际地址") {
-                            Text(effectiveAddressText)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.trailing)
                         }
                         // 自己填的地址不通时，通用服务地址（8000）能顶上：
                         // 给个一键切回去，省得手动改地址
@@ -767,22 +762,29 @@ struct CloudEditSheet: View {
             .onAppear {
                 switch target {
                 case .service:
-                    address = session.cloudAddress
+                    // 打开就显示整理过的地址（补上 https://、去掉结尾的 /）
+                    address = normalized(session.cloudAddress)
                     useDefault = true
                 case .model(let m):
                     let own = session.cloudOwnAddress(m)
                     // 自己没填地址 = 用默认（通用服务地址）
                     useDefault = own.isEmpty
-                    address = own
+                    address = normalized(own)
                     if m == .asr { asrScheme = session.cloudASRScheme }
                 }
+            }
+            .onChange(of: useDefault) { _, on in
+                // 从"默认"切到"自定义"：把通用服务地址填进去，用户直接改就行
+                guard !on, address.isEmpty else { return }
+                address = sharedAddressText
             }
         }
     }
 
     /// 通用服务地址（8000 那个，三个模型都能用它）
+    /// 显示时统一补上 https://（老版本存的可能没写协议）
     private var sharedAddressText: String {
-        session.cloudAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalized(session.cloudAddress)
     }
 
     /// 真正会拿去连的地址：补上 https://、去掉结尾的 "/"
@@ -791,15 +793,22 @@ struct CloudEditSheet: View {
         CloudClient.cleanURL(s)
     }
 
-    /// 现在实际用的地址（跟着"默认"开关实时变）
-    /// 模型选了"默认"就用通用服务地址，没选就用这里填的
+    /// 「自定义」那一行显示的地址：
+    /// 选了"默认"就显示通用服务地址，没选就显示自己填的（都带 https://）
+    private var addressBinding: Binding<String> {
+        Binding(
+            get: { useDefault ? sharedAddressText : address },
+            set: { address = $0 }
+        )
+    }
+
+    /// 这个模型实际会用的地址（补上 https:// 之后的）
     private var effectiveAddressText: String {
         switch target {
         case .service:
-            return sharedAddressText.isEmpty ? "还没填" : sharedAddressText
+            return normalized(sharedAddressText)
         case .model:
-            let a = useDefault ? sharedAddressText : address.trimmingCharacters(in: .whitespacesAndNewlines)
-            return a.isEmpty ? "还没填" : normalized(a)
+            return normalized(useDefault ? sharedAddressText : address)
         }
     }
 

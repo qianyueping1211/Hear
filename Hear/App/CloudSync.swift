@@ -27,10 +27,6 @@ final class CloudSync: ObservableObject {
             if enabled { scheduleSync(delay: 0.5) }
         }
     }
-    @Published private(set) var folderName: String?
-    /// 显示用的路径：选的是 iCloud 云盘根节点就显示「iCloud 云盘」，
-    /// 选了子文件夹就显示「iCloud 云盘/文件夹名」
-    @Published private(set) var displayPath: String = ""
     @Published private(set) var lastSync: Date?
     @Published private(set) var syncing = false
     @Published private(set) var message: String?
@@ -68,8 +64,6 @@ final class CloudSync: ObservableObject {
         let d = UserDefaults.standard
         enabled = d.bool(forKey: Keys.enabled)
         lastSync = d.object(forKey: Keys.lastSync) as? Date
-        folderName = resolveFolder()?.lastPathComponent
-        displayPath = Self.displayPath(for: resolveFolder())
 
         // 历史有变动、设置有变动：过几秒同步一次（连续改动只同步一次）
         ConversationStore.shared.$revision
@@ -97,55 +91,114 @@ final class CloudSync: ObservableObject {
 
     // MARK: - 文件夹
 
-    var hasFolder: Bool { UserDefaults.standard.data(forKey: Keys.bookmark) != nil }
-
-    /// 用户选好 iCloud 云盘里的文件夹后调用
-    func setFolder(_ url: URL) {
-        let access = url.startAccessingSecurityScopedResource()
-        defer { if access { url.stopAccessingSecurityScopedResource() } }
-        do {
-            let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
-            UserDefaults.standard.set(data, forKey: Keys.bookmark)
-            // 换了文件夹：重新判断设置该用哪边的
-            UserDefaults.standard.removeObject(forKey: Keys.settingsHash)
-            folderName = url.lastPathComponent
-            displayPath = Self.displayPath(for: url)
-            hearLog("iCloud 同步：使用 \(displayPath)")
-            enabled = true
-            scheduleSync(delay: 0.3)
-        } catch {
-            message = "无法使用这个文件夹：\(error.localizedDescription)"
-            hearLog("iCloud 同步：保存文件夹失败 \(error)", .error)
-        }
+    /// iCloud 云盘里我们自己的文件夹：就用 App 名字（听见），用户不用选也不用改
+    static var syncFolderName: String {
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            .flatMap { $0.isEmpty ? nil : $0 } ?? "听见"
     }
 
-    /// iCloud 云盘根节点在不同系统版本下路径不一样：
-    /// 有的是 .../com~app~CloudDocuments/...，有的是 .../Mobile Documents/com~app~CloudDocs/...，
-    /// 有的直接就是容器的 Documents。都当成「iCloud 云盘」根节点。
-    static func isICloudRoot(_ url: URL) -> Bool {
-        let path = url.path
-        let n = url.lastPathComponent
-        // iCloud 云盘根在 App 里显示成 com~apple~CloudDocs（不同系统版本也可能是
-        // com~app~CloudDocs），这些容器内部名都当成根节点
-        if n.contains("CloudDocs") { return true }
-        // 就是容器的 Documents（iCloud 云盘根）
-        if n == "Documents" {
-            if path.contains("CloudDocs") || path.contains("Mobile Documents") { return true }
-            if let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) {
-                if path == container.path || path == container.appendingPathComponent("Documents").path { return true }
+    /// 有没有可以放同步数据的地方
+    /// （App 自己的 iCloud 容器，或者之前授权过的 iCloud 文件夹）
+    var hasFolder: Bool { withFolderAccess { _ in true } ?? false }
+
+    /// 同步数据所在的文件夹：iCloud 云盘里的「听见」
+    ///
+    /// 用户不用自己挑地方：
+    ///   · App 自己的 iCloud 容器 → 容器里的 Documents 在云盘里就叫 App 名字
+    ///   · 之前授权过的 iCloud 文件夹 → 里面固定放一个「听见」
+    /// 挨个试，第一个能用的就是它（用不了的说明没权限）。
+    private func resolveFolder() -> URL? {
+        for dir in folderCandidates() {
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                return dir
+            } catch {
+                continue     // 这个位置没权限，试下一个
             }
         }
-        return false
+        return nil
     }
 
-    /// 显示用的路径
-    static func displayPath(for url: URL?) -> String {
-        guard let url else { return "" }
-        if isICloudRoot(url) { return "iCloud 云盘" }
-        return "iCloud 云盘 / \(url.lastPathComponent)"
+    /// 打开同步文件夹的访问权限，取到文件夹，用完关掉。
+    /// 用书签授权过的文件夹时，必须先 startAccessing 才动得了里面的东西。
+    @discardableResult
+    private func withFolderAccess<T>(_ body: (URL) -> T) -> T? {
+        var scoped: URL?
+        if let picked = resolveBookmarkFolder(), picked.startAccessingSecurityScopedResource() {
+            scoped = picked
+        }
+        defer { if let scoped { scoped.stopAccessingSecurityScopedResource() } }
+        guard let dir = resolveFolder() else { return nil }
+        return body(dir)
     }
 
-    private func resolveFolder() -> URL? {
+    /// 候选的同步文件夹（按优先级排）
+    private func folderCandidates() -> [URL] {
+        var out: [URL] = []
+        // 1. 之前授权过的 iCloud 文件夹：里面固定放一个「听见」
+        //    （老用户的数据已经在里面了，优先用它）
+        if let picked = resolveBookmarkFolder() {
+            let name = picked.lastPathComponent
+            if name == Self.syncFolderName {
+                out.append(picked)                                   // 选的就是「听见」
+            } else if name == Self.legacyFolderName {
+                // 之前选的是「听见同步」：新位置是它的上一层里的「听见」
+                out.append(picked.deletingLastPathComponent()
+                    .appendingPathComponent(Self.syncFolderName, isDirectory: true))
+                out.append(picked)                                   // 兜底：还在旧文件夹里
+            } else {
+                out.append(picked.appendingPathComponent(Self.syncFolderName, isDirectory: true))
+            }
+        }
+        // 2. App 自己的 iCloud 容器：iCloud 云盘里显示为 App 名字的那个目录
+        if let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) {
+            let docs = container.appendingPathComponent("Documents", isDirectory: true)
+            out.append(FileManager.default.fileExists(atPath: docs.path) ? docs : container)
+        }
+        return out
+    }
+
+    /// 旧版本用的文件夹名（升级时把里面的数据搬过来）
+    private static let legacyFolderName = "听见同步"
+
+    /// 老版本的数据在「听见同步」里，现在改成「听见」：把老文件夹搬过来
+    private func migrateLegacyFolder(to dir: URL) {
+        let fm = FileManager.default
+        // 只在「听见」还没数据的时候搬，避免覆盖新的
+        let newManifest = dir.appendingPathComponent("manifest.json")
+        if fm.fileExists(atPath: newManifest.path) { return }
+        // 老文件夹就在同步目录的上一层（老版本用的是同一个根 + 「听见同步」）
+        let parent = dir.deletingLastPathComponent()
+        let legacy = parent.appendingPathComponent(Self.legacyFolderName, isDirectory: true)
+        guard legacy != dir, fm.fileExists(atPath: legacy.path) else { return }
+        do {
+            try Self.mergeContents(from: legacy, to: dir)
+            try? fm.removeItem(at: legacy)
+            hearLog("iCloud 同步：老文件夹「\(Self.legacyFolderName)」已改名为「\(Self.syncFolderName)」")
+        } catch {
+            hearLog("iCloud 同步：搬老文件夹失败 \(error)", .warning)
+        }
+    }
+
+    /// 把 from 里的东西并到 to 里：同名的文件不动，文件夹递归合并
+    private static func mergeContents(from: URL, to: URL) throws {
+        let fm = FileManager.default
+        for item in try fm.contentsOfDirectory(at: from, includingPropertiesForKeys: nil) {
+            let dst = to.appendingPathComponent(item.lastPathComponent)
+            var isDir: ObjCBool = false
+            let exists = fm.fileExists(atPath: dst.path, isDirectory: &isDir)
+            let srcIsDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if !exists {
+                try fm.moveItem(at: item, to: dst)
+            } else if isDir.boolValue && srcIsDir {
+                try mergeContents(from: item, to: dst)
+            }
+            // 同名的单个文件：保留新的（老的不覆盖）
+        }
+    }
+
+    /// 老版本授权过的那个文件夹（书签）
+    private func resolveBookmarkFolder() -> URL? {
         guard let data = UserDefaults.standard.data(forKey: Keys.bookmark) else { return nil }
         var stale = false
         guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil,
@@ -156,19 +209,44 @@ final class CloudSync: ObservableObject {
         return url
     }
 
+    /// 用户选好 iCloud 云盘里的文件夹后调用（只在完全没有 iCloud 权限时才会用到）
+    func setFolder(_ url: URL) {
+        let access = url.startAccessingSecurityScopedResource()
+        defer { if access { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+            UserDefaults.standard.set(data, forKey: Keys.bookmark)
+            // 换了文件夹：重新判断设置该用哪边的
+            UserDefaults.standard.removeObject(forKey: Keys.settingsHash)
+            hearLog("iCloud 同步：使用 iCloud 云盘里的「\(Self.syncFolderName)」文件夹")
+            enabled = true
+            scheduleSync(delay: 0.3)
+        } catch {
+            message = "无法使用这个文件夹：\(error.localizedDescription)"
+            hearLog("iCloud 同步：保存文件夹失败 \(error)", .error)
+        }
+    }
+
+
     // MARK: - 启动时：iCloud 的设置更新就先用上（在读设置之前调用）
 
     /// App 启动时调用（LiveSession 读设置之前）
     func applyCloudSettingsAtLaunch() {
-        guard enabled, let root = resolveFolder() else { return }
-        let access = root.startAccessingSecurityScopedResource()
-        defer { if access { root.stopAccessingSecurityScopedResource() } }
-        let dir = root.appendingPathComponent("听见同步", isDirectory: true)
-        guard let manifest = Self.readManifestNow(dir) else { return }
-        if decideSettings(manifest) == .pull, let cloud = Self.readSettingsNow(dir) {
-            applySettings(cloud, hash: manifest.settingsHash)
-            hearLog("iCloud 同步：启动时用了 iCloud 上更新的设置")
+        guard enabled else { return }
+        withSyncFolder { dir -> Void in
+            migrateLegacyFolder(to: dir)
+            guard let manifest = Self.readManifestNow(dir) else { return }
+            if decideSettings(manifest) == .pull, let cloud = Self.readSettingsNow(dir) {
+                applySettings(cloud, hash: manifest.settingsHash)
+                hearLog("iCloud 同步：启动时用了 iCloud 上更新的设置")
+            }
         }
+    }
+
+    /// 拿到同步文件夹（iCloud 云盘里的「听见」），并且在需要时开启访问权限
+    @discardableResult
+    private func withSyncFolder<T>(_ body: (URL) -> T) -> T? {
+        withFolderAccess(body)
     }
 
     // MARK: - 同步
@@ -218,7 +296,7 @@ final class CloudSync: ObservableObject {
     }
 
     private func sync() async {
-        guard enabled, let root = resolveFolder() else { return }
+        guard enabled else { return }
         if syncing {
             // 已经有一次同步在跑：等它跑完再来一次。
             // 不这样的话，这次的改动会被漏掉（同步期间改的设置传不上去）。
@@ -227,9 +305,20 @@ final class CloudSync: ObservableObject {
         }
         syncing = true
         defer { syncing = false }
-        let access = root.startAccessingSecurityScopedResource()
-        defer { if access { root.stopAccessingSecurityScopedResource() } }
-        let dir = root.appendingPathComponent("听见同步", isDirectory: true)
+        // 用书签授权的文件夹：访问期间要 startAccessing
+        // （要先开启权限，才能在里面建文件夹）
+        var scoped: URL?
+        if let picked = resolveBookmarkFolder(), picked.startAccessingSecurityScopedResource() {
+            scoped = picked
+        }
+        defer { if let scoped { scoped.stopAccessingSecurityScopedResource() } }
+        guard let dir = resolveFolder() else {
+            hearLog("iCloud 同步：找不到 iCloud 云盘里的「\(Self.syncFolderName)」文件夹", .warning)
+            message = "iCloud 云盘里找不到「\(Self.syncFolderName)」文件夹，请检查 iCloud 是否已登录"
+            return
+        }
+        // 先把老文件夹「听见同步」的内容搬过来，再建 conversations
+        migrateLegacyFolder(to: dir)
         let convDir = dir.appendingPathComponent("conversations", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: convDir, withIntermediateDirectories: true)

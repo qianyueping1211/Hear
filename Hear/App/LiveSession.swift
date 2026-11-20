@@ -304,6 +304,9 @@ final class LiveSession: ObservableObject {
 
     // 朗读队列：readIndex 指向下一句要读的译文
     @Published private(set) var readingID: UUID?
+    /// 正在等克隆声音生成好的那一条。
+    /// 声音还没准备好时，界面上的喇叭要显示成灰色（表示"还在生成"），不要蓝色。
+    @Published private(set) var clonePreparingID: UUID?
 
     // 对话翻译模式：按住某种语言的按钮说话，松开就暂停
     @Published var talkMode: Bool {
@@ -2182,7 +2185,10 @@ final class LiveSession: ObservableObject {
             if task == nil { task = await prepareClone(item.id) }
             if let t = task {
                 if cloneTasks[item.id] == nil { cloneTasks[item.id] = t }
+                // 声音还在生成：告诉界面把喇叭显示成灰色
+                clonePreparingID = item.id
                 cloned = await waitClone(t, seconds: Double(cloneWait) / 1_000_000_000)
+                clonePreparingID = nil
                 if Task.isCancelled { return }
             }
         }

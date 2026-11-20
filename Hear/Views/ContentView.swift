@@ -289,6 +289,7 @@ struct TranscriptView: View {
                     ForEach(session.items) { item in
                         BubbleView(item: item, leading: item.source == session.langA,
                                    reading: session.readingID == item.id,
+                                   preparing: session.clonePreparingID == item.id,
                                    onEdit: { if item.done { onEdit(item) } }) {
                             session.tapRead(item)
                         }
@@ -336,6 +337,8 @@ struct BubbleView: View {
     let item: TranslationItem
     let leading: Bool
     var reading: Bool = false
+    /// 声音（克隆原声）还在生成：喇叭显示成灰色，表示"马上就好"
+    var preparing: Bool = false
     var onEdit: (() -> Void)? = nil      // 有值时：长按修改原文（对话页）；没有时：长按弹出复制菜单（历史页）
     var onSpeak: () -> Void
 
@@ -346,8 +349,9 @@ struct BubbleView: View {
 
     private var readingIcon: some View {
         Image(systemName: "speaker.wave.2.fill")
-            .symbolEffect(.variableColor.iterative)
-            .foregroundStyle(Color.accentColor)
+            .symbolEffect(.variableColor.iterative, isActive: !preparing)
+            // 声音还没生成好：灰色 + 不闪，提示"还在生成"
+            .foregroundStyle(preparing ? Color.secondary : Color.accentColor)
     }
 
     var body: some View {

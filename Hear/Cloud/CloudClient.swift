@@ -280,14 +280,28 @@ actor CloudClient {
     static func diagnose(address: String) async -> String {
         let s = cleanURL(address)
         if s.isEmpty { return "还没填地址" }
-        return await diagnoseOne(s)
+        var text = await diagnoseOne(s)
+        if !Self.looksConnected(text) {
+            // 第一次访问局域网会弹系统的「本地网络」授权框。
+            // 用户点「允许」之前请求是不通的，等一下再试一次就能通。
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            text = await diagnoseOne(s)
+        }
+        return text
+    }
+
+    /// 这段话是不是表示连上了
+    static func looksConnected(_ text: String) -> Bool {
+        text.hasPrefix("连接正常") || text.hasPrefix("服务在加载")
     }
 
     /// 真的连一次，把失败的原因说清楚
     private static func diagnoseOne(_ s: String) async -> String {
         guard let url = URL(string: s + "/health") else { return "地址格式不对：\(s)" }
         var req = URLRequest(url: url)
-        req.timeoutInterval = 6
+        // 放长一点：第一次访问局域网会弹系统的「本地网络」授权框，
+        // 用户点「允许」之前请求是等着的，6 秒太短会先超时
+        req.timeoutInterval = 25
         do {
             let (data, resp) = try await CloudClient.session.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
@@ -312,12 +326,12 @@ actor CloudClient {
                 let u = URL(string: s)
                 let host = u?.host ?? "电脑的IP"
                 let port = u?.port.map(String.init) ?? "这个端口"
-                return "连不上（\(port) 没有在监听）：确认服务已经启动，而且已经生成了证书（server/certs/cert.pem，没有的话只有 http 能用，App 只走 https）。三个模型都填同一个地址 https://192.168.x.x:8000，8081、8082 只在你电脑上监听，手机访问不了。"
+                return "连不上（\(port) 没有在监听）：确认服务已经启动，而且已经生成了证书（server/certs/cert.pem，没有的话只有 http 能用，App 只走 https）。三个模型都填同一个地址 https://192.168.x.x:8000，8081、8082 只在你电脑上监听，手机访问不了。如果刚弹过系统的「本地网络」授权框，先点「允许」再试一次。"
             case .timedOut:
                 let u = URL(string: s)
                 let host = u?.host ?? "电脑的IP"
                 let port = u?.port ?? 8000
-                return "超时，手机没收到回应。先在手机浏览器打开 https://\(host):\(port)/ 试试：能打开说明是 App 的「本地网络」权限没给（设置 → 隐私与安全性 → 本地网络），打不开说明网络不通。"
+                return "超时，手机没收到回应。先在手机浏览器打开 https://\(host):\(port)/ 试试：能打开说明是 App 的「本地网络」权限没给（设置 → 隐私与安全性 → 本地网络），打不开说明网络不通。刚点过系统的授权框的话，再试一次就好。"
             case .secureConnectionFailed, .serverCertificateUntrusted,
                  .serverCertificateHasUnknownRoot, .serverCertificateHasBadDate,
                  .serverCertificateNotYetValid, .clientCertificateRejected:
@@ -461,7 +475,11 @@ actor CloudClient {
 
     /// 用参考音频里的声音念一句话
     func clone(text: String, lang: String, reference: [Float], referenceText: String) async throws -> CloneAudio {
+        guard !reference.isEmpty else {
+            throw CloudError.badResponse("没有参考音频")
+        }
         let refWav = Wav.encode(samples: reference, sampleRate: 16_000)
+        hearLog("云端克隆：准备发请求（参考音频 \(refWav.count) 字节）")
         // 先试这个模型自己的地址，不行就退回通用服务地址（8000 会转发给克隆后端）
         var lastError: Error = CloudError.notConfigured
         for addr in candidateAddresses(cloneAddress) {
@@ -487,14 +505,17 @@ actor CloudClient {
                     "reference_wav": refWav.base64EncodedString(),
                     "reference_text": referenceText,
                 ]
+                hearLog("云端克隆：请求已发出（\(addr)）")
                 let obj = try await json("/v1/clone", address: addr, method: "POST",
                                          body: try JSONSerialization.data(withJSONObject: body), timeout: 300)
+                hearLog("云端克隆：收到回复")
                 guard let b64 = obj["audio"] as? String, let wavData = Data(base64Encoded: b64) else {
                     throw CloudError.badResponse("没有 audio 字段")
                 }
                 guard let decoded = Wav.decode(wavData) else {
                     throw CloudError.badResponse("返回的不是 wav 音频")
                 }
+                hearLog("云端克隆：音频解出来了（\(decoded.samples.count) 个采样，\(decoded.sampleRate) Hz）")
                 var rate = (obj["sample_rate"] as? Int) ?? decoded.sampleRate
                 if rate <= 0 { rate = decoded.sampleRate }
                 if rate <= 0 { rate = 24_000 }
