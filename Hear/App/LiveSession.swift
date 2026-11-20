@@ -1261,6 +1261,8 @@ final class LiveSession: ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = false
         capture.stop()                 // 把正在说的这一句交出去
         capture.muted = false
+        // 松手了就把麦克风放开（别的 App 才录得到声音）
+        scheduleMicrophoneRelease()
         translator.cancelPreview()
         previewSamples = nil
         mtPending = nil
@@ -1379,6 +1381,35 @@ final class LiveSession: ObservableObject {
         toast = nil
     }
 
+    /// 停完以后把麦克风放开：别的 App（比如录音机）要能录到声音。
+    ///
+    /// 音频会话一直停在"可录音"而且是激活的，麦克风就被我们占住了，
+    /// 别的 App 录出来是静音。正在朗读的时候不能停会话（会把声音切断），
+    /// 就等读完再放。
+    private func releaseMicrophoneIfIdle(attempt: Int = 0) {
+        guard !capture.isRunning else { return }      // 还在收音，不能放
+        if speaker.isPlaying {
+            // 还在出声：等一会儿再看（最多等 3 秒）
+            if attempt < 10 {
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    self?.releaseMicrophoneIfIdle(attempt: attempt + 1)
+                }
+            }
+            return
+        }
+        capture.releaseSession()
+    }
+
+    /// 延后一点再放开麦克风。
+    /// 停完以后马上要朗读的话，先让朗读把音频会话激活起来，别把声音切断了。
+    private func scheduleMicrophoneRelease() {
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            self?.releaseMicrophoneIfIdle()
+        }
+    }
+
     /// readAfter：停止后是否接着朗读没读的句子（只有用户自己点停止时才读）
     func stop(readAfter: Bool = true) {
         let wasRunning = isRunning
@@ -1404,6 +1435,8 @@ final class LiveSession: ObservableObject {
         stopLiveEngine()
         stopAppleASR()
         finishedSeg = max(finishedSeg, currentSeg)
+        // 麦克风放开（不占着，别的 App 才能录到声音）
+        scheduleMicrophoneRelease()
         // 整句话可能还没识别完（界面上是虚线框）：按了暂停，这句也要留在记录里，不能丢
         stopFlushItemID = nil
         stopFlushSegID = currentSeg
@@ -1557,6 +1590,8 @@ final class LiveSession: ObservableObject {
     private func readLoop(_ g: Int) async {
         defer {
             if g == readerGen { readerTask = nil; readingID = nil }
+            // 读完了：没在收音的话就把麦克风放开
+            releaseMicrophoneIfIdle()
         }
         while !Task.isCancelled, g == readerGen, readIndex < items.count {
             let item = items[readIndex]
@@ -1582,6 +1617,8 @@ final class LiveSession: ObservableObject {
         readingID = nil
         if wasReading { speaker.stop() }
         capture.muted = false
+        // 朗读停了：没在收音的话就把麦克风放开
+        scheduleMicrophoneRelease()
     }
 
     /// 点某一句：从这句开始往后读；正在读这句时再点一下就停止

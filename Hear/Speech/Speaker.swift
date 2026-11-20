@@ -30,6 +30,8 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     private var connectedFormat: AVAudioFormat?
     /// 这次播放有没有真的开始（只在 queue 上读写）
     private var playStarted = false
+    /// 引擎启动时的"会话停用代数"（只在 queue 上读写）
+    private var engineGen = -1
     private var currentPan: Float = 0
 
     override init() {
@@ -161,6 +163,12 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         return started
     }
 
+    /// 现在有没有在出声（用来判断能不能放开麦克风）
+    var isPlaying: Bool {
+        if synth.isSpeaking { return true }
+        return player.isPlaying
+    }
+
     /// 立即停止当前朗读
     func stop() {
         if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
@@ -257,7 +265,11 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             connectedFormat = hw
         }
         player.pan = currentPan
-        if !engine.isRunning {
+        // 音频会话被停用过的话（停止实时翻译以后放开了麦克风），
+        // 系统会把播放引擎也打断，得重新起一次才有声音
+        let gen = AudioRoute.deactivateGeneration
+        if !engine.isRunning || engineGen != gen {
+            engine.stop()
             engine.prepare()
             do {
                 try engine.start()
@@ -265,6 +277,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
                 hearLog("朗读：音频引擎启动失败 \(error)", .error)
                 return nil
             }
+            engineGen = gen
         }
         return engine.isRunning ? hw : nil
     }

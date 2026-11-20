@@ -113,6 +113,16 @@ final class AudioCapture {
         }
     }
 
+    /// 放开麦克风：停用音频会话，别占着麦克风不让别的 App 用。
+    ///
+    /// 排在 engineQueue 后面执行，保证引擎已经停了才停会话
+    /// （引擎还在跑的时候停会话，麦克风会被系统打断）。
+    func releaseSession() {
+        engineQueue.async {
+            AudioRoute.deactivate()
+        }
+    }
+
     private func installTapAndStart() throws {
         let input = engine.inputNode
         let inFormat = input.outputFormat(forBus: 0)

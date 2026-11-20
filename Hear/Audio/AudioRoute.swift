@@ -44,6 +44,29 @@ enum AudioRoute {
         apply(lastOutput)
     }
 
+    /// 音频会话被停用过几次。
+    /// 停会话会把播放引擎也打断，播放之前要用它判断要不要重新启动引擎。
+    private static let genLock = NSLock()
+    private static var deactivateGen = 0
+
+    static var deactivateGeneration: Int {
+        genLock.lock(); defer { genLock.unlock() }; return deactivateGen
+    }
+
+    /// 停用音频会话：把麦克风让给别的 App。
+    ///
+    /// 停止实时翻译以后如果不这么做，音频会话还停在"可录音"状态、
+    /// 而且是激活的，麦克风就一直被我们占着——手机上别的录音 App
+    /// 再也录不到声音（录出来是静音）。
+    ///
+    /// 必须在后台线程调用：关会话时蓝牙耳机会从通话模式切回音乐模式，
+    /// 要好几百毫秒，卡住主线程会让界面发涩。
+    static func deactivate() {
+        genLock.lock(); deactivateGen += 1; genLock.unlock()
+        let s = AVAudioSession.sharedInstance()
+        try? s.setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
     /// 按“声音来源”选择麦克风（已经是想要的就不动）。
     /// 返回 true 表示真的换了麦克风（换了的话输出路由也会被重置）。
     @discardableResult

@@ -57,13 +57,20 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
             //   旧证书里就没有新 IP，手机会直接拒绝：
             //   "certificate unknown"——这里放开，省得每次换网络都要重装证书）
             var t = trust
-            if let cert = SecTrustGetCertificateAtIndex(trust, 0) {
-                var relaxed = trust
-                SecTrustSetAnchorCertificates(relaxed, [cert] as CFArray)
-                SecTrustSetPolicies(relaxed, [SecPolicyCreateSSL(true, nil)])
-                var err: CFError?
-                if SecTrustEvaluateWithError(relaxed, &err) {
-                    t = relaxed
+            // 先按系统的判断来：证书本来就合格就用系统的
+            var err: CFError?
+            if !SecTrustEvaluateWithError(trust, &err),
+               let cert = SecTrustGetCertificateAtIndex(trust, 0) {
+                // 系统不认（自签证书、或者证书里的 IP 是旧的）：
+                // 内网地址就放宽——把证书本身当成自己的根，并且不校验主机名
+                var relaxed: SecTrust?
+                let st = SecTrustCreateWithCertificates(cert, SecPolicyCreateSSL(true, nil), &relaxed)
+                if st == errSecSuccess, let r = relaxed {
+                    SecTrustSetAnchorCertificates(r, [cert] as CFArray)
+                    var err2: CFError?
+                    if SecTrustEvaluateWithError(r, &err2) {
+                        t = r
+                    }
                 }
             }
             completionHandler(.useCredential, URLCredential(trust: t))
@@ -242,13 +249,31 @@ actor CloudClient {
         return req
     }
 
+    /// 发一个请求：连接被服务端断开之类的临时错误，重试一次。
+    ///
+    /// 服务现在用 HTTP/1.1 长连接，手机会复用同一个连接；
+    /// 连接空闲太久被服务端收掉的时候，正好赶上发请求就会断一下——
+    /// 重试一次就好，别让用户这一句白说。
+    /// （超时不重试：那是服务真的慢，重试只会让等待翻倍。）
+    private func sendWithRetry(_ req: URLRequest, path: String) async throws -> (Data, HTTPURLResponse?) {
+        do {
+            let (data, resp) = try await CloudClient.session.data(for: req)
+            return (data, resp as? HTTPURLResponse)
+        } catch let e as URLError where e.code == .networkConnectionLost
+                                            || e.code == .cannotConnectToHost {
+            hearLog("云端连接断了，重试一次：\(path)（\(e.code.rawValue)）", .warning)
+            let (data, resp) = try await CloudClient.session.data(for: req)
+            return (data, resp as? HTTPURLResponse)
+        }
+    }
+
     /// 请求并解析 JSON
     private func json(_ path: String, address: String, method: String = "GET", body: Data? = nil,
                       contentType: String = "application/json",
                       timeout: TimeInterval = 60) async throws -> [String: Any] {
         let req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
-        let (data, resp) = try await CloudClient.session.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        let (data, resp) = try await sendWithRetry(req, path: path)
+        let code = resp?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             let msg = String(data: data.prefix(400), encoding: .utf8) ?? ""
             throw CloudError.http(code, msg)
@@ -267,8 +292,8 @@ actor CloudClient {
                          timeout: TimeInterval = 60) async throws -> Data {
         var req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
-        let (data, resp) = try await CloudClient.session.data(for: req)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        let (data, resp) = try await sendWithRetry(req, path: path)
+        let code = resp?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             let msg = String(data: data.prefix(400), encoding: .utf8) ?? ""
             throw CloudError.http(code, msg)
@@ -451,8 +476,8 @@ actor CloudClient {
                 req.setValue(asrScheme, forHTTPHeaderField: "X-ASR-Scheme")
                 // 预览只要快，不要修正
                 if preview { req.setValue("1", forHTTPHeaderField: "X-ASR-Preview") }
-                let (data, resp) = try await CloudClient.session.data(for: req)
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                let (data, resp) = try await sendWithRetry(req, path: "/v1/asr")
+                let code = resp?.statusCode ?? 0
                 guard (200..<300).contains(code) else {
                     throw CloudError.http(code, String(data: data.prefix(400), encoding: .utf8) ?? "")
                 }
