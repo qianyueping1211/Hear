@@ -33,21 +33,33 @@ final class SystemTranslator {
     ///
     /// 我们自己的 tts 是 "en-US" "ja-JP" 这种（给朗读用的），
     /// 苹果翻译用的写法不一定一样：有的带地区，有的不带。
-    /// 所以按优先级挨个试，挑系统列表里真的有的那个。
+    /// 所以按优先级挨个试，挑系统列表里真的有的那个——
+    /// 而且用的是系统那一份（不是我们自己拼的），
+    /// 这样万一苹果改写法，我们不用跟着改。
     func canonical(_ lang: Language) async -> Locale.Language {
         let key = lang.id
         if let hit = resolved[key] { return hit }
         await loadSupportedLanguages()
-        for cand in candidates(lang) {
+        let cands = candidates(lang)
+        // 先找完全一样的（语言、脚本、地区都一样）
+        for cand in cands {
             let l = Locale.Language(identifier: cand)
-            if supportedIDs.contains(where: { $0.identifier.caseInsensitiveCompare(cand) == .orderedSame }) {
-                resolved[key] = l
-                return l
+            if let hit = supportedIDs.first(where: { sameLanguage($0, l, exact: true) }) {
+                resolved[key] = hit
+                return hit
+            }
+        }
+        // 再找语言代码一样的（苹果可能用 "en" 而不是 "en-US"）
+        for cand in cands {
+            let l = Locale.Language(identifier: cand)
+            if let hit = supportedIDs.first(where: { sameLanguage($0, l, exact: false) }) {
+                resolved[key] = hit
+                return hit
             }
         }
         // 系统列表里一个都没对上：先用我们自己的写法，
         // 下面 availability 会报“不支持”，App 会退回别的引擎。
-        let guess = Locale.Language(identifier: candidates(lang).first ?? lang.id)
+        let guess = Locale.Language(identifier: cands.first ?? lang.id)
         resolved[key] = guess
         return guess
     }
@@ -60,6 +72,19 @@ final class SystemTranslator {
         if !t.isEmpty { out.append(t) }
         if lang.id != t { out.append(lang.id) }  // "en" 这种
         return out
+    }
+
+    /// 两个语言算不算同一个：
+    /// 语言代码必须一样；脚本也一样（简繁不能混）。
+    /// exact = true 时地区也要一样。
+    private func sameLanguage(_ a: Locale.Language, _ b: Locale.Language, exact: Bool) -> Bool {
+        guard a.languageCode == b.languageCode else { return false }
+        if exact {
+            return a.script == b.script && a.region == b.region
+        }
+        // 候选写法里没写脚本时（"en"），就不要求脚本一样
+        if let sa = a.script, let sb = b.script { return sa == sb }
+        return true
     }
 
     /// 这两种语言之间能不能用苹果翻译、语言包下载了没有

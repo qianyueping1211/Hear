@@ -976,9 +976,23 @@ final class LiveSession: ObservableObject {
         let a = langA, b = langB
         var msg = "苹果翻译暂时用不了（\(a.name) → \(b.name)）"
         if let error { msg += "：\(Self.appleErrorText(error))" }
-        msg += "。多半是苹果翻译的语言包没装好：点“下载语言包”装一次就行；也可以在设置里改用云端或本地翻译。"
+        msg += "。多半是苹果翻译的语言包没装好：系统弹窗里点“下载”装一次就行；也可以在设置里改用云端或本地翻译。"
         appleNote = msg
         hearLog(msg, .warning)
+        // 再要一次语言包：系统会重新弹一次下载窗（只弹一次，别反复烦人）
+        askAppleDownloadAgain()
+    }
+
+    /// 再要一次苹果翻译的语言包（系统会重新弹下载窗）
+    private func askAppleDownloadAgain() {
+        guard usingAppleTranslation, !appleDownloadAsked else { return }
+        appleDownloadAsked = true
+        Task {
+            let src = await systemTranslator.canonical(langA)
+            let tgt = await systemTranslator.canonical(langB)
+            // 换一份新的配置：系统就会重新跑一遍翻译任务，再弹一次下载窗
+            translationPrepConfig = TranslationSession.Configuration(source: src, target: tgt)
+        }
     }
 
     /// 把苹果翻译的报错说成人话
@@ -997,6 +1011,7 @@ final class LiveSession: ObservableObject {
         guard usingAppleTranslation else { return }
         let a = langA, b = langB
         systemTranslator.reset()
+        appleDownloadAsked = false
         Task {
             await systemTranslator.loadSupportedLanguages()
             // 苹果翻译的语言标识得用苹果自己的写法（有的写 "en-US"，有的只写 "en"），
@@ -1007,7 +1022,7 @@ final class LiveSession: ObservableObject {
             case .installed:
                 appleNote = nil
             case .needsDownload:
-                appleNote = "需要下载苹果翻译的 \(a.name)、\(b.name) 语言包（点“下载语言包”）"
+                appleNote = "需要苹果翻译的 \(a.name)、\(b.name) 语言包（系统会弹窗让你下载）"
             case .unsupported:
                 appleNote = "苹果翻译不支持 \(a.name) 到 \(b.name)"
             }
@@ -1661,6 +1676,8 @@ final class LiveSession: ObservableObject {
     // MARK: - 朗读队列
     /// App 现在在后台吗（用户切到别的 App 了）
     private var inBackground = false
+    /// 已经跟苹果要过语言包下载了（别反复弹窗）
+    private var appleDownloadAsked = false
     //
     // 戴耳机：译文出来就从耳机读，边听边读，麦克风不暂停（耳机声音不会被录进去）。
     // 扬声器：聆听中不读；停止实时翻译后，从上次没读完的那句开始往后读；
