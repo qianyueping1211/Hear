@@ -431,6 +431,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_wav(self, wav, code=200):
+        """直接发 wav 原始数据（手机端要原始音频时用，省掉 base64，内存小很多）"""
+        self.send_response(code)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(wav)))
+        self.end_headers()
+        self.wfile.write(wav)
+
     def _error(self, msg, code=400):
         self._send_json({"error": str(msg)}, code)
 
@@ -608,13 +616,19 @@ a{color:#007aff;text-decoration:none}
         }
         payload = {k: v for k, v in payload.items() if v}
         t0 = time.time()
+        log("克隆 开始：%d 字，参考音频 %d 字节"
+            % (len(payload.get("input", "")), len(payload.get("speaker_ref_b64", "")) * 3 // 4))
         data = json.dumps(payload).encode("utf-8")
         r = urllib.request.Request(CLONE_URL + "/tts", data=data,
                                    headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(r, timeout=900) as resp:
             wav = resp.read()
         rate = wav_sample_rate(wav)
-        log("克隆 %.1fs：%d 字节，%d Hz" % (time.time() - t0, len(wav), rate))
+        log("克隆 结束 %.1fs：%d 字节，%d Hz" % (time.time() - t0, len(wav), rate))
+        # 手机端在请求头里说明要原始 wav：直接发 wav（不用 base64，手机那边省内存）
+        if (self.headers.get("X-Hear-Audio") or "").strip().lower() == "wav":
+            self._send_wav(wav)
+            return
         self._send_json({
             "audio": base64.b64encode(wav).decode("ascii"),
             "sample_rate": rate,

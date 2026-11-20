@@ -124,6 +124,20 @@ final class LiveSession: ObservableObject {
     /// 声音克隆走云端
     var usingCloudClone: Bool { voiceClone && voiceCloneCloud }
 
+    /// 模型管理默认显示哪一边：0 = 本地模型，1 = 在线模型
+    ///
+    /// 看三个引擎（语音识别 / 文本翻译 / 声音克隆）：
+    ///   · 只要有一个是本地引擎 → 本地模型
+    ///   · 都是在线引擎，或者在线 + 苹果自带混着用 → 在线模型
+    ///   · 全是苹果自带 → 本地模型
+    var preferredModelTab: Int {
+        let engines = [asrEngine, translationEngine,
+                       voiceCloneCloud ? "cloud" : (voiceClone ? "local" : "apple")]
+        if engines.contains(where: { Self.isLocalEngine($0) }) { return 0 }
+        if engines.contains("cloud") { return 1 }
+        return 0
+    }
+
     // 朗读输出：扬声器 / 耳机；耳机时左右耳各播哪种语言（"A" / "B" / "off"）
     @Published var outputMode: AudioOutput { didSet { save("outputMode", outputMode.rawValue) } }
     @Published var leftEar: String { didSet { save("leftEar", leftEar) } }
@@ -312,6 +326,7 @@ final class LiveSession: ObservableObject {
     @Published var talkMode: Bool {
         didSet {
             save("talkMode", talkMode)
+            save("hearLastMode", talkMode)      // 多存一份：万一主的那份丢了还能找回来
             if talkMode != oldValue, isRunning { stop(readAfter: false) }
         }
     }
@@ -382,7 +397,15 @@ final class LiveSession: ObservableObject {
         }
         voiceProcessing = d.object(forKey: "voiceProcessing") as? Bool ?? true
         inputSource = d.string(forKey: "inputSource") ?? "phone"
-        talkMode = d.object(forKey: "talkMode") as? Bool ?? false
+        // 上次用的模式一定要记住：不管存的是 Bool 还是 NSNumber 都能读回来
+        if let v = d.object(forKey: "talkMode") as? Bool {
+            talkMode = v
+        } else if d.object(forKey: "talkMode") != nil {
+            talkMode = d.bool(forKey: "talkMode")
+        } else {
+            talkMode = d.bool(forKey: "hearLastMode")
+        }
+        hearLog("启动：\(talkMode ? "对话翻译模式" : "实时翻译模式")")
         capture.voiceProcessing = voiceProcessing
         AudioRoute.useHeadsetMic = inputSource == "headset"
 
@@ -1366,8 +1389,10 @@ final class LiveSession: ObservableObject {
         stopLiveEngine()
         stopAppleASR()
         finishedSeg = max(finishedSeg, currentSeg)
+        // 整句话可能还没识别完（界面上是虚线框）：按了暂停，这句也要留在记录里，不能丢
+        flushPartial()
         partial = ""; partialTranslation = ""; partialSource = nil
-        dropUnfinished()
+        finishUnfinished()
         if wasRunning && readAfter { kickReader() }   // 停止聆听后，从上次没读完的地方接着读
         if pendingLocalSwitch {
             pendingLocalSwitch = false
@@ -1375,13 +1400,33 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    /// 停止时还没翻译完的句子：有部分译文就保留，没有就删掉
-    private func dropUnfinished() {
+    /// 停止时还没说完的那一句（实时气泡里的虚线内容）：变成一条正常的记录留下来
+    private func flushPartial() {
+        var text = partial.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("…") { text = String(text.dropFirst()).trimmingCharacters(in: .whitespaces) }
+        guard !text.isEmpty, text != "…", SpeechRecognizer.isMeaningful(text) else { return }
+        let src = partialSource ?? (lastLangID == langB.id ? langB : langA)
+        let tgt = src == langA ? langB : langA
+        var item = TranslationItem(source: src, target: tgt, sourceText: text)
+        item.translated = partialTranslation
+        item.done = !partialTranslation.isEmpty
+        items.append(item)
+        hearLog("暂停：保留了一句还没说完的（\(text.prefix(40))）")
+        persist()
+    }
+
+    /// 停止时还没翻译完的句子：原文还在的就留着，并且接着把译文补上
+    /// （一个字都没有的才删掉，不然按暂停会把刚识别出来的内容丢掉）
+    private func finishUnfinished() {
         var changed = false
+        var pending: [(UUID, String, Language, Language)] = []
         for i in items.indices.reversed() where !items[i].done {
-            if items[i].translated.isEmpty || items[i].sourceText == "…" {
+            let text = items[i].sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if items[i].translated.isEmpty && (text.isEmpty || text == "…") {
                 items.remove(at: i)
                 if i < readIndex { readIndex -= 1 }
+            } else if items[i].translated.isEmpty {
+                pending.append((items[i].id, items[i].sourceText, items[i].source, items[i].target))
             } else {
                 items[i].done = true
             }
@@ -1389,6 +1434,23 @@ final class LiveSession: ObservableObject {
         }
         if readIndex > items.count { readIndex = items.count }
         if changed { persist() }
+        // 没译完的接着翻（这一步不受"停止"影响，译完这句就齐了）
+        for (id, text, src, tgt) in pending {
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let out = try await self.translateFinal(text, from: src, to: tgt, context: []) { _ in }
+                    self.update(id, out, done: true)
+                    self.persist()
+                    self.kickReader()          // 译完了，朗读那边等着这句呢
+                } catch {
+                    hearLog("补翻译失败：\(error)", .error)
+                    self.update(id, "（翻译失败）", done: true)
+                    self.persist()
+                    self.kickReader()
+                }
+            }
+        }
     }
 
     func swapLanguages() {
@@ -1679,7 +1741,10 @@ final class LiveSession: ObservableObject {
                                                  glossary: PromptBuilder.parseGlossary(glossary))
                 do {
                     let out = try await cloud.translate(prompt: prompt, src: p.src.id, dst: p.tgt.id)
-                    if !out.isEmpty, gen == runGen, id == partialSeg, id > finishedSeg { partialTranslation = out }
+                    if !out.isEmpty {
+                        hearLog("云端翻译（预览）：\(out.prefix(20))")
+                        if gen == runGen, id == partialSeg, id > finishedSeg { partialTranslation = out }
+                    }
                 } catch {
                     cloudFallbackToApple(.mt, reason: error.localizedDescription)
                 }
@@ -1709,9 +1774,14 @@ final class LiveSession: ObservableObject {
         let prompt = PromptBuilder.build(text: text, from: src, to: tgt, context: context,
                                          glossary: PromptBuilder.parseGlossary(glossary))
         if usingCloudMT {
+            let t0 = Date()
+            hearLogNow("云端翻译：开始（\(src.id) → \(tgt.id)）")
             do {
-                return try await cloud.translate(prompt: prompt, src: src.id, dst: tgt.id)
+                let out = try await cloud.translate(prompt: prompt, src: src.id, dst: tgt.id)
+                hearLogNow("云端翻译：\(out.prefix(40))（用时 \(CloudClient.secs(t0))s）")
+                return out
             } catch {
+                hearLog("云端翻译失败：\(error)", .error)
                 cloudFallbackToApple(.mt, reason: error.localizedDescription)
                 throw error
             }
@@ -2064,9 +2134,6 @@ final class LiveSession: ObservableObject {
             return
         }
         guard gen == runGen else { return }              // 翻译中途被停止：stop() 已经收尾
-        if usingCloudMT {
-            hearLog("云端翻译：\(result.prefix(40))")
-        }
         update(id, result, done: true)
         persist()
         activity = isRunning ? "正在聆听" : ""
@@ -2311,7 +2378,7 @@ final class LiveSession: ObservableObject {
         if vp != voiceProcessing { voiceProcessing = vp }
         let isrc = d.string(forKey: "inputSource") ?? "phone"
         if isrc != inputSource { inputSource = isrc }
-        let tm = d.object(forKey: "talkMode") as? Bool ?? false
+        let tm = (d.object(forKey: "talkMode") as? Bool) ?? d.bool(forKey: "talkMode")
         if tm != talkMode { talkMode = tm }
         // 大模型配置、日志设置各自存着，让它们也重新读一遍
         LLMSettings.shared.reloadFromDefaults()
@@ -2674,7 +2741,7 @@ final class LiveSession: ObservableObject {
                 if useCloud {
                     // 把可用内存一起记上：万一又被系统杀掉，日志里能看出来
                     let memMB = await MainActor.run { Self.freeMB() }
-                    hearLog("声音克隆（云端）：开始生成（可用内存 \(memMB) MB）")
+                    hearLogNow("声音克隆（云端）：开始生成（可用内存 \(memMB) MB）")
                     // 语言名要用模型认的那种写法（english/chinese），和本地跑的时候一样
                     let cloudLang = VoiceCloneGGUF.languageNames[lang] ?? lang
                     let out: CloneAudio
@@ -2686,12 +2753,14 @@ final class LiveSession: ObservableObject {
                         await MainActor.run { self.cloudFallbackToApple(.clone, reason: why) }
                         return nil
                     }
-                    hearLog("声音克隆（云端）：生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
+                    hearLogNow("声音克隆（云端）：结束，生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
                     await CloneCache.shared.put(key, out)
                     return out
                 }
+                hearLogNow("声音克隆（本地）：开始生成")
                 let out = try await cloner.synthesize(text: text, language: lang,
                                                       reference: ref.samples, referenceText: ref.text)
+                hearLogNow("声音克隆（本地）：结束，生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
                 // 存进缓存，下次同一句话直接播放
                 await CloneCache.shared.put(key, out)
                 return out

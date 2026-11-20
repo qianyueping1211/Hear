@@ -9,6 +9,7 @@ import Foundation
 /// - `POST /v1/translate`  翻译：{"prompt":"...","src":"zh","dst":"en"}，返回 {"text":"..."}
 /// - `POST /v1/clone`      声音克隆：{"text":"...","lang":"en","reference_wav":"<base64>","reference_text":"..."}
 ///                         返回 {"audio":"<base64 wav>","sample_rate":24000}
+///                         （请求头带 X-Hear-Audio: wav 的话，服务直接回 wav 原始数据）
 /// - `GET  /health`        看服务状态
 ///
 /// 手机和电脑要在同一个局域网里，地址写成 http://192.168.x.x:8000 这种。
@@ -247,8 +248,10 @@ actor CloudClient {
     /// 请求并返回原始数据（不是 JSON）
     private func rawData(_ path: String, address: String, method: String = "GET", body: Data? = nil,
                          contentType: String = "application/json",
+                         headers: [String: String] = [:],
                          timeout: TimeInterval = 60) async throws -> Data {
-        let req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
+        var req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
         let (data, resp) = try await CloudClient.session.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
@@ -512,11 +515,12 @@ actor CloudClient {
             throw CloudError.badResponse("没有参考音频")
         }
         let refWav = Wav.encode(samples: reference, sampleRate: 16_000)
-        hearLog("云端克隆：准备发请求（参考音频 \(refWav.count) 字节）")
+        hearLogNow("云端克隆：开始（参考音频 \(refWav.count) 字节）")
         // 先试这个模型自己的地址，不行就退回通用服务地址（8000 会转发给克隆后端）
         var lastError: Error = CloudError.notConfigured
         for addr in candidateAddresses(cloneAddress) {
             do {
+                let t0 = Date()
                 // 地址上跑的是单独的 llama-server（8082 那种）时，用 /tts，返回的是 wav 原始数据
                 if await kind(of: addr) == .llamaServer {
                     let body: [String: Any] = [
@@ -525,11 +529,14 @@ actor CloudClient {
                         "speaker_ref_b64": refWav.base64EncodedString(),
                         "speaker_ref_text": referenceText,
                     ]
+                    hearLogNow("云端克隆：请求已发出（\(addr)）")
                     let data = try await rawData("/tts", address: addr, method: "POST",
                                                  body: try JSONSerialization.data(withJSONObject: body), timeout: 300)
+                    hearLogNow("云端克隆：收到回复（\(data.count) 字节）")
                     guard let decoded = Wav.decode(data) else {
                         throw CloudError.badResponse("llama-server 返回的不是 wav 音频")
                     }
+                    hearLogNow("云端克隆：结束（\(decoded.samples.count) 个采样，\(decoded.sampleRate) Hz，用时 \(Self.secs(t0))s）")
                     return CloneAudio(samples: decoded.samples, sampleRate: decoded.sampleRate)
                 }
                 let body: [String: Any] = [
@@ -538,25 +545,42 @@ actor CloudClient {
                     "reference_wav": refWav.base64EncodedString(),
                     "reference_text": referenceText,
                 ]
-                hearLog("云端克隆：请求已发出（\(addr)）")
-                let obj = try await json("/v1/clone", address: addr, method: "POST",
-                                         body: try JSONSerialization.data(withJSONObject: body), timeout: 300)
-                hearLog("云端克隆：收到回复")
-                guard let b64 = obj["audio"] as? String, let wavData = Data(base64Encoded: b64) else {
-                    throw CloudError.badResponse("没有 audio 字段")
+                hearLogNow("云端克隆：请求已发出（\(addr)）")
+                // 请求头里说明要原始 wav：新服务直接回 wav 原始数据（省掉 base64，
+                // 内存占用小很多）；老服务不认这个头，还是回 JSON，这里也照样能解。
+                let data = try await rawData("/v1/clone", address: addr, method: "POST",
+                                             body: try JSONSerialization.data(withJSONObject: body),
+                                             headers: ["X-Hear-Audio": "wav"], timeout: 300)
+                hearLogNow("云端克隆：收到回复（\(data.count) 字节）")
+                var wavData = data
+                var rate = 0
+                if !(data.count > 4 && data.prefix(4) == Data([0x52, 0x49, 0x46, 0x46])) {
+                    // 老服务：回的是 JSON（audio 是 base64）
+                    guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let b64 = obj["audio"] as? String,
+                          let d = Data(base64Encoded: b64) else {
+                        throw CloudError.badResponse("没有 audio 字段")
+                    }
+                    wavData = d
+                    rate = (obj["sample_rate"] as? Int) ?? 0
                 }
                 guard let decoded = Wav.decode(wavData) else {
                     throw CloudError.badResponse("返回的不是 wav 音频")
                 }
-                hearLog("云端克隆：音频解出来了（\(decoded.samples.count) 个采样，\(decoded.sampleRate) Hz）")
-                var rate = (obj["sample_rate"] as? Int) ?? decoded.sampleRate
                 if rate <= 0 { rate = decoded.sampleRate }
                 if rate <= 0 { rate = 24_000 }
+                hearLogNow("云端克隆：结束（\(decoded.samples.count) 个采样，\(rate) Hz，用时 \(Self.secs(t0))s）")
                 return CloneAudio(samples: decoded.samples, sampleRate: rate)
             } catch {
                 lastError = error
+                hearLog("云端克隆失败：\(error)", .error)
             }
         }
         throw lastError
+    }
+
+    /// 从开始到现在的秒数（一位小数）
+    static func secs(_ t0: Date) -> String {
+        String(format: "%.1f", Date().timeIntervalSince(t0))
     }
 }

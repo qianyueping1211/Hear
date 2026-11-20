@@ -99,6 +99,15 @@ struct SettingsView: View {
                                 .disabled(cloud.syncing)
                         }
                     }
+                    if cloud.enabled && !cloud.hasFolder {
+                        // 只有系统还没给过云盘权限时才有这一行（点一次授权，以后不用再管）
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("还没有 iCloud 云盘的访问权限。授权一次就行，之后设置和历史会自动同步到云盘里的「听见」文件夹，不用再选目录。")
+                                .font(.footnote).foregroundStyle(.orange)
+                            Button("授权 iCloud 云盘（只此一次）") { showCloudPicker = true }
+                                .buttonStyle(.bordered)
+                        }
+                    }
                     if let m = cloud.message {
                         Text(m).font(.footnote).foregroundStyle(.orange)
                     }
@@ -293,8 +302,15 @@ struct SettingsView: View {
             }
             .onAppear {
                 session.refreshHeadset()
+                syncModelTab()
                 if modelTab == 1 { Task { await session.refreshCloudStatus() } }
             }
+            // 引擎换了，模型管理的页签跟着走
+            // （有本地引擎 → 本地模型；都是在线 / 在线+苹果 → 在线模型）
+            .onChange(of: session.asrEngine) { _, _ in syncModelTab() }
+            .onChange(of: session.translationEngine) { _, _ in syncModelTab() }
+            .onChange(of: session.voiceClone) { _, _ in syncModelTab() }
+            .onChange(of: session.voiceCloneCloud) { _, _ in syncModelTab() }
             // 在线模型页每 2 秒自动更新一次状态，不用手动点刷新
             .task(id: modelTab) {
                 guard modelTab == 1 else { return }
@@ -387,14 +403,23 @@ struct SettingsView: View {
 
     @State private var askClone = false
 
+    /// 打开 iCloud 同步：不用让用户选目录。
+    /// 数据固定放在 iCloud 云盘里的「听见」文件夹（就是 App 名字）。
+    /// 只有在系统还没给过云盘权限时，下面才会多一个「授权 iCloud 云盘」的按钮（点一次就行）。
     private var cloudBinding: Binding<Bool> {
         Binding(
             get: { cloud.enabled },
             set: { on in
-                if !on { cloud.enabled = false; return }
-                if cloud.hasFolder { cloud.enabled = true } else { showCloudPicker = true }
+                cloud.enabled = on
+                if on { cloud.checkFolderAccess() }
             }
         )
+    }
+
+    /// 引擎换了以后，模型管理的页签跟着引擎走
+    private func syncModelTab() {
+        let want = session.preferredModelTab
+        if modelTab != want { modelTab = want }
     }
 
     static func timeText(_ d: Date) -> String {

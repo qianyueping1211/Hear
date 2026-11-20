@@ -373,7 +373,7 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>当前版本</dt><dd>0.4.35</dd></div>
+        <div><dt>当前版本</dt><dd>0.4.36</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
         <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
         <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
@@ -531,7 +531,9 @@ section.band{scroll-margin-top:62px}
           <li><b>实时翻译模式</b>　点一下麦克风开始，直接说话，App 自动判断说的是哪种语言并翻成另一种；再点一下停止。</li>
           <li><b>对话翻译模式</b>　左右两个「按住说 XX」按钮，按住说对应语言，松开即翻译并播报。</li>
           <li><b>双向互译</b>　13 种语言任意配对（zh / en / ja / ko / ar / fr / de / es / ru / pt / it / th / vi）。</li>
-          <li><b>模式切换</b>　底部左右滑动切换，底部圆点指示当前模式，点圆点也能直接切。</li>
+          <li><b>模式切换</b>　底部左右滑动切换，底部圆点指示当前模式，点圆点也能直接切。
+              <strong>上次用哪个模式会记住</strong>，下次打开还是那个模式（这个模式只存在本机，不跟 iCloud 走）。</li>
+          <li><b>暂停不丢内容</b>　整句话还没说完时（气泡是虚线的）按暂停，那句也会留下来继续翻译，不会消失。</li>
           <li><b>气泡式对话</b>　左右分栏气泡，源语言侧在左、目标侧在右；实时气泡随识别持续刷新。</li>
           <li><b>结果可编辑</b>　长按某句可改原文并重新翻译、复制原文或译文。</li>
           <li><b>点气泡即朗读</b>　正在朗读的气泡带描边与声波动画。</li>
@@ -591,6 +593,8 @@ section.band{scroll-margin-top:62px}
           <li><b>镜像加速</b>　自动探测所在网络，国内走 hf-mirror，海外走 huggingface.co。</li>
           <li><b>本地导入</b>　从「文件」App 直接导入 .gguf 或模型目录。</li>
           <li><b>在线模型</b>　识别 / 翻译 / 克隆三个模型各自独立配置地址，支持「测试连接」。</li>
+          <li><b>页签跟着引擎走</b>　三个引擎（识别 / 翻译 / 克隆）里只要有一个是本地引擎，就停在「本地模型」；
+              都是在线引擎、或者在线 + 苹果自带混着用，就默认「在线模型」。</li>
           <li><b>状态可视</b>　每个模型行直接显示「未配置 / 正常 / 异常」，异常时给出具体原因。</li>
         </ul>
       </div>
@@ -610,12 +614,16 @@ section.band{scroll-margin-top:62px}
       <div class="fgroup">
         <h3><em>08</em>稳定性与同步</h3>
         <ul>
-          <li><b>iCloud 同步</b>　把设置与历史对话同步到 iCloud 云盘里的「听见」文件夹，位置固定，不用用户选。</li>
+          <li><b>iCloud 同步</b>　把设置与历史对话同步到 iCloud 云盘里的「听见」文件夹，位置固定，不用用户选；
+              打开开关<strong>不会弹选择框</strong>，只有系统还没给过云盘权限时才在设置里给一个「授权一次」的入口。</li>
           <li><b>双向合并</b>　按修改时间判定谁新推谁，删除记录双向合并，设置用哈希指纹判断。</li>
           <li><b>崩溃捕获</b>　未捕获异常 + 6 类信号，崩溃现场写入本地日志。</li>
           <li><b>异常退出检测</b>　结合崩溃记录、内存警告、退出前可用内存三项判断，避免误报。</li>
           <li><b>麦克风自恢复</b>　启动失败自动重试，音频路由变化时重装采样回调。</li>
           <li><b>云端失败降级</b>　云端引擎出错自动切回系统引擎并重启会话，不中断使用。</li>
+          <li><b>日志看得到开始与结束</b>　云端克隆、云端翻译这类要等好几秒的操作，
+              都会先记一条「开始」，结束后再记一条带用时的「结束」；关键节点同步落盘，
+              中途崩溃也查得到停在哪一步。</li>
         </ul>
       </div>
 
@@ -864,7 +872,13 @@ section.band{scroll-margin-top:62px}
              （<code>FileManager.url(forUbiquityContainerIdentifier:)</code>），没有就用之前授权过的文件夹，
              在里面放一个「听见」。用户不用选目录，也不用改目录，界面上也不显示同步位置。
              老版本用的「听见同步」文件夹会在升级后自动改名成「听见」。</p>
-          <p>同步三类数据：<code>settings.plist</code>（设置，27 个键，用 SHA256 指纹判断是否被改过；
+          <p><strong>打开开关不会再弹「请选择文件夹」</strong>：位置永远是「听见」。
+             授权用<strong>带安全权限的书签</strong>（<code>bookmarkData(options: .withSecurityScope)</code>），
+             App 重启之后权限还在，不用每次重新选；只有系统完全没给过云盘权限时，
+             设置里才会出现一个「授权 iCloud 云盘（只此一次）」的按钮。</p>
+          <p>同步三类数据：<code>settings.plist</code>（设置，26 个键，用 SHA256 指纹判断是否被改过；
+             「实时翻译 / 对话翻译」这个模式<strong>只存在本机</strong>，不跟 iCloud 走，
+             否则每次启动都会被云盘里的旧值改回去；
              含在线模型：通用服务地址、三个模型各自的地址、识别方案、用不用云端翻译/克隆）、
              <code>conversations/&lt;uuid&gt;.json</code>（历史）、<code>manifest.json</code>（各页修改时间、删除记录、设置哈希）。</p>
           <p>方向判定：对话按每页 <code>updatedAt</code> 谁新推谁；删除用 <code>deletedConversations</code> 字典两边合并；
@@ -975,6 +989,13 @@ section.band{scroll-margin-top:62px}
             <td>—</td>
             <td class="mono">8000</td>
             <td class="mono">GET /health · /ping · /</td>
+          </tr>
+          <tr>
+            <td>自检脚本</td>
+            <td><code>test_api.py</code><span class="sub">Windows 上直接测本机服务，不经过 App</span></td>
+            <td>—</td>
+            <td class="mono">8000</td>
+            <td class="mono">python test_api.py clone --wav 参考.wav --text "Hello"</td>
           </tr>
         </tbody>
       </table>
@@ -1136,6 +1157,14 @@ section.band{scroll-margin-top:62px}
              同时用自带的会话而不是系统共享会话，因为共享会话没法挂证书处理程序。</p>
           <p>地址写成 <code>http://</code> 也会被自动换成 <code>https://</code>，
              根本没写协议的（只写 <code>192.168.x.x:8000</code>）则补上 <code>https://</code>。</p>
+          <p><strong>声音克隆可以直接回原始 wav</strong>：手机在请求头里带 <code>X-Hear-Audio: wav</code>，
+             服务就回 wav 原始数据（<code>Content-Type: audio/wav</code>），省掉 base64，
+             手机那边内存占用小很多；不带这个头的老客户端仍然收到 JSON（<code>audio</code> 是 base64）。</p>
+          <p><strong>自检脚本</strong> <code>server/test_api.py</code>：在 Windows 上直接测本机服务，
+             不经过手机、不经过 App，用来分清「是服务端的问题还是 App 的问题」。
+             <code>python test_api.py health</code> 看服务状态；
+             <code>python test_api.py clone --wav 参考.wav --text "Hello"</code> 用一段中文声音念英文，
+             成功的话会存成 <code>clone_out.wav</code>，双击就能听。</p>
           <p>证书由服务<strong>自己保证</strong>：<code>hear_cloud.py</code> 启动时发现
              <code>server/certs/cert.pem</code> 不在，就地生成一份（SAN 带上本机所有局域网 IP）。
              Windows 的 <code>start-windows.ps1</code> 和启动脚本会在服务起来之前先生成一次，
@@ -1365,7 +1394,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.35</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.36</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>

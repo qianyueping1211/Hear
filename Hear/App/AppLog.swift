@@ -1,5 +1,9 @@
 import Foundation
 
+/// 写日志文件用的锁和队列（几处都要写同一个文件，不能写乱了）
+private let hearLogFileLock = NSLock()
+private let hearLogAsyncQueue = DispatchQueue(label: "hear.log.write.async", qos: .utility)
+
 enum LogLevel: String, CaseIterable {
     case info = "I"
     case warning = "W"
@@ -80,13 +84,44 @@ final class AppLog: ObservableObject {
     /// 崩溃或者被系统杀掉的时候来不及走队列，日志丢了就查不出原因，
     /// 所以警告和错误级别的日志用这个直接落盘。
     nonisolated static func appendDirect(_ message: String, _ level: LogLevel) {
-        if (UserDefaults.standard.object(forKey: "logEnabled") as? Bool ?? true) == false { return }
-        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("hear-log.txt")
+        guard logEnabledNow else { return }
+        writeLineToFile(message, level)
+    }
+
+    /// 马上排队落盘（不阻塞调用方，也不等主线程）。
+    /// 普通信息日志用这个：以前要等主线程空出来才写，
+    /// 主线程正忙的时候（云端克隆要等十几秒）日志会拖很久才出现，
+    /// 看起来就像"开始了没有记录"。
+    nonisolated static func appendAsync(_ message: String, _ level: LogLevel) {
+        guard logEnabledNow else { return }
+        let line = formattedLine(message, level)
+        hearLogAsyncQueue.async { writeRawLine(line) }
+    }
+
+    /// 现在要不要写日志
+    nonisolated static var logEnabledNow: Bool {
+        (UserDefaults.standard.object(forKey: "logEnabled") as? Bool ?? true) != false
+    }
+
+    /// 拼成一行日志（带时间）
+    nonisolated static func formattedLine(_ message: String, _ level: LogLevel) -> String {
         let f = DateFormatter()
         f.dateFormat = "MM-dd HH:mm:ss"
-        let line = "[\(f.string(from: Date()))] [\(level.rawValue)] \(message)\n"
+        return "[\(f.string(from: Date()))] [\(level.rawValue)] \(message)\n"
+    }
+
+    /// 真正写文件（加锁，避免几处同时写把行写乱了）
+    nonisolated private static func writeLineToFile(_ message: String, _ level: LogLevel) {
+        writeRawLine(formattedLine(message, level))
+    }
+
+    nonisolated private static func writeRawLine(_ line: String) {
         guard let data = line.data(using: .utf8) else { return }
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let url = docs.appendingPathComponent("hear-log.txt")
+        let old = docs.appendingPathComponent("hear-log.old.txt")
+        var size: Int64 = 0
+        hearLogFileLock.lock()
         if let h = try? FileHandle(forWritingTo: url) {
             h.seekToEndOfFile()
             h.write(data)
@@ -94,6 +129,26 @@ final class AppLog: ObservableObject {
         } else {
             try? data.write(to: url)
         }
+        size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+        // 超过上限的一半就转成"旧日志"，顺手清掉更老的
+        let limit = Int64(maxMBNow) * 1_000_000 / 2
+        if size > limit {
+            try? FileManager.default.removeItem(at: old)
+            try? FileManager.default.moveItem(at: url, to: old)
+            size = 0
+        }
+        hearLogFileLock.unlock()
+        Task { @MainActor in AppLog.shared.noteFileSize(size) }
+    }
+
+    /// 现在日志文件最大是多少 MB
+    nonisolated static var maxMBNow: Int {
+        (UserDefaults.standard.object(forKey: "logMaxMB") as? Int) ?? 100
+    }
+
+    /// 写完之后更新一下"日志大小"的显示
+    func noteFileSize(_ n: Int64) {
+        fileBytes = n
     }
 
     /// 写文件在后台队列做，别在主线程上做磁盘 IO（不然会影响交互流畅度）
@@ -179,13 +234,21 @@ final class AppLog: ObservableObject {
     }
 }
 
-/// 任何线程都可以调用
+/// 普通信息日志：马上排队落盘，再进内存列表（不等主线程）
 func hearLog(_ message: String, _ level: LogLevel = .info) {
     if level == .info {
-        Task { @MainActor in AppLog.shared.add(message, level: level) }
+        AppLog.appendAsync(message, level)
     } else {
         // 警告和错误：先同步落盘（崩了就来不及走队列），再进内存列表
         AppLog.appendDirect(message, level)
-        Task { @MainActor in AppLog.shared.add(message, level: level, saveToFile: false) }
     }
+    Task { @MainActor in AppLog.shared.add(message, level: level, saveToFile: false) }
+}
+
+/// 关键节点日志：立刻同步落盘。
+/// 云端克隆、翻译这种要等好几秒的操作，用它记录"开始/结束"，
+/// 这样即使中途 App 崩了或被系统杀掉，日志文件里也留着最后一步。
+func hearLogNow(_ message: String) {
+    AppLog.appendDirect(message, .info)
+    Task { @MainActor in AppLog.shared.add(message, level: .info, saveToFile: false) }
 }
