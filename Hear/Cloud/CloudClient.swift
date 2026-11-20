@@ -121,6 +121,7 @@ actor CloudClient {
         case badURL
         case http(Int, String)
         case badResponse(String)
+        case net(String)          // 网络不通，说清楚为什么
 
         var errorDescription: String? {
             switch self {
@@ -128,6 +129,7 @@ actor CloudClient {
             case .badURL: return "云端模型地址格式不对"
             case .http(let code, let msg): return "云端服务返回 \(code)：\(msg)"
             case .badResponse(let msg): return "云端服务返回的内容看不懂：\(msg)"
+            case .net(let msg): return msg
             }
         }
     }
@@ -168,6 +170,43 @@ actor CloudClient {
         cloneBusy = false
     }
 
+    /// 参考音频在服务器上缓存着：同一段参考只从手机传一次，
+    /// 后面每句话只带一个 id。
+    ///
+    /// 每句话都重传一遍参考音频的话，一段 10 秒的参考就是几百 KB，
+    /// 一场对话下来白白占掉手机的流量，电脑那边的带宽也被占着——
+    /// 手机自己的网络都可能被拖累（用户抱怨过切到别的软件手机提示断网）。
+    private var cloneRefID: String = ""
+    private var cloneRefKey: String = ""        // 参考音频的指纹（换参考了要重新传）
+    private var cloneRefUnsupported = false    // 老服务没有这个接口，别再试了
+
+    /// 参考音频的指纹（换了参考音频就得重新传）
+    private func refFingerprint(_ samples: [Float]) -> String {
+        var acc: Double = 0
+        var i = 0
+        while i < samples.count {
+            acc += Double(samples[i])
+            i += 331
+        }
+        return "\(samples.count)-\(Int(acc * 1000))"
+    }
+
+    /// 把参考音频传到服务器上，换一个 id 回来（后面每句话只带 id）
+    private func uploadCloneReference(_ refWav: Data, address: String) async throws -> String {
+        let req = try makeRequest("/v1/clone/reference", address: address, method: "POST",
+                                  body: refWav, contentType: "audio/wav", timeout: 60)
+        let (data, resp) = try await sendWithRetry(req, path: "/v1/clone/reference")
+        let code = resp?.statusCode ?? 0
+        guard (200..<300).contains(code) else {
+            throw CloudError.http(code, String(data: data.prefix(200), encoding: .utf8) ?? "")
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rid = obj["id"] as? String, !rid.isEmpty else {
+            throw CloudError.badResponse("没有 reference id")
+        }
+        return rid
+    }
+
     /// 这个地址上跑的是哪种服务
     /// （探测失败时不缓存：可能只是暂时连不上，下次还要再问一次）
     func kind(of address: String) async -> ServiceKind {
@@ -185,6 +224,7 @@ actor CloudClient {
         let a = s.trimmingCharacters(in: .whitespacesAndNewlines)
         asrAddress = a; mtAddress = a; cloneAddress = a
         kinds.removeAll()
+        cloneRefID = ""; cloneRefKey = ""; cloneRefUnsupported = false
     }
 
     /// 分别设置三个模型的接口地址
@@ -193,6 +233,7 @@ actor CloudClient {
         mtAddress = mt.trimmingCharacters(in: .whitespacesAndNewlines)
         cloneAddress = clone.trimmingCharacters(in: .whitespacesAndNewlines)
         kinds.removeAll()
+        cloneRefID = ""; cloneRefKey = ""; cloneRefUnsupported = false
     }
 
     var currentAddress: String { asrAddress }
@@ -261,25 +302,33 @@ actor CloudClient {
     /// 重试一次就好，别让用户这一句白说。
     /// （超时不重试：那是服务真的慢，重试只会让等待翻倍。）
     private func sendWithRetry(_ req: URLRequest, path: String) async throws -> (Data, HTTPURLResponse?) {
-        do {
-            let (data, resp) = try await CloudClient.session.data(for: req)
-            return (data, resp as? HTTPURLResponse)
-        } catch let e as URLError {
-            // 本地网络权限被系统拒了：告诉界面弹提示。
-            // 系统的授权框只问一次，拒绝了就得用户自己去设置里开，
-            // 不提示的话用户只会看到"连不上"，根本不知道要去哪儿开。
-            if Self.isLocalNetworkDenied(e) {
-                hearLog("本地网络权限被拒绝：\(path)", .warning)
-                NotificationCenter.default.post(name: .hearLocalNetworkDenied, object: nil)
-                throw e
-            }
-            if e.code == .networkConnectionLost || e.code == .cannotConnectToHost {
-                hearLog("云端连接断了，重试一次：\(path)（\(e.code.rawValue)）", .warning)
+        // 网络断了（Wi-Fi 抖一下、刚切过网络、电脑上的服务重启），
+        // 等一下再试往往就好了——不用让用户把刚才那句话重新说一遍。
+        var lastError: Error = CloudError.notConfigured
+        for attempt in 0..<3 {
+            do {
                 let (data, resp) = try await CloudClient.session.data(for: req)
                 return (data, resp as? HTTPURLResponse)
+            } catch let e as URLError {
+                lastError = e
+                // 本地网络权限被系统拒了：告诉界面弹提示。
+                // 系统的授权框只问一次，拒绝了就得用户自己去设置里开，
+                // 不提示的话用户只会看到"连不上"，根本不知道要去哪儿开。
+                if Self.isLocalNetworkDenied(e) {
+                    hearLog("本地网络权限被拒绝：\(path)", .warning)
+                    NotificationCenter.default.post(name: .hearLocalNetworkDenied, object: nil)
+                    throw CloudError.net(Self.friendlyError(e))
+                }
+                if Self.isTransientNetworkError(e), attempt < 2 {
+                    let wait = attempt == 0 ? 1.5 : 4.0
+                    hearLog("云端连不上，等 \(wait) 秒重试：\(path)（\(e.code.rawValue)）", .warning)
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    continue
+                }
+                throw CloudError.net(Self.friendlyError(e))
             }
-            throw e
         }
+        throw CloudError.net(Self.friendlyError(lastError))
     }
 
     /// 请求并解析 JSON
@@ -355,6 +404,49 @@ actor CloudClient {
             return (.llamaServer, out)
         }
         return nil
+    }
+
+    /// 把网络错误说成人话
+    ///
+    /// 手机上最常见的是这两种：
+    ///  - 连不上电脑（没有网络路径）：手机没连同一个 Wi-Fi、
+    ///    或者「本地网络」权限没开（系统会直接拦掉局域网访问）；
+    ///  - 连接断了：Wi-Fi 抖了一下，或者电脑上的服务刚重启。
+    static func friendlyError(_ error: Error) -> String {
+        if let ce = error as? CloudError { return ce.localizedDescription }
+        guard let e = error as? URLError else { return error.localizedDescription }
+        switch e.code {
+        case .notConnectedToInternet:
+            return "连不上电脑：手机到电脑这条路断了。可能是手机没连同一个 Wi-Fi、" +
+                   "「本地网络」权限没开（设置 → 隐私与安全性 → 本地网络 → 听见），" +
+                   "或者电脑上的服务没开、IP 换了"
+        case .cannotConnectToHost:
+            return "连不上电脑上的服务（那个端口没在监听）：确认服务开着、IP 没换"
+        case .timedOut:
+            return "等电脑上的服务回应超时"
+        case .networkConnectionLost:
+            return "连接断开了：Wi-Fi 断了，或者服务刚重启"
+        case .cannotFindHost:
+            return "找不到这个地址：IP 写错了？"
+        case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasUnknownRoot:
+            return "证书握手不上：电脑上还没生成证书（跑一次 server/start-windows.ps1 就会生成）"
+        case .appTransportSecurityRequiresSecureConnection:
+            return "服务地址不可用，请确认"
+        default:
+            return error.localizedDescription
+        }
+    }
+
+    /// 这些错误是"网络一时不通"，等一下再来往往就好了
+    static func isTransientNetworkError(_ error: Error) -> Bool {
+        guard let e = error as? URLError else { return false }
+        switch e.code {
+        case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost,
+             .cannotFindHost, .timedOut, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
     }
 
     /// 连接诊断的结果
@@ -601,66 +693,104 @@ actor CloudClient {
         guard !reference.isEmpty else {
             throw CloudError.badResponse("没有参考音频")
         }
+        // 换参考音频了：服务器上存的那份就作废了
+        let fp = refFingerprint(reference)
+        if cloneRefKey != fp {
+            cloneRefKey = fp
+            cloneRefID = ""
+        }
         let refWav = Wav.encode(samples: reference, sampleRate: 16_000)
         hearLogNow("云端克隆：开始（参考音频 \(refWav.count) 字节）")
         // 先试这个模型自己的地址，不行就退回通用服务地址（8000 会转发给克隆后端）
         var lastError: Error = CloudError.notConfigured
         for addr in candidateAddresses(cloneAddress) {
-            do {
-                let t0 = Date()
-                // 地址上跑的是单独的 llama-server（8082 那种）时，用 /tts，返回的是 wav 原始数据
-                if await kind(of: addr) == .llamaServer {
-                    let body: [String: Any] = [
-                        "input": text,
-                        "lang": lang,
-                        "speaker_ref_b64": refWav.base64EncodedString(),
-                        "speaker_ref_text": referenceText,
-                    ]
+            let isLlama = await kind(of: addr) == .llamaServer
+            // 最多试两次：服务器上存的参考音频可能没了（服务重启过）
+            for _ in 0..<2 {
+                do {
+                    let t0 = Date()
+                    var body: [String: Any] = ["text": text, "lang": lang]
+                    if isLlama {
+                        // 地址上跑的是单独的 llama-server（8082 那种）时，用 /tts，
+                        // 返回的是 wav 原始数据。它只认 base64 的参考音频，用不了 id。
+                        body["speaker_ref_b64"] = refWav.base64EncodedString()
+                        body["speaker_ref_text"] = referenceText
+                        hearLogNow("云端克隆：请求已发出（\(addr)）")
+                        let data = try await rawData("/tts", address: addr, method: "POST",
+                                                     body: try JSONSerialization.data(withJSONObject: body), timeout: 300)
+                        hearLogNow("云端克隆：收到回复（\(data.count) 字节）")
+                        guard let decoded = Wav.decode(data) else {
+                            throw CloudError.badResponse("llama-server 返回的不是 wav 音频")
+                        }
+                        hearLogNow("云端克隆：结束（\(decoded.samples.count) 个采样，\(decoded.sampleRate) Hz，用时 \(Self.secs(t0))s）")
+                        return CloneAudio(samples: decoded.samples, sampleRate: decoded.sampleRate)
+                    }
+                    // 总服务：参考音频只传一次，后面每句话只带 id
+                    var refID = cloneRefID
+                    if refID.isEmpty && !cloneRefUnsupported {
+                        do {
+                            let rid = try await uploadCloneReference(refWav, address: addr)
+                            if !rid.isEmpty {
+                                refID = rid
+                                cloneRefID = rid
+                                hearLogNow("云端克隆：参考音频已上传（\(refWav.count) 字节），后面几遍只传 id")
+                            }
+                        } catch let e as CloudError {
+                            if case .http = e {
+                                // 服务器不认识这个接口（老服务）：以后照旧整段发过去
+                                cloneRefUnsupported = true
+                                hearLog("云端克隆：服务器不支持参考音频 id，整段上传", .info)
+                            } else {
+                                hearLog("云端克隆：参考音频上传失败，整段上传（\(Self.friendlyError(e))）", .warning)
+                            }
+                        } catch {
+                            hearLog("云端克隆：参考音频上传失败，整段上传", .warning)
+                        }
+                    }
+                    if refID.isEmpty {
+                        body["reference_wav"] = refWav.base64EncodedString()
+                    } else {
+                        body["reference_id"] = refID
+                    }
+                    body["reference_text"] = referenceText
                     hearLogNow("云端克隆：请求已发出（\(addr)）")
-                    let data = try await rawData("/tts", address: addr, method: "POST",
-                                                 body: try JSONSerialization.data(withJSONObject: body), timeout: 300)
+                    // 请求头里说明要原始 wav：新服务直接回 wav 原始数据（省掉 base64，
+                    // 内存占用小很多）；老服务不认这个头，还是回 JSON，这里也照样能解。
+                    let data = try await rawData("/v1/clone", address: addr, method: "POST",
+                                                 body: try JSONSerialization.data(withJSONObject: body),
+                                                 headers: ["X-Hear-Audio": "wav"], timeout: 300)
                     hearLogNow("云端克隆：收到回复（\(data.count) 字节）")
-                    guard let decoded = Wav.decode(data) else {
-                        throw CloudError.badResponse("llama-server 返回的不是 wav 音频")
+                    var wavData = data
+                    var rate = 0
+                    if !(data.count > 4 && data.prefix(4) == Data([0x52, 0x49, 0x46, 0x46])) {
+                        // 老服务：回的是 JSON（audio 是 base64）
+                        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                              let b64 = obj["audio"] as? String,
+                              let d = Data(base64Encoded: b64) else {
+                            throw CloudError.badResponse("没有 audio 字段")
+                        }
+                        wavData = d
+                        rate = (obj["sample_rate"] as? Int) ?? 0
                     }
-                    hearLogNow("云端克隆：结束（\(decoded.samples.count) 个采样，\(decoded.sampleRate) Hz，用时 \(Self.secs(t0))s）")
-                    return CloneAudio(samples: decoded.samples, sampleRate: decoded.sampleRate)
-                }
-                let body: [String: Any] = [
-                    "text": text,
-                    "lang": lang,
-                    "reference_wav": refWav.base64EncodedString(),
-                    "reference_text": referenceText,
-                ]
-                hearLogNow("云端克隆：请求已发出（\(addr)）")
-                // 请求头里说明要原始 wav：新服务直接回 wav 原始数据（省掉 base64，
-                // 内存占用小很多）；老服务不认这个头，还是回 JSON，这里也照样能解。
-                let data = try await rawData("/v1/clone", address: addr, method: "POST",
-                                             body: try JSONSerialization.data(withJSONObject: body),
-                                             headers: ["X-Hear-Audio": "wav"], timeout: 300)
-                hearLogNow("云端克隆：收到回复（\(data.count) 字节）")
-                var wavData = data
-                var rate = 0
-                if !(data.count > 4 && data.prefix(4) == Data([0x52, 0x49, 0x46, 0x46])) {
-                    // 老服务：回的是 JSON（audio 是 base64）
-                    guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                          let b64 = obj["audio"] as? String,
-                          let d = Data(base64Encoded: b64) else {
-                        throw CloudError.badResponse("没有 audio 字段")
+                    guard let decoded = Wav.decode(wavData) else {
+                        throw CloudError.badResponse("返回的不是 wav 音频")
                     }
-                    wavData = d
-                    rate = (obj["sample_rate"] as? Int) ?? 0
+                    if rate <= 0 { rate = decoded.sampleRate }
+                    if rate <= 0 { rate = 24_000 }
+                    hearLogNow("云端克隆：结束（\(decoded.samples.count) 个采样，\(rate) Hz，用时 \(Self.secs(t0))s）")
+                    return CloneAudio(samples: decoded.samples, sampleRate: rate)
+                } catch {
+                    // 服务器上存的参考音频没了（服务重启过）：清掉，重新传一次再来
+                    if let ce = error as? CloudError, case .http(let code, _) = ce,
+                       code == 404, !cloneRefID.isEmpty {
+                        hearLog("云端克隆：服务器上的参考音频没了，重新上传", .warning)
+                        cloneRefID = ""
+                        continue
+                    }
+                    lastError = error
+                    hearLog("云端克隆失败：\(Self.friendlyError(error))", .error)
+                    break          // 这个地址不行，换下一个
                 }
-                guard let decoded = Wav.decode(wavData) else {
-                    throw CloudError.badResponse("返回的不是 wav 音频")
-                }
-                if rate <= 0 { rate = decoded.sampleRate }
-                if rate <= 0 { rate = 24_000 }
-                hearLogNow("云端克隆：结束（\(decoded.samples.count) 个采样，\(rate) Hz，用时 \(Self.secs(t0))s）")
-                return CloneAudio(samples: decoded.samples, sampleRate: rate)
-            } catch {
-                lastError = error
-                hearLog("云端克隆失败：\(error)", .error)
             }
         }
         throw lastError

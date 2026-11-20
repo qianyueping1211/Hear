@@ -237,6 +237,12 @@ POST /v1/clone      {"text": "Hello", "lang": "english",
                      "reference_wav": "<base64 的 16 kHz wav>",
                      "reference_text": "参考音频里说的那句话"}
                     返回：{"audio": "<base64 的 wav>", "sample_rate": 24000}
+
+POST /v1/clone/reference   请求体：16 kHz 单声道 wav（二进制）
+                    返回：{"id": "一串 id"}
+                    参考音频先存一次拿到 id，后面的克隆请求带
+                    "reference_id" 就行，不用每句都重传几百 KB。
+                    （老的 App 不带这个 id，服务照旧按 reference_wav 收。）
 ```
 
 `prompt` 是 App 拼好的（和本地翻译用的是同一套格式，包含上下文和术语表），

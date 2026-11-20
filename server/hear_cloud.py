@@ -14,6 +14,10 @@
                                      "reference_wav": "<base64 的 wav>",
                                      "reference_text": "..."}
                          返回 {"audio": "<base64 的 wav>", "sample_rate": 24000}
+    POST /v1/clone/reference
+                         存一次参考音频（请求体是 wav 二进制），返回 {"id": "..."};
+                         后面的克隆请求带 "reference_id" 就行，
+                         不用每句话都把参考音频重传一遍
 
 翻译和声音克隆都转发给 llama.cpp 的 llama-server（两个不同的实例，各跑各的模型）；
 语音识别默认用 faster-whisper 在本进程里跑，也可以设 HEAR_ASR_URL 转发给别的
@@ -452,6 +456,32 @@ def backend_model(url):
 
 # ---------------------------------------------------------------- HTTP
 
+# 参考音频缓存：同一段参考音频只从手机传一次，后面每句话只带一个 id。
+#
+# 每句话都重传一遍参考音频的话，一段 10 秒的参考就是几百 KB，
+# 一场对话下来白白占掉手机的流量，电脑那边的带宽也被占着——
+# 手机自己的网络都可能被拖累。只留最近 8 段，内存占用可控。
+_REF_CACHE = {}
+_REF_ORDER = []
+_REF_LOCK = threading.Lock()
+
+
+def ref_put(wav_bytes):
+    rid = os.urandom(8).hex()
+    with _REF_LOCK:
+        _REF_CACHE[rid] = wav_bytes
+        _REF_ORDER.append(rid)
+        while len(_REF_ORDER) > 8:
+            old = _REF_ORDER.pop(0)
+            _REF_CACHE.pop(old, None)
+    return rid
+
+
+def ref_get(rid):
+    with _REF_LOCK:
+        return _REF_CACHE.get(rid)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "HearCloud/1.0"
     # 用 HTTP/1.1：手机那边能复用同一个连接，
@@ -593,6 +623,9 @@ a{color:#007aff;text-decoration:none}
                 self.asr(body)
             elif self.path.startswith("/v1/translate"):
                 self.translate(body)
+            elif self.path.startswith("/v1/clone/reference"):
+                # 注意：必须排在 /v1/clone 前面（这个路径也是 /v1/clone 开头）
+                self.clone_reference(body)
             elif self.path.startswith("/v1/clone"):
                 self.clone(body)
             else:
@@ -669,12 +702,51 @@ a{color:#007aff;text-decoration:none}
 
     # -- 声音克隆 --
 
+    def clone_reference(self, body):
+        """存一段参考音频，返回一个 id；后面的克隆请求只带 id 就行。"""
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype == "audio/wav":
+            wav = body
+        else:
+            try:
+                req = json.loads(body.decode("utf-8"))
+            except Exception:
+                self._error("参考音频格式不对", 400)
+                return
+            b64 = req.get("reference_wav", "")
+            try:
+                wav = base64.b64decode(b64) if b64 else b""
+            except Exception:
+                self._error("参考音频不是合法的 base64", 400)
+                return
+        if not wav:
+            self._error("参考音频是空的", 400)
+            return
+        rid = ref_put(wav)
+        log("参考音频已存：%s（%d 字节）" % (rid, len(wav)))
+        self._send_json({"id": rid})
+
     def clone(self, body):
         req = json.loads(body.decode("utf-8"))
+        # 参考音频：手机上先传过一次（/v1/clone/reference），
+        # 后面每句话只带 reference_id，不用再传几百 KB。
+        ref_b64 = ""
+        rid = req.get("reference_id") or ""
+        if rid:
+            wav = ref_get(rid)
+            if wav:
+                ref_b64 = base64.b64encode(wav).decode("ascii")
+            else:
+                # 服务重启过，缓存里的参考音频没了：让手机重新传一次
+                log("参考音频 id 不认识：%s" % rid)
+                self._error("参考音频 id 不认识，请重新上传", 404)
+                return
+        else:
+            ref_b64 = req.get("reference_wav", "")
         payload = {
             "input": req.get("text", ""),
             "lang": req.get("lang", ""),
-            "speaker_ref_b64": req.get("reference_wav", ""),
+            "speaker_ref_b64": ref_b64,
             "speaker_ref_text": req.get("reference_text", ""),
         }
         payload = {k: v for k, v in payload.items() if v}

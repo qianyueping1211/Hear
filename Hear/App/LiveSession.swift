@@ -509,6 +509,27 @@ final class LiveSession: ObservableObject {
             }
         }
 
+        // 切到别的 App：别在后台继续出声。
+        // 麦克风照旧留着听（实时翻译不能断），但喇叭得停：
+        // 不然用户切走了还在那儿放声音，以为 App 关不掉。
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.inBackground = true
+                self.stopReading()
+                hearLog("切到后台：停止朗读", .info)
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.inBackground = false
+            }
+        }
+
         // 来电、Siri 等打断音频时停止
         NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
@@ -947,12 +968,28 @@ final class LiveSession: ObservableObject {
     }
 
     /// 苹果翻译真的失败了：这时才提示用户
-    private func appleTranslationFailed() {
+    ///
+    /// 失败最常见的原因是语言包没装好（苹果自己报 unsupportedSourceLanguage），
+    /// 所以这里要说清楚可以怎么办，而不只是说"不支持"。
+    private func appleTranslationFailed(_ error: Error? = nil) {
         guard usingAppleTranslation else { return }
         let a = langA, b = langB
-        let msg = "苹果翻译暂不支持 \(a.name) 到 \(b.name)，可以在设置里改用本地翻译引擎"
+        var msg = "苹果翻译暂时用不了（\(a.name) → \(b.name)）"
+        if let error { msg += "：\(Self.appleErrorText(error))" }
+        msg += "。多半是苹果翻译的语言包没装好：点“下载语言包”装一次就行；也可以在设置里改用云端或本地翻译。"
         appleNote = msg
         hearLog(msg, .warning)
+    }
+
+    /// 把苹果翻译的报错说成人话
+    static func appleErrorText(_ error: Error) -> String {
+        // TranslationError 的 cause 在描述里，直接翻一下
+        let s = String(describing: error)
+        if s.contains("unsupportedSourceLanguage") { return "源语言不支持（多半是语言包没装）" }
+        if s.contains("unsupportedTargetLanguage") { return "目标语言不支持（多半是语言包没装）" }
+        if s.contains("unsupportedLanguagePairing") { return "苹果翻译不支持这个语言方向" }
+        if s.contains("notInstalled") { return "语言包还没装" }
+        return error.localizedDescription
     }
 
     /// 检查苹果翻译的语言包；没下载就让系统弹出下载
@@ -961,24 +998,36 @@ final class LiveSession: ObservableObject {
         let a = langA, b = langB
         systemTranslator.reset()
         Task {
-            switch await SystemTranslator.availability(a, b) {
+            await systemTranslator.loadSupportedLanguages()
+            // 苹果翻译的语言标识得用苹果自己的写法（有的写 "en-US"，有的只写 "en"），
+            // 写错了它就当"这个语言不支持"，语言包也下不下来。
+            let src = await systemTranslator.canonical(a)
+            let tgt = await systemTranslator.canonical(b)
+            switch await systemTranslator.availability(a, b) {
             case .installed:
                 appleNote = nil
             case .needsDownload:
-                appleNote = "需要下载苹果翻译的 \(a.name)、\(b.name) 语言包"
-                translationPrepConfig = TranslationSession.Configuration(source: a.appleLanguage,
-                                                                         target: b.appleLanguage)
+                appleNote = "需要下载苹果翻译的 \(a.name)、\(b.name) 语言包（点“下载语言包”）"
             case .unsupported:
-                // 系统的可用性检查对中文→英文这类会误报"不支持"（其实能用），
-                // 所以先不提示，等真的翻译失败时再说。
-                appleNote = nil
+                appleNote = "苹果翻译不支持 \(a.name) 到 \(b.name)"
+            }
+            // 不管状态是什么，都给系统一份配置：
+            // 只有 .translationTask 能让系统弹语言包下载，
+            // 少了这一步语言包永远装不上，翻译就会一直报 unsupportedSourceLanguage。
+            // 语言没换就别换配置，免得系统反复弹下载框。
+            if translationPrepConfig?.source != src || translationPrepConfig?.target != tgt {
+                translationPrepConfig = TranslationSession.Configuration(source: src, target: tgt)
             }
         }
     }
 
     /// 系统语言包下载完成（或用户关掉了下载窗口）
     func appleTranslationPrepared(_ ok: Bool) {
-        if ok { appleNote = nil }
+        if ok {
+            appleNote = nil
+        } else if usingAppleTranslation {
+            appleNote = "苹果翻译的语言包没下载好，会改用别的引擎来翻译"
+        }
         systemTranslator.reset()
         hearLog(ok ? "苹果翻译语言包已就绪" : "苹果翻译语言包没有下载", ok ? .info : .warning)
     }
@@ -1610,6 +1659,8 @@ final class LiveSession: ObservableObject {
     }
 
     // MARK: - 朗读队列
+    /// App 现在在后台吗（用户切到别的 App 了）
+    private var inBackground = false
     //
     // 戴耳机：译文出来就从耳机读，边听边读，麦克风不暂停（耳机声音不会被录进去）。
     // 扬声器：聆听中不读；停止实时翻译后，从上次没读完的那句开始往后读；
@@ -1618,7 +1669,8 @@ final class LiveSession: ObservableObject {
 
     /// 现在能不能自动朗读
     private var autoReadAllowed: Bool {
-        speakOutput && (outputMode == .headphones || !isRunning)
+        // 在后台（切到别的 App 了）不朗读：用户不在跟前听，吵得慌
+        !inBackground && speakOutput && (outputMode == .headphones || !isRunning)
     }
 
     /// 有新译文或状态变化时调用：能读就从 readIndex 开始往后读
@@ -1865,7 +1917,10 @@ final class LiveSession: ObservableObject {
             guard isRunning, id == currentSeg, id > finishedSeg else { continue }
             let gen = runGen
             if usingAppleTranslation {
-                let out = try? await systemTranslator.translate(p.text, from: p.src, to: p.tgt)
+                var out = try? await systemTranslator.translate(p.text, from: p.src, to: p.tgt)
+                if (out ?? "").isEmpty {
+                    out = try? await fallbackTranslate(p.text, from: p.src, to: p.tgt)
+                }
                 if let out, !out.isEmpty, gen == runGen, id == partialSeg, id > finishedSeg { partialTranslation = out }
                 continue
             }
@@ -1902,7 +1957,15 @@ final class LiveSession: ObservableObject {
     private func translateFinal(_ text: String, from src: Language, to tgt: Language,
                                 context: [String], onPartial: @escaping (String) -> Void) async throws -> String {
         if usingAppleTranslation {
-            return try await systemTranslator.translate(text, from: src, to: tgt)
+            do {
+                return try await systemTranslator.translate(text, from: src, to: tgt)
+            } catch {
+                hearLog("苹果翻译失败：\(error)", .error)
+                appleTranslationFailed(error)
+                // 苹果翻译不行就换个引擎把这句译出来，别让用户干等着
+                if let out = try? await fallbackTranslate(text, from: src, to: tgt) { return out }
+                throw error
+            }
         }
         let prompt = PromptBuilder.build(text: text, from: src, to: tgt, context: context,
                                          glossary: PromptBuilder.parseGlossary(glossary))
@@ -1920,6 +1983,21 @@ final class LiveSession: ObservableObject {
             }
         }
         return try await translator.translate(prompt: prompt) { partial in onPartial(partial) }
+    }
+
+    /// 苹果翻译用不了时的替补：云端优先，其次本地（模型装好而且正在跑才行）
+    private func fallbackTranslate(_ text: String, from src: Language, to tgt: Language) async throws -> String {
+        let prompt = PromptBuilder.build(text: text, from: src, to: tgt, context: [],
+                                         glossary: PromptBuilder.parseGlossary(glossary))
+        if usingCloudMT {
+            hearLog("苹果翻译失败，改用云端翻译")
+            return try await cloud.translate(prompt: prompt, src: src.id, dst: tgt.id)
+        }
+        if isInstalled(.translation) {
+            hearLog("苹果翻译失败，改用本地翻译")
+            return try await translator.translate(prompt: prompt) { _ in }
+        }
+        throw LiveTextError.unsupportedLanguage
     }
 
     // MARK: - iOS 系统听写
@@ -2446,7 +2524,7 @@ final class LiveSession: ObservableObject {
                 clonePreparingID = item.id
                 cloned = await waitClone(t, seconds: Double(cloneWait) / 1_000_000_000)
                 clonePreparingID = nil
-                if Task.isCancelled { return }
+                if Task.isCancelled || inBackground { return }
             }
         }
         hearLog("朗读：\(item.target.displayName)，\(outputMode == .speaker ? "扬声器" : (pan < 0 ? "左耳" : (pan > 0 ? "右耳" : "双耳")))，\(cloned != nil ? "克隆原声" : "系统声音")")
@@ -2466,6 +2544,8 @@ final class LiveSession: ObservableObject {
         } else if cloned != nil {
             cloneUnavailableNotified = false
         }
+        // 切到后台了：别出声（用户不在跟前听，吵得慌）
+        if inBackground { return }
         if mute { capture.muted = true }
         if let cloned {
             let ok = await speaker.play(samples: cloned.samples, sampleRate: Double(cloned.sampleRate), pan: pan)

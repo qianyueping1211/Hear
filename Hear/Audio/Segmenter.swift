@@ -32,11 +32,22 @@ final class Segmenter {
     private var voicedRun = 0
     private var silentRun = 0
     private var voicedFrames = 0
-    private var history: [Float] = []     // 最近约 3 秒每帧的音量，用来估计环境噪声
     private var segID = 0
     private var lastPartialAt = 0
     private var frameCounter = 0
     private var voicedLevel: Float = -40  // 这句话说话声的平均音量，用来判断停顿
+
+    /// 环境噪声（dB）：门限是它加上灵敏度。
+    ///
+    /// 这里是整个断句的关键，三条规矩：
+    ///  1) 说话的时候绝对不拿说话声去估噪声——底噪被估成自己说话那么响，
+    ///     门限就抬到下一句根本够不着的地方，
+    ///     表现是“上一句译完了，后面怎么说都不出声了”；
+    ///  2) 变安静了要赶紧跟上（用户停下来，底噪得马上降下来）；
+    ///  3) 变吵了要慢慢跟上，而且只用“明显不是说话”的帧——
+    ///     免得用户说话声音不大的时候，底噪一路追着他的声音往上爬，
+    ///     爬到门限比声音还高，麦克风就永远聋了。
+    private var noiseEstimate: Float = -52
 
     /// 丢掉当前正在说的这一句（不算一句话的开始/结束），环境噪声的估计留着。
     ///
@@ -50,13 +61,11 @@ final class Segmenter {
 
     /// 完全重置：连环境噪声的估计一起清掉。
     ///
-    /// 环境噪声是最近 3 秒音量的第 10 百分位。以前重新开始收音时不清，
     /// 上一轮要是正好在很吵的环境里（或者刚读完一段译文），
-    /// 底噪会被估得偏高，说话的门限也跟着抬高，高到说话声都够不着——
-    /// 结果就是一句都断不出来，看着像"麦克风坏了"。
+    /// 底噪会被估得偏高，高到说话声都够不着——看着像“麦克风坏了”。
     func reset() {
         discardCurrent()
-        history.removeAll()
+        noiseEstimate = -52
         voicedLevel = -40
     }
 
@@ -87,11 +96,14 @@ final class Segmenter {
             onEvent?(.level(min(1, max(0, (db + 60) / 50))))
         }
 
-        history.append(db)
-        if history.count > 100 { history.removeFirst(history.count - 100) }
-        let noise = noiseFloor()
-        let threshold = max(noise + config.sensitivityDB, -50)
+        let noise = noiseEstimate
+        // 门限不再钉死在 -50：房间很安静的时候（比如没开语音增强、离得远），
+        // 说话声可能只有 -55 dB，钉在 -50 就永远够不着门限，
+        // 于是“停一会儿再说话”那一句就再也断不出来了。
+        let threshold = max(noise + config.sensitivityDB, -68)
         if frameCounter % 167 == 0 { onEvent?(.noise(noise, threshold)) }   // 约 5 秒一次
+
+        if !inSpeech { updateNoise(db, threshold: threshold) }
 
         if !inSpeech {
             preroll.append(contentsOf: f)
@@ -137,11 +149,17 @@ final class Segmenter {
         }
     }
 
-    /// 环境噪声 = 最近 3 秒音量的第 10 百分位（会随环境自动调整，说话中也会更新）
-    private func noiseFloor() -> Float {
-        guard history.count >= 10 else { return -50 }
-        let sorted = history.sorted()
-        return min(-25, max(-75, sorted[sorted.count / 10]))
+    /// 更新环境噪声的估计（只在没在说话的时候调）。
+    private func updateNoise(_ db: Float, threshold: Float) {
+        if db < noiseEstimate {
+            // 真的安静下来了：赶紧跟上（跟慢了会错过开口那半秒）
+            noiseEstimate += (db - noiseEstimate) * 0.5
+        } else if db <= threshold {
+            // 有点吵了：慢慢跟上（每秒最多涨零点几个 dB）
+            noiseEstimate += (db - noiseEstimate) * 0.01
+        }
+        // 上面的“明显不是说话”那条已经挡住了说话声，这里只管别跑偏
+        noiseEstimate = min(-25, max(-80, noiseEstimate))
     }
 
     private func finish() {
