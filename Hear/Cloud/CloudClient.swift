@@ -35,7 +35,59 @@ enum CloudModel: String, CaseIterable, Identifiable {
     }
 }
 
+/// 局域网服务用的是自签证书（电脑上自己生成的），系统默认不认。
+/// 这里只对"内网地址"放行自签证书：
+///   - 私有网段（10.x / 172.16-31.x / 192.168.x / 169.254.x）和 .local / localhost 才放行
+///   - 公网域名照常走系统校验，免得真的连到别的地方时什么证书都信
+final class LocalServerTrust: NSObject, URLSessionDelegate {
+    static let shared = LocalServerTrust()
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        if Self.isLocalHost(challenge.protectionSpace.host) {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+
+    /// 是不是内网地址（自己解析 IP，不依赖 IPv4Address 那套 API，省得两个 init 搞混）
+    static func isLocalHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        if h == "localhost" || h.hasSuffix(".local") || h.hasSuffix(".lan") { return true }
+        let parts = h.split(separator: ".")
+        guard parts.count == 4 else { return false }
+        var n: [Int] = []
+        for p in parts {
+            guard let v = Int(p), v >= 0, v <= 255 else { return false }
+            n.append(v)
+        }
+        if n[0] == 10 { return true }                       // 10.x
+        if n[0] == 172 && n[1] >= 16 && n[1] <= 31 { return true }   // 172.16-31.x
+        if n[0] == 192 && n[1] == 168 { return true }       // 192.168.x
+        if n[0] == 169 && n[1] == 254 { return true }       // 169.254.x
+        if n[0] == 127 { return true }                      // 127.x
+        return false
+    }
+}
+
 actor CloudClient {
+    /// 自己的会话：带自签证书放行 + 超时放宽
+    /// （不用系统那个共享会话：它没法加证书处理程序）
+    static let session: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.timeoutIntervalForRequest = 180
+        cfg.timeoutIntervalForResource = 600
+        cfg.waitsForConnectivity = false
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: cfg, delegate: LocalServerTrust.shared, delegateQueue: nil)
+    }()
+
     enum CloudError: LocalizedError {
         case notConfigured
         case badURL
@@ -111,15 +163,42 @@ actor CloudClient {
         if !p.isEmpty { out.append(p) }
         let s = sharedAddress
         if !s.isEmpty && !out.contains(s) { out.append(s) }
+        // 再加上换过协议的那个（电脑上开 https、手机里填 http 时能顶上）
+        var more: [String] = []
+        for a in out {
+            if let alt = Self.alternateScheme(a), !out.contains(alt), !more.contains(alt) {
+                more.append(alt)
+            }
+        }
+        out += more
         return out
     }
 
     // MARK: - 地址
 
+    /// 把用户填的地址整理成能用的样子：
+    ///  - 去掉前后空格和结尾的 "/"
+    ///  - 没写协议的话补上 http://
+    ///    （不补的话 "192.168.1.10:8000" 会被当成别的协议，URL 直接建不出来）
     static func cleanURL(_ s: String) -> String {
         var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         while t.hasSuffix("/") { t.removeLast() }
+        if t.isEmpty { return t }
+        let lower = t.lowercased()
+        if !lower.hasPrefix("http://") && !lower.hasPrefix("https://") {
+            t = "http://" + t
+        }
         return t
+    }
+
+    /// 换个协议的同一个地址：http ↔ https
+    /// （电脑上开了 https、手机里填的是 http，或者反过来，都能试出来）
+    static func alternateScheme(_ s: String) -> String? {
+        let t = cleanURL(s)
+        let lower = t.lowercased()
+        if lower.hasPrefix("http://") { return "https://" + String(t.dropFirst(7)) }
+        if lower.hasPrefix("https://") { return "http://" + String(t.dropFirst(8)) }
+        return nil
     }
 
     private func endpoint(_ path: String, address: String) throws -> URL {
@@ -147,7 +226,7 @@ actor CloudClient {
                       contentType: String = "application/json",
                       timeout: TimeInterval = 60) async throws -> [String: Any] {
         let req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await CloudClient.session.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             let msg = String(data: data.prefix(400), encoding: .utf8) ?? ""
@@ -165,7 +244,7 @@ actor CloudClient {
                          contentType: String = "application/json",
                          timeout: TimeInterval = 60) async throws -> Data {
         let req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await CloudClient.session.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             let msg = String(data: data.prefix(400), encoding: .utf8) ?? ""
@@ -195,7 +274,7 @@ actor CloudClient {
         guard !s.isEmpty, let url = URL(string: s + "/health") else { return nil }
         var req = URLRequest(url: url)
         req.timeoutInterval = 5
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+        guard let (data, resp) = try? await CloudClient.session.data(for: req),
               let code = (resp as? HTTPURLResponse)?.statusCode else { return nil }
         var out: [String: String] = [:]
         if let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
@@ -220,11 +299,26 @@ actor CloudClient {
     static func diagnose(address: String) async -> String {
         let s = cleanURL(address)
         if s.isEmpty { return "还没填地址" }
+        let first = await diagnoseOne(s)
+        if first.hasPrefix("连接正常") || first.hasPrefix("服务在加载") { return first }
+        // 这个地址连不上，换个协议再试一次：
+        // 电脑上开了 https 而手机里填的是 http（或者反过来）都能这样兜住
+        if let alt = alternateScheme(s) {
+            let second = await diagnoseOne(alt)
+            if second.hasPrefix("连接正常") || second.hasPrefix("服务在加载") {
+                return "\(second)（\(s) 连不上，换成 \(alt) 可以通）"
+            }
+        }
+        return first
+    }
+
+    /// 真的连一次，把失败的原因说清楚
+    private static func diagnoseOne(_ s: String) async -> String {
         guard let url = URL(string: s + "/health") else { return "地址格式不对：\(s)" }
         var req = URLRequest(url: url)
         req.timeoutInterval = 6
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await CloudClient.session.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200..<300).contains(code) else {
                 let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
@@ -239,7 +333,8 @@ actor CloudClient {
         } catch let e as URLError {
             switch e.code {
             case .appTransportSecurityRequiresSecureConnection:
-                return "被系统拦下了（不允许 http 明文），请用 0.4.19 以上的版本"
+                hearLog("云端连接被系统拦下：\(s)（\(e.code.rawValue)）", .warning)
+                return "被系统拦下了（不允许 http 明文）：确认地址是 http:// 开头、App 是最新版；也可以试试 https://\(s.dropFirst(7))"
             case .cannotConnectToHost:
                 let u = URL(string: s)
                 let host = u?.host ?? "电脑的IP"
@@ -257,9 +352,11 @@ actor CloudClient {
             case .networkConnectionLost:
                 return "连接断开了：服务可能刚重启，或者 Wi-Fi 断了"
             default:
-                return "连不上（\(e.code)）：\(e.localizedDescription)"
+                hearLog("云端连接失败：\(s) 错误码 \(e.code.rawValue) \(e.localizedDescription)", .warning)
+                return "连不上（\(e.code.rawValue)）：\(e.localizedDescription)"
             }
         } catch {
+            hearLog("云端连接失败：\(s) \(error.localizedDescription)", .warning)
             return "连不上：\(error.localizedDescription)"
         }
     }
@@ -319,7 +416,7 @@ actor CloudClient {
                 req.setValue(asrScheme, forHTTPHeaderField: "X-ASR-Scheme")
                 // 预览只要快，不要修正
                 if preview { req.setValue("1", forHTTPHeaderField: "X-ASR-Preview") }
-                let (data, resp) = try await URLSession.shared.data(for: req)
+                let (data, resp) = try await CloudClient.session.data(for: req)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 guard (200..<300).contains(code) else {
                     throw CloudError.http(code, String(data: data.prefix(400), encoding: .utf8) ?? "")

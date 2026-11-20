@@ -138,6 +138,7 @@ function Show-LanInfo($port) {
         Write-Host ""
         Write-Host "  三个模型用同一个通用服务地址就行（它会自己转发给翻译 / 克隆）：" -ForegroundColor DarkGray
         Write-Host "      通用服务地址 = 上面的 http://电脑IP:8000" -ForegroundColor DarkGray
+        Write-Host "      也可以用 https://电脑IP:8000（同一个端口，加密的）" -ForegroundColor DarkGray
         Write-Host ""
         Write-Host "  想单独连某个模型服务（一般不用）：" -ForegroundColor DarkGray
         foreach ($c in $choices) {
@@ -387,6 +388,14 @@ if ($busy) {
 if ($tempCloud -and -not $tempCloud.HasExited) {
     try { Stop-Process -Id $tempCloud.Id -Force } catch {}
 }
+# 自签证书：有了它同一个端口上 http 和 https 都能用
+# （私钥只留在本机，不进仓库）
+try {
+    & $venvPy (Join-Path $ServerDir "make_cert.py") | Out-Null
+} catch {
+    Step "证书没生成成，这次只用 http"
+}
+
 $cloud = Start-Process -FilePath $venvPy -ArgumentList "`"$cloudScript`"" `
             -PassThru -NoNewWindow
 Start-Sleep -Seconds 3

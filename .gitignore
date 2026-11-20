@@ -15,3 +15,6 @@ joblog.zip
 
 __pycache__/
 *.pyc
+
+# 自签证书（每台电脑自己生成，私钥不能进仓库）
+server/certs/

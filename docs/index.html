@@ -1,0 +1,1364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>听见 Hear · 应用介绍与技术架构</title>
+<meta name="description" content="听见 Hear — iPhone 上的实时语音翻译 App。功能架构、功能清单、技术架构与关键技术点，以及可选的自建在线模型服务。">
+<style>
+/* ============================================================
+   听见 Hear · 介绍文档
+   设计基调：声呐 / 信号通路 —— 冷灰纸面 + 信号橙 + 深青
+   ============================================================ */
+
+:root{
+  --ink:#111A22;
+  --ink-2:#2A3A46;
+  --body:#33434F;
+  --muted:#6D7C88;
+  --paper:#EEF2F4;
+  --card:#FFFFFF;
+  --rule:#D3DDE3;
+  --rule-soft:#E6ECEF;
+  --signal:#DC5524;
+  --signal-soft:#FDF0EA;
+  --teal:#0E6B66;
+  --teal-soft:#E7F2F1;
+  --mono:"Cascadia Mono","Consolas","SF Mono","Roboto Mono",ui-monospace,monospace;
+  --sans:"Segoe UI Variable Text","Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",-apple-system,sans-serif;
+  --display:"Bahnschrift","DIN Alternate","Oswald","PingFang SC","Microsoft YaHei",sans-serif;
+  --shadow:0 1px 2px rgba(17,26,34,.05),0 12px 28px -18px rgba(17,26,34,.35);
+}
+
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--body);
+  font-family:var(--sans);
+  font-size:16px;
+  line-height:1.85;
+  font-feature-settings:"tnum" 0;
+  -webkit-font-smoothing:antialiased;
+}
+@media (min-width:900px){ body{font-size:16.5px} }
+
+h1,h2,h3,h4{color:var(--ink);line-height:1.28;margin:0}
+p{margin:0 0 1em}
+a{color:var(--teal);text-underline-offset:3px;text-decoration-thickness:1px}
+a:hover{color:var(--signal)}
+strong{color:var(--ink);font-weight:650}
+code,kbd{font-family:var(--mono);font-size:.86em;background:var(--teal-soft);color:var(--teal);
+  padding:.12em .42em;border-radius:3px;white-space:pre-wrap;overflow-wrap:break-word}
+hr{border:0;border-top:1px solid var(--rule);margin:0}
+::selection{background:#FFD9C8;color:var(--ink)}
+
+:focus-visible{outline:2px solid var(--signal);outline-offset:3px;border-radius:2px}
+
+/* ---------- 顶栏 ---------- */
+.topbar{
+  position:sticky;top:0;z-index:50;
+  background:rgba(238,242,244,.86);
+  backdrop-filter:saturate(160%) blur(14px);
+  -webkit-backdrop-filter:saturate(160%) blur(14px);
+  border-bottom:1px solid var(--rule);
+}
+.topbar-in{
+  max-width:1180px;margin:0 auto;padding:11px 26px;
+  display:flex;align-items:center;gap:22px;
+}
+.mark{display:flex;align-items:baseline;gap:8px;text-decoration:none;color:var(--ink);flex:none}
+.mark b{font-family:var(--display);font-weight:600;font-size:19px;letter-spacing:.06em}
+.mark span{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.1em}
+.topnav{display:flex;gap:2px;margin-left:auto;flex-wrap:wrap}
+.topnav a{
+  font-size:13.5px;color:var(--ink-2);text-decoration:none;
+  padding:5px 11px;border-radius:4px;white-space:nowrap;
+}
+.topnav a:hover{background:rgba(17,26,34,.06);color:var(--ink)}
+.topnav .gh{border:1px solid var(--rule);background:var(--card)}
+.topnav .gh:hover{border-color:var(--signal);color:var(--signal)}
+
+@media (max-width:760px){
+  .topbar-in{padding:10px 16px;gap:10px}
+  .topnav{font-size:13px;gap:0}
+  .topnav a{padding:5px 8px}
+  .topnav .gh{display:none}
+}
+
+/* ---------- 通用排版 ---------- */
+.wrap{max-width:1180px;margin:0 auto;padding:0 26px}
+.prose{max-width:74ch}
+section.band{padding:66px 0 6px}
+section.band + section.band{padding-top:58px}
+
+.sechead{
+  display:grid;grid-template-columns:54px 1fr;gap:0 20px;
+  align-items:start;margin-bottom:34px;
+}
+.sechead .num{
+  font-family:var(--mono);font-size:13px;letter-spacing:.08em;color:var(--signal);
+  border-left:3px solid var(--signal);padding:5px 0 5px 12px;line-height:1.3;
+  border-radius:0;
+}
+.sechead h2{
+  font-family:var(--display);font-weight:600;font-size:clamp(1.6rem,3.4vw,2.15rem);
+  letter-spacing:.01em;
+}
+.sechead .lede{margin:8px 0 0;color:var(--muted);font-size:15.5px;max-width:70ch}
+
+.subhead{
+  font-family:var(--display);font-weight:600;font-size:1.12rem;color:var(--ink);
+  margin:44px 0 14px;display:flex;align-items:center;gap:10px;
+}
+.subhead::before{content:"";width:16px;height:2px;background:var(--signal);flex:none}
+.subhead small{font-family:var(--sans);font-size:12.5px;color:var(--muted);font-weight:400;letter-spacing:0}
+
+/* ---------- Hero ---------- */
+.hero{padding:56px 0 30px}
+.hero-grid{display:grid;grid-template-columns:minmax(0,1.02fr) minmax(0,.98fr);gap:56px;align-items:center}
+@media (max-width:960px){ .hero-grid{grid-template-columns:1fr;gap:38px} }
+
+.kicker{
+  font-family:var(--mono);font-size:12px;letter-spacing:.04em;color:var(--muted);
+  display:inline-flex;align-items:center;gap:9px;margin-bottom:20px;
+}
+.kicker::before{content:"";width:26px;height:1px;background:var(--signal)}
+
+.hero h1{
+  font-family:var(--display);font-weight:600;
+  font-size:clamp(3.4rem,10vw,6.2rem);line-height:.92;letter-spacing:.02em;
+  color:var(--ink);
+}
+.hero h1 .lat{
+  display:block;font-size:clamp(1rem,2.4vw,1.45rem);letter-spacing:.42em;
+  color:var(--signal);margin-top:14px;font-weight:500;
+}
+.hero .lead{font-size:17.5px;line-height:1.85;margin-top:26px;max-width:46ch;color:var(--ink-2)}
+.hero .lead b{color:var(--ink);font-weight:650}
+
+.facts{
+  margin:30px 0 0;padding:0;border-top:1px solid var(--rule);
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 26px;
+}
+@media (max-width:560px){ .facts{grid-template-columns:1fr} }
+.facts div{padding:11px 0;border-bottom:1px solid var(--rule-soft)}
+.facts dt{font-size:11.5px;color:var(--muted);letter-spacing:.02em}
+.facts dd{margin:2px 0 0;font-family:var(--mono);font-size:13.5px;color:var(--ink)}
+
+.cta-row{display:flex;gap:12px;margin-top:28px;flex-wrap:wrap}
+.btn{
+  display:inline-flex;align-items:center;gap:8px;text-decoration:none;
+  font-size:14px;padding:10px 18px;border-radius:5px;border:1px solid var(--ink);
+  color:var(--paper);background:var(--ink);font-weight:500;
+}
+.btn:hover{background:var(--signal);border-color:var(--signal);color:#fff}
+.btn.ghost{background:transparent;color:var(--ink);border-color:var(--rule)}
+.btn.ghost:hover{background:var(--card);border-color:var(--ink);color:var(--ink)}
+
+.figure{margin:0}
+.figure .frame{
+  background:var(--card);border:1px solid var(--rule);border-radius:8px;
+  padding:26px 22px 18px;box-shadow:var(--shadow);
+}
+.figure svg{display:block;width:100%;height:auto}
+.figure figcaption{
+  font-size:12.5px;color:var(--muted);margin-top:12px;line-height:1.7;
+  padding-left:12px;border-left:2px solid var(--rule);
+}
+
+/* ---------- 信号通路图 ---------- */
+.flow{
+  display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;
+  background:var(--card);border:1px solid var(--rule);border-radius:8px;overflow:hidden;
+}
+@media (max-width:900px){ .flow{grid-template-columns:1fr} }
+.stage{padding:20px 18px 18px;border-right:1px solid var(--rule-soft);position:relative}
+.stage:last-child{border-right:0}
+@media (max-width:900px){
+  .stage{border-right:0;border-bottom:1px solid var(--rule-soft)}
+  .stage:last-child{border-bottom:0}
+}
+.stage .n{font-family:var(--mono);font-size:11px;color:var(--signal);letter-spacing:.06em}
+.stage h4{font-size:16px;font-family:var(--display);font-weight:600;margin:5px 0 7px}
+.stage p{margin:0;font-size:13px;line-height:1.7;color:var(--muted)}
+.stage .file{
+  margin-top:10px;font-family:var(--mono);font-size:11px;color:var(--teal);
+  background:var(--teal-soft);border-radius:3px;padding:3px 7px;display:inline-block;
+}
+.stage::after{
+  content:"";position:absolute;right:-6px;top:34px;width:11px;height:11px;
+  border-top:1.5px solid var(--rule);border-right:1.5px solid var(--rule);
+  transform:rotate(45deg);background:var(--card);z-index:2;
+}
+.stage:last-child::after{display:none}
+@media (max-width:900px){ .stage::after{display:none} }
+
+.engine-rail{
+  margin-top:14px;background:var(--card);border:1px solid var(--rule);border-radius:8px;
+  padding:16px 20px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+}
+.engine-rail .lab{font-family:var(--mono);font-size:11.5px;color:var(--muted);flex:none}
+.engine-rail .opt{
+  font-size:12.5px;padding:4px 11px;border-radius:100px;
+  border:1px solid var(--rule);color:var(--ink-2);background:var(--paper);
+}
+.engine-rail .opt b{font-weight:600;color:var(--ink)}
+.engine-rail .opt.on{border-color:var(--signal);background:var(--signal-soft);color:var(--signal)}
+.engine-rail .opt.on b{color:var(--signal)}
+
+/* ---------- 功能清单 ---------- */
+.fgroups{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:26px 40px}
+.fgroup{border-top:2px solid var(--ink);padding-top:14px}
+.fgroup h3{
+  font-family:var(--display);font-weight:600;font-size:1.02rem;
+  display:flex;align-items:baseline;gap:9px;margin-bottom:10px;
+}
+.fgroup h3 em{
+  font-style:normal;font-family:var(--mono);font-size:10.5px;color:var(--signal);
+  letter-spacing:.06em;flex:none;
+}
+.fgroup ul{margin:0;padding:0;list-style:none}
+.fgroup li{
+  position:relative;padding:5px 0 5px 16px;font-size:14.5px;line-height:1.72;
+  border-bottom:1px dashed var(--rule-soft);
+}
+.fgroup li:last-child{border-bottom:0}
+.fgroup li::before{
+  content:"";position:absolute;left:0;top:14px;width:5px;height:5px;border-radius:50%;
+  background:var(--signal);opacity:.55;
+}
+.fgroup li b{color:var(--ink);font-weight:600}
+.fgroup li .hint{color:var(--muted);font-size:13px}
+
+/* ---------- 表格 ---------- */
+.tablewrap{
+  background:var(--card);border:1px solid var(--rule);border-radius:8px;overflow-x:auto;
+  box-shadow:var(--shadow);max-width:100%;
+}
+/* 网格子项默认 min-width:auto，会被表格的 min-width 撑破容器 */
+.key > *,.fgroups > *,.layer > *,.hero-grid > *{min-width:0}
+table{border-collapse:collapse;width:100%;font-size:14px;min-width:560px}
+thead th{
+  text-align:left;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.05em;
+  color:var(--muted);text-transform:none;padding:12px 16px;
+  border-bottom:1px solid var(--rule);background:#F7F9FA;white-space:nowrap;
+}
+tbody td{padding:11px 16px;border-bottom:1px solid var(--rule-soft);vertical-align:top;line-height:1.65}
+tbody tr:last-child td{border-bottom:0}
+tbody td:first-child{color:var(--ink);font-weight:550}
+tbody td code{white-space:normal}
+tbody td.mono{font-family:var(--mono);font-size:12.5px;color:var(--teal);font-weight:400}
+tbody td .sub{display:block;color:var(--muted);font-size:12.5px;font-weight:400;margin-top:2px}
+
+/* ---------- 分层图 ---------- */
+.layers{display:grid;gap:10px}
+.layer{
+  display:grid;grid-template-columns:118px 1fr;gap:0;
+  background:var(--card);border:1px solid var(--rule);border-radius:8px;overflow:hidden;
+}
+@media (max-width:760px){ .layer{grid-template-columns:1fr} }
+.layer .lname{
+  background:#F7F9FA;border-right:1px solid var(--rule);padding:14px 16px;
+  font-family:var(--display);font-size:13.5px;font-weight:600;color:var(--ink);
+  display:flex;align-items:center;
+}
+@media (max-width:760px){ .layer .lname{border-right:0;border-bottom:1px solid var(--rule)} }
+.layer .lbody{padding:13px 16px;display:flex;flex-wrap:wrap;gap:7px;align-content:flex-start}
+.chip{
+  font-family:var(--mono);font-size:12px;padding:4px 10px;border-radius:4px;
+  background:var(--paper);border:1px solid var(--rule-soft);color:var(--ink-2);
+}
+.chip.on{background:var(--signal-soft);border-color:#F3C7B4;color:var(--signal)}
+.chip.cool{background:var(--teal-soft);border-color:#C9E0DE;color:var(--teal)}
+
+/* ---------- 关键技术点 ---------- */
+.keys{display:grid;gap:0;border-top:1px solid var(--rule)}
+.key{
+  display:grid;grid-template-columns:minmax(0,196px) minmax(0,1fr);gap:0 30px;
+  padding:22px 4px 22px 0;border-bottom:1px solid var(--rule-soft);
+}
+@media (max-width:760px){ .key{grid-template-columns:1fr;gap:10px} }
+.key .term{display:flex;flex-direction:column;gap:7px}
+.key .term .tag{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.05em;color:var(--teal);
+  background:var(--teal-soft);border-radius:3px;padding:3px 8px;align-self:flex-start;
+}
+.key .term h4{font-size:15.5px;font-family:var(--display);font-weight:600;line-height:1.4}
+.key .detail{font-size:14.5px;line-height:1.8}
+.key .detail p{margin:0 0 .7em}
+.key .detail p:last-child{margin-bottom:0}
+.key .detail ul{margin:.4em 0 0;padding-left:1.15em}
+.key .detail li{margin:.2em 0}
+.key .detail .num-hl{color:var(--ink);font-weight:600;background:#FBEDE5;padding:0 4px;border-radius:2px}
+
+/* ---------- 提示块 ---------- */
+.note{
+  border-left:3px solid var(--teal);background:var(--teal-soft);
+  padding:16px 20px;border-radius:0 6px 6px 0;margin:22px 0;font-size:14.5px;line-height:1.8;
+}
+.note .h{font-weight:650;color:var(--teal);display:block;margin-bottom:5px;font-size:13.5px}
+.note.warn{border-left-color:var(--signal);background:var(--signal-soft)}
+.note.warn .h{color:var(--signal)}
+.note p:last-child{margin-bottom:0}
+
+/* ---------- 拓扑图 ---------- */
+.topo{
+  background:var(--card);border:1px solid var(--rule);border-radius:8px;padding:26px 22px;
+  box-shadow:var(--shadow);
+}
+.topo svg{display:block;width:100%;height:auto}
+
+/* ---------- 页脚 ---------- */
+footer{margin-top:76px;border-top:1px solid var(--rule);background:#E7ECEF}
+.foot-in{
+  max-width:1180px;margin:0 auto;padding:30px 26px 44px;
+  display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start;
+}
+.foot-in .fcol{min-width:190px}
+.foot-in h5{
+  margin:0 0 8px;font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;
+  color:var(--muted);font-weight:600;
+}
+.foot-in p{margin:0;font-size:13.5px;line-height:1.8;color:var(--ink-2)}
+.foot-in a{color:var(--ink-2);text-decoration:none;border-bottom:1px solid var(--rule)}
+.foot-in a:hover{color:var(--signal);border-color:var(--signal)}
+.foot-note{max-width:1180px;margin:0 auto;padding:0 26px 34px;font-size:12px;color:var(--muted)}
+
+/* ---------- 动效 ---------- */
+@keyframes wvpulse{0%,100%{opacity:.32}50%{opacity:1}}
+.wv-bar{animation:wvpulse 2.9s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){
+  .wv-bar{animation:none;opacity:.9}
+  html{scroll-behavior:auto}
+}
+html{scroll-behavior:smooth}
+section.band{scroll-margin-top:62px}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-in">
+    <a class="mark" href="#top"><b>听见</b><span>HEAR</span></a>
+    <nav class="topnav">
+      <a href="#features">功能架构</a>
+      <a href="#tech">技术架构</a>
+      <a href="#cloud">在线模型服务</a>
+      <a class="gh" href="https://github.com/qianyueping1211/Hear" target="_blank" rel="noopener">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ===================== HERO ===================== -->
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="kicker">iOS 18+ · Swift · 端侧推理 · 可选自建云端</span>
+      <h1>听见<span class="lat">HEAR</span></h1>
+      <p class="lead">
+        一个跑在 iPhone 上的<b>实时语音翻译</b>应用。麦克风里的声音被切成句子、识别成文字、翻译成另一种语言，
+        再用合成的声音读出来。默认<b>三个模型全部在手机本地跑</b>——不联网、不上传、不需要账号；
+        也可以把模型搬到自己的电脑上，手机通过局域网调用。
+      </p>
+
+      <dl class="facts">
+        <div><dt>当前版本</dt><dd>0.4.28</dd></div>
+        <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
+        <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
+        <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
+        <div><dt>支持语言</dt><dd>13 种（双向互译）</dd></div>
+        <div><dt>在线模型服务</dt><dd>可选，自建局域网服务</dd></div>
+      </dl>
+
+      <div class="cta-row">
+        <a class="btn" href="https://github.com/qianyueping1211/Hear" target="_blank" rel="noopener">查看源码仓库</a>
+        <a class="btn ghost" href="#features">从功能架构读起</a>
+      </div>
+    </div>
+
+    <figure class="figure">
+      <div class="frame">
+        <svg viewBox="16 38 492 258" role="img" aria-label="语音信号从波形经过识别后分成原文与译文两条轨道的示意图">
+          <defs>
+            <linearGradient id="wv" gradientUnits="userSpaceOnUse" x1="20" y1="0" x2="250" y2="0">
+              <stop offset="0" stop-color="#DC5524" stop-opacity=".30"/>
+              <stop offset=".42" stop-color="#DC5524"/>
+              <stop offset="1" stop-color="#DC5524" stop-opacity=".62"/>
+            </linearGradient>
+          </defs>
+
+          <!-- 波形 -->
+          <g id="wave" stroke="url(#wv)" stroke-width="6" stroke-linecap="round">
+            <line class="wv-bar" style="animation-delay:-.00s" x1="26"  y1="118" x2="26"  y2="182"/>
+            <line class="wv-bar" style="animation-delay:-.06s" x1="40"  y1="98"  x2="40"  y2="202"/>
+            <line class="wv-bar" style="animation-delay:-.12s" x1="54"  y1="74"  x2="54"  y2="226"/>
+            <line class="wv-bar" style="animation-delay:-.18s" x1="68"  y1="108" x2="68"  y2="192"/>
+            <line class="wv-bar" style="animation-delay:-.24s" x1="82"  y1="62"  x2="82"  y2="238"/>
+            <line class="wv-bar" style="animation-delay:-.30s" x1="96"  y1="88"  x2="96"  y2="212"/>
+            <line class="wv-bar" style="animation-delay:-.36s" x1="110" y1="46"  x2="110" y2="254"/>
+            <line class="wv-bar" style="animation-delay:-.42s" x1="124" y1="104" x2="124" y2="196"/>
+            <line class="wv-bar" style="animation-delay:-.48s" x1="138" y1="70"  x2="138" y2="230"/>
+            <line class="wv-bar" style="animation-delay:-.54s" x1="152" y1="112" x2="152" y2="188"/>
+            <line class="wv-bar" style="animation-delay:-.60s" x1="166" y1="52"  x2="166" y2="248"/>
+            <line class="wv-bar" style="animation-delay:-.66s" x1="180" y1="92"  x2="180" y2="208"/>
+            <line class="wv-bar" style="animation-delay:-.72s" x1="194" y1="116" x2="194" y2="184"/>
+            <line class="wv-bar" style="animation-delay:-.78s" x1="208" y1="78"  x2="208" y2="222"/>
+            <line class="wv-bar" style="animation-delay:-.84s" x1="222" y1="104" x2="222" y2="196"/>
+            <line class="wv-bar" style="animation-delay:-.90s" x1="236" y1="128" x2="236" y2="172"/>
+          </g>
+          <line x1="20" y1="150" x2="248" y2="150" stroke="#D3DDE3" stroke-width="1" stroke-dasharray="2 5"/>
+
+          <!-- 分流箭头 -->
+          <path d="M252 150 H286" stroke="#D3DDE3" stroke-width="1.5" fill="none"/>
+          <path d="M286 150 C306 150, 306 112, 330 112" stroke="#0E6B66" stroke-width="1.5" fill="none"/>
+          <path d="M286 150 C306 150, 306 196, 330 196" stroke="#111A22" stroke-width="1.5" fill="none"/>
+          <circle cx="286" cy="150" r="3.5" fill="#DC5524"/>
+
+          <!-- 原文轨（青） -->
+          <g fill="#0E6B66">
+            <rect x="338" y="86"  width="150" height="11" rx="5.5" opacity=".92"/>
+            <rect x="338" y="104" width="112" height="11" rx="5.5" opacity=".7"/>
+            <rect x="338" y="122" width="58"  height="11" rx="5.5" opacity=".45"/>
+          </g>
+          <!-- 译文轨（墨） -->
+          <g fill="#111A22">
+            <rect x="338" y="178" width="122" height="11" rx="5.5" opacity=".9"/>
+            <rect x="338" y="196" width="150" height="11" rx="5.5" opacity=".62"/>
+            <rect x="338" y="214" width="76"  height="11" rx="5.5" opacity=".38"/>
+          </g>
+          <!-- 朗读波形 -->
+          <g stroke="#DC5524" stroke-width="3" stroke-linecap="round" opacity=".8">
+            <line x1="338" y1="248" x2="338" y2="262"/>
+            <line x1="352" y1="240" x2="352" y2="270"/>
+            <line x1="366" y1="252" x2="366" y2="258"/>
+            <line x1="380" y1="236" x2="380" y2="274"/>
+            <line x1="394" y1="246" x2="394" y2="264"/>
+            <line x1="408" y1="242" x2="408" y2="268"/>
+            <line x1="422" y1="250" x2="422" y2="260"/>
+            <line x1="436" y1="238" x2="436" y2="272"/>
+            <line x1="450" y1="248" x2="450" y2="262"/>
+            <line x1="464" y1="244" x2="464" y2="266"/>
+          </g>
+
+          <g font-family="Cascadia Mono, Consolas, monospace" font-size="10.5" fill="#6D7C88" letter-spacing=".04em">
+            <text x="338" y="72">原文 · SOURCE</text>
+            <text x="338" y="164">译文 · TARGET</text>
+            <text x="338" y="290">合成语音</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>
+        一句话说完产品链路：<b>声音 → 文字 → 译文 → 声音</b>。
+        四个环节各自可换引擎，本地跑不动的时候可以把任意一环外包给局域网里的电脑。
+      </figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ===================== 1. 功能架构 ===================== -->
+<section class="band" id="features">
+  <div class="wrap">
+    <div class="sechead">
+      <div class="num">01</div>
+      <div>
+        <h2>功能架构</h2>
+        <p class="lede">
+          整个 App 是<strong>一条五段式信号通路</strong>：采集 → 断句 → 识别 → 翻译 → 朗读。
+          每一段都做了引擎抽象，可以独立选择「手机本地」「系统自带」或「局域网云端」，三者可以任意组合。
+        </p>
+      </div>
+    </div>
+
+    <h3 class="subhead">信号通路 <small>每一段的实现类</small></h3>
+    <div class="flow">
+      <div class="stage">
+        <div class="n">STAGE 1</div>
+        <h4>音频采集</h4>
+        <p>麦克风取流、重采样到 16 kHz 单声道、语音增强与路由管理。</p>
+        <span class="file">AudioCapture.swift</span>
+      </div>
+      <div class="stage">
+        <div class="n">STAGE 2</div>
+        <h4>自动断句</h4>
+        <p>按 30 ms 帧做能量 VAD，判断起句、静音收尾，产出可提交的语音片段。</p>
+        <span class="file">Segmenter.swift</span>
+      </div>
+      <div class="stage">
+        <div class="n">STAGE 3</div>
+        <h4>语音识别</h4>
+        <p>四选一引擎出文字，同时判断这句话是哪种语言。</p>
+        <span class="file">SpeechRecognizer.swift</span>
+      </div>
+      <div class="stage">
+        <div class="n">STAGE 4</div>
+        <h4>文本翻译</h4>
+        <p>注入上下文与术语表，按官方提示词格式送进翻译模型。</p>
+        <span class="file">LlamaTranslator.swift</span>
+      </div>
+      <div class="stage">
+        <div class="n">STAGE 5</div>
+        <h4>朗读 / 克隆</h4>
+        <p>系统语音朗读译文，或用克隆音色把译文念出来。</p>
+        <span class="file">Speaker.swift</span>
+      </div>
+    </div>
+
+    <div class="engine-rail">
+      <span class="lab">引擎可选</span>
+      <span class="opt"><b>识别</b>　Whisper / SenseVoice / 系统听写 / 云端</span>
+      <span class="opt"><b>翻译</b>　Hy-MT2 本地 / 系统翻译 / 云端</span>
+      <span class="opt"><b>朗读</b>　AVSpeechSynthesizer / Qwen3-TTS 克隆</span>
+      <span class="opt on"><b>默认</b>　全部本地，离线可用</span>
+    </div>
+
+    <h3 class="subhead">功能清单</h3>
+    <div class="fgroups">
+
+      <div class="fgroup">
+        <h3><em>01</em>交互模式</h3>
+        <ul>
+          <li><b>实时翻译模式</b>　点一下麦克风开始，直接说话，App 自动判断说的是哪种语言并翻成另一种；再点一下停止。</li>
+          <li><b>对话翻译模式</b>　左右两个「按住说 XX」按钮，按住说对应语言，松开即翻译并播报。</li>
+          <li><b>双向互译</b>　13 种语言任意配对（zh / en / ja / ko / ar / fr / de / es / ru / pt / it / th / vi）。</li>
+          <li><b>模式切换</b>　底部左右滑动切换，底部圆点指示当前模式，点圆点也能直接切。</li>
+          <li><b>气泡式对话</b>　左右分栏气泡，源语言侧在左、目标侧在右；实时气泡随识别持续刷新。</li>
+          <li><b>结果可编辑</b>　长按某句可改原文并重新翻译、复制原文或译文。</li>
+          <li><b>点气泡即朗读</b>　正在朗读的气泡带描边与声波动画。</li>
+        </ul>
+      </div>
+
+      <div class="fgroup">
+        <h3><em>02</em>语音识别</h3>
+        <ul>
+          <li><b>Whisper</b>　<span class="hint">本地最准</span>，large-v3 turbo，标点与长句最好。</li>
+          <li><b>SenseVoice</b>　<span class="hint">本地最快</span>，约 240 MB，中英日韩粤，说完立刻出字。</li>
+          <li><b>SenseVoice + Whisper 校正</b>　<span class="hint">推荐</span>，先出快结果，空闲时用 Whisper 复核，明显有差异就替换，被改过的句子带魔法棒标记。</li>
+          <li><b>系统听写</b>　<span class="hint">iOS 26+</span>，说话时逐字显示，说完由 Whisper 定稿。</li>
+          <li><b>云端识别</b>　<span class="hint">可选</span>，走自家电脑上的服务，方案可指派。</li>
+          <li><b>语种自动判断</b>　识别结果与文字脚本不一致时自动改判另一侧语言。</li>
+        </ul>
+      </div>
+
+      <div class="fgroup">
+        <h3><em>03</em>翻译</h3>
+        <ul>
+          <li><b>本地 Hy-MT2</b>　<span class="hint">腾讯 1.8B GGUF，llama.cpp 跑在 GPU 上</span>。</li>
+          <li><b>云端翻译</b>　<span class="hint">可选</span>，调用局域网里的 llama-server。</li>
+          <li><b>系统翻译</b>　<span class="hint">iOS 26+</span>，调用系统 Translation 框架。</li>
+          <li><b>上下文连贯翻译</b>　可开关。开启后参考最近两句已完成的原文，代词与语气更连贯。</li>
+          <li><b>自定义术语表</b>　每行「原文=译文」，人名、公司名、专业词强制按表翻译。</li>
+          <li><b>采样参数</b>　Hy-MT2 官方推荐值：top_k 20 / top_p 0.6 / temperature 0.7。</li>
+        </ul>
+      </div>
+
+      <div class="fgroup">
+        <h3><em>04</em>朗读与声音</h3>
+        <ul>
+          <li><b>译文朗读</b>　可开关；朗读期间麦克风自动静音，杜绝回声串音。</li>
+          <li><b>左右耳</b>　耳机模式下可指定译文进左耳或右耳，另一侧播放原文或静音。</li>
+          <li><b>声音克隆</b>　Qwen3-TTS 0.6B，喂一段参考音频 + 参考文本，用这个音色念译文。</li>
+          <li><b>克隆缓存</b>　内存 LRU 60 条 + 磁盘 WAV 长期留存，按 SHA256 命名。</li>
+          <li><b>音色选择</b>　系统朗读优选高质量音色，过滤个人音色与 novelty 音色。</li>
+        </ul>
+      </div>
+
+      <div class="fgroup">
+        <h3><em>05</em>会话与历史</h3>
+        <ul>
+          <li><b>历史记录</b>　每次对话独立存档，列表页显示标题、条数、预览与语种。</li>
+          <li><b>多模板总结</b>　5 套模板：德鲁克式会议纪要、简明摘要、行动项清单、双语要点对照、沟通访谈记录。</li>
+          <li><b>总结可编辑</b>　生成结果可直接改写后保存。</li>
+          <li><b>中断恢复</b>　异常退出后残留的「生成中」总结会被标记为失败，不会永远转圈。</li>
+        </ul>
+      </div>
+
+      <div class="fgroup">
+        <h3><em>06</em>模型管理</h3>
+        <ul>
+          <li><b>四类本地模型</b>　Whisper、SenseVoice、Hy-MT2 翻译模型、Qwen3-TTS 克隆模型，分别下载与导入。</li>
+          <li><b>断点续传</b>　网络中断自动续传，网络类错误最多重试 8 次，指数退避。</li>
+          <li><b>镜像加速</b>　自动探测所在网络，国内走 hf-mirror，海外走 huggingface.co。</li>
+          <li><b>本地导入</b>　从「文件」App 直接导入 .gguf 或模型目录。</li>
+          <li><b>在线模型</b>　识别 / 翻译 / 克隆三个模型各自独立配置地址，支持「测试连接」。</li>
+          <li><b>状态可视</b>　每个模型行直接显示「未配置 / 正常 / 异常」，异常时给出具体原因。</li>
+        </ul>
+      </div>
+
+      <div class="fgroup">
+        <h3><em>07</em>设置项</h3>
+        <ul>
+          <li><b>说话灵敏度</b>　6–24 dB，环境吵就调高。</li>
+          <li><b>停顿时长</b>　400–1500 ms，调短出结果更快。</li>
+          <li><b>声音来源</b>　手机麦克风或耳机麦克风。</li>
+          <li><b>运行位置</b>　GPU 或神经引擎（Apple Silicon）。</li>
+          <li><b>语音增强</b>　回声消除 + 降噪 + 自动增益，可关。</li>
+          <li><b>日志</b>　可开关，上限 10 / 50 / 100 / 500 MB，支持在 App 内查看。</li>
+        </ul>
+      </div>
+
+      <div class="fgroup">
+        <h3><em>08</em>稳定性与同步</h3>
+        <ul>
+          <li><b>iCloud 同步</b>　把设置与历史对话同步到 iCloud 云盘里的一个文件夹，自选位置。</li>
+          <li><b>双向合并</b>　按修改时间判定谁新推谁，删除记录双向合并，设置用哈希指纹判断。</li>
+          <li><b>崩溃捕获</b>　未捕获异常 + 6 类信号，崩溃现场写入本地日志。</li>
+          <li><b>异常退出检测</b>　结合崩溃记录、内存警告、退出前可用内存三项判断，避免误报。</li>
+          <li><b>麦克风自恢复</b>　启动失败自动重试，音频路由变化时重装采样回调。</li>
+          <li><b>云端失败降级</b>　云端引擎出错自动切回系统引擎并重启会话，不中断使用。</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 2. 技术架构 ===================== -->
+<section class="band" id="tech">
+  <div class="wrap">
+    <div class="sechead">
+      <div class="num">02</div>
+      <div>
+        <h2>技术架构与关键技术点</h2>
+        <p class="lede">
+          客户端是 Swift + SwiftUI 的 iOS 应用，推理层用两个方向不同的引擎：
+          <strong>WhisperKit</strong> 负责神经网络的语音识别，<strong>llama.cpp</strong> 负责翻译与声音克隆。
+          云端能力通过一个 actor 客户端接入，与本地引擎共享同一套提示词与接口约定。
+        </p>
+      </div>
+    </div>
+
+    <h3 class="subhead">技术栈 <small>依赖与用途</small></h3>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>层</th><th>技术 / 依赖</th><th>版本</th><th>在项目里做什么</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>界面</td><td class="mono">SwiftUI</td><td class="mono">Swift 5</td><td>全部界面：对话页、历史页、设置、在线模型配置、日志查看</td></tr>
+          <tr><td>音频</td><td class="mono">AVAudioEngine / AVAudioConverter</td><td class="mono">系统</td><td>麦克风采集、16 kHz 重采样、语音增强、音频路由与输出</td></tr>
+          <tr><td>识别</td><td class="mono">WhisperKit（SPM）</td><td class="mono">≥ 1.0.0</td><td>Whisper large-v3 turbo 的 CoreML 推理，GPU / 神经引擎</td></tr>
+          <tr><td>识别</td><td class="mono">FluidAudio（SPM）</td><td class="mono">0.18.3</td><td>SenseVoice ONNX 识别（int8 优先），中英日韩粤</td></tr>
+          <tr><td>识别</td><td class="mono">SpeechAnalyzer / SpeechTranscriber</td><td class="mono">iOS 26+</td><td>系统听写，逐字回显</td></tr>
+          <tr><td>翻译 / 克隆</td><td class="mono">llama.xcframework</td><td class="mono">ggml-org/llama.cpp b12491</td><td>Hy-MT2 翻译、Qwen3-TTS 声音克隆，GPU 全层卸载</td></tr>
+          <tr><td>翻译</td><td class="mono">Translation 框架</td><td class="mono">iOS 26+</td><td>系统翻译兜底</td></tr>
+          <tr><td>朗读</td><td class="mono">AVSpeechSynthesizer / AVAudioPlayerNode</td><td class="mono">系统</td><td>译文朗读与左右耳空间定位</td></tr>
+          <tr><td>网络</td><td class="mono">URLSession</td><td class="mono">系统</td><td>云端模型服务调用、模型下载（续传）、大模型 API</td></tr>
+          <tr><td>工程</td><td class="mono">XcodeGen（project.yml）</td><td class="mono">—</td><td>声明式生成 Xcode 工程，无需手工维护 .xcodeproj</td></tr>
+          <tr><td>构建</td><td class="mono">GitHub Actions（macos-15）</td><td class="mono">—</td><td>拉取 llama.cpp → 生成工程 → xcodebuild → 打包 ipa → 发布 Release</td></tr>
+          <tr><td>云端</td><td class="mono">Python 标准库 + faster-whisper + sherpa-onnx</td><td class="mono">—</td><td>局域网模型服务（详见第 3 节）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="subhead">模块分层</h3>
+    <div class="layers">
+      <div class="layer">
+        <div class="lname">表现层</div>
+        <div class="lbody">
+          <span class="chip">ContentView</span><span class="chip">HistoryView</span><span class="chip">ConversationDetailView</span>
+          <span class="chip">SettingsView</span><span class="chip">LLMSettingsView</span><span class="chip">LogView</span>
+          <span class="chip">CenterDialog</span><span class="chip">MarkdownView</span><span class="chip">SetupView</span>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="lname">编排层</div>
+        <div class="lbody">
+          <span class="chip on">LiveSession（@MainActor · ObservableObject）</span>
+          <span class="chip">SummaryService</span><span class="chip">CrashGuard</span><span class="chip">AppLog</span><span class="chip">CloudSync</span>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="lname">能力层</div>
+        <div class="lbody">
+          <span class="chip cool">SpeechRecognizer</span><span class="chip cool">SenseVoiceRecognizer</span>
+          <span class="chip cool">LiveTextEngine</span><span class="chip cool">LlamaTranslator</span>
+          <span class="chip cool">GGUFVoiceCloner</span><span class="chip cool">Speaker</span>
+          <span class="chip cool">SystemTranslator</span><span class="chip cool">CloudClient</span><span class="chip cool">LLMClient</span>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="lname">音频层</div>
+        <div class="lbody">
+          <span class="chip">AudioCapture</span><span class="chip">Segmenter</span><span class="chip">AudioRoute</span>
+          <span class="chip">VoiceAnalyzer</span><span class="chip">Wav</span>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="lname">数据层</div>
+        <div class="lbody">
+          <span class="chip">ModelManager</span><span class="chip">Conversation / ConversationStore</span>
+          <span class="chip">Language</span><span class="chip">HostPicker</span><span class="chip">CloneCache</span><span class="chip">Fillers</span>
+        </div>
+      </div>
+    </div>
+
+    <h3 class="subhead">关键技术点</h3>
+    <div class="keys">
+
+      <div class="key">
+        <div class="term"><span class="tag">AUDIO</span><h4>采集与重采样</h4></div>
+        <div class="detail">
+          <p>用 <code>AVAudioEngine</code> 的 <code>installTap</code>（bufferSize 4096，format 传 nil 跟随真实格式）取流，
+             再用 <code>AVAudioConverter</code> 统一转成 <b>16 kHz / 单声道 / Float32</b>；格式变化时重建转换器，
+             容量按 <code>frameLength × ratio + 64</code> 预留，避免爆音。</p>
+          <p>语音增强用 <code>setVoiceProcessingEnabled</code>（回声消除 + 降噪 + AGC），同时把 ducking 配置为
+             <code>enableAdvancedDucking: false</code>、<code>duckingLevel: .min</code>——否则朗读时系统会把麦克风压低。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">VAD</span><h4>自动断句算法</h4></div>
+        <div class="detail">
+          <p>按 <span class="num-hl">30 ms / 帧（480 采样）</span> 逐帧分析，参数全部可在设置里调：</p>
+          <ul>
+            <li><b>噪声底</b>：取最近 100 帧（约 3 秒）dB 的第 10 百分位，钳在 −75 ~ −25 dB；阈值 = <code>max(噪声底 + 灵敏度, −50 dB)</code>。</li>
+            <li><b>起句</b>：需连续 <span class="num-hl">5 帧（150 ms）</span> 超阈值才判定开始说话，并保留说话前 <span class="num-hl">300 ms</span> 的 preroll，避免吞掉第一个字。</li>
+            <li><b>收尾</b>：静音时长达到「停顿时长」（400–1500 ms）或整句超过 <span class="num-hl">15 秒</span> 即结束；尾部静音裁掉，只留约 200 ms。</li>
+            <li><b>静音线</b>：<code>max(噪声底 + 灵敏度×0.5, 本句平均音量 − 18 dB)</code>；本句音量用 EMA 更新（0.97 × 旧值 + 0.03 × 新值）。</li>
+            <li><b>丢弃</b>：有声时长不足 <span class="num-hl">400 ms</span> 的片段直接丢掉，不进识别。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">ASR</span><h4>识别引擎编排</h4></div>
+        <div class="detail">
+          <p>WhisperKit 用 <code>openai_whisper-large-v3-v20240930_turbo</code>（CoreML，非 GGUF 量化），中文前置提示
+             「以下是普通话的句子，使用简体中文。」，输出经 <code>StringTransform("Hant-Hans")</code> 转简体。
+             关键采样参数：<code>temperature = 0</code>、<code>noSpeechThreshold = 0.6</code>、
+             <code>compressionRatioThreshold = 2.4</code>、<code>logProbThreshold = −1.0</code>、
+             <code>sampleLength = min(224, max(24, 秒数 × 15))</code>。</p>
+          <p>识别结果还要过两道闸：<code>confident()</code> 按分段平均 logprob 与 noSpeech 概率过滤幻觉，
+             <code>isMeaningful()</code> 再用字幕/广告语黑名单过滤「字幕」「点赞」「Subtitles by」这类无意义输出。</p>
+          <p><b>SenseVoice + Whisper 校正</b>的判定：去掉标点、空格与大小写后算编辑距离，
+             <span class="num-hl">距离 ≥ 2</span>，或 <span class="num-hl">距离 = 1 且较短句长度 ≤ 8</span> 才算「明显不同」；
+             不同则以 Whisper 为准并重译、标记魔法棒图标、把朗读位置回退到该句重读。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">LANG</span><h4>语种自动判断</h4></div>
+        <div class="detail">
+          <p>不依赖模型的语言标签，而是统计识别文本的 Unicode script 区间——中日韩 / 西里尔 / 阿拉伯 / 泰 / 拉丁，
+             <span class="num-hl">命中率 ≥ 0.6</span> 才判定为该语言；CJK 文本里夹的连续拉丁字母按 1 个字计，
+             避免「Nginx」这类词把中文判成英文。</p>
+          <p>识别引擎返回的语言与文本脚本不一致时改判另一侧；<code>lastLangID</code> 记住上一句语种，作为下一句的 fallback。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">MT</span><h4>翻译模型与提示词</h4></div>
+        <div class="detail">
+          <p>llama.cpp 参数：<code>n_gpu_layers = 999</code>（全 GPU）、<code>n_ctx = 4096</code>、<code>n_batch = 4096</code>。
+             采样链严格按 Hy-MT2 官方推荐：<span class="num-hl">top_k 20 → top_p 0.6 → temperature 0.7</span>，
+             正式翻译 <code>max_tokens = 512</code>，实时预览 256。</p>
+          <p>提示词用模型自带的 chat template（<code>llama_chat_apply_template</code>），格式分中英文两套，例如：</p>
+          <p><code>将以下文本翻译为English，注意只需要输出翻译后的结果，不要额外解释：</code><br>
+             <code>参考上面的信息，把下面的文本翻译成English，注意不需要翻译上文，也不要额外解释：</code></p>
+          <p>术语表只注入<strong>命中</strong>的条目（大小写不敏感的包含匹配），避免无关术语污染上下文。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">CTX</span><h4>上下文连贯翻译</h4></div>
+        <div class="detail">
+          <p>每次翻译前调用 <code>llama_memory_clear(ctx, true)</code> 清空 KV cache——
+             <strong>每句独立推理</strong>，这样不会因为上一句的生成把下一句带跑偏，也保证了延迟稳定。</p>
+          <p>「上下文」是通过提示词文本注入实现的：开启后取最近 <span class="num-hl">2 句</span>已完成的原文，
+             按「参考上面的信息…」的模板拼进 prompt，历史本身不进模型状态。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">TTS</span><h4>朗读与空间音频</h4></div>
+        <div class="detail">
+          <p>双耳（pan = 0）直接走 <code>AVSpeechSynthesizer.speak</code>；单耳则用 <code>synth.write(u)</code> 拿到 PCM 缓冲，
+             转成硬件当前输出格式后交给 <code>AVAudioPlayerNode</code> 并设置 <code>player.pan</code> 播放，实现「原文进左耳、译文进右耳」。</p>
+          <p>细节：超时保护 <code>5 + 字符数 × 0.45</code> 秒；<code>bestVoice(for:)</code> 过滤掉个人音色与 novelty 音色，
+             取 quality 最高的一个；输出音量做峰值归一（峰值低于 0.5 时放大到 0.85）；设备路由变化时把
+             <code>connectedFormat</code> 置 nil 重建引擎。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">VC</span><h4>声音克隆</h4></div>
+        <div class="detail">
+          <p>走 llama.cpp 的 <strong>mtmd 音频多模态接口</strong>，需要两个 GGUF：Qwen3-TTS 骨架（0.6B Q4_K_M）
+             与 mmproj 语音 tokenizer（Q8_0），输出 24 kHz。加载参数：
+             <code>n_gpu_layers = 999</code>（或 CPU 时 0）、<code>embeddings = true</code>、
+             <code>n_ctx = n_batch = 2048</code>、线程数 <code>min(6, 核数 − 1)</code>。</p>
+          <p>参考音频的处理链路：16 kHz PCM → <code>denoise()</code>（80 Hz 一阶高通 + 20 ms 分段取能量最低的 20% 估底噪，
+             做 0.5 倍软门限）→ 写临时 WAV → <code>mtmd_helper_bitmap_init_from_file</code> 得到 <code>speaker_ref</code>，
+             配合参考音频里那句原话（ICL 上下文）一起进模型。</p>
+          <p>采样 <code>top_k 20 / top_p 0.6 / temp −1（用模型默认）/ seed = UInt32.max</code>，
+             骨架部分用<strong>贪心</strong>采样（取最大 logit）；每次生成前后清 KV cache（该管线不支持复用 KV）。
+             输出做峰值归一 + 头尾 5 ms 淡入淡出，峰值低于 0.0005 判为静音并退回系统声音。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">CONCURRENCY</span><h4>并发与取消</h4></div>
+        <div class="detail">
+          <p><code>LiveSession</code> 是 <code>@MainActor final class: ObservableObject</code>；
+             <code>SpeechRecognizer</code> / <code>SenseVoiceRecognizer</code> / <code>LlamaTranslator</code> /
+             <code>GGUFVoiceCloner</code> / <code>CloneCache</code> / <code>CloudClient</code> 全部是 <code>actor</code>；
+             音频采集回调跑在 <code>hear.audio.segmenter</code> 队列，引擎启停在 <code>hear.audio.engine</code> 队列。</p>
+          <p>取消机制是三级：<code>runGen</code>（停止会话时 +1，作废在途结果）、<code>loadGen</code>（防旧加载覆盖新状态）、
+             <code>EpochCounter</code>（取消预览翻译）与 <code>CancelFlag</code>（取消整句翻译）。
+             实时预览分两条独立循环：<code>previewLoop</code> 与 <code>previewTranslateLoop</code>，
+             各自用单飞标志，互不等待，只翻「最新一份」文本。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">MODEL</span><h4>模型下载</h4></div>
+        <div class="detail">
+          <p>翻译模型从 Hugging Face <code>tencent/Hy-MT2-1.8B-GGUF</code> 取：先调 <code>/api/models/{repo}</code> 拿文件列表，
+             按 <code>Q8_0 &gt; Q6_K &gt; Q5_K_M &gt; Q4_K_M</code> 的优先级挑量化版本，排除 1.25bit / 2bit / IMATRIX 变体。
+             WhisperKit 走 <code>WhisperKit.download(variant:downloadBase:progressCallback:)</code>，
+             镜像通过 <code>setenv("HF_ENDPOINT", …)</code> 切换。</p>
+          <p>下载器 <code>FileDownloader</code> 用 <code>URLSessionDownloadDelegate</code>：网络类错误（−1005 / −1001 / −1003 / 连接丢失）
+             最多重试 <span class="num-hl">8 次</span>，指数退避 <code>min(2ⁿ, 30)</code> 秒，
+             用 <code>NSURLSessionDownloadTaskResumeData</code> 续传；请求超时 120 秒、资源超时 2 小时。</p>
+          <p>导入的模型会校验是否包含 <code>AudioEncoder.mlmodelc</code> / <code>TextDecoder.mlmodelc</code> / <code>MelSpectrogram.mlmodelc</code>。
+             模型路径在 UserDefaults 里存<strong>相对路径</strong>——重装 App 后沙盒绝对路径会变。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">MIRROR</span><h4>下载源自动选择</h4></div>
+        <div class="detail">
+          <p><code>HostPicker</code> 先查 Cloudflare 的 <code>cdn-cgi/trace</code>，读出 <code>loc=</code> 判断国家：
+             在国内切 <code>hf-mirror.com</code>，否则用 <code>huggingface.co</code>；查询失败或超时则两个源同时 HEAD 探测，
+             哪个先通用哪个。结果在进程内缓存，下载失败时 <code>reset()</code> 重新选择。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">STORAGE</span><h4>会话存储</h4></div>
+        <div class="detail">
+          <p>每次对话一个 JSON 文件（<code>Application Support/Conversations/&lt;uuid&gt;.json</code>），
+             另有 <code>index.json</code> 索引记录标题、条数、预览、语种与总结状态。
+             索引损坏时 <code>rebuildIndex()</code> 重建；启动时 <code>recoverInterrupted()</code>
+             把残留 <code>.generating</code> 状态的总结标记为 failed。</p>
+          <p>一份对话可挂多套总结模板（<code>summaries[templateID]</code>），互不覆盖。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">SYNC</span><h4>iCloud 同步</h4></div>
+        <div class="detail">
+          <p>免费账号自签的 App 拿不到 CloudKit 权限，因此走 <strong>iCloud 云盘里的一个文件夹</strong>：
+             <code>UIDocumentPickerViewController(forOpeningContentTypes: [.folder])</code> 选位置，书签存 UserDefaults。</p>
+          <p>同步三类数据：<code>settings.plist</code>（设置，20 个键，用 SHA256 指纹判断是否被改过）、
+             <code>conversations/&lt;uuid&gt;.json</code>（历史）、<code>manifest.json</code>（各页修改时间、删除记录、设置哈希）。</p>
+          <p>方向判定：对话按每页 <code>updatedAt</code> 谁新推谁；删除用 <code>deletedConversations</code> 字典两边合并；
+             设置是三态——只有 iCloud 改过而本机没改过才 pull，两边都改以本机为准。读写走 <code>NSFileCoordinator</code>，
+             文件未下载到本机时识别 <code>.文件名.icloud</code> 占位并触发下载，最多等 5 秒。</p>
+          <p><strong>模型文件与 API Key 不参与同步。</strong></p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">STABILITY</span><h4>崩溃保护与自恢复</h4></div>
+        <div class="detail">
+          <p><code>NSSetUncaughtExceptionHandler</code> 捕获未捕获的 ObjC 异常（取前 15 帧调用栈），
+             另注册 SIGABRT / SIGSEGV / SIGILL / SIGTRAP / SIGFPE / SIGBUS 信号处理器；
+             写完日志后恢复默认处理器并 <code>raise</code>，让系统照常生成崩溃报告。
+             信号处理器内不做 <code>queue.sync</code>，直接用 <code>FileHandle</code> 追加写，避免死锁。</p>
+          <p>异常退出检测用标记文件 <code>hear-running.json</code>（含启动时间、是否收到内存警告、退出前可用内存）：
+             下次启动时文件还在即判定异常退出，但只有<strong>有崩溃记录 / 收过内存警告 / 退出前可用内存 &lt; 400 MB</strong>
+             三者之一才提示，避免用户划掉 App 时误报。</p>
+          <p>音频侧：麦克风启动失败重试 3 次（重置音频会话、关掉语音增强再试），仍失败则卸载已加载的克隆模型再试；
+             <code>AVAudioEngineConfigurationChange</code> 通知触发重装 tap（重试 2 次）；
+             停止引擎放到后台队列，避免蓝牙切换模式时卡住主线程。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">LOG</span><h4>日志系统</h4></div>
+        <div class="detail">
+          <p>全局 <code>hearLog(_:_:)</code> 可从任意线程调用，日志写 <code>Documents/hear-log.txt</code>，
+             格式为 <code>[MM-dd HH:mm:ss] [I/W/E] 内容</code>；内存里保留最近 3000 条，启动时只读文件尾部 1 MB。
+             上限可选 10 / 50 / 100 / 500 MB，超过一半即轮转为 <code>hear-log.old.txt</code>，两份合计不超过上限。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">SECURITY</span><h4>凭据与隐私</h4></div>
+        <div class="detail">
+          <p>大模型 API Key 优先存钥匙串（<code>kSecClassGenericPassword</code>，service <code>com.hear.llm</code>，
+             <code>kSecAttrAccessibleAfterFirstUnlock</code>）；自签 App 没有钥匙串权限时自动降级到
+             <code>FileKeyStore</code>（<code>Application Support/llm-keys.json</code>，
+             <code>completeFileProtectionUntilFirstUserAuthentication</code>，并标记 <code>isExcludedFromBackup</code> 不进 iCloud 备份）。</p>
+          <p>整个 App 的默认路径是<strong>数据不出设备</strong>：识别、翻译、克隆都在本地推理；
+             只有开了云端引擎或调用外部大模型 API 才会出网，且走的是用户自己填的局域网地址或用户自选的 API。</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 3. 在线模型服务 ===================== -->
+<section class="band" id="cloud">
+  <div class="wrap">
+    <div class="sechead">
+      <div class="num">03</div>
+      <div>
+        <h2>在线模型服务</h2>
+        <p class="lede">
+          「听见」的在线能力分两类，职责完全不同：
+          一类是<strong>自建的局域网模型服务</strong>，把识别、翻译、声音克隆三个模型搬到自家电脑上跑，手机通过 Wi-Fi 调用；
+          另一类是<strong>外部大模型 API</strong>，只用于给对话生成纪要，不参与翻译链路。
+        </p>
+      </div>
+    </div>
+
+    <div class="note">
+      <span class="h">两类服务的边界</span>
+      <p><b>自建云端模型服务</b>是「把模型换台机器跑」，接口与本地引擎一一对应，手机端无需任何改动；
+         <b>外部大模型 API</b>是「对话结束后的增值能力」，只有配置了 API Key 才能用，缺失时只影响总结功能，不影响翻译。</p>
+    </div>
+
+    <!-- ---------- A. 自建服务 ---------- -->
+    <h3 class="subhead">A · 自建局域网模型服务 <small>仓库 server/ 目录，Python 标准库实现</small></h3>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>能力</th><th>服务端实现</th><th>模型</th><th>端口</th><th>对外协议</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>语音识别</td>
+            <td>跑在总服务进程内<span class="sub">faster-whisper / sherpa-onnx SenseVoice</span></td>
+            <td>Whisper small（默认）<span class="sub">SenseVoice small int8</span></td>
+            <td class="mono">8000</td>
+            <td class="mono">POST /v1/asr</td>
+          </tr>
+          <tr>
+            <td>文本翻译</td>
+            <td>llama.cpp <code>llama-server</code><span class="sub">独立进程</span></td>
+            <td>Hy-MT2-1.8B GGUF<span class="sub">默认 Q4_K_M 量化</span></td>
+            <td class="mono">8081</td>
+            <td class="mono">POST /v1/translate<span class="sub">或 OpenAI 兼容 /v1/chat/completions</span></td>
+          </tr>
+          <tr>
+            <td>声音克隆</td>
+            <td>llama.cpp <code>llama-server</code><span class="sub">独立进程，带 mmproj</span></td>
+            <td>Qwen3-TTS-0.6B GGUF<span class="sub">骨架 + 语音 tokenizer</span></td>
+            <td class="mono">8082</td>
+            <td class="mono">POST /v1/clone<span class="sub">或 /tts</span></td>
+          </tr>
+          <tr>
+            <td>聚合与健康检查</td>
+            <td><code>hear_cloud.py</code><span class="sub">ThreadingHTTPServer（http + https 同端口）</span></td>
+            <td>—</td>
+            <td class="mono">8000</td>
+            <td class="mono">GET /health · /ping · /</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="subhead">部署拓扑</h3>
+    <div class="topo">
+      <svg viewBox="0 0 900 380" role="img" aria-label="iPhone 通过局域网访问电脑上总服务、总服务再转发给翻译与克隆两个 llama-server 的拓扑图">
+        <!-- 手机 -->
+        <g>
+          <rect x="26" y="72" width="86" height="176" rx="16" fill="#FFFFFF" stroke="#111A22" stroke-width="1.6"/>
+          <rect x="35" y="84" width="68" height="140" rx="6" fill="#EEF2F4"/>
+          <circle cx="69" cy="234" r="5" fill="none" stroke="#111A22" stroke-width="1.4"/>
+          <text x="69" y="62" text-anchor="middle" font-family="Bahnschrift, sans-serif" font-size="14" fill="#111A22">听见 App</text>
+          <text x="69" y="264" text-anchor="middle" font-family="Cascadia Mono, monospace" font-size="10.5" fill="#6D7C88">iPhone</text>
+        </g>
+
+        <!-- 局域网 -->
+        <line x1="120" y1="200" x2="398" y2="200" stroke="#DC5524" stroke-width="1.6" stroke-dasharray="7 6"/>
+        <rect x="196" y="176" width="126" height="24" rx="4" fill="#FDF0EA"/>
+        <text x="259" y="192" text-anchor="middle" font-family="Cascadia Mono, monospace" font-size="10.5" fill="#DC5524">局域网 Wi-Fi · HTTP / HTTPS</text>
+
+        <!-- 电脑容器 -->
+        <rect x="398" y="26" width="478" height="330" rx="10" fill="#F7F9FA" stroke="#D3DDE3" stroke-width="1.4"/>
+        <text x="418" y="52" font-family="Bahnschrift, sans-serif" font-size="14" fill="#111A22">自己的电脑</text>
+        <text x="418" y="69" font-family="Cascadia Mono, monospace" font-size="10" fill="#6D7C88">CPU 核显 / NPU / GPU</text>
+
+        <!-- 8000 -->
+        <rect x="420" y="86" width="434" height="92" rx="7" fill="#FFFFFF" stroke="#0E6B66" stroke-width="1.6"/>
+        <text x="438" y="110" font-family="Bahnschrift, sans-serif" font-size="13.5" fill="#0E6B66">8000 · hear_cloud.py</text>
+        <text x="438" y="128" font-family="Cascadia Mono, monospace" font-size="10" fill="#6D7C88">/v1/asr · /v1/translate · /v1/clone · /health</text>
+        <rect x="438" y="138" width="192" height="26" rx="4" fill="#E7F2F1"/>
+        <text x="450" y="155" font-family="Cascadia Mono, monospace" font-size="10" fill="#0E6B66">faster-whisper（CPU int8）</text>
+        <rect x="640" y="138" width="150" height="26" rx="4" fill="#E7F2F1"/>
+        <text x="652" y="155" font-family="Cascadia Mono, monospace" font-size="10" fill="#0E6B66">SenseVoice（ONNX）</text>
+        <rect x="800" y="138" width="42" height="26" rx="4" fill="#FDF0EA"/>
+        <text x="821" y="155" text-anchor="middle" font-family="Cascadia Mono, monospace" font-size="10" fill="#DC5524">转发</text>
+
+        <!-- 箭头 8000 -> 8081/8082 -->
+        <path d="M560 178 V206" stroke="#0E6B66" stroke-width="1.4" fill="none"/>
+        <path d="M740 178 V206" stroke="#0E6B66" stroke-width="1.4" fill="none"/>
+        <path d="M554 200 L560 208 L566 200" fill="none" stroke="#0E6B66" stroke-width="1.4"/>
+        <path d="M734 200 L740 208 L746 200" fill="none" stroke="#0E6B66" stroke-width="1.4"/>
+
+        <!-- 8081 -->
+        <rect x="420" y="212" width="196" height="96" rx="7" fill="#FFFFFF" stroke="#111A22" stroke-width="1.4"/>
+        <text x="438" y="236" font-family="Bahnschrift, sans-serif" font-size="13.5" fill="#111A22">8081 · llama-server</text>
+        <text x="438" y="255" font-family="Cascadia Mono, monospace" font-size="10" fill="#6D7C88">/v1/chat/completions</text>
+        <rect x="438" y="266" width="160" height="24" rx="4" fill="#F2F5F7"/>
+        <text x="450" y="282" font-family="Cascadia Mono, monospace" font-size="10" fill="#33434F">Hy-MT2-1.8B GGUF</text>
+        <text x="438" y="302" font-family="Cascadia Mono, monospace" font-size="9.5" fill="#6D7C88">Vulkan / OpenVINO / CUDA</text>
+
+        <!-- 8082 -->
+        <rect x="646" y="212" width="208" height="96" rx="7" fill="#FFFFFF" stroke="#111A22" stroke-width="1.4"/>
+        <text x="664" y="236" font-family="Bahnschrift, sans-serif" font-size="13.5" fill="#111A22">8082 · llama-server</text>
+        <text x="664" y="255" font-family="Cascadia Mono, monospace" font-size="10" fill="#6D7C88">/tts（带参考音频克隆音色）</text>
+        <rect x="664" y="266" width="172" height="24" rx="4" fill="#F2F5F7"/>
+        <text x="676" y="282" font-family="Cascadia Mono, monospace" font-size="10" fill="#33434F">Qwen3-TTS-0.6B + mmproj</text>
+        <text x="664" y="302" font-family="Cascadia Mono, monospace" font-size="9.5" fill="#6D7C88">仅支持 Vulkan / CUDA</text>
+
+        <!-- 底部说明 -->
+        <text x="420" y="336" font-family="Cascadia Mono, monospace" font-size="9.5" fill="#6D7C88">WSL2 访问不到 Intel NPU；要在 Windows 原生跑才能吃满核显与 NPU</text>
+      </svg>
+    </div>
+
+    <h3 class="subhead">接口定义</h3>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>方法 / 路径</th><th>请求</th><th>响应</th><th>超时</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">GET /health</td>
+            <td>—</td>
+            <td class="mono">{"asr":"就绪（small）","mt":"就绪","clone":"就绪"}</td>
+            <td>手机侧 5 s</td>
+          </tr>
+          <tr>
+            <td class="mono">GET /</td>
+            <td>—</td>
+            <td>自检 HTML 页面，列出本机所有局域网 IP<span class="sub">用手机浏览器打开即验证网络与权限</span></td>
+            <td>—</td>
+          </tr>
+          <tr>
+            <td class="mono">POST /v1/asr</td>
+            <td>请求体：16 kHz 单声道 wav（二进制）<span class="sub">头：X-Languages / X-Fallback-Language / X-ASR-Scheme / X-ASR-Preview</span></td>
+            <td class="mono">{"lang":"en","text":"..."}</td>
+            <td>120 s</td>
+          </tr>
+          <tr>
+            <td class="mono">POST /v1/translate</td>
+            <td class="mono">{"prompt":"...","src":"zh","dst":"en"}</td>
+            <td class="mono">{"text":"..."}</td>
+            <td>120 s</td>
+          </tr>
+          <tr>
+            <td class="mono">POST /v1/clone</td>
+            <td class="mono">{"text":"Hello","lang":"english","reference_wav":"&lt;base64 wav&gt;","reference_text":"..."}</td>
+            <td class="mono">{"audio":"&lt;base64 wav&gt;","sample_rate":24000}</td>
+            <td>300 s</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="margin-top:12px;font-size:13.5px;color:var(--muted)">
+      <code>prompt</code> 是 App 拼好的，与本地翻译用的是同一套格式（含上下文与术语表）；服务端只做转发，
+      由 llama.cpp 套用模型自带的对话模板。
+    </p>
+
+    <h3 class="subhead">关键技术点</h3>
+    <div class="keys">
+
+      <div class="key">
+        <div class="term"><span class="tag">PROBE</span><h4>客户端自动识别服务类型</h4></div>
+        <div class="detail">
+          <p>App 不要求用户手工区分端口。往地址发一个 <code>GET /health</code>：返回里带 <code>asr</code> / <code>mt</code> / <code>clone</code>
+             字段的判定为<strong>总服务</strong>（有识别接口）；只带 <code>status</code> 的判定为<strong>单独 llama-server</strong>；
+             探测失败不写缓存，下次还会再问一次。</p>
+          <p>判定为 llama-server 时：翻译走 OpenAI 兼容的 <code>/v1/chat/completions</code>，克隆走 <code>/tts</code>，
+             而<strong>识别直接跳过</strong>——单独的模型服务没有识别接口，App 会明确提示「这个地址不提供语音识别，请用 8000 的总服务地址」。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">FALLBACK</span><h4>地址回退链</h4></div>
+        <div class="detail">
+          <p>每个模型可以单独配地址，也共用一个「通用服务地址」。请求时按
+             <span class="num-hl">模型专属地址 → 通用地址（8000，会转发给真正干活的模型服务）</span> 的顺序依次尝试，
+             第一个成功的即采用；全部失败才把最后一个错误抛给界面。</p>
+          <p>这意味着即使某个模型单独配的地址没起来，只要总服务活着，功能依然可用。</p>
+          <p>回退链上还有一步<strong>换协议</strong>：<code>http://</code> 连不上就试 <code>https://</code>，
+             反之亦然。因为总服务在同一个端口上两种协议都接（见 TLS 卡片），
+             用户填了哪一种都能通，App 也会在「测试连接」里直接告诉你哪个协议能用。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">HEALTH</span><h4>健康检查与状态判定</h4></div>
+        <div class="detail">
+          <p>服务端探测后端 llama-server 时，把状态分成三档：<b>就绪</b>（200）、<b>加载中</b>（503 且响应体含 <code>loading</code>——
+             llama-server 模型还没加载完，这是「活着但在准备」，不是「连不上」）、<b>连不上</b>。</p>
+          <p>探测结果<strong>缓存 2 秒</strong>：不缓存的话后端没起来时每次 <code>/health</code> 都要等 3 秒 + 3 秒，
+             手机 5 秒就超时了，会被误报成「连不上」。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">TLS</span><h4>同一个端口，http 和 https 都能用</h4></div>
+        <div class="detail">
+          <p>电脑上第一次启动服务时，<code>make_cert.py</code> 会用 <code>cryptography</code>
+             生成一张<strong>自签证书</strong>（SAN 里带上本机所有局域网 IP、127.0.0.1 和 localhost）。
+             私钥只留在本机的 <code>server/certs/</code> 里，不进仓库。</p>
+          <p>总服务在 8000 端口上<strong>同时接两种协议</strong>：接到连接先偷看第一个字节，
+             TLS 握手的第一个字节固定是 <code>0x16</code>，是 TLS 就套上 TLS，否则按普通 http 处理。
+             所以手机里填 <code>http://192.168.x.x:8000</code> 或者
+             <code>https://192.168.x.x:8000</code> 都能连上，不用来回改。</p>
+          <p>App 侧只对<strong>内网地址</strong>（私有网段、<code>.local</code>、<code>localhost</code>）
+             放行自签证书，公网域名照常走系统校验；
+             同时用自带的会话而不是系统共享会话，因为共享会话没法挂证书处理程序。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">BOOT</span><h4>先占端口，再后台预热</h4></div>
+        <div class="detail">
+          <p>主线程立刻把 8000 端口监听起来并 <code>serve_forever</code>，让手机连过来不会吃「拒绝连接」；
+             识别模型的加载、翻译/克隆后端的探测、启动自检全部放到后台线程，不阻塞请求处理。</p>
+          <p>识别模型（faster-whisper）是<strong>懒加载 + 后台预热</strong>的：第一次要下载几百 MB 权重，
+             期间 <code>/health</code> 会如实返回「加载中（第一次要下识别模型）」，下完变成「就绪」。
+             权重缓存到 <code>~/.cache/huggingface</code>，只下一次。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">ASR</span><h4>云端识别的三套方案</h4></div>
+        <div class="detail">
+          <p>由 App 在请求头 <code>X-ASR-Scheme</code> 指定，服务端按它执行，也可以用环境变量 <code>HEAR_ASR_SCHEME</code> 设默认值：</p>
+          <ul>
+            <li><b>sensevoice</b>　只用 SenseVoice（ONNX，CPU 也能跑，约 230 MB），最快。</li>
+            <li><b>whisper</b>　只用 faster-whisper，最准但慢一些。</li>
+            <li><b>sensevoice+whisper</b>　<span class="num-hl">推荐</span>。SenseVoice 先出结果，Whisper 再复核；两者文本不同以 Whisper 为准。</li>
+          </ul>
+          <p>实时预览走 <code>X-ASR-Preview: 1</code>，此时组合方案只用 SenseVoice，不跑复核——预览要的是快。
+             SenseVoice 的输出带 <code>&lt;|zh|&gt;</code>、<code>&lt;|NEUTRAL|&gt;</code> 这类语言与情绪标记，
+             服务端负责解析出语种并清洗标签。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">DETAIL</span><h4>踩过的坑与对应处理</h4></div>
+        <div class="detail">
+          <ul>
+            <li><b>faster-whisper 必须喂 numpy float32 数组</b>。给普通 list 它会当成文件去 <code>av.open()</code>，老版本 av 直接报
+                <code>open() got an unexpected keyword argument 'metadata_errors'</code>。服务端统一转成 ndarray，非 16 kHz 先线性重采样。</li>
+            <li><b>av 版本必须 ≥ 12</b>，老版本没有 <code>metadata_errors</code> 参数，faster-whisper 解码会报错——这条写进了 <code>requirements.txt</code>。</li>
+            <li><b>手机超时断开会刷 BrokenPipe 报错</b>，两个处理分支都单独捕获，安静收尾。</li>
+            <li><b>手机连的是 8081 / 8082 会失败</b>：这两个端口默认只监听本机，手机访问不到。诊断文案里直接写明了这一点。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">PARAM</span><h4>采样参数透传</h4></div>
+        <div class="detail">
+          <p>服务端向 llama-server 转发翻译请求时，携带与手机本地完全一致的采样参数：
+             <code>top_k = 20</code>、<code>top_p = 0.6</code>、<code>temperature = 0.7</code>、<code>max_tokens = 512</code>、
+             <code>stream = false</code>。这样同一条句子走本地和走云端，输出风格不会变。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">PROXY</span><h4>识别可外接到别的服务</h4></div>
+        <div class="detail">
+          <p>设置 <code>HEAR_ASR_URL</code> 后，服务端不再安装 faster-whisper，而是把 wav 转成
+             <code>multipart/form-data</code> 转发给 OpenAI 兼容的 <code>/v1/audio/transcriptions</code>——
+             比如 whisper.cpp 的 <code>whisper-server</code>。转发的 multipart 请求体是手写拼装的，
+             边界串固定为 <code>----HearBoundary7MA4YWxkTrZu0gW</code>。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">BACKEND</span><h4>硬件后端矩阵</h4></div>
+        <div class="detail">
+          <p>llama.cpp 在不同机器上走的路子不一样，脚本通过环境变量切换：</p>
+          <ul>
+            <li><b>NVIDIA 显卡</b>　CUDA。</li>
+            <li><b>Intel Core Ultra 核显</b>　Vulkan（<code>--device Vulkan</code>），兼容性最好，多模态（声音克隆）只能走这条。</li>
+            <li><b>Intel NPU</b>　OpenVINO 后端（<code>GGML_OPENVINO_DEVICE=NPU</code>），官方文档验证机型是 Lunar Lake（Core Ultra 5 238V）。
+                限制：<b>只支持纯文本模型</b>、无状态执行（<code>-np 1</code>）、必须明确给 <code>-c</code>。</li>
+            <li><b>Apple Silicon</b>　Metal。</li>
+            <li><b>WSL2</b>　<strong>访问不到 Intel NPU</strong>，核显的 Vulkan 也不太稳，实际等同于纯 CPU。要吃满硬件必须原生跑 Windows。</li>
+          </ul>
+          <p>默认分工：翻译走核显或 NPU，声音克隆走核显，识别走 CPU（faster-whisper int8）。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">DEPLOY</span><h4>一键启动</h4></div>
+        <div class="detail">
+          <p><b>Windows 原生（推荐）</b>：<code>server\start-windows.ps1</code> 自动下载 llama.cpp 的 Vulkan 版与 OpenVINO 版运行包、
+             三个模型文件（Hy-MT2 约 1.1 GB、Qwen3-TTS 两个文件约 800 MB），建 venv 装 faster-whisper，
+             起三个服务，最后打印一个局域网地址供填入 App。不需要编译、不需要 Visual Studio、不需要 WSL。</p>
+          <p><b>WSL2</b>：<code>server/start.sh</code>，需要手动装 cmake / ffmpeg / python3-venv，实质是纯 CPU 运行。</p>
+          <p>防火墙需要放行 8000 / 8081 / 8082 三个入站端口。</p>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">ENV</span><h4>环境变量</h4></div>
+        <div class="detail">
+          <div class="tablewrap" style="box-shadow:none">
+            <table>
+              <thead><tr><th>变量</th><th>作用</th><th>默认</th></tr></thead>
+              <tbody>
+                <tr><td class="mono">HEAR_PORT</td><td>总服务端口</td><td class="mono">8000</td></tr>
+                <tr><td class="mono">HEAR_MT_PORT / HEAR_CLONE_PORT</td><td>两个 llama-server 端口</td><td class="mono">8081 / 8082</td></tr>
+                <tr><td class="mono">HEAR_MT_DEVICE / HEAR_CLONE_DEVICE</td><td>翻译 / 克隆后端：NPU / GPU / CPU</td><td class="mono">GPU</td></tr>
+                <tr><td class="mono">HEAR_ASR_SCHEME</td><td>识别方案</td><td class="mono">sensevoice+whisper</td></tr>
+                <tr><td class="mono">HEAR_ASR_MODEL</td><td>Whisper 模型（tiny…large-v3）</td><td class="mono">small</td></tr>
+                <tr><td class="mono">HEAR_ASR_DEVICE / HEAR_ASR_COMPUTE</td><td>识别设备与量化</td><td class="mono">cpu / int8</td></tr>
+                <tr><td class="mono">HEAR_ASR_URL</td><td>转发给外部转写服务</td><td class="mono">空</td></tr>
+                <tr><td class="mono">HEAR_MT_QUANT</td><td>翻译模型量化</td><td class="mono">Q4_K_M</td></tr>
+                <tr><td class="mono">HEAR_THREADS / HEAR_CTX</td><td>线程数 / 上下文长度</td><td class="mono">8 / 4096</td></tr>
+                <tr><td class="mono">HEAR_TOP_K / HEAR_TOP_P / HEAR_TEMPERATURE</td><td>采样参数</td><td class="mono">20 / 0.6 / 0.7</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">DIAG</span><h4>错误要说清楚原因</h4></div>
+        <div class="detail">
+          <p>「测试连接」不只回答连不连，而是区分开：</p>
+          <ul>
+            <li><b>ATS 拦截</b>（不允许 http 明文）→ 提示需要 0.4.19 以上版本。</li>
+            <li><b>端口没在监听</b> → 提示确认服务已启动，并说明 8081 / 8082 默认只在本机监听。</li>
+            <li><b>超时</b> → 引导先用手机浏览器打开同一个地址：能打开说明是「本地网络」权限没给，打不开说明网络不通。</li>
+            <li><b>503 且含 loading</b> → 明确说「服务在加载模型（稍等几秒再试一次）」，而不是当成连不上。</li>
+            <li>另有找不到主机、手机没联网、连接断开等分支。</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="key">
+        <div class="term"><span class="tag">PERF</span><h4>性能参考</h4></div>
+        <div class="detail">
+          <p>以 Intel Core Ultra 7 258V（16 核、Arc 130V 核显、NPU 48 TOPS）为例：</p>
+          <ul>
+            <li>翻译（Hy-MT2 Q4_K_M，核显 Vulkan）：一句十来字的英文约 <span class="num-hl">1 ~ 2 秒</span>，走 NPU 更快。</li>
+            <li>识别（faster-whisper small，CPU int8）：10 秒语音约 <span class="num-hl">1 ~ 2 秒</span>。</li>
+            <li>声音克隆（Qwen3-TTS 0.6B Q4_K_M，核显 Vulkan）：一句约 <span class="num-hl">2 ~ 4 秒</span>。</li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ---------- B. 外部大模型 API ---------- -->
+    <h3 class="subhead">B · 外部大模型 API <small>仅用于对话总结，不参与翻译链路</small></h3>
+
+    <p class="prose">
+      用户可以配置多个大模型服务，在「设置 → 大模型 API」里切换当前使用的那个。
+      App 会把整页对话整理成带双方语言标注的逐句记录，套上模板提示词后送去生成纪要，
+      结果写回对话文件，支持二次编辑。
+    </p>
+
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>接口类型</th><th>端点</th><th>鉴权</th><th>请求体</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>OpenAI 兼容<span class="sub">OpenAI、DeepSeek、通义千问、Kimi、MiniMax、OpenRouter、Ollama 等</span></td>
+            <td class="mono">POST {baseURL}/chat/completions</td>
+            <td class="mono">Authorization: Bearer {key}</td>
+            <td class="mono">{"model":"...","temperature":0.3,"messages":[system, user]}</td>
+          </tr>
+          <tr>
+            <td>Anthropic</td>
+            <td class="mono">POST {baseURL}/v1/messages</td>
+            <td class="mono">x-api-key + anthropic-version</td>
+            <td class="mono">{"model":"...","max_tokens":8000,"system":"...","messages":[user]}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note warn">
+      <span class="h">两条链路不要混淆</span>
+      <p>翻译<strong>永远不</strong>走外部大模型 API。翻译只有三条路：本地 Hy-MT2、云端 llama-server、系统翻译框架。
+         外部 API 只在「生成总结」时被调用——它是把对话内容发出去的唯一路径，因此需要用户自己明确配置并填写 Key。
+         推理模型返回的 <code>&lt;think&gt;…&lt;/think&gt;</code> 思考过程会被 <code>stripThinking()</code> 剥掉，不写进纪要。</p>
+    </div>
+
+    <h3 class="subhead">总结模板</h3>
+    <div class="fgroups">
+      <div class="fgroup">
+        <h3><em>01</em>高效会议纪要（德鲁克）</h3>
+        <ul><li>按「卓有成效的管理者」的有效会议理念组织，固定七段式结构：会议目的 / 参与方与语言 / 讨论要点 / 达成的结论 / 行动承诺（表格）/ 未决问题与风险 / 下一步。行动项表格要求「事项 · 负责人 · 截止时间 · 备注」，对话里没明确的写「待定」。</li></ul>
+      </div>
+      <div class="fgroup">
+        <h3><em>02</em>简明摘要</h3>
+        <ul><li>三到五句话说清这次对话讲了什么，再列五条以内的关键要点，适合快速回顾。</li></ul>
+      </div>
+      <div class="fgroup">
+        <h3><em>03</em>行动项清单</h3>
+        <ul><li>专门抽取可执行的事项与负责人，输出为可勾选的清单。</li></ul>
+      </div>
+      <div class="fgroup">
+        <h3><em>04</em>双语要点对照</h3>
+        <ul><li>左右对照呈现原始语言与译文要点，方便核对术语与语气是否准确。</li></ul>
+      </div>
+      <div class="fgroup">
+        <h3><em>05</em>沟通访谈记录</h3>
+        <ul><li>按访谈结构整理问答过程，保留追问与回答的对应关系。</li></ul>
+      </div>
+      <div class="fgroup">
+        <h3><em>执行</em>生成机制</h3>
+        <ul>
+          <li>同一对话可并存多套模板的结果，互不覆盖。</li>
+          <li>生成在后台任务中执行，用 <code>beginBackgroundTask</code> 申请后台运行时间。</li>
+          <li>配置不完整时（没加 API、没选模型、没读到 Key）会给出具体是哪一项缺失，而不是笼统报错。</li>
+          <li>结果可手动编辑后保存，并记录所用模型与更新时间。</li>
+        </ul>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="foot-in">
+    <div class="fcol">
+      <h5>项目</h5>
+      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.28</p>
+    </div>
+    <div class="fcol">
+      <h5>仓库</h5>
+      <p><a href="https://github.com/qianyueping1211/Hear" target="_blank" rel="noopener">github.com/qianyueping1211/Hear</a></p>
+    </div>
+    <div class="fcol">
+      <h5>技术栈</h5>
+      <p>Swift · SwiftUI · WhisperKit · FluidAudio<br>llama.cpp · faster-whisper · sherpa-onnx</p>
+    </div>
+    <div class="fcol">
+      <h5>平台</h5>
+      <p>iOS 18.0+<br>系统听写与系统翻译需 iOS 26+</p>
+    </div>
+  </div>
+  <div class="foot-note">
+    本文内容依据仓库 <code>qianyueping1211/Hear</code> 源码整理，技术参数与实现细节以源码为准。
+  </div>
+</footer>
+
+</body>
+</html>

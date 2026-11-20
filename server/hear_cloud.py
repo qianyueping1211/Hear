@@ -26,6 +26,9 @@ import base64
 import io
 import json
 import os
+import select
+import socket
+import ssl
 import sys
 import threading
 import time
@@ -41,6 +44,10 @@ MT_URL = os.environ.get("HEAR_MT_URL", "http://127.0.0.1:8081").rstrip("/")
 CLONE_URL = os.environ.get("HEAR_CLONE_URL", "http://127.0.0.1:8082").rstrip("/")
 ASR_URL = os.environ.get("HEAR_ASR_URL", "").rstrip("/")
 ASR_MODEL = os.environ.get("HEAR_ASR_MODEL", "small")
+# 自签证书（make_cert.py 生成）。有的话同一个端口上 http 和 https 都能用
+_HERE = os.path.dirname(os.path.abspath(__file__))
+TLS_CERT = os.environ.get("HEAR_TLS_CERT", os.path.join(_HERE, "certs", "cert.pem"))
+TLS_KEY = os.environ.get("HEAR_TLS_KEY", os.path.join(_HERE, "certs", "key.pem"))
 # 识别用哪个方案：
 #   whisper         只用 faster-whisper（准，但慢一点）
 #   sensevoice      只用 SenseVoice（快，擅长中英日韩粤）
@@ -597,13 +604,73 @@ a{color:#007aff;text-decoration:none}
         })
 
 
+def make_ssl_context():
+    """有自签证书就返回 TLS 上下文，没有就返回 None（只用 http）"""
+    if not (os.path.exists(TLS_CERT) and os.path.exists(TLS_KEY)):
+        return None
+    try:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+        return ctx
+    except Exception as e:
+        log("证书用不了（%s），这次只用 http" % e)
+        return None
+
+
+class MixedServer(ThreadingHTTPServer):
+    """同一个端口上 http 和 https 都能用。
+
+    办法：接到连接先偷看一眼第一个字节。
+    TLS 握手的第一个字节固定是 0x16，是 TLS 就套上 TLS，否则按普通 http 处理。
+    这样手机里填 http://192.168.x.x:8000 或者 https://192.168.x.x:8000 都能连，
+    不用来回改。
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, addr, handler, ssl_context=None):
+        super().__init__(addr, handler)
+        self.ssl_context = ssl_context
+
+    def process_request(self, request, client_address):
+        # 握手在起线程之前做，这样一个慢连接不会挡住别人
+        if self.ssl_context is not None:
+            sock = request
+            try:
+                ready, _, _ = select.select([sock], [], [], 5)
+            except (OSError, ValueError):
+                ready = []
+            if ready:
+                try:
+                    first = sock.recv(1, socket.MSG_PEEK)
+                except OSError:
+                    first = b""
+                if first == b"\x16":
+                    try:
+                        request = self.ssl_context.wrap_socket(sock, server_side=True)
+                    except Exception as e:
+                        log("TLS 握手失败：%s" % e)
+                        try:
+                            sock.close()
+                        except Exception:
+                            pass
+                        return
+        super().process_request(request, client_address)
+
+
 def main():
     # 先把端口占上（这样别人连过来不会报"拒绝连接"），再开始处理请求
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    ctx = make_ssl_context()
+    srv = MixedServer((HOST, PORT), Handler, ctx)
     log("服务起来了，监听 %s:%d" % (HOST, PORT))
     log("本机测试：http://127.0.0.1:%d/" % PORT)
     for ip in local_ips():
         log("手机访问：http://%s:%d/" % (ip, PORT))
+        if ctx is not None:
+            log("手机访问（加密）：https://%s:%d/" % (ip, PORT))
+    if ctx is not None:
+        log("同一个端口 http 和 https 都能用，App 里填哪个都行")
     log("翻译后端：%s" % MT_URL)
     log("克隆后端：%s" % CLONE_URL)
     log("识别后端：%s" % (ASR_URL or "本机 faster-whisper（%s）" % ASR_MODEL))

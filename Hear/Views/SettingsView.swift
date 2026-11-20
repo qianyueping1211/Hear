@@ -780,6 +780,16 @@ struct CloudEditSheet: View {
         session.cloudAddress.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// 真正会拿去连的地址：补上协议头、去掉结尾的 "/"
+    /// （用户只填 "192.168.1.10:8000" 也能用）
+    private func normalized(_ s: String) -> String {
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return "" }
+        let low = t.lowercased()
+        if low.hasPrefix("http://") || low.hasPrefix("https://") { return t }
+        return "http://" + t
+    }
+
     /// 现在实际用的地址（跟着"默认"开关实时变）
     /// 模型选了"默认"就用通用服务地址，没选就用这里填的
     private var effectiveAddressText: String {
@@ -788,7 +798,7 @@ struct CloudEditSheet: View {
             return sharedAddressText.isEmpty ? "还没填" : sharedAddressText
         case .model:
             let a = useDefault ? sharedAddressText : address.trimmingCharacters(in: .whitespacesAndNewlines)
-            return a.isEmpty ? "还没填" : a
+            return a.isEmpty ? "还没填" : normalized(a)
         }
     }
 
