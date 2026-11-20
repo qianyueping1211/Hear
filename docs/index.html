@@ -368,8 +368,8 @@ section.band{scroll-margin-top:62px}
       <h1>听见<span class="lat">HEAR</span></h1>
       <p class="lead">
         一个跑在 iPhone 上的<b>实时语音翻译</b>应用。麦克风里的声音被切成句子、识别成文字、翻译成另一种语言，
-        再用合成的声音读出来。默认<b>三个模型全部在手机本地跑</b>——不联网、不上传、不需要账号；
-        也可以把模型搬到自己的电脑上，手机通过局域网调用。
+        再用合成的声音读出来。不联网、不上传、不需要账号——<b>识别、翻译、声音克隆三个环节都能在手机本地跑</b>，
+        也可以把其中几环搬到自己的电脑上，手机通过局域网调用。
       </p>
 
       <dl class="facts">
@@ -520,6 +520,17 @@ section.band{scroll-margin-top:62px}
       <span class="opt"><b>翻译</b>　Hy-MT2 本地 / 系统翻译 / 云端</span>
       <span class="opt"><b>朗读</b>　AVSpeechSynthesizer / Qwen3-TTS 克隆</span>
       <span class="opt on"><b>默认</b>　全部本地，离线可用</span>
+    </div>
+
+    <div class="note">
+      三个环节<strong>可以任意组合</strong>：全本地（全离线，不用开电脑）、全云端、或者一半一半。
+      全本地的配置是「识别：SenseVoice（快）或 Whisper（准）」+「翻译：本地引擎 MT」+
+      「声音克隆：本地引擎 Qwen」。代价是内存——Hy-MT2 约 1.1 GB、Qwen3-TTS 两个文件约 800 MB、
+      SenseVoice 约 240 MB，三个同时常驻对内存小的机型有压力。
+      App 的对策：声音克隆模型放到最后加载（等其它模型就绪）、用不到的模型自动卸载、
+      翻译切到云端就卸载本地翻译模型、收到内存警告时全部卸载、
+      麦克风起不来时先卸掉声音克隆模型再试。内存吃紧就先用 SenseVoice + 本地 MT，
+      需要原声朗读时再把 Qwen3-TTS 打开。
     </div>
 
     <h3 class="subhead">功能清单</h3>
