@@ -60,6 +60,17 @@ final class AudioCapture {
         // 重复挂会直接崩（"required condition is false: !engine.isRunning"）。
         if isRunning { return }
         engineQueue.sync {}            // 等上一次的停止做完
+        let input = engine.inputNode
+
+        // 语音增强：系统的语音处理单元，改它之前必须先把音频会话停掉（Apple 的要求）。
+        // 开着会话改，轻则直接报错（以前只在日志里留一行，看不出来）、
+        // 重则行为不对（录出来的声音发闷、发杂）。
+        // 所以顺序是：停会话 → 设语音增强 → 再按"要麦克风"把会话激活。
+        if input.isVoiceProcessingEnabled != voiceProcessing {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            do { try input.setVoiceProcessingEnabled(voiceProcessing) }
+            catch { hearLog("语音增强设置失败：\(error)", .warning) }
+        }
         // 正在收音：会话用 .playAndRecord（要麦克风）
         AudioRoute.capturing = true
         do {
@@ -67,13 +78,6 @@ final class AudioCapture {
         } catch {
             AudioRoute.capturing = false
             throw error
-        }
-        let input = engine.inputNode
-
-        // 语音增强：要在引擎启动前设置
-        if input.isVoiceProcessingEnabled != voiceProcessing {
-            do { try input.setVoiceProcessingEnabled(voiceProcessing) }
-            catch { hearLog("语音增强设置失败：\(error)", .warning) }
         }
         if input.isVoiceProcessingEnabled {
             // 不要因为开了语音增强把朗读声音压低

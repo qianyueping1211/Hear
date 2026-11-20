@@ -279,9 +279,33 @@ final class LiveSession: ObservableObject {
         }
     }
     @Published private(set) var headsetConnected = false
+    /// 正在套用 iCloud 同步过来的设置（这时候不重启麦克风）
+    private var applyingSyncedSettings = false
+
     // 语音增强：系统的降噪 + 回声消除 + 自动增益
     @Published var voiceProcessing: Bool {
-        didSet { save("voiceProcessing", voiceProcessing); capture.voiceProcessing = voiceProcessing }
+        didSet {
+            guard voiceProcessing != oldValue else { return }
+            save("voiceProcessing", voiceProcessing)
+            capture.voiceProcessing = voiceProcessing
+            // 语音增强是设在输入节点上的，引擎不停就没法改：
+            // 正在收音时改开关，就把麦克风重开一次（录屏时想临时关掉语音增强，
+            // 不用先停一次翻译）。
+            // 同步过来的设置不在这里重启（那是后台换的，不该打断当前这一句）。
+            if isRunning, !applyingSyncedSettings { restartCapture() }
+        }
+    }
+
+    /// 重开麦克风（改了输入相关的设置时用）
+    private func restartCapture() {
+        hearLog("重开麦克风（语音增强\(voiceProcessing ? "开" : "关")）")
+        capture.stop()
+        do {
+            try capture.start()
+            AudioRoute.apply(outputMode)
+        } catch {
+            hearLog("重开麦克风失败：\(error)", .error)
+        }
     }
 
     private let capture = AudioCapture()
@@ -2440,6 +2464,8 @@ final class LiveSession: ObservableObject {
 
     /// iCloud 把设置同步过来了：把新设置直接换上，不用重开 App
     func reloadSyncedSettings() {
+        applyingSyncedSettings = true
+        defer { applyingSyncedSettings = false }
         let d = UserDefaults.standard
         // 在线模型先换：语音克隆走云端的话，本地的克隆模型要卸掉
         let ca = d.string(forKey: "cloudAddress") ?? ""
