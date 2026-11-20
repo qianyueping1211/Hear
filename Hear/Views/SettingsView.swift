@@ -100,13 +100,9 @@ struct SettingsView: View {
                         }
                     }
                     if cloud.enabled && !cloud.hasFolder {
-                        // 只有系统还没给过云盘权限时才有这一行（点一次授权，以后不用再管）
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("还没有 iCloud 云盘的访问权限。授权一次就行，之后设置和历史会自动同步到云盘里的「听见」文件夹，不用再选目录。")
-                                .font(.footnote).foregroundStyle(.orange)
-                            Button("授权 iCloud 云盘（只此一次）") { showCloudPicker = true }
-                                .buttonStyle(.bordered)
-                        }
+                        // 只有系统还没给过云盘权限时才有这一个按钮（授权一次，以后不用再管）
+                        Button("授权 iCloud 云盘") { showCloudPicker = true }
+                            .buttonStyle(.bordered)
                     }
                     if let m = cloud.message {
                         Text(m).font(.footnote).foregroundStyle(.orange)
@@ -134,9 +130,8 @@ struct SettingsView: View {
                         Text("云端服务引擎").tag("cloud")
                     }
                     Picker("声音克隆", selection: voiceCloneEngineBinding) {
-                        Text("苹果自带").tag("apple")
-                        Text("本地引擎：Qwen").tag("local")
                         Text("云端服务引擎").tag("cloud")
+                        Text("本地引擎：Qwen").tag("local")
                     }
                     if session.translationEngine == "local", !session.isInstalled(.translation) {
                         Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
@@ -243,6 +238,8 @@ struct SettingsView: View {
                 // MARK: 朗读（出声 → 音色 → 耳机左右耳）
                 Section {
                     Toggle("朗读译文", isOn: $session.speakOutput)
+                    // 声音克隆开关：默认关。开了就用说话人的原声朗读译文
+                    Toggle("声音克隆", isOn: $session.voiceClone)
                     Picker("朗读从哪里出声", selection: outputBinding) {
                         Text("手机扬声器").tag(AudioOutput.speaker)
                         Text("耳机").tag(AudioOutput.headphones)
@@ -262,7 +259,7 @@ struct SettingsView: View {
                 } header: {
                     Text("朗读")
                 } footer: {
-                    Text("朗读用系统声音；在「声音克隆引擎」选本地 Qwen 后，会用说话人的原声朗读。")
+                    Text("开了「声音克隆」就用说话人的原声朗读译文。用的模型在「引擎管理 → 声音克隆」里选：云端服务引擎（默认）或本地 Qwen。")
                 }
 
                 Section {
@@ -309,8 +306,14 @@ struct SettingsView: View {
             // （有本地引擎 → 本地模型；都是在线 / 在线+苹果 → 在线模型）
             .onChange(of: session.asrEngine) { _, _ in syncModelTab() }
             .onChange(of: session.translationEngine) { _, _ in syncModelTab() }
-            .onChange(of: session.voiceClone) { _, _ in syncModelTab() }
             .onChange(of: session.voiceCloneCloud) { _, _ in syncModelTab() }
+            .onChange(of: session.voiceClone) { _, on in
+                syncModelTab()
+                // 打开声音克隆但本地模型还没下载：先问要不要下载
+                if on, !session.voiceCloneCloud, !session.isInstalled(.voiceClone), !session.bgDownloading {
+                    askClone = true
+                }
+            }
             // 在线模型页每 2 秒自动更新一次状态，不用手动点刷新
             .task(id: modelTab) {
                 guard modelTab == 1 else { return }
@@ -392,11 +395,10 @@ struct SettingsView: View {
                       message: engineDownloadMessage) {
             if let e = pendingEngine { session.downloadForEngine(e) }
         }
-        // 打开声音克隆但还没下载模型：先问要不要下载
+        // 本地声音克隆模型还没下载：先问要不要下载
         .centerDialog(isPresented: $askClone,
                       title: "下载声音克隆模型？",
-                      message: "声音克隆需要下载 Qwen3-TTS 模型（GGUF，约 760 MB），请连接 Wi‑Fi。下载期间先用系统声音朗读，下载完成后自动改用原声。下载时请保持 App 在前台。") {
-            session.voiceClone = true
+                      message: "本地声音克隆需要 Qwen3-TTS 模型（GGUF，约 760 MB），请连接 Wi‑Fi。下载期间先用系统声音朗读，下载完成后自动改用原声。下载时请保持 App 在前台。") {
             session.startBackgroundDownload(kinds: [.voiceClone], switchWhenDone: false)
         }
     }
@@ -430,11 +432,10 @@ struct SettingsView: View {
 
     private var voiceCloneEngineBinding: Binding<String> {
         Binding(
-            get: { session.voiceCloneCloud ? "cloud" : (session.voiceClone ? "local" : "apple") },
+            get: { session.voiceCloneCloud ? "cloud" : "local" },
             set: { v in
                 if v == "cloud" {
                     session.voiceCloneCloud = true
-                    session.voiceClone = true
                     return
                 }
                 // 选本地克隆：别的本地引擎开着的话不行（会互相抢内存导致崩溃）
@@ -443,12 +444,8 @@ struct SettingsView: View {
                     return
                 }
                 session.voiceCloneCloud = false
-                let on = v == "local"
-                if on == session.voiceClone { return }
-                if !on { session.voiceClone = false; return }
-                if session.isInstalled(.voiceClone) {
-                    session.voiceClone = true
-                } else if !session.bgDownloading {
+                // 模型没下载的话，先问要不要下（不自动开开关）
+                if !session.isInstalled(.voiceClone), !session.bgDownloading {
                     askClone = true
                 }
             }

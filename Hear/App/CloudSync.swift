@@ -331,14 +331,10 @@ final class CloudSync: ObservableObject {
     }
 
     /// 打开 iCloud 同步后检查一下能不能拿到云盘里的文件夹。
-    /// 拿不到不会自动弹选择框，只在设置里提示"授权一次"。
+    /// 拿不到不弹任何提示：设置里会出现一个「授权 iCloud 云盘」的按钮，点一次就行。
     func checkFolderAccess() {
         guard enabled else { return }
-        if hasFolder {
-            if let m = message, m.hasPrefix("iCloud") { message = nil }
-            return
-        }
-        message = "还没有 iCloud 云盘的访问权限：点下面的「授权 iCloud 云盘」授权一次就行（只此一次）。之后数据都自动放在云盘里的「\(Self.syncFolderName)」文件夹里，不用再选。"
+        if hasFolder, let m = message, m.hasPrefix("iCloud") { message = nil }
     }
 
     /// 强制把设置重新写一遍并上传。

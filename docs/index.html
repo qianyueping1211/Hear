@@ -373,7 +373,7 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>当前版本</dt><dd>0.4.36</dd></div>
+        <div><dt>当前版本</dt><dd>0.4.37</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
         <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
         <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
@@ -569,7 +569,13 @@ section.band{scroll-margin-top:62px}
         <ul>
           <li><b>译文朗读</b>　可开关；朗读期间麦克风自动静音，杜绝回声串音。</li>
           <li><b>左右耳</b>　耳机模式下可指定译文进左耳或右耳，另一侧播放原文或静音。</li>
-          <li><b>声音克隆</b>　Qwen3-TTS 0.6B，喂一段参考音频 + 参考文本，用这个音色念译文。</li>
+          <li><b>声音克隆</b>　在「朗读」栏里单独开关（默认关）。模型在「引擎管理 → 声音克隆」里选：
+              <strong>云端服务引擎（默认）</strong>或本地 Qwen3-TTS 0.6B（喂一段参考音频 + 参考文本，用这个音色念译文）。
+              列表里没有「苹果自带」——系统本身没有声音克隆的能力。</li>
+          <li><b>克隆失败会明说</b>　云端克隆服务不可用时弹一条「声音克隆服务不可用，已改用系统声音朗读」，
+              并在日志里记下原因，不会悄悄换成系统声音。</li>
+          <li><b>等得到再放弃</b>　云端克隆要等电脑那边算完，最多等 60 秒；
+              同一句只发一次请求（发两次会排队，等太久就超时退回系统声音）。</li>
           <li><b>克隆缓存</b>　内存 LRU 60 条 + 磁盘 WAV 长期留存，按 SHA256 命名。</li>
           <li><b>音色选择</b>　系统朗读优选高质量音色，过滤个人音色与 novelty 音色。</li>
         </ul>
@@ -879,7 +885,8 @@ section.band{scroll-margin-top:62px}
              只有开过 <code>startAccessingSecurityScopedResource()</code> 的那一个能动里面的东西，
              之前的版本解析了两次，于是每次都以为「没权限」，又要让用户重新选。
              现在权限在整个 App 运行期间一直开着，
-             只有系统完全没给过云盘权限时，设置里才会出现一个「授权 iCloud 云盘（只此一次）」的按钮。</p>
+             只有系统完全没给过云盘权限时，设置里才会出现一个「授权 iCloud 云盘」的按钮——
+             界面上不再有任何说明文字和提示气泡，点一下授权即可。</p>
           <p>同步三类数据：<code>settings.plist</code>（设置，26 个键，用 SHA256 指纹判断是否被改过；
              「实时翻译 / 对话翻译」这个模式<strong>只存在本机</strong>，不跟 iCloud 走，
              否则每次启动都会被云盘里的旧值改回去；
@@ -1398,7 +1405,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.36</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.37</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>

@@ -131,8 +131,9 @@ final class LiveSession: ObservableObject {
     ///   · 都是在线引擎，或者在线 + 苹果自带混着用 → 在线模型
     ///   · 全是苹果自带 → 本地模型
     var preferredModelTab: Int {
-        let engines = [asrEngine, translationEngine,
-                       voiceCloneCloud ? "cloud" : (voiceClone ? "local" : "apple")]
+        // 声音克隆的开关关着的时候不算一个引擎
+        var engines = [asrEngine, translationEngine]
+        if voiceClone { engines.append(voiceCloneCloud ? "cloud" : "local") }
         if engines.contains(where: { Self.isLocalEngine($0) }) { return 0 }
         if engines.contains("cloud") { return 1 }
         return 0
@@ -304,6 +305,12 @@ final class LiveSession: ObservableObject {
     private var working = false
     private var currentSeg = 0
     private var partialSeg = 0            // 实时气泡（partial）属于第几句
+    /// 刚停下来时保留下来的那一条：断句的最后一段声音要挂到它身上（声音克隆用）
+    private var stopFlushItemID: UUID?
+    /// 停下来那一刻正在说的那句（断句器最后会把它的声音交出来）
+    private var stopFlushSegID = 0
+    /// 声音克隆服务不可用（已经提醒过，别一直弹）
+    private var cloneUnavailableNotified = false
     // 实时预览分两条线：识别只管出原文，翻译只拿最新的原文去翻，互不等待
     private var previewSamples: (id: Int, samples: [Float])?
     private var asrPreviewBusy = false
@@ -358,7 +365,14 @@ final class LiveSession: ObservableObject {
         leftEar = d.string(forKey: "leftEar") ?? "A"
         rightEar = d.string(forKey: "rightEar") ?? "B"
         voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
-        voiceCloneCloud = d.object(forKey: "voiceCloneCloud") as? Bool ?? false
+        // 声音克隆默认用云端模型（本地 Qwen 要下 760 MB）；已经设置过的按原来的来
+        if let v = d.object(forKey: "voiceCloneCloud") as? Bool {
+            voiceCloneCloud = v
+        } else if d.object(forKey: "voiceCloneCloud") != nil {
+            voiceCloneCloud = d.bool(forKey: "voiceCloneCloud")
+        } else {
+            voiceCloneCloud = true
+        }
         // init 里属性还没初始化完，只能用局部变量，不能直接读 self.cloudAddress
         let cloudAddr = d.string(forKey: "cloudAddress") ?? ""
         cloudAddress = cloudAddr
@@ -1390,6 +1404,8 @@ final class LiveSession: ObservableObject {
         stopAppleASR()
         finishedSeg = max(finishedSeg, currentSeg)
         // 整句话可能还没识别完（界面上是虚线框）：按了暂停，这句也要留在记录里，不能丢
+        stopFlushItemID = nil
+        stopFlushSegID = currentSeg
         flushPartial()
         partial = ""; partialTranslation = ""; partialSource = nil
         finishUnfinished()
@@ -1411,6 +1427,7 @@ final class LiveSession: ObservableObject {
         item.translated = partialTranslation
         item.done = !partialTranslation.isEmpty
         items.append(item)
+        stopFlushItemID = item.id      // 断句器最后一段声音会挂到这条上
         hearLog("暂停：保留了一句还没说完的（\(text.prefix(40))）")
         persist()
     }
@@ -1598,9 +1615,11 @@ final class LiveSession: ObservableObject {
 
     private func handle(_ e: Segmenter.Event) {
         // 已经停止：停止前还没送到的断句事件一律丢弃
+        // （最后那句的"结束"要接住：它带着这段声音，声音克隆要用）
         if !isRunning && !holdReleasing {
             switch e {
-            case .started, .partial, .ended: return
+            case .started, .partial: return
+            case .ended: break
             default: break
             }
         }
@@ -1623,6 +1642,7 @@ final class LiveSession: ObservableObject {
                 Task { await previewLoop() }
             }
         case .ended(let id, let samples):
+            let alreadyDone = id <= finishedSeg
             finishedSeg = id
             live?.markSegmentEnd(id)
             for eng in appleEngines { eng.markSegmentEnd(id) }
@@ -1635,11 +1655,31 @@ final class LiveSession: ObservableObject {
             let mine = partialSeg == id
             let src = forcedLang ?? (mine ? partialSource : nil) ?? ((lastLangID == langB.id) ? langB : langA)
             let tgt = src == langA ? langB : langA
+            // 已经停下来了：这一句不会再走整句识别，
+            // 但这段声音要留下来（声音克隆的样本），译文等下接着补
+            if !isRunning {
+                if id == stopFlushSegID, let fid = stopFlushItemID {
+                    stopFlushItemID = nil
+                    if let idx = items.firstIndex(where: { $0.id == fid }) {
+                        rememberReference(fid, samples: samples, text: items[idx].sourceText,
+                                          lang: items[idx].source.id)
+                        hearLog("暂停：这一段声音留给声音克隆用")
+                    }
+                }
+                finishedSeg = max(finishedSeg, id)
+                return
+            }
+            // 上一轮停下来残留的断句事件，别重复加一条
+            if alreadyDone { return }
             var item = TranslationItem(source: src, target: tgt,
                                        sourceText: mine && !partial.isEmpty ? partial : "…")
             item.translated = mine ? partialTranslation : ""
             items.append(item)
             if mine { partial = ""; partialTranslation = ""; partialSource = nil }
+            // 声音样本先记下来（声音克隆要用）：
+            // 整句识别要好几秒，用户随时可能点停止，
+            // 等识别完再记就来不及了（那样只能退回系统声音朗读）
+            rememberReference(item.id, samples: samples, text: item.sourceText, lang: src.id)
             queue.append((item.id, id, samples))
             if !working { Task { await drain() } }
         case .discarded(let id):
@@ -2243,14 +2283,18 @@ final class LiveSession: ObservableObject {
         // 聆听中用扬声器读（只有点句子时才会）：暂停麦克风，避免把喇叭声音再识别一遍
         let mute = outputMode == .speaker && isRunning
         // 声音克隆：等提前生成好的克隆声音，没有就用系统声音。
-        // 放 CPU 跑的时候慢一些，多给点时间
-        let cloneWait: UInt64 = cloneOnCPU ? 40_000_000_000 : 20_000_000_000
+        // 云端要等电脑那边算完（自己也要几秒），多给点时间：
+        // 宁可多等一会儿用原声，也不要等不及就退回系统声音。
+        let cloneWait: UInt64 = (usingCloudClone || cloneOnCPU) ? 60_000_000_000 : 30_000_000_000
         var cloned: CloneAudio?
+        // 发了请求但没拿到声音 = 服务不可用；连请求都没发 = 这句没有声音样本
+        var cloneAsked = false
         if voiceClone {
             // ?? 的右边不能带 await（自动闭包里不支持异步），所以分开写
             var task = cloneTasks[item.id]
-            if task == nil { task = await prepareClone(item.id) }
+            if task == nil { task = prepareClone(item.id) }
             if let t = task {
+                cloneAsked = true
                 if cloneTasks[item.id] == nil { cloneTasks[item.id] = t }
                 // 声音还在生成：告诉界面把喇叭显示成灰色
                 clonePreparingID = item.id
@@ -2260,6 +2304,22 @@ final class LiveSession: ObservableObject {
             }
         }
         hearLog("朗读：\(item.target.displayName)，\(outputMode == .speaker ? "扬声器" : (pan < 0 ? "左耳" : (pan > 0 ? "右耳" : "双耳")))，\(cloned != nil ? "克隆原声" : "系统声音")")
+        // 开了声音克隆却没拿到克隆声音：提醒一下
+        if voiceClone, cloned == nil {
+            if cloneAsked {
+                // 请求发出去了但没等到声音：服务不可用
+                hearLog("声音克隆服务不可用，改用系统声音朗读", .warning)
+                if !cloneUnavailableNotified {
+                    cloneUnavailableNotified = true
+                    showToast("声音克隆服务不可用，已改用系统声音朗读", seconds: 4)
+                }
+            } else {
+                // 连请求都没发：这句话没有声音样本（说得太短、太长，或者开关刚打开）
+                hearLog("这句没有声音样本，改用系统声音朗读", .warning)
+            }
+        } else if cloned != nil {
+            cloneUnavailableNotified = false
+        }
         if mute { capture.muted = true }
         if let cloned {
             let ok = await speaker.play(samples: cloned.samples, sampleRate: Double(cloned.sampleRate), pan: pan)
@@ -2317,7 +2377,8 @@ final class LiveSession: ObservableObject {
         items[i].done = done
         // 译文定稿后马上在后台生成克隆声音，轮到朗读时就不用等
         if done, voiceClone, speakOutput, changed || cloneTasks[id] == nil {
-            Task { cloneTasks[id] = await prepareClone(id) }
+            if changed { cloneTasks[id] = nil }      // 原文改了，之前那次的克隆作废
+            _ = prepareClone(id)                    // 同一句只发一次请求
         }
     }
 
@@ -2603,16 +2664,22 @@ final class LiveSession: ObservableObject {
             translationEngine = appleAvailable ? "apple" : "local"
         case .clone:
             guard voiceCloneCloud else { return false }
-            // 声音克隆退回苹果自带（不克隆，直接用系统声音读）
+            // 云端克隆用不了了：先关掉声音克隆（直接用系统声音读）。
+            // 引擎还是云端，下次打开开关再试一次。
             voiceClone = false
-            voiceCloneCloud = false
         }
-        hearLog("云端\(model.title)调用失败，已改为苹果自带引擎：\(reason)", .warning)
+        hearLog(model == .clone
+                ? "声音克隆服务不可用，已改用系统声音朗读：\(reason)"
+                : "云端\(model.title)调用失败，已改为苹果自带引擎：\(reason)", .warning)
         // 服务端自己报错（500 之类）和网络不通，说的话不一样
         let serverSide = reason.contains("云端服务返回")
-        showToast(serverSide
-                  ? "云端\(model.title)服务出错了，已经切换为苹果自带引擎"
-                  : "由于网络不稳定或模型不可用，已经切换为苹果自带引擎", seconds: 4)
+        if model == .clone {
+            showToast("声音克隆服务不可用，已改用系统声音朗读", seconds: 4)
+        } else {
+            showToast(serverSide
+                      ? "云端\(model.title)服务出错了，已经切换为苹果自带引擎"
+                      : "由于网络不稳定或模型不可用，已经切换为苹果自带引擎", seconds: 4)
+        }
         // 换引擎会停掉当前会话，接着把它起回来，翻译不中断。
         // 注意：上面的 asrEngine/translationEngine 改动已经触发了 stop()，
         // 这里必须等它真的停完再开始，否则麦克风会被开两次（AVAudioEngine 崩）。
@@ -2721,23 +2788,29 @@ final class LiveSession: ObservableObject {
     }
 
     /// 在后台生成这句译文的克隆声音；没有样本、不支持这种语言或模型没加载时返回 nil
-    private func prepareClone(_ id: UUID) async -> Task<CloneAudio?, Never>? {
+    ///
+    /// 同一句只发一次请求：已经在生成中就把那个任务原样还回去。
+    /// （云端一次只发一个克隆请求，两个请求排着队会等太久，
+    ///   等不及就退回系统声音了——听着像是"没走云端"）
+    private func prepareClone(_ id: UUID) -> Task<CloneAudio?, Never>? {
+        // 已经有一个任务在跑（或者已经生成好了）：直接用，别再发一遍请求
+        if let existing = cloneTasks[id] { return existing }
         guard let ref = cloneRefs[id],
               let item = items.first(where: { $0.id == id }),
               !item.translated.isEmpty, !item.translated.hasPrefix("（翻译失败"),
               VoiceCloneGGUF.languageNames[item.target.id] != nil else { return nil }
         let text = item.translated, lang = item.target.id
         let key = cloneCacheKey(lang: lang, text: text)
-        // 之前生成过一样的，直接拿来放，不用再等模型算一遍
-        if let cached = await CloneCache.shared.get(key) {
-            hearLog("声音克隆：命中缓存，直接播放")
-            return Task<CloneAudio?, Never> { cached }
-        }
         let cloner = self.cloner
         let cloud = self.cloud
         let useCloud = usingCloudClone
-        return Task.detached(priority: .userInitiated) {
+        let t = Task<CloneAudio?, Never>.detached(priority: .userInitiated) {
             do {
+                // 之前生成过一样的，直接拿来放，不用再等模型算一遍
+                if let cached = await CloneCache.shared.get(key) {
+                    hearLog("声音克隆：命中缓存，直接播放")
+                    return cached
+                }
                 if useCloud {
                     // 把可用内存一起记上：万一又被系统杀掉，日志里能看出来
                     let memMB = await MainActor.run { Self.freeMB() }
@@ -2769,6 +2842,8 @@ final class LiveSession: ObservableObject {
                 return nil
             }
         }
+        cloneTasks[id] = t
+        return t
     }
 
     // MARK: - 设置
