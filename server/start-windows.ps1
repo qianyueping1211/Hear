@@ -26,6 +26,8 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 # 让 Python 一定用 UTF-8 写日志（不管系统是什么语言）
 $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
+# 打印一行中文，自己看一眼显示正不正常（还是乱码就是这个控制台代码页的问题）
+Write-Host "  中文显示测试：听见（正常应该就是这行字）" -ForegroundColor DarkGray
 $tempCloud = $null      # 临时服务进程（出错时要停掉）
 $cloud = $null          # 正式服务进程
 $ServerDir = $PSScriptRoot                                  # ...\Hear\server
