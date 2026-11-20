@@ -2151,6 +2151,12 @@ final class LiveSession: ObservableObject {
     private var drainTask: Task<Void, Never>?
     private var drainGen = 0
 
+    /// 一句的识别+翻译跑完没有（用来判断是不是卡住了）。
+    /// 只有主线程碰它，所以不用加锁。
+    private final class JobState: @unchecked Sendable {
+        var finished = false
+    }
+
     private func enqueueDrain() {
         guard drainTask == nil else { return }
         drainGen += 1
@@ -2172,7 +2178,9 @@ final class LiveSession: ObservableObject {
         while !queue.isEmpty {
             let job = queue.removeFirst()
             let gen = runGen
+            let state = JobState()
             let jobTask = Task { [weak self] in
+                defer { state.finished = true }
                 guard let self else { return }
                 if self.usingAppleASR {
                     await self.processApple(job.samples, itemID: job.itemID, segID: job.segID, gen: gen)
@@ -2182,13 +2190,13 @@ final class LiveSession: ObservableObject {
             }
             // 一句最多等 150 秒：这一句卡住了，也不能把后面的句子全堵死
             var waited = 0
-            while !jobTask.isFinished {
+            while !state.finished {
                 if waited >= 1500 { break }
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 waited += 1
                 if Task.isCancelled { break }
             }
-            if !jobTask.isFinished {
+            if !state.finished {
                 hearLog("这句卡住太久了，先跳过，后面的句子继续处理", .warning)
                 jobTask.cancel()
             } else {
