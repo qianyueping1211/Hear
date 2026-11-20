@@ -146,7 +146,16 @@ final class AudioCapture {
 
     private func installTapAndStart() throws {
         let input = engine.inputNode
-        let inFormat = input.outputFormat(forBus: 0)
+        // 刚激活音频会话时，硬件有时还没准备好，输入格式会短暂地是 0×0。
+        // 这时候直接报错就"麦克风起不来"了，用户看着像是整个实时翻译坏了。
+        // 等一小会儿再看，最多等 0.5 秒。
+        var inFormat = input.outputFormat(forBus: 0)
+        var waited = 0
+        while inFormat.sampleRate <= 0 || inFormat.channelCount <= 0, waited < 10 {
+            Thread.sleep(forTimeInterval: 0.05)
+            inFormat = input.outputFormat(forBus: 0)
+            waited += 1
+        }
         guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
             throw NSError(domain: "Hear", code: 1, userInfo: [NSLocalizedDescriptionKey: "无法使用麦克风"])
         }

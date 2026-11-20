@@ -1368,11 +1368,13 @@ final class LiveSession: ObservableObject {
                 } catch {
                     hearLog("麦克风启动失败：\(error)", .error)
                     activity = "麦克风启动失败：\(error.localizedDescription)"
+                    showToast("麦克风启动失败，请看日志", seconds: 4)
                     return false
                 }
             } else {
                 hearLog("麦克风启动失败：\(error)", .error)
                 activity = "麦克风启动失败：\(error.localizedDescription)"
+                showToast("麦克风启动失败，请看日志", seconds: 4)
                 return false
             }
         }

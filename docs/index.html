@@ -373,7 +373,7 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>当前版本</dt><dd>0.4.41</dd></div>
+        <div><dt>当前版本</dt><dd>0.4.42</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
         <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
         <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
@@ -766,6 +766,9 @@ section.band{scroll-margin-top:62px}
              设置里可以关掉，界面上也写清楚了。</p>
           <p>语音增强用 <code>setVoiceProcessingEnabled</code>（回声消除 + 降噪 + AGC），同时把 ducking 配置为
              <code>enableAdvancedDucking: false</code>、<code>duckingLevel: .min</code>——否则朗读时系统会把麦克风压低。</p>
+          <p><strong>麦克风起不来时的兜底</strong>：刚激活音频会话，硬件有时还没准备好，
+             输入格式会短暂地是 0×0。这时不直接报错，等最多 0.5 秒再看；
+             真的起不来会把「麦克风启动失败」弹出来并写进日志，不会闷着不动。</p>
           <p><strong>语音增强只在收音的时候开</strong>：不收音就停掉音频会话，麦克风整个让出来。
              而且 Apple 要求<strong>改语音处理之前必须先停会话</strong>，所以顺序是
              「停会话 → 设语音增强 → 按需要激活会话」——开着会话改，轻则报错、重则录出来发闷发杂。
@@ -1463,7 +1466,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.41</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.42</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>
