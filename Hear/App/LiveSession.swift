@@ -1317,7 +1317,10 @@ final class LiveSession: ObservableObject {
         }
         // 已经插着耳机就用耳机朗读（除非用户手动选了扬声器）；耳机已拔掉就改回扬声器
         // 注意：这里不强制改输出路由，避免开始聆听时麦克风被重新配置
-        try? AudioRoute.activate()
+        // 马上要收音了，会话直接按"要麦克风"来设（.playAndRecord），
+        // 别先设成播放再改回来——来回切类别会让别的 App 听到杂音
+        AudioRoute.capturing = true
+        try? AudioRoute.updateSession()
         let hasHeadphones = AudioRoute.headphonesLikelyConnected()
         if outputMode == .speaker, hasHeadphones, !manualSpeaker {
             outputMode = .headphones

@@ -55,7 +55,10 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     /// 朗读一段文字，读完（或被 stop 打断）后返回
     func speak(_ req: SpeakRequest) async {
         stop()
-        try? AudioRoute.activate()
+        // 只是放声音：会话用 .playback，不占麦克风
+        // （占着麦克风的话，手机上录屏、录音机就录不到了）
+        AudioRoute.speaking = true
+        try? AudioRoute.updateSession()
         let u = AVSpeechUtterance(string: req.text)
         u.voice = req.voice ?? Self.bestVoice(for: req.locale)
         u.pitchMultiplier = req.pitch
@@ -88,6 +91,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
                 self.resume(gen)
             }
         }
+        AudioRoute.speaking = false
+        try? AudioRoute.updateSession()
+        stopEngineIfIdle()
     }
 
     /// 播放一段已经生成好的声音（声音克隆朗读用），播完（或被 stop 打断）后返回。
@@ -96,7 +102,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         stop()
         // 重新激活音频会话会把"输出到哪"重置掉（setCategory 会清掉 override），
         // 这里再应用一次，保证声音真的从耳机出来
-        try? AudioRoute.activate()
+        // 只是放声音：不占麦克风
+        AudioRoute.speaking = true
+        try? AudioRoute.updateSession()
         AudioRoute.apply(AudioRoute.lastOutput)
         guard !samples.isEmpty else { return false }
         // 采样率是 0 的话下面算时长会除出无穷大，Dispatch 会直接崩，这里兜一下
@@ -160,6 +168,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         if started {
             hearLog("朗读：克隆声音 \(String(format: "%.1f", Double(samples.count) / sr)) 秒，\(Int(sr)) Hz，峰值 \(String(format: "%.2f", peak))")
         }
+        AudioRoute.speaking = false
+        try? AudioRoute.updateSession()
+        stopEngineIfIdle()
         return started
     }
 
@@ -179,6 +190,19 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             let c = continuation
             continuation = nil
             c?.resume()
+        }
+        AudioRoute.speaking = false
+        stopEngineIfIdle()
+    }
+
+    /// 停一会儿以后把播放引擎也停掉。
+    /// 引擎一直开着就会一直占着音频输出：别的 App 放声音会跟我们互相干扰，
+    /// 录屏里的声音也容易出现杂音。
+    private func stopEngineIfIdle() {
+        queue.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self else { return }
+            guard !self.synth.isSpeaking, !self.player.isPlaying else { return }
+            self.engine.stop()
         }
     }
 
@@ -252,7 +276,8 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     private func ensureEngine() -> AVAudioFormat? {
         // 重新激活音频会话会把"输出到哪"重置掉（setCategory 会清掉 override），
         // 这里再应用一次，保证声音真的从耳机出来
-        try? AudioRoute.activate()
+        AudioRoute.speaking = true
+        try? AudioRoute.updateSession()
         AudioRoute.apply(AudioRoute.lastOutput)
         let hw = hardwareFormat()
         if connectedFormat == nil

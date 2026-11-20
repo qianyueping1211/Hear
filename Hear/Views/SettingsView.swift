@@ -200,6 +200,11 @@ struct SettingsView: View {
                         Text("耳机麦克风").tag("headset")
                     }
                     Toggle("语音增强（降噪、消除回声）", isOn: $session.voiceProcessing)
+                    // 语音增强用的是系统的语音处理单元，它会独占麦克风：
+                    // 同时录屏、录音的时候，别的 App 拿到的声音会又刺又碎。
+                    // 平时用不到的话关掉，兼容性最好。
+                    Text("语音增强会独占麦克风：录屏、录音时如果声音发杂，就把它关掉")
+                        .font(.caption).foregroundStyle(.secondary)
                     VStack(alignment: .leading) {
                         Text("说话灵敏度：\(Int(session.sensitivity)) dB")
                         Slider(value: $session.sensitivity, in: 6...24, step: 1)

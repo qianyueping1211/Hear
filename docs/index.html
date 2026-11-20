@@ -373,7 +373,7 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>当前版本</dt><dd>0.4.39</dd></div>
+        <div><dt>当前版本</dt><dd>0.4.40</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
         <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
         <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
@@ -735,9 +735,24 @@ section.band{scroll-margin-top:62px}
       <div class="key">
         <div class="term"><span class="tag">AUDIO</span><h4>采集与重采样</h4></div>
         <div class="detail">
-          <p>用 <code>AVAudioEngine</code> 的 <code>installTap</code>（bufferSize 4096，format 传 nil 跟随真实格式）取流，
+          <p>用 <code>AVAudioEngine</code> 的 <code>installTap</code>（format 传 nil 跟随真实格式）取流，
              再用 <code>AVAudioConverter</code> 统一转成 <b>16 kHz / 单声道 / Float32</b>；格式变化时重建转换器，
              容量按 <code>frameLength × ratio + 64</code> 预留，避免爆音。</p>
+          <p><strong>每次取整 100 毫秒</strong>（16 kHz 正好 1600 个采样）：
+             采样数不能被整除时，转到 16 kHz 会攒出零头，转换器偶尔错开一小截，
+             听起来就是「刺刺」的杂音。</p>
+          <p><strong>音频线程上只做最少的事</strong>：取到的样本立刻送去后台线程，
+             系统听写、其它识别引擎的喂样本都在后台做——
+             音频线程是实时线程，哪一下没赶上就会漏音。</p>
+          <p><strong>会话类别按「要不要麦克风」来定</strong>：正在收音是 <code>.playAndRecord</code>，
+             只是朗读就降成 <code>.playback</code>——<code>.playback</code> 不占麦克风，
+             手机上别的 App（录屏、录音机）才录得到声音。
+             改类别只在没有声音在放的时候做：改类别会打断正在播的声音。</p>
+          <p><strong>播放引擎用完就停</strong>：朗读结束 0.6 秒后把 <code>AVAudioEngine</code> 停掉。
+             引擎一直开着会一直占着音频输出，别的 App 放声音会跟我们互相干扰。</p>
+          <p><strong>语音增强（<code>setVoiceProcessingEnabled</code>）会独占麦克风</strong>：
+             同时录屏、录音的时候，别的 App 拿到的声音会又刺又碎。
+             设置里可以关掉，界面上也写清楚了。</p>
           <p>语音增强用 <code>setVoiceProcessingEnabled</code>（回声消除 + 降噪 + AGC），同时把 ducking 配置为
              <code>enableAdvancedDucking: false</code>、<code>duckingLevel: .min</code>——否则朗读时系统会把麦克风压低。</p>
         </div>
@@ -1432,7 +1447,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.39</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.40</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>

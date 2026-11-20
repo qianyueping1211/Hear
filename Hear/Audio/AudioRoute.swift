@@ -23,25 +23,61 @@ enum AudioRoute {
     /// 上一次真正应用过的输出方式（用来避免重复改路由）
     private static var appliedOutput: AudioOutput?
 
-    /// 设置为“可录音 + 可播放”。
+    /// 正在收音（要麦克风）
+    static var capturing = false
+    /// 正在放声音（只是播放）
+    static var speaking = false
+
+    /// 按当前状态设置音频会话。
+    ///
+    /// - 正在收音 → .playAndRecord（要麦克风）
+    /// - 只是放声音 → .playback（**不占麦克风**）
+    ///
+    /// 以前不管有没有在收音都用 .playAndRecord，结果只是朗读的时候
+    /// 也把麦克风占着：手机上别的 App（录屏、录音机）就录不到声音，
+    /// 录屏里的声音会变得又刺又碎。
+    ///
     /// 用手机麦克风时，蓝牙耳机走高音质 A2DP（只播放）；
     /// 用耳机麦克风时，需要蓝牙通话模式（HFP），耳机播放会变成单声道通话音质。
-    static func activate() throws {
+    static func updateSession() throws {
         let s = AVAudioSession.sharedInstance()
-        // .defaultToSpeaker：没有耳机时走扬声器（不是听筒）。
-        // 插着耳机时系统还是走耳机（除非用 overrideOutputAudioPort(.speaker) 强制）。
-        var opts: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
-        if useHeadsetMic { opts.insert(.allowBluetooth) }
-        // setCategory 会把"输出到哪"重置掉，只有真的改了类别才需要重新应用
-        var categoryChanged = (s.category != .playAndRecord || s.categoryOptions != opts)
-        if categoryChanged {
-            try s.setCategory(.playAndRecord, mode: .default, options: opts)
+        if capturing {
+            // .defaultToSpeaker：没有耳机时走扬声器（不是听筒）。
+            // 插着耳机时系统还是走耳机（除非用 overrideOutputAudioPort(.speaker) 强制）。
+            var opts: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
+            if useHeadsetMic { opts.insert(.allowBluetooth) }
+            // setCategory 会把"输出到哪"重置掉，只有真的改了类别才需要重新应用
+            var categoryChanged = (s.category != .playAndRecord || s.categoryOptions != opts)
+            if categoryChanged {
+                try s.setCategory(.playAndRecord, mode: .default, options: opts)
+            }
+            try s.setActive(true)
+            // 换麦克风也会重置路由
+            if applyInput() { categoryChanged = true }
+            if categoryChanged { appliedOutput = nil }
+            apply(lastOutput)
+            return
         }
-        try s.setActive(true)
-        // 换麦克风也会重置路由
-        if applyInput() { categoryChanged = true }
-        if categoryChanged { appliedOutput = nil }
+        if speaking {
+            // 正在放声音：不要改类别（改类别会打断正在播的声音），
+            // 只保证会话是活的
+            try? s.setActive(true)
+            apply(lastOutput)
+            return
+        }
+        // 不放声音：类别降回 .playback，不占麦克风。
+        // 会话本身的启停交给别的地方管（停用会话要几百毫秒，不能在这里做）。
+        let opts: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
+        if s.category != .playback || s.categoryOptions != opts {
+            try? s.setCategory(.playback, mode: .default, options: opts)
+            appliedOutput = nil
+        }
         apply(lastOutput)
+    }
+
+    /// 设置为“可录音 + 可播放”（旧入口，现在按当前状态来）
+    static func activate() throws {
+        try updateSession()
     }
 
     /// 音频会话被停用过几次。
@@ -62,6 +98,7 @@ enum AudioRoute {
     /// 必须在后台线程调用：关会话时蓝牙耳机会从通话模式切回音乐模式，
     /// 要好几百毫秒，卡住主线程会让界面发涩。
     static func deactivate() {
+        if capturing { return }          // 还在收音，不能停会话
         genLock.lock(); deactivateGen += 1; genLock.unlock()
         let s = AVAudioSession.sharedInstance()
         try? s.setActive(false, options: .notifyOthersOnDeactivation)

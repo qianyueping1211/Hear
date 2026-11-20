@@ -23,6 +23,8 @@ final class AudioCapture {
     private let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                           sampleRate: 16_000, channels: 1, interleaved: false)!
     private let queue = DispatchQueue(label: "hear.audio.segmenter")
+    /// 送样本给别的识别引擎用（不在音频线程上做）
+    private let feedQueue = DispatchQueue(label: "hear.audio.feed", qos: .userInitiated)
     /// 停止音频引擎放在后台做：戴蓝牙耳机时，关麦克风会让系统把耳机从通话模式切回音乐模式，
     /// 要好几百毫秒，放在主线程会让界面（例如切换模式的动画）卡住
     private let engineQueue = DispatchQueue(label: "hear.audio.engine", qos: .userInitiated)
@@ -58,7 +60,14 @@ final class AudioCapture {
         // 重复挂会直接崩（"required condition is false: !engine.isRunning"）。
         if isRunning { return }
         engineQueue.sync {}            // 等上一次的停止做完
-        try AudioRoute.activate()
+        // 正在收音：会话用 .playAndRecord（要麦克风）
+        AudioRoute.capturing = true
+        do {
+            try AudioRoute.updateSession()
+        } catch {
+            AudioRoute.capturing = false
+            throw error
+        }
         let input = engine.inputNode
 
         // 语音增强：要在引擎启动前设置
@@ -94,7 +103,12 @@ final class AudioCapture {
                 Thread.sleep(forTimeInterval: 0.3 * Double(attempt))
             }
         }
-        if let lastError = lastError { throw lastError }
+        if let lastError = lastError {
+            // 起不来就别占着麦克风
+            AudioRoute.capturing = false
+            try? AudioRoute.updateSession()
+            throw lastError
+        }
         queue.async { [segmenter] in segmenter.reset() }
         isRunning = true
         let f = input.outputFormat(forBus: 0)
@@ -104,12 +118,15 @@ final class AudioCapture {
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        // 不收音了：会话降回 .playback（只是朗读的时候不占麦克风）
+        AudioRoute.capturing = false
         let engine = self.engine
         engineQueue.async { [queue, segmenter] in
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
             // 引擎停了再把最后一句交出去，后面不会再有声音进来
             queue.async { segmenter.flush() }
+            try? AudioRoute.updateSession()
         }
     }
 
@@ -129,12 +146,16 @@ final class AudioCapture {
         guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
             throw NSError(domain: "Hear", code: 1, userInfo: [NSLocalizedDescriptionKey: "无法使用麦克风"])
         }
+        // 每次取整 100 毫秒的声音（16 kHz 正好 1600 个采样）。
+        // 采样数要是不能被整除，转成 16 kHz 时就会攒零头，
+        // 转换器偶尔会错开一小截，听起来就是"刺刺"的杂音。
+        let size = AVAudioFrameCount(max(256, (inFormat.sampleRate / 10).rounded()))
         // 引擎在跑的时候不能换 tap，必须先停下来（AVFAudio 的硬性要求，
         // 违反会直接 crash：'required condition is false: !engine.isRunning'）
         if engine.isRunning { engine.stop() }
         input.removeTap(onBus: 0)
         // format 传 nil：始终按麦克风当前的真实格式接收，路由变化后也不会错位
-        input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
+        input.installTap(onBus: 0, bufferSize: size, format: nil) { [weak self] buffer, _ in
             self?.handle(buffer)
         }
         engine.prepare()
@@ -184,8 +205,12 @@ final class AudioCapture {
         guard error == nil, let ch = out.floatChannelData, out.frameLength > 0 else { return }
         let samples = Array(UnsafeBufferPointer(start: ch[0], count: Int(out.frameLength)))
         let isMuted = muted
+        // 送样本的活儿放到后台线程做：
+        // 这个回调跑在音频线程上（实时线程），在这儿做转换、拷贝、
+        // 喂系统听写，哪一下没赶上就会漏音，听起来是「刺刺」的杂音。
         if let feed = onSamples {
-            feed(isMuted ? [Float](repeating: 0, count: samples.count) : samples)
+            let input = isMuted ? [Float](repeating: 0, count: samples.count) : samples
+            feedQueue.async { feed(input) }
         }
         queue.async { [segmenter] in
             if isMuted { segmenter.reset() } else { segmenter.feed(samples) }
