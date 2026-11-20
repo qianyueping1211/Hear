@@ -333,8 +333,10 @@ actor CloudClient {
         } catch let e as URLError {
             switch e.code {
             case .appTransportSecurityRequiresSecureConnection:
+                // 地址写错（比如没写 http://、IP 打错）时系统也会报这个，
+                // 界面上别提版本号，就说地址不可用让人去确认，细节写日志里
                 hearLog("云端连接被系统拦下：\(s)（\(e.code.rawValue)）", .warning)
-                return "被系统拦下了（不允许 http 明文）：确认地址是 http:// 开头、App 是最新版；也可以试试 https://\(s.dropFirst(7))"
+                return "服务地址不可用，请确认"
             case .cannotConnectToHost:
                 let u = URL(string: s)
                 let host = u?.host ?? "电脑的IP"
