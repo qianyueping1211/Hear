@@ -1355,10 +1355,9 @@ final class LiveSession: ObservableObject {
         }
         // 已经插着耳机就用耳机朗读（除非用户手动选了扬声器）；耳机已拔掉就改回扬声器
         // 注意：这里不强制改输出路由，避免开始聆听时麦克风被重新配置
-        // 马上要收音了，会话直接按"要麦克风"来设（.playAndRecord），
-        // 别先设成播放再改回来——来回切类别会让别的 App 听到杂音
-        AudioRoute.capturing = true
-        try? AudioRoute.updateSession()
+        // 音频会话也先不碰：capture.start() 会按"要麦克风"把会话设成 .playAndRecord。
+        // 在这之前先改一次类别，等于让音频路由白白变一次，
+        // 系统会重新配置引擎，麦克风刚接上又被打断（以前就是这样：刚开始就听不稳）。
         let hasHeadphones = AudioRoute.headphonesLikelyConnected()
         if outputMode == .speaker, hasHeadphones, !manualSpeaker {
             outputMode = .headphones
@@ -1471,6 +1470,12 @@ final class LiveSession: ObservableObject {
         // 停止收音 = 立刻停止所有识别和翻译：清空排队的句子，打断正在生成的译文
         runGen += 1
         queue.removeAll()
+        // 流水线也要收干净：不收的话 working 一直挂在 true，
+        // 下一次开始以后新句子进不了队列（表现就是"重新开始也只能说一两句"）
+        drainGen += 1
+        drainTask?.cancel()
+        drainTask = nil
+        working = false
         translator.cancelCurrent()
         translator.cancelPreview()
         previewSamples = nil
@@ -1755,7 +1760,10 @@ final class LiveSession: ObservableObject {
                 return
             }
             // 上一轮停下来残留的断句事件，别重复加一条
-            if alreadyDone { return }
+            if alreadyDone {
+                hearLog("断句：第 \(id) 句是重复事件，跳过", .warning)
+                return
+            }
             var item = TranslationItem(source: src, target: tgt,
                                        sourceText: mine && !partial.isEmpty ? partial : "…")
             item.translated = mine ? partialTranslation : ""
@@ -1766,7 +1774,7 @@ final class LiveSession: ObservableObject {
             // 等识别完再记就来不及了（那样只能退回系统声音朗读）
             rememberReference(item.id, samples: samples, text: item.sourceText, lang: src.id)
             queue.append((item.id, id, samples))
-            if !working { Task { await drain() } }
+            enqueueDrain()
         case .discarded(let id):
             finishedSeg = max(finishedSeg, id)
             if partialSeg == id { partial = ""; partialTranslation = ""; partialSource = nil }
@@ -2131,17 +2139,62 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 整句识别和翻译
 
+    /// 整句识别 + 翻译的流水线。一次只跑一个，别让两句话抢引擎。
+    ///
+    /// 以前是"没在忙就起一个 drain"，有三个坑：
+    /// 一是两个"没在忙"之间可能塞进两句话，起两个 drain 抢着干；
+    /// 二是 working 只有全部干完才置回 false，哪一句卡住（网络、模型、语音增强），
+    /// 整条流水线就永远停在那儿——后面的话一句也不会再被识别，
+    /// 表现就是"上一句翻译完了，下一句就不动了"；
+    /// 三是停止的时候 working 没复位，重新开始以后队列再也不动。
+    /// 现在：单独一个任务负责收尾、收尾一定复位、每句都加上限。
+    private var drainTask: Task<Void, Never>?
+    private var drainGen = 0
+
+    private func enqueueDrain() {
+        guard drainTask == nil else { return }
+        drainGen += 1
+        let g = drainGen
+        drainTask = Task { [weak self] in
+            guard let self else { return }
+            await self.drain()
+            // 已经被新一轮接管了，就别去动新任务的状态
+            guard self.drainGen == g else { return }
+            self.drainTask = nil
+            // 收尾这一小会儿里要是又来了新句子，接着处理，别把它落下
+            if !self.queue.isEmpty { self.enqueueDrain() }
+        }
+    }
+
     private func drain() async {
         working = true
+        defer { working = false }
         while !queue.isEmpty {
             let job = queue.removeFirst()
-            if usingAppleASR {
-                await processApple(job.samples, itemID: job.itemID, segID: job.segID, gen: runGen)
+            let gen = runGen
+            let jobTask = Task { [weak self] in
+                guard let self else { return }
+                if self.usingAppleASR {
+                    await self.processApple(job.samples, itemID: job.itemID, segID: job.segID, gen: gen)
+                } else {
+                    await self.process(job.samples, itemID: job.itemID, gen: gen)
+                }
+            }
+            // 一句最多等 150 秒：这一句卡住了，也不能把后面的句子全堵死
+            var waited = 0
+            while !jobTask.isFinished {
+                if waited >= 1500 { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                waited += 1
+                if Task.isCancelled { break }
+            }
+            if !jobTask.isFinished {
+                hearLog("这句卡住太久了，先跳过，后面的句子继续处理", .warning)
+                jobTask.cancel()
             } else {
-                await process(job.samples, itemID: job.itemID, gen: runGen)
+                _ = await jobTask.value
             }
         }
-        working = false
     }
 
     /// 对话翻译模式下按住的语言（实时翻译模式为 nil）

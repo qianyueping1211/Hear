@@ -92,7 +92,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             }
         }
         AudioRoute.speaking = false
-        try? AudioRoute.updateSession()
+        // 还在收音的时候不要动音频会话：改会话类别/路由会把正在跑的麦克风打断，
+        // 麦克风一断，后面的话就再也识别不到了（以前就是这样：读一句、断一句）。
+        if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         stopEngineIfIdle()
     }
 
@@ -104,7 +106,8 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         // 这里再应用一次，保证声音真的从耳机出来
         // 只是放声音：不占麦克风
         AudioRoute.speaking = true
-        try? AudioRoute.updateSession()
+        // 收音的时候不动会话：会话一改，正在跑的麦克风会被打断
+        if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         AudioRoute.apply(AudioRoute.lastOutput)
         guard !samples.isEmpty else { return false }
         // 采样率是 0 的话下面算时长会除出无穷大，Dispatch 会直接崩，这里兜一下
@@ -169,7 +172,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             hearLog("朗读：克隆声音 \(String(format: "%.1f", Double(samples.count) / sr)) 秒，\(Int(sr)) Hz，峰值 \(String(format: "%.2f", peak))")
         }
         AudioRoute.speaking = false
-        try? AudioRoute.updateSession()
+        if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         stopEngineIfIdle()
         return started
     }
@@ -202,6 +205,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         queue.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self else { return }
             guard !self.synth.isSpeaking, !self.player.isPlaying else { return }
+            // 还在收音的时候别停：停引擎会让系统重新配置音频路由，
+            // 正在跑的麦克风会被打断，实时翻译就再也听不到下一句了。
+            guard !AudioRoute.capturing else { return }
             self.engine.stop()
         }
     }
@@ -277,7 +283,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         // 重新激活音频会话会把"输出到哪"重置掉（setCategory 会清掉 override），
         // 这里再应用一次，保证声音真的从耳机出来
         AudioRoute.speaking = true
-        try? AudioRoute.updateSession()
+        // 收音的时候不要重新激活会话：会话一改，正在跑的麦克风会被打断，
+        // 麦克风一断就再也听不到下一句了。
+        if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         AudioRoute.apply(AudioRoute.lastOutput)
         let hw = hardwareFormat()
         if connectedFormat == nil

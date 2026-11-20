@@ -38,10 +38,26 @@ final class Segmenter {
     private var frameCounter = 0
     private var voicedLevel: Float = -40  // 这句话说话声的平均音量，用来判断停顿
 
-    func reset() {
+    /// 丢掉当前正在说的这一句（不算一句话的开始/结束），环境噪声的估计留着。
+    ///
+    /// 朗读译文的时候用：喇叭的声音不能算成用户说的话，
+    /// 但环境噪声还得继续估（不然朗读一结束门限就乱跳）。
+    func discardCurrent() {
         if inSpeech { onEvent?(.discarded(segID)) }
         carry.removeAll(); preroll.removeAll(); speech.removeAll()
         inSpeech = false; voicedRun = 0; silentRun = 0; voicedFrames = 0
+    }
+
+    /// 完全重置：连环境噪声的估计一起清掉。
+    ///
+    /// 环境噪声是最近 3 秒音量的第 10 百分位。以前重新开始收音时不清，
+    /// 上一轮要是正好在很吵的环境里（或者刚读完一段译文），
+    /// 底噪会被估得偏高，说话的门限也跟着抬高，高到说话声都够不着——
+    /// 结果就是一句都断不出来，看着像"麦克风坏了"。
+    func reset() {
+        discardCurrent()
+        history.removeAll()
+        voicedLevel = -40
     }
 
     /// 停止时把正在说的那句也交出去

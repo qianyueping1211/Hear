@@ -5,6 +5,13 @@ import AVFoundation
 /// - 输出路由改变（扬声器/耳机切换、插拔耳机）时，系统会重配音频引擎、麦克风格式也可能变；
 ///   这里会自动重新接上麦克风，并按实际格式重采样，避免收到变速的“乱码”声音。
 /// - 可选“语音增强”：系统自带的回声消除 + 降噪 + 自动增益（和 FaceTime 同一套）。
+///
+/// 两条铁律（都是踩过坑才定下来的）：
+/// 1. **动引擎的活儿全排在 engineQueue 上**：挂 tap、停引擎、重新接麦克风。
+///    以前挂 tap 在主线程、停引擎在后台线程，两边同时动同一个输入节点，
+///    结果是"引擎在跑却没有声音"——界面还显示正在聆听，其实麦克风早就哑了。
+/// 2. **麦克风必须能自己恢复**：接不上就重试，还接不上就看门狗隔几秒再试，
+///    绝不能悄悄哑掉（用户只能把实时翻译关掉再打开才恢复）。
 final class AudioCapture {
     let segmenter = Segmenter()
 
@@ -33,6 +40,35 @@ final class AudioCapture {
     private(set) var isRunning = false
     private var configObserver: NSObjectProtocol?
 
+    // MARK: - 麦克风"活着"的自我检测（下面这些都只在 engineQueue 上读写）
+
+    /// tap 是否已经挂在输入节点上
+    private var tapInstalled = false
+    /// 挂 tap 时的输入格式：路由没变就别白折腾一次（折腾有可能把正在用的 tap 弄掉）
+    private var installedFormat: (rate: Double, ch: AVAudioChannelCount) = (0, 0)
+    /// 正在重新接麦克风，别重入
+    private var rearming = false
+    /// 看门狗定时器
+    private var watchdog: DispatchSourceTimer?
+    /// 系统中断中（来电、别的 App 抢音频）：这时候别去折腾麦克风
+    private var interrupted = false
+    /// 连续几次没收到声音（看门狗每 3 秒数一次）
+    private var silentTicks = 0
+
+    // MARK: - 收尾用的小账本（跨线程读写，走 lock）
+
+    private var _gen = 0
+    /// 每开一次麦换一个号：收尾的时候好知道"这一轮已经有人接手了"
+    private var gen: Int { lock.lock(); defer { lock.unlock() }; return _gen }
+    private func bumpGen() { lock.lock(); _gen += 1; lock.unlock() }
+
+    private var _lastSample = Date()
+    /// 最近一次收到声音的时间（看门狗用它判断麦克风是不是哑了）
+    private var lastSampleAt: Date {
+        get { lock.lock(); defer { lock.unlock() }; return _lastSample }
+        set { lock.lock(); _lastSample = newValue; lock.unlock() }
+    }
+
     /// 朗读译文时静音麦克风，避免把喇叭声音又识别一遍
     var muted: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _muted }
@@ -43,7 +79,26 @@ final class AudioCapture {
         configObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
         ) { [weak self] _ in
+            // 通知是在主线程收到的，但动引擎的活儿一律交给 engineQueue，
+            // 和 stop()/start() 排成一条线，不会互相踩
             self?.restartAfterConfigChange()
+        }
+        // 来电、别的 App 抢音频：系统会把引擎停掉。
+        // 这时候不要自己去抢麦克风，等中断结束再重新接上。
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            let type = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                ?? AVAudioSession.InterruptionType.began.rawValue
+            let began = type == AVAudioSession.InterruptionType.began.rawValue
+            self.engineQueue.async {
+                self.interrupted = began
+                if !began {
+                    hearLog("系统中断结束，重新连接麦克风", .warning)
+                    self.rearmMic(reason: "系统中断结束")
+                }
+            }
         }
     }
 
@@ -59,12 +114,75 @@ final class AudioCapture {
         // 已经在跑就别再开一次：AVAudioEngine 一个输入只能挂一个 tap，
         // 重复挂会直接崩（"required condition is false: !engine.isRunning"）。
         if isRunning { return }
-        engineQueue.sync {}            // 等上一次的停止做完
+        // 换一轮号：上一轮的收尾看到号不一样，就不会再去动音频会话
+        bumpGen()
+        // 先把断句器清干净（连环境噪声的估计一起清）。
+        // 必须在起引擎之前清：引擎一起来就会往里灌声音，
+        // 晚一步清的话，头一小段声音会被 reset 抹掉。
+        queue.sync { [segmenter] in segmenter.reset() }
+        var lastError: Error?
+        // 所有动引擎的活儿都在 engineQueue 上做，和 stop()/重新接麦克风串行
+        engineQueue.sync {
+            do {
+                try prepareAndStart()
+                lastError = nil
+            } catch {
+                lastError = error
+            }
+        }
+        if let lastError {
+            // 起不来就别占着麦克风
+            AudioRoute.capturing = false
+            try? AudioRoute.updateSession()
+            throw lastError
+        }
+        isRunning = true
+        startWatchdog()
+        let f = engine.inputNode.outputFormat(forBus: 0)
+        hearLog("麦克风已启动：\(Int(f.sampleRate)) Hz，\(f.channelCount) 声道，语音增强\(engine.inputNode.isVoiceProcessingEnabled ? "开" : "关")")
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+        stopWatchdog()
+        let g = gen
+        let engine = self.engine
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            self.removeTap()
+            engine.stop()
+            // 引擎停了再把最后一句交出去，后面不会再有声音进来
+            self.queue.async { self.segmenter.flush() }
+            // 引擎真的停了，才告诉音频会话"不收音了"。
+            // 早一步改类别（.playAndRecord → .playback）会把还在跑的引擎的输入抽走，
+            // 系统重新配置引擎，麦克风就断在半路上（以后再也没有声音进来）。
+            // 这期间要是已经又开了一轮新的收音，就别动会话了，交给 start() 处理。
+            guard self.gen == g else { return }
+            AudioRoute.capturing = false
+            try? AudioRoute.updateSession()
+        }
+    }
+
+    /// 放开麦克风：停用音频会话，别占着麦克风不让别的 App 用。
+    ///
+    /// 排在 engineQueue 后面执行，保证引擎已经停了才停会话
+    /// （引擎还在跑的时候停会话，麦克风会被系统打断）。
+    func releaseSession() {
+        engineQueue.async {
+            AudioRoute.deactivate()
+        }
+    }
+
+    // MARK: - 打开麦克风（一定在 engineQueue 上跑）
+
+    /// 语音增强 → 音频会话 → 挂 tap → 起引擎
+    private func prepareAndStart() throws {
         let input = engine.inputNode
 
         // 语音增强：系统的语音处理单元，改它之前必须先把音频会话停掉（Apple 的要求）。
         // 开着会话改，轻则直接报错（以前只在日志里留一行，看不出来）、
-        // 重则行为不对（录出来的声音发闷、发杂）。
+        // 重则把输入节点搞成半坏状态、麦克风根本起不来。
         // 所以顺序是：停会话 → 设语音增强 → 再按"要麦克风"把会话激活。
         if input.isVoiceProcessingEnabled != voiceProcessing {
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -99,6 +217,7 @@ final class AudioCapture {
                 lastError = error
                 hearLog("麦克风启动失败（第 \(attempt)/3 次）：\(error)", .warning)
                 engine.stop()
+                removeTap()
                 if input.isVoiceProcessingEnabled {
                     // 个别情况下语音增强启动失败：关掉再试一次
                     try? input.setVoiceProcessingEnabled(false)
@@ -107,40 +226,11 @@ final class AudioCapture {
                 Thread.sleep(forTimeInterval: 0.3 * Double(attempt))
             }
         }
-        if let lastError = lastError {
+        if let lastError {
             // 起不来就别占着麦克风
             AudioRoute.capturing = false
             try? AudioRoute.updateSession()
             throw lastError
-        }
-        queue.async { [segmenter] in segmenter.reset() }
-        isRunning = true
-        let f = input.outputFormat(forBus: 0)
-        hearLog("麦克风已启动：\(Int(f.sampleRate)) Hz，\(f.channelCount) 声道，语音增强\(input.isVoiceProcessingEnabled ? "开" : "关")")
-    }
-
-    func stop() {
-        guard isRunning else { return }
-        isRunning = false
-        // 不收音了：会话降回 .playback（只是朗读的时候不占麦克风）
-        AudioRoute.capturing = false
-        let engine = self.engine
-        engineQueue.async { [queue, segmenter] in
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-            // 引擎停了再把最后一句交出去，后面不会再有声音进来
-            queue.async { segmenter.flush() }
-            try? AudioRoute.updateSession()
-        }
-    }
-
-    /// 放开麦克风：停用音频会话，别占着麦克风不让别的 App 用。
-    ///
-    /// 排在 engineQueue 后面执行，保证引擎已经停了才停会话
-    /// （引擎还在跑的时候停会话，麦克风会被系统打断）。
-    func releaseSession() {
-        engineQueue.async {
-            AudioRoute.deactivate()
         }
     }
 
@@ -166,35 +256,128 @@ final class AudioCapture {
         // 引擎在跑的时候不能换 tap，必须先停下来（AVFAudio 的硬性要求，
         // 违反会直接 crash：'required condition is false: !engine.isRunning'）
         if engine.isRunning { engine.stop() }
+        // 挂新 tap 之前一定要先把旧的摘掉：重复挂会直接崩。
         input.removeTap(onBus: 0)
+        tapInstalled = false
         // format 传 nil：始终按麦克风当前的真实格式接收，路由变化后也不会错位
         input.installTap(onBus: 0, bufferSize: size, format: nil) { [weak self] buffer, _ in
             self?.handle(buffer)
         }
+        tapInstalled = true
+        installedFormat = (inFormat.sampleRate, inFormat.channelCount)
+        lastSampleAt = Date()
         engine.prepare()
         try engine.start()
     }
 
+    /// 把 tap 摘掉（只摘一次，摘两次会出问题）
+    private func removeTap() {
+        guard tapInstalled else { return }
+        tapInstalled = false
+        engine.inputNode.removeTap(onBus: 0)
+    }
+
+    // MARK: - 重新接麦克风（一定在 engineQueue 上跑）
+
     /// 切换扬声器/耳机、插拔耳机后，系统会停掉引擎：重新接上麦克风继续聆听
     private func restartAfterConfigChange() {
         guard isRunning else { return }
-        let f = engine.inputNode.outputFormat(forBus: 0)
-        hearLog("音频路由变化，重新连接麦克风（\(Int(f.sampleRate)) Hz）", .warning)
-        engine.stop()
-        // 路由刚变，硬件有时还没准备好，失败就重新激活会话再来一次
-        for attempt in 1...2 {
-            do {
-                try installTapAndStart()
+        engineQueue.async { [weak self] in
+            guard let self, self.isRunning else { return }
+            let f = self.engine.inputNode.outputFormat(forBus: 0)
+            // 输入格式没变的话，这次变化跟麦克风无关（比如只是输出路由变了）。
+            // 白折腾一次反而容易把正在用的 tap 弄掉，不用管。
+            if self.tapInstalled, self.engine.isRunning,
+               abs(f.sampleRate - self.installedFormat.rate) < 1,
+               f.channelCount == self.installedFormat.ch {
                 return
-            } catch {
-                hearLog("重新连接麦克风失败（第 \(attempt)/2 次）：\(error)", .error)
-                engine.stop()
-                AudioRoute.reset()
             }
+            hearLog("音频路由变化，重新连接麦克风（\(Int(f.sampleRate)) Hz）", .warning)
+            self.rearmMic(reason: "路由变化")
         }
     }
 
+    /// 重新接一次麦克风。接不上就重试几次；
+    /// 全失败了也别悄悄哑掉——看门狗下一轮还会再来一次。
+    private func rearmMic(reason: String) {
+        guard !rearming else { return }
+        rearming = true
+        defer { rearming = false }
+        hearLog("重新连接麦克风（\(reason)）", .warning)
+        engine.stop()
+        removeTap()
+        for attempt in 1...3 {
+            do {
+                try installTapAndStart()
+                silentTicks = 0
+                return
+            } catch {
+                hearLog("重新连接麦克风失败（第 \(attempt)/3 次）：\(error)", .error)
+                engine.stop()
+                removeTap()
+                AudioRoute.reset()
+                Thread.sleep(forTimeInterval: 0.25 * Double(attempt))
+            }
+        }
+        // 还是不行：引擎现在是停的、tap 也没挂，麦克风等于哑了。
+        // 看门狗会隔几秒再来一次，这里如实记一笔，别让日志里什么都没有。
+        hearLog("麦克风暂时接不上，过几秒会自动再试", .error)
+    }
+
+    // MARK: - 看门狗：麦克风哑了自己能发现
+
+    private func startWatchdog() {
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            guard self.watchdog == nil else { return }
+            let t = DispatchSource.makeTimerSource(queue: self.engineQueue)
+            t.schedule(deadline: .now() + 3, repeating: 3)
+            t.setEventHandler { [weak self] in self?.checkMicAlive() }
+            self.watchdog = t
+            t.resume()
+        }
+    }
+
+    private func stopWatchdog() {
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            self.watchdog?.cancel()
+            self.watchdog = nil
+            self.silentTicks = 0
+        }
+    }
+
+    /// 引擎在跑却好几秒没有声音进来，说明 tap 掉了、或者输入被系统掐了。
+    ///
+    /// 以前这种情况没人管：界面还显示"正在聆听"，其实麦克风早就哑了，
+    /// 用户说什么都没反应，只有把实时翻译关掉再打开才恢复。
+    /// 引擎每 100 毫秒都会给一次缓冲区（哪怕全是静音），所以"没声音"就是出问题了。
+    private func checkMicAlive() {
+        guard isRunning, !interrupted else { return }
+        if !tapInstalled || !engine.isRunning {
+            hearLog("麦克风没有声音了（引擎停了或 tap 掉了），自动重新接上", .warning)
+            silentTicks = 0
+            rearmMic(reason: "看门狗")
+            return
+        }
+        if Date().timeIntervalSince(lastSampleAt) > 4 {
+            silentTicks += 1
+            // 连续两次（大约 6 秒）没有声音才动手，避免打断正常的短暂卡顿
+            if silentTicks >= 2 {
+                silentTicks = 0
+                hearLog("麦克风 6 秒没有收到声音，自动重新接上", .warning)
+                rearmMic(reason: "看门狗")
+            }
+        } else {
+            silentTicks = 0
+        }
+    }
+
+    // MARK: - 收声音
+
     private func handle(_ buffer: AVAudioPCMBuffer) {
+        // 收到声音了：看门狗靠这个判断麦克风还活着
+        lastSampleAt = Date()
         // 按这一块声音的真实格式重采样（格式变了就重建转换器）
         if converter == nil || converter!.inputFormat != buffer.format {
             converter = AVAudioConverter(from: buffer.format, to: outFormat)
@@ -226,7 +409,9 @@ final class AudioCapture {
             feedQueue.async { feed(input) }
         }
         queue.async { [segmenter] in
-            if isMuted { segmenter.reset() } else { segmenter.feed(samples) }
+            // 正在朗读：这一段声音不要（免得把喇叭的声音又识别一遍），
+            // 但环境噪声的估计要留着，别让门限乱跳
+            if isMuted { segmenter.discardCurrent() } else { segmenter.feed(samples) }
         }
     }
 }
