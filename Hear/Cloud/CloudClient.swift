@@ -116,6 +116,30 @@ actor CloudClient {
     /// 每个地址是哪种服务（改了地址就清掉缓存）
     private var kinds: [String: ServiceKind] = [:]
 
+    // MARK: - 克隆请求排队（一次只发一个）
+
+    /// 正在跑的克隆请求（true = 位置被占了）
+    private var cloneBusy = false
+
+    /// 拿一个位置来跑克隆请求。
+    /// 拿不到就等（前面的做完了会放出来）。
+    /// 返回 false 表示任务被取消了，别发请求。
+    private func acquireCloneSlot() async -> Bool {
+        // 轮询等位置（50 毫秒一次）：
+        // 简单、不会漏掉、也不会把位置给错人
+        while cloneBusy {
+            if Task.isCancelled { return false }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        cloneBusy = true
+        return true
+    }
+
+    /// 用完了把位置放出来
+    private func releaseCloneSlot() {
+        cloneBusy = false
+    }
+
     /// 这个地址上跑的是哪种服务
     /// （探测失败时不缓存：可能只是暂时连不上，下次还要再问一次）
     func kind(of address: String) async -> ServiceKind {
@@ -474,7 +498,16 @@ actor CloudClient {
     // MARK: - 声音克隆
 
     /// 用参考音频里的声音念一句话
+    ///
+    /// 一次只发一个克隆请求：
+    /// 每句话都会在后台预生成声音，同时来好几句的话，
+    /// 好几个大响应一起在内存里，内存紧张时 App 会被系统直接杀掉。
     func clone(text: String, lang: String, reference: [Float], referenceText: String) async throws -> CloneAudio {
+        // 排队：一次只发一个克隆请求
+        guard await acquireCloneSlot() else {
+            throw CloudError.badResponse("任务已取消")
+        }
+        defer { releaseCloneSlot() }
         guard !reference.isEmpty else {
             throw CloudError.badResponse("没有参考音频")
         }

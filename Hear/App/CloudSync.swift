@@ -97,9 +97,15 @@ final class CloudSync: ObservableObject {
             .flatMap { $0.isEmpty ? nil : $0 } ?? "听见"
     }
 
+    /// 已经找到的同步文件夹（找到一次就记下来，不用每次都去问系统）
+    private var cachedFolder: URL?
+
     /// 有没有可以放同步数据的地方
     /// （App 自己的 iCloud 容器，或者之前授权过的 iCloud 文件夹）
-    var hasFolder: Bool { withFolderAccess { _ in true } ?? false }
+    var hasFolder: Bool {
+        if let cachedFolder { return true }
+        return withFolderAccess { _ in true } ?? false
+    }
 
     /// 同步数据所在的文件夹：iCloud 云盘里的「听见」
     ///
@@ -108,9 +114,11 @@ final class CloudSync: ObservableObject {
     ///   · 之前授权过的 iCloud 文件夹 → 里面固定放一个「听见」
     /// 挨个试，第一个能用的就是它（用不了的说明没权限）。
     private func resolveFolder() -> URL? {
+        if let cachedFolder { return cachedFolder }
         for dir in folderCandidates() {
             do {
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                cachedFolder = dir
                 return dir
             } catch {
                 continue     // 这个位置没权限，试下一个
@@ -216,6 +224,7 @@ final class CloudSync: ObservableObject {
         do {
             let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
             UserDefaults.standard.set(data, forKey: Keys.bookmark)
+            cachedFolder = nil
             // 换了文件夹：重新判断设置该用哪边的
             UserDefaults.standard.removeObject(forKey: Keys.settingsHash)
             hearLog("iCloud 同步：使用 iCloud 云盘里的「\(Self.syncFolderName)」文件夹")
