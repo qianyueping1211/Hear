@@ -706,7 +706,9 @@ final class LiveSession: ObservableObject {
         // 上次退出不正常（崩溃 / 被系统杀掉）：先查出来，提示用户
         if let prev = CrashGuard.shared.checkPreviousRun() {
             hearLog(prev, .warning)
-            showToast(prev, seconds: 6)
+            // 提示只显示第一句，完整的调用栈在日志里
+            let head = prev.split(separator: "\n").first.map(String.init) ?? prev
+            showToast(head, seconds: 6)
         }
         // 记下"这次在跑"，退出时删掉；下次打开还在就说明上次是不正常结束的
         CrashGuard.shared.markRunning()

@@ -987,7 +987,7 @@ struct LocalModelSheet: View {
 /// "本地模型 / 在线模型" 两个页签
 ///
 /// 自己画，不用系统的分段控件：
-///   - 高度可以自己定（比系统默认矮约一成）
+///   - 高度可以自己定（比系统默认高一点，好点得着）
 ///   - 字号用 .body，跟界面里其它文字一样大（系统的分段控件字偏小，看着不统一）
 ///   - 深色模式下也是浅色圆角块，不会变成黑块
 struct ModelTabBar: View {
@@ -1011,9 +1011,9 @@ struct ModelTabBar: View {
                     .font(.body)
                     .foregroundStyle(i == selection ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 30)
+                    .frame(height: 37)
                     .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
                             .fill(i == selection ? pillColor : Color.clear)
                             .shadow(color: Color.black.opacity(i == selection && scheme != .dark ? 0.12 : 0),
                                     radius: 1, x: 0, y: 0.5)
@@ -1028,6 +1028,7 @@ struct ModelTabBar: View {
             }
         }
         .padding(2)
-        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(trackColor))
+        // 弧度跟"模型管理"那一整块的圆角一致
+        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(trackColor))
     }
 }

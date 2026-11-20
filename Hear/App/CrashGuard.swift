@@ -14,6 +14,12 @@ import os
 final class CrashGuard {
     static let shared = CrashGuard()
 
+    /// 这次运行开始的时间。
+    /// 用来分辨"标记文件是上次留下的"还是"就是这次启动自己写的"
+    /// （回到前台时也会写标记，不然在后台被系统杀掉就看不出来了；
+    ///   但那一次正好撞上刚启动，就会误报"上次退出不正常"）
+    private static let processStart = Date()
+
     private let markerURL: URL
     private let crashURL: URL
     private let queue = DispatchQueue(label: "hear.crashguard")
@@ -115,19 +121,34 @@ final class CrashGuard {
     /// App 启动时调用：上次留下标记说明上次是不正常退出的
     /// 返回上次异常退出时记下来的原因（没有则返回 nil）
     func checkPreviousRun() -> String? {
-        let m = (try? Data(contentsOf: markerURL)).flatMap { try? JSONDecoder().decode(Marker.self, from: $0) }
+        var m = (try? Data(contentsOf: markerURL)).flatMap { try? JSONDecoder().decode(Marker.self, from: $0) }
         // 上次崩溃时写下的原因（如果有）
         let detail = (((try? String(contentsOf: crashURL, encoding: .utf8)) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines))
         try? FileManager.default.removeItem(at: markerURL)
         if !detail.isEmpty { try? FileManager.default.removeItem(at: crashURL) }
-        // 标记文件在（说明上次没正常收尾）和崩溃记录，都算异常
-        guard m != nil || !detail.isEmpty else { return nil }
-        var text = "上次退出不正常（可能是崩溃或被系统杀掉）"
-        if let m {
-            if m.memoryWarning { text += "，退出前收到过内存不足警告" }
-            if m.freeMB > 0 { text += "，退出前可用内存 \(m.freeMB) MB" }
+        // 标记文件是这次启动自己写的（回到前台时也会写），
+        // 不是上次留下的，不能当成"上次不正常退出"
+        if let mm = m, mm.startedAt >= Self.processStart {
+            m = nil
         }
+        // 光有"上次留下的标记文件"不算异常：
+        // 用户从多任务界面把 App 划掉、或者系统回收后台 App，都属正常，
+        // 那样每次打开都报"上次退出不正常"就太吵了。
+        // 只有下面这些才算有证据：
+        //   · 有崩溃记录（真的崩了）
+        //   · 退出前收到过内存不足警告（多半是被系统杀掉的）
+        //   · 退出前几乎没内存了（也是被系统杀掉的）
+        let hasCrash = !detail.isEmpty
+        let memWarning = m?.memoryWarning == true
+        let free = m?.freeMB ?? 0
+        let lowMem = free > 0 && free < 400
+        guard hasCrash || memWarning || lowMem else { return nil }
+
+        var text = "上次退出不正常"
+        if hasCrash { text += "（崩溃）" } else { text += "（可能是被系统杀掉）" }
+        if memWarning { text += "，退出前收到过内存不足警告" }
+        if free > 0 { text += "，退出前可用内存 \(free) MB" }
         if !detail.isEmpty { text += "\n\(detail)" }
         return text
     }
