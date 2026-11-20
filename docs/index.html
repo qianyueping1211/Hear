@@ -73,10 +73,14 @@ hr{border:0;border-top:1px solid var(--rule);margin:0}
 .mark span{font-family:var(--mono);font-size:11px;color:var(--muted);letter-spacing:.1em}
 .topnav{display:flex;gap:2px;margin-left:auto;flex-wrap:wrap}
 .topnav a{
+  display:inline-block;
   font-size:13.5px;color:var(--ink-2);text-decoration:none;
   padding:5px 11px;border-radius:4px;white-space:nowrap;
 }
 .topnav a:hover{background:rgba(17,26,34,.06);color:var(--ink)}
+/* 选中的那一个：点过就一直留着，鼠标移开也不消失 */
+.topnav a.active,
+.topnav a.active:hover{background:var(--ink);color:#F2F5F6}
 .topnav .gh{border:1px solid var(--rule);background:var(--card)}
 .topnav .gh:hover{border-color:var(--signal);color:var(--signal)}
 
@@ -106,7 +110,8 @@ section.band + section.band{padding-top:58px}
   font-family:var(--display);font-weight:600;font-size:clamp(1.6rem,3.4vw,2.15rem);
   letter-spacing:.01em;
 }
-.sechead .lede{margin:8px 0 0;color:var(--muted);font-size:15.5px;max-width:70ch}
+/* 介绍文字跟下面表格一样宽（右侧对齐到表格的右边） */
+.sechead .lede{margin:8px 0 0;color:var(--muted);font-size:15.5px;max-width:none}
 
 .subhead{
   font-family:var(--display);font-weight:600;font-size:1.12rem;color:var(--ink);
@@ -343,7 +348,8 @@ section.band{scroll-margin-top:62px}
 <header class="topbar">
   <div class="topbar-in">
     <a class="mark" href="#top"><b>听见</b><span>HEAR</span></a>
-    <nav class="topnav">
+    <nav class="topnav" id="nav">
+      <a href="#top">首页</a>
       <a href="#features">功能架构</a>
       <a href="#tech">技术架构</a>
       <a href="#cloud">在线模型服务</a>
@@ -367,7 +373,7 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>当前版本</dt><dd>0.4.29</dd></div>
+        <div><dt>当前版本</dt><dd>0.4.30</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
         <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
         <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
@@ -958,7 +964,7 @@ section.band{scroll-margin-top:62px}
           </tr>
           <tr>
             <td>聚合与健康检查</td>
-            <td><code>hear_cloud.py</code><span class="sub">ThreadingHTTPServer（http + https 同端口）</span></td>
+            <td><code>hear_cloud.py</code><span class="sub">ThreadingHTTPServer（同一个端口 http / https 都接）</span></td>
             <td>—</td>
             <td class="mono">8000</td>
             <td class="mono">GET /health · /ping · /</td>
@@ -982,7 +988,7 @@ section.band{scroll-margin-top:62px}
         <!-- 局域网 -->
         <line x1="120" y1="200" x2="398" y2="200" stroke="#DC5524" stroke-width="1.6" stroke-dasharray="7 6"/>
         <rect x="196" y="176" width="126" height="24" rx="4" fill="#FDF0EA"/>
-        <text x="259" y="192" text-anchor="middle" font-family="Cascadia Mono, monospace" font-size="10.5" fill="#DC5524">局域网 Wi-Fi · HTTP / HTTPS</text>
+        <text x="259" y="192" text-anchor="middle" font-family="Cascadia Mono, monospace" font-size="10.5" fill="#DC5524">局域网 Wi-Fi · HTTPS</text>
 
         <!-- 电脑容器 -->
         <rect x="398" y="26" width="478" height="330" rx="10" fill="#F7F9FA" stroke="#D3DDE3" stroke-width="1.4"/>
@@ -1094,9 +1100,8 @@ section.band{scroll-margin-top:62px}
              <span class="num-hl">模型专属地址 → 通用地址（8000，会转发给真正干活的模型服务）</span> 的顺序依次尝试，
              第一个成功的即采用；全部失败才把最后一个错误抛给界面。</p>
           <p>这意味着即使某个模型单独配的地址没起来，只要总服务活着，功能依然可用。</p>
-          <p>回退链上还有一步<strong>换协议</strong>：<code>http://</code> 连不上就试 <code>https://</code>，
-             反之亦然。因为总服务在同一个端口上两种协议都接（见 TLS 卡片），
-             用户填了哪一种都能通，App 也会在「测试连接」里直接告诉你哪个协议能用。</p>
+          <p>协议只有一种：<strong>只用 https</strong>。用户只填 <code>192.168.x.x:8000</code> 的话，
+             App 会自动补上 <code>https://</code>，测试连接之后把补好之后的地址回显出来。</p>
         </div>
       </div>
 
@@ -1118,11 +1123,12 @@ section.band{scroll-margin-top:62px}
              私钥只留在本机的 <code>server/certs/</code> 里，不进仓库。</p>
           <p>总服务在 8000 端口上<strong>同时接两种协议</strong>：接到连接先偷看第一个字节，
              TLS 握手的第一个字节固定是 <code>0x16</code>，是 TLS 就套上 TLS，否则按普通 http 处理。
-             所以手机里填 <code>http://192.168.x.x:8000</code> 或者
-             <code>https://192.168.x.x:8000</code> 都能连上，不用来回改。</p>
+             这样浏览器自检页面还能用 http 打开，App 则一律走 <code>https://</code>。</p>
           <p>App 侧只对<strong>内网地址</strong>（私有网段、<code>.local</code>、<code>localhost</code>）
              放行自签证书，公网域名照常走系统校验；
              同时用自带的会话而不是系统共享会话，因为共享会话没法挂证书处理程序。</p>
+          <p>地址写成 <code>http://</code> 也会被自动换成 <code>https://</code>，
+             根本没写协议的（只写 <code>192.168.x.x:8000</code>）则补上 <code>https://</code>。</p>
         </div>
       </div>
 
@@ -1340,7 +1346,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.29</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.30</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>
@@ -1359,6 +1365,57 @@ section.band{scroll-margin-top:62px}
     本文内容依据仓库 <code>qianyueping1211/Hear</code> 源码整理，技术参数与实现细节以源码为准。
   </div>
 </footer>
+
+<script>
+/* 顶部导航：
+   · 点过的那个一直保持选中（不靠 :hover，鼠标移开也不掉）
+   · 往下滚到别的章节，导航也跟着换，跟内容始终一致 */
+(function () {
+  var nav = document.getElementById('nav');
+  if (!nav) { return; }
+  var links = Array.prototype.slice.call(nav.querySelectorAll('a[href^="#"]'));
+  if (!links.length) { return; }
+
+  function setActive(id) {
+    links.forEach(function (a) {
+      var on = (a.getAttribute('href') === '#' + id);
+      if (on) { a.classList.add('active'); }
+      else { a.classList.remove('active'); }
+    });
+  }
+
+  var sections = links.map(function (a) {
+    return document.querySelector(a.getAttribute('href'));
+  });
+
+  links.forEach(function (a) {
+    a.addEventListener('click', function () {
+      setActive(a.getAttribute('href').slice(1));
+    });
+  });
+
+  function sync() {
+    var y = window.scrollY + 140;          // 顶栏下面一点算"到了这一节"
+    var current = null;
+    for (var i = 0; i < sections.length; i++) {
+      var sec = sections[i];
+      if (!sec) { continue; }
+      if (sec.offsetTop <= y) { current = sec.id; }
+    }
+    // 滚到底了就选最后一个
+    if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4) {
+      for (var j = sections.length - 1; j >= 0; j--) {
+        if (sections[j]) { current = sections[j].id; break; }
+      }
+    }
+    if (current) { setActive(current); }
+  }
+
+  window.addEventListener('scroll', sync, { passive: true });
+  window.addEventListener('resize', sync);
+  sync();
+})();
+</script>
 
 </body>
 </html>

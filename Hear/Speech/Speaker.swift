@@ -97,6 +97,8 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         try? AudioRoute.activate()
         AudioRoute.apply(AudioRoute.lastOutput)
         guard !samples.isEmpty else { return false }
+        // 采样率是 0 的话下面算时长会除出无穷大，Dispatch 会直接崩，这里兜一下
+        let sr = sampleRate > 0 ? sampleRate : 24_000
 
         // 音量过小的话听起来像没声音，放大到能听见的水平
         var boosted = samples
@@ -118,7 +120,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             playStarted = false
             return generation
         }
-        let limit = 5 + Double(samples.count) / sampleRate * 1.5
+        let limit = 5 + Double(samples.count) / sr * 1.5
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             queue.sync { continuation = c }
             queue.async { [self] in
@@ -130,7 +132,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
                     self.resume(gen)
                     return
                 }
-                guard let buf = Self.makeBuffer(samples: out, sampleRate: sampleRate, target: hw) else {
+                guard let buf = Self.makeBuffer(samples: out, sampleRate: sr, target: hw) else {
                     hearLog("朗读：克隆声音的缓冲区创建失败", .error)
                     self.resume(gen)
                     return
@@ -154,7 +156,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         }
         let started = queue.sync { playStarted }
         if started {
-            hearLog("朗读：克隆声音 \(String(format: "%.1f", Double(samples.count) / sampleRate)) 秒，\(Int(sampleRate)) Hz，峰值 \(String(format: "%.2f", peak))")
+            hearLog("朗读：克隆声音 \(String(format: "%.1f", Double(samples.count) / sr)) 秒，\(Int(sr)) Hz，峰值 \(String(format: "%.2f", peak))")
         }
         return started
     }

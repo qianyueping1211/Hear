@@ -664,13 +664,17 @@ def main():
     ctx = make_ssl_context()
     srv = MixedServer((HOST, PORT), Handler, ctx)
     log("服务起来了，监听 %s:%d" % (HOST, PORT))
-    log("本机测试：http://127.0.0.1:%d/" % PORT)
+    log("本机测试：https://127.0.0.1:%d/" % PORT)
     for ip in local_ips():
-        log("手机访问：http://%s:%d/" % (ip, PORT))
         if ctx is not None:
-            log("手机访问（加密）：https://%s:%d/" % (ip, PORT))
+            log("手机访问：https://%s:%d/" % (ip, PORT))
+        else:
+            log("手机访问：http://%s:%d/" % (ip, PORT))
     if ctx is not None:
-        log("同一个端口 http 和 https 都能用，App 里填哪个都行")
+        log("App 里填上面那个 https:// 地址就行（同一个端口 http 也能用，浏览器自检页面用）")
+    else:
+        log("！！没有证书（server/certs/cert.pem），App 只走 https，现在手机连不上")
+        log("   跑一次 python server/make_cert.py 生成证书，再重启服务")
     log("翻译后端：%s" % MT_URL)
     log("克隆后端：%s" % CLONE_URL)
     log("识别后端：%s" % (ASR_URL or "本机 faster-whisper（%s）" % ASR_MODEL))

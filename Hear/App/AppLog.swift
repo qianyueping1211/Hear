@@ -67,13 +67,33 @@ final class AppLog: ObservableObject {
 
     // MARK: 写入
 
-    func add(_ message: String, level: LogLevel = .info) {
+    func add(_ message: String, level: LogLevel = .info, saveToFile: Bool = true) {
         guard enabled else { return }
         let e = LogEntry(id: nextID, time: formatter.string(from: Date()), level: level, message: message)
         nextID += 1
         entries.append(e)
         if entries.count > maxInMemory { entries.removeFirst(entries.count - maxInMemory) }
-        write(e.line + "\n")
+        if saveToFile { write(e.line + "\n") }
+    }
+
+    /// 同步写一行到日志文件：不走主线程，也不进内存列表。
+    /// 崩溃或者被系统杀掉的时候来不及走队列，日志丢了就查不出原因，
+    /// 所以警告和错误级别的日志用这个直接落盘。
+    nonisolated static func appendDirect(_ message: String, _ level: LogLevel) {
+        if (UserDefaults.standard.object(forKey: "logEnabled") as? Bool ?? true) == false { return }
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("hear-log.txt")
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm:ss"
+        let line = "[\(f.string(from: Date()))] [\(level.rawValue)] \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if let h = try? FileHandle(forWritingTo: url) {
+            h.seekToEndOfFile()
+            h.write(data)
+            try? h.close()
+        } else {
+            try? data.write(to: url)
+        }
     }
 
     /// 写文件在后台队列做，别在主线程上做磁盘 IO（不然会影响交互流畅度）
@@ -161,5 +181,11 @@ final class AppLog: ObservableObject {
 
 /// 任何线程都可以调用
 func hearLog(_ message: String, _ level: LogLevel = .info) {
-    Task { @MainActor in AppLog.shared.add(message, level: level) }
+    if level == .info {
+        Task { @MainActor in AppLog.shared.add(message, level: level) }
+    } else {
+        // 警告和错误：先同步落盘（崩了就来不及走队列），再进内存列表
+        AppLog.appendDirect(message, level)
+        Task { @MainActor in AppLog.shared.add(message, level: level, saveToFile: false) }
+    }
 }

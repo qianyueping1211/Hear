@@ -163,14 +163,6 @@ actor CloudClient {
         if !p.isEmpty { out.append(p) }
         let s = sharedAddress
         if !s.isEmpty && !out.contains(s) { out.append(s) }
-        // 再加上换过协议的那个（电脑上开 https、手机里填 http 时能顶上）
-        var more: [String] = []
-        for a in out {
-            if let alt = Self.alternateScheme(a), !out.contains(alt), !more.contains(alt) {
-                more.append(alt)
-            }
-        }
-        out += more
         return out
     }
 
@@ -178,27 +170,16 @@ actor CloudClient {
 
     /// 把用户填的地址整理成能用的样子：
     ///  - 去掉前后空格和结尾的 "/"
-    ///  - 没写协议的话补上 http://
+    ///  - **只用 https**：没写协议就补 https://，写了 http:// 的也换成 https://
     ///    （不补的话 "192.168.1.10:8000" 会被当成别的协议，URL 直接建不出来）
     static func cleanURL(_ s: String) -> String {
         var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         while t.hasSuffix("/") { t.removeLast() }
         if t.isEmpty { return t }
         let lower = t.lowercased()
-        if !lower.hasPrefix("http://") && !lower.hasPrefix("https://") {
-            t = "http://" + t
-        }
-        return t
-    }
-
-    /// 换个协议的同一个地址：http ↔ https
-    /// （电脑上开了 https、手机里填的是 http，或者反过来，都能试出来）
-    static func alternateScheme(_ s: String) -> String? {
-        let t = cleanURL(s)
-        let lower = t.lowercased()
+        if lower.hasPrefix("https://") { return t }
         if lower.hasPrefix("http://") { return "https://" + String(t.dropFirst(7)) }
-        if lower.hasPrefix("https://") { return "http://" + String(t.dropFirst(8)) }
-        return nil
+        return "https://" + t
     }
 
     private func endpoint(_ path: String, address: String) throws -> URL {
@@ -299,17 +280,7 @@ actor CloudClient {
     static func diagnose(address: String) async -> String {
         let s = cleanURL(address)
         if s.isEmpty { return "还没填地址" }
-        let first = await diagnoseOne(s)
-        if first.hasPrefix("连接正常") || first.hasPrefix("服务在加载") { return first }
-        // 这个地址连不上，换个协议再试一次：
-        // 电脑上开了 https 而手机里填的是 http（或者反过来）都能这样兜住
-        if let alt = alternateScheme(s) {
-            let second = await diagnoseOne(alt)
-            if second.hasPrefix("连接正常") || second.hasPrefix("服务在加载") {
-                return "\(second)（\(s) 连不上，换成 \(alt) 可以通）"
-            }
-        }
-        return first
+        return await diagnoseOne(s)
     }
 
     /// 真的连一次，把失败的原因说清楚
@@ -341,12 +312,12 @@ actor CloudClient {
                 let u = URL(string: s)
                 let host = u?.host ?? "电脑的IP"
                 let port = u?.port.map(String.init) ?? "这个端口"
-                return "连不上（\(port) 没有在监听）：确认服务已经启动。三个模型都填同一个地址 http://192.168.x.x:8000，8081、8082 只在你电脑上监听，手机访问不了。也可以在手机浏览器打开 http://\(host):\(port)/ 看看"
+                return "连不上（\(port) 没有在监听）：确认服务已经启动，而且已经生成了证书（server/certs/cert.pem，没有的话只有 http 能用，App 只走 https）。三个模型都填同一个地址 https://192.168.x.x:8000，8081、8082 只在你电脑上监听，手机访问不了。"
             case .timedOut:
                 let u = URL(string: s)
                 let host = u?.host ?? "电脑的IP"
                 let port = u?.port ?? 8000
-                return "超时，手机没收到回应。先在手机浏览器打开 http://\(host):\(port)/ 试试：能打开说明是 App 的「本地网络」权限没给（设置 → 隐私与安全性 → 本地网络），打不开说明网络不通。"
+                return "超时，手机没收到回应。先在手机浏览器打开 https://\(host):\(port)/ 试试：能打开说明是 App 的「本地网络」权限没给（设置 → 隐私与安全性 → 本地网络），打不开说明网络不通。"
             case .cannotFindHost:
                 return "找不到这个地址：IP 写错了？"
             case .notConnectedToInternet:
@@ -518,7 +489,9 @@ actor CloudClient {
                 guard let decoded = Wav.decode(wavData) else {
                     throw CloudError.badResponse("返回的不是 wav 音频")
                 }
-                let rate = (obj["sample_rate"] as? Int) ?? decoded.sampleRate
+                var rate = (obj["sample_rate"] as? Int) ?? decoded.sampleRate
+                if rate <= 0 { rate = decoded.sampleRate }
+                if rate <= 0 { rate = 24_000 }
                 return CloneAudio(samples: decoded.samples, sampleRate: rate)
             } catch {
                 lastError = error

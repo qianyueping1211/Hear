@@ -2653,7 +2653,9 @@ final class LiveSession: ObservableObject {
         return Task.detached(priority: .userInitiated) {
             do {
                 if useCloud {
-                    hearLog("声音克隆（云端）：开始生成")
+                    // 把可用内存一起记上：万一又被系统杀掉，日志里能看出来
+                    let memMB = await MainActor.run { Self.freeMB() }
+                    hearLog("声音克隆（云端）：开始生成（可用内存 \(memMB) MB）")
                     // 语言名要用模型认的那种写法（english/chinese），和本地跑的时候一样
                     let cloudLang = VoiceCloneGGUF.languageNames[lang] ?? lang
                     let out: CloneAudio

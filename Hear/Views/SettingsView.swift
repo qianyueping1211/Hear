@@ -696,7 +696,7 @@ struct CloudEditSheet: View {
                         HStack {
                             Text("自定义")
                             Spacer(minLength: 8)
-                            TextField("http://192.168.1.10:8000", text: $address)
+                            TextField("https://192.168.1.10:8000", text: $address)
                                 .multilineTextAlignment(.trailing)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
@@ -728,7 +728,7 @@ struct CloudEditSheet: View {
                             .font(.footnote)
                         }
                     } else {
-                        TextField("http://192.168.1.10:8000", text: $address)
+                        TextField("https://192.168.1.10:8000", text: $address)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .keyboardType(.URL)
@@ -780,14 +780,10 @@ struct CloudEditSheet: View {
         session.cloudAddress.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// 真正会拿去连的地址：补上协议头、去掉结尾的 "/"
+    /// 真正会拿去连的地址：补上 https://、去掉结尾的 "/"
     /// （用户只填 "192.168.1.10:8000" 也能用）
     private func normalized(_ s: String) -> String {
-        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.isEmpty { return "" }
-        let low = t.lowercased()
-        if low.hasPrefix("http://") || low.hasPrefix("https://") { return t }
-        return "http://" + t
+        CloudClient.cleanURL(s)
     }
 
     /// 现在实际用的地址（跟着"默认"开关实时变）
@@ -803,7 +799,9 @@ struct CloudEditSheet: View {
     }
 
     private func save() {
-        let v = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 存之前先补上 https://（用户只填 IP:端口 也能存）
+        let v = normalized(address)
+        address = v
         switch target {
         case .service:
             session.cloudAddress = v
@@ -820,7 +818,12 @@ struct CloudEditSheet: View {
     private func test() {
         busy = true
         status = nil
-        let own = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 用户只填了 IP:端口 的话，这里自动补上 https://，
+        // 并且把补好之后的地址回显出来
+        let own = normalized(address)
+        if own != address.trimmingCharacters(in: .whitespacesAndNewlines) {
+            address = own
+        }
         let shared = sharedAddressText
         // 要试的地址：
         //   服务地址 = 就这一个

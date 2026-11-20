@@ -132,17 +132,17 @@ function Show-LanInfo($port) {
         Write-Host ""
         $i = 1
         foreach ($c in $choices) {
-            Write-Host ("      {0}. {1,-8} {2}   http://{3}:{4}" -f $i, $c.Kind, $c.Name, $c.IP, $port) -ForegroundColor Green
+            Write-Host ("      {0}. {1,-8} {2}   https://{3}:{4}" -f $i, $c.Kind, $c.Name, $c.IP, $port) -ForegroundColor Green
             $i++
         }
         Write-Host ""
         Write-Host "  三个模型用同一个通用服务地址就行（它会自己转发给翻译 / 克隆）：" -ForegroundColor DarkGray
-        Write-Host "      通用服务地址 = 上面的 http://电脑IP:8000" -ForegroundColor DarkGray
-        Write-Host "      也可以用 https://电脑IP:8000（同一个端口，加密的）" -ForegroundColor DarkGray
+        Write-Host "      通用服务地址 = 上面的 https://电脑IP:8000" -ForegroundColor DarkGray
+        Write-Host "      （只填电脑IP:8000 也行，App 会自己补上 https://）" -ForegroundColor DarkGray
         Write-Host ""
         Write-Host "  想单独连某个模型服务（一般不用）：" -ForegroundColor DarkGray
         foreach ($c in $choices) {
-            Write-Host ("      http://{0}:{1}  翻译模型      http://{0}:{2}  克隆模型" -f $c.IP, $script:MtPort, $script:ClonePort) -ForegroundColor DarkGray
+            Write-Host ("      https://{0}:{1}  翻译模型      https://{0}:{2}  克隆模型" -f $c.IP, $script:MtPort, $script:ClonePort) -ForegroundColor DarkGray
         }
         Write-Host ""
         Write-Host "  （手机和电脑要连同一个 Wi-Fi）" -ForegroundColor DarkGray
@@ -281,7 +281,7 @@ $env:HEAR_SENSEVOICE_DIR = $SvDir
                         -RedirectStandardError (Join-Path $ServerDir "cloud.log.err")
         Start-Sleep -Seconds 2
         Say "临时服务已启动（端口 $Port），现在就能在手机浏览器上测网络"
-        Write-Host "    电脑浏览器： http://127.0.0.1:$Port/" -ForegroundColor Cyan
+        Write-Host "    电脑浏览器： https://127.0.0.1:$Port/" -ForegroundColor Cyan
         Write-Host "    手机浏览器：下面这些地址，随便挑一个能打开的" -ForegroundColor Cyan
         Show-LanInfo $Port
         Write-Host "  （模型还在下，下完之后会自动换成完整的服务）" -ForegroundColor DarkGray
