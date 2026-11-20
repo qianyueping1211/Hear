@@ -440,12 +440,12 @@ actor CloudClient {
                 let u = URL(string: s)
                 let host = u?.host ?? "电脑的IP"
                 let port = u?.port.map(String.init) ?? "这个端口"
-                return Diagnosis(text: "连不上（\(port) 没有在监听）：确认服务已经启动，而且已经生成了证书（server/certs/cert.pem，没有的话只有 http 能用，App 只走 https）。三个模型都填同一个地址 https://192.168.x.x:8000，8081、8082 只在你电脑上监听，手机访问不了。如果刚弹过系统的「本地网络」授权框，先点「允许」再试一次。")
+                return Diagnosis(text: "连不上（\(port) 没有在监听）：确认服务已经启动，而且已经生成了证书（server/certs/cert.pem，没有的话只有 http 能用，App 只走 https）。三个模型都填同一个地址 https://192.168.x.x:8000，8081、8082 只在你电脑上监听，手机访问不了。还有一种可能：手机的「本地网络」权限没开——设置 → 隐私与安全性 → 本地网络 → 听见 → 打开（系统的授权框只问一次，选了不允许就只能自己去设置里开）。")
             case .timedOut:
                 let u = URL(string: s)
                 let host = u?.host ?? "电脑的IP"
                 let port = u?.port ?? 8000
-                return Diagnosis(text: "超时，手机没收到回应。先在手机浏览器打开 https://\(host):\(port)/ 试试：能打开说明是 App 的「本地网络」权限没给（设置 → 隐私与安全性 → 本地网络），打不开说明网络不通。刚点过系统的授权框的话，再试一次就好。")
+                return Diagnosis(text: "超时，手机没收到回应。先在手机浏览器打开 https://\(host):\(port)/ 试试：能打开说明是 App 的「本地网络」权限没给（设置 → 隐私与安全性 → 本地网络 → 听见 → 打开），打不开说明网络不通。刚点过系统的授权框的话，再试一次就好。")
             case .secureConnectionFailed, .serverCertificateUntrusted,
                  .serverCertificateHasUnknownRoot, .serverCertificateHasBadDate,
                  .serverCertificateNotYetValid, .clientCertificateRejected:
