@@ -42,17 +42,27 @@ final class CloudSync: ObservableObject {
         static let settingsHash = "cloudSyncSettingsHash"
     }
 
-    /// 要同步的设置（UserDefaults 里的键）。模型位置、同步自己的状态不同步
+    /// 要同步的设置（UserDefaults 里的键）。模型文件本身、下载来源、同步自己的状态不同步
+    ///
+    /// 注意：在线模型（通用服务地址、三个模型各自的地址、识别方案、
+    /// 用不用云端翻译/克隆）一定要在这里面，不然换了手机或者重装之后就没了。
     private static let settingKeys = [
         "langA", "langB", "speakOutput", "useContext", "sensitivity", "silenceMs", "glossary",
         "outputMode", "leftEar", "rightEar", "voiceClone", "asrUseGPU", "asrEngine",
         "voiceProcessing", "inputSource", "talkMode", "llmProviders", "llmActiveID",
         "logEnabled", "logMaxMB",
+        // 在线模型（云端服务）
+        "cloudAddress", "cloudModelAddress", "cloudASRScheme",
+        "voiceCloneCloud", "translationEngine",
+        // 下载源、翻译模型选哪个 gguf
+        "hfHost", "ggufName",
     ]
 
     private var bag = Set<AnyCancellable>()
     private var pending: Task<Void, Never>?
     private var applyingCloud = false
+    /// 下一次同步强制上传设置（不管两边谁新）
+    private var forcePushSettings = false
 
     private init() {
         let d = UserDefaults.standard
@@ -72,7 +82,7 @@ final class CloudSync: ObservableObject {
                 Task { @MainActor in
                     guard let self, !self.applyingCloud else { return }
                     let h = Self.settingsHash(Self.localSettings())
-                    if h != UserDefaults.standard.string(forKey: Keys.settingsHash) { self.scheduleSync(delay: 5) }
+                    if h != UserDefaults.standard.string(forKey: Keys.settingsHash) { self.scheduleSync(delay: 2) }
                 }
             }
             .store(in: &bag)
@@ -165,6 +175,15 @@ final class CloudSync: ObservableObject {
 
     func syncNow() { scheduleSync(delay: 0) }
 
+    /// 强制把设置重新写一遍并上传。
+    /// 用来对付"文件写进去了但 iCloud 没传上去"的情况：
+    /// 重写一次（修改时间变了），系统就会重新传。
+    func reuploadSettings() {
+        guard enabled, hasFolder else { return }
+        forcePushSettings = true
+        scheduleSync(delay: 0)
+    }
+
     private func scheduleSync(delay: Double) {
         guard enabled, hasFolder else { return }
         pending?.cancel()
@@ -185,7 +204,8 @@ final class CloudSync: ObservableObject {
 
     private enum SettingsAction { case push, pull, none }
 
-    private func decideSettings(_ cloud: Manifest?) -> SettingsAction {
+    private func decideSettings(_ cloud: Manifest?, forcePush: Bool = false) -> SettingsAction {
+        if forcePush { return .push }
         let local = Self.settingsHash(Self.localSettings())
         let last = UserDefaults.standard.string(forKey: Keys.settingsHash)
         guard let cloudHash = cloud?.settingsHash else { return .push }   // iCloud 上还没有设置
@@ -198,7 +218,13 @@ final class CloudSync: ObservableObject {
     }
 
     private func sync() async {
-        guard enabled, !syncing, let root = resolveFolder() else { return }
+        guard enabled, let root = resolveFolder() else { return }
+        if syncing {
+            // 已经有一次同步在跑：等它跑完再来一次。
+            // 不这样的话，这次的改动会被漏掉（同步期间改的设置传不上去）。
+            scheduleSync(delay: 1)
+            return
+        }
         syncing = true
         defer { syncing = false }
         let access = root.startAccessingSecurityScopedResource()
@@ -217,7 +243,10 @@ final class CloudSync: ObservableObject {
 
         // 1. 设置
         var settingsNote: String?
-        switch decideSettings(manifest) {
+        var pushedSettings = 0
+        let doPush = forcePushSettings
+        forcePushSettings = false
+        switch decideSettings(manifest, forcePush: doPush) {
         case .push:
             let s = Self.localSettings()
             let h = Self.settingsHash(s)
@@ -227,12 +256,14 @@ final class CloudSync: ObservableObject {
                 manifest.settingsHash = h
                 manifest.settingsUpdatedAt = Date()
                 UserDefaults.standard.set(h, forKey: Keys.settingsHash)
+                pushedSettings = s.count
+                hearLog("iCloud 同步：上传了 \(s.count) 项设置")
             }
         case .pull:
             if let cloud = await Self.readSettings(dir) {
                 applySettings(cloud, hash: manifest.settingsHash)
-                settingsNote = "已从 iCloud 同步设置"
-                hearLog("iCloud 同步：用了 iCloud 上更新的设置")
+                settingsNote = "已从 iCloud 同步设置（\(cloud.count) 项）"
+                hearLog("iCloud 同步：用了 iCloud 上更新的设置（\(cloud.count) 项）")
             }
         case .none:
             if let h = manifest.settingsHash { UserDefaults.standard.set(h, forKey: Keys.settingsHash) }
@@ -276,8 +307,8 @@ final class CloudSync: ObservableObject {
         }
         lastSync = Date()
         UserDefaults.standard.set(lastSync, forKey: Keys.lastSync)
-        message = settingsNote
-        if pushed + pulled + removed > 0 || settingsNote != nil {
+        message = settingsNote ?? (pushedSettings > 0 ? "已上传 \(pushedSettings) 项设置到 iCloud" : nil)
+        if pushed + pulled + removed > 0 || settingsNote != nil || pushedSettings > 0 {
             hearLog("iCloud 同步：上传 \(pushed) 页，下载 \(pulled) 页，删除 \(removed) 页")
         }
     }

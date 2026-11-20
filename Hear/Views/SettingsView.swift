@@ -92,8 +92,13 @@ struct SettingsView: View {
                                 Text(cloud.lastSync.map { Self.timeText($0) } ?? "还没有同步")
                             }
                         }
-                        Button("立即同步") { cloud.syncNow() }
-                            .disabled(cloud.syncing)
+                        HStack {
+                            Button("立即同步") { cloud.syncNow() }
+                            Spacer()
+                            // 文件写进去了但 iCloud 没传上去的时候用这个重传一遍
+                            Button("重新上传设置") { cloud.reuploadSettings() }
+                                .disabled(cloud.syncing)
+                        }
                         Button("更换同步位置") { showCloudPicker = true }
                     }
                     if let m = cloud.message {

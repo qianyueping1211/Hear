@@ -2262,6 +2262,19 @@ final class LiveSession: ObservableObject {
     /// iCloud 把设置同步过来了：把新设置直接换上，不用重开 App
     func reloadSyncedSettings() {
         let d = UserDefaults.standard
+        // 在线模型先换：语音克隆走云端的话，本地的克隆模型要卸掉
+        let ca = d.string(forKey: "cloudAddress") ?? ""
+        if ca != cloudAddress { cloudAddress = ca }
+        let cm = d.object(forKey: "cloudModelAddress") as? [String: String] ?? [:]
+        if cm != cloudModelAddress { cloudModelAddress = cm }
+        let cas = d.string(forKey: "cloudASRScheme") ?? "sensevoice+whisper"
+        if cas != cloudASRScheme { cloudASRScheme = cas }
+        let vcc = d.object(forKey: "voiceCloneCloud") as? Bool ?? false
+        if vcc != voiceCloneCloud { voiceCloneCloud = vcc }
+        let te = d.string(forKey: "translationEngine") ?? translationEngine
+        if te != translationEngine { translationEngine = te }
+        let hh = d.string(forKey: "hfHost") ?? "huggingface.co"
+        if hh != hfHost { hfHost = hh }
         let a = Language.find(d.string(forKey: "langA") ?? "zh")
         if a != langA { langA = a }
         let b = Language.find(d.string(forKey: "langB") ?? "en")
