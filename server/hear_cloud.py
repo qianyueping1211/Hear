@@ -23,7 +23,9 @@ OpenAI 兼容的转写服务（例如 whisper.cpp 的 whisper-server）。
 """
 
 import base64
+import datetime
 import io
+import ipaddress
 import json
 import os
 import select
@@ -411,7 +413,13 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "HearCloud/1.0"
 
     def log_message(self, fmt, *args):
-        log(fmt % args)
+        # 请求行里可能有二进制（TLS 握手打到 http 端口时就是一堆乱码），
+        # 直接打进日志会看不清。这里判断一下：不是正常的 ASCII 请求行就整条换成提示。
+        text = fmt % args
+        if all((32 <= ord(c) < 127) or c in "\r\n\t" for c in text):
+            log(text)
+        else:
+            log("收到一段二进制内容（不是 HTTP 请求），已忽略")
 
     # -- 工具 --
 
@@ -613,9 +621,65 @@ a{color:#007aff;text-decoration:none}
         })
 
 
+def ensure_cert():
+    """确保有自签证书；没有就自己生成一份。
+
+    App 只走 https，所以证书必须有。放在这里自己生成，
+    就不会因为"某个文件没下载下来"而没有证书。
+    """
+    if os.path.exists(TLS_CERT) and os.path.exists(TLS_KEY):
+        return True
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+    except ImportError:
+        log("没有 cryptography 这个包，生成不了证书")
+        log("   装一下：pip install cryptography")
+        return False
+    try:
+        os.makedirs(os.path.dirname(TLS_CERT), exist_ok=True)
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "hear-cloud")])
+        ips = []
+        for ip in local_ips():
+            try:
+                ips.append(ipaddress.ip_address(ip))
+            except ValueError:
+                pass
+        ips.append(ipaddress.ip_address("127.0.0.1"))
+        san = [x509.DNSName("localhost"), x509.DNSName("hear-cloud.local")]
+        san += [x509.IPAddress(i) for i in ips]
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .add_extension(x509.SubjectAlternativeName(san), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256())
+        )
+        with open(TLS_CERT, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        with open(TLS_KEY, "wb") as f:
+            f.write(key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption()))
+        log("自签证书生成好了：%s" % TLS_CERT)
+        return True
+    except Exception as e:
+        log("证书生成失败：%s" % e)
+        return False
+
+
 def make_ssl_context():
     """有自签证书就返回 TLS 上下文，没有就返回 None（只用 http）"""
-    if not (os.path.exists(TLS_CERT) and os.path.exists(TLS_KEY)):
+    if not ensure_cert():
         return None
     try:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

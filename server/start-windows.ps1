@@ -390,17 +390,24 @@ if ($tempCloud -and -not $tempCloud.HasExited) {
 }
 # 自签证书：App 只走 https，没有证书手机就连不上，
 # 所以这一步要看得见，失败了要马上说清楚（私钥只留在本机，不进仓库）
+# 证书：服务启动时如果没有会自己生成一份（hear_cloud.py 里 ensure_cert），
+# 这里只是提前生成，好让用户早点看到结果。
 $certFile = Join-Path $ServerDir "certs\cert.pem"
+$certScript = Join-Path $ServerDir "make_cert.py"
 if (-not (Test-Path $certFile)) {
     Write-Host ""
     Say "生成自签证书（手机要用 https 连）"
-    & $venvPy (Join-Path $ServerDir "make_cert.py")
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $certFile)) {
-        Write-Host ""
-        Write-Host "!! 证书没生成成，手机（App 只走 https）就连不上" -ForegroundColor Red
-        Write-Host "   原因多半是缺 cryptography 这个包，手动装一次：& `"$venvPy`" -m pip install cryptography" -ForegroundColor Red
-        Write-Host "   装完再跑一次本文件就行。" -ForegroundColor Red
-        Write-Host ""
+    if (Test-Path $certScript) {
+        & $venvPy $certScript
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $certFile)) {
+            Write-Host ""
+            Write-Host "!! 证书没生成成，手机（App 只走 https）就连不上" -ForegroundColor Red
+            Write-Host "   原因多半是缺 cryptography 这个包，手动装一次：& `"$venvPy`" -m pip install cryptography" -ForegroundColor Red
+            Write-Host "   装完再跑一次本文件就行。" -ForegroundColor Red
+            Write-Host ""
+        }
+    } else {
+        Step "没有 make_cert.py，服务启动时会自己生成证书"
     }
 } else {
     Step "已有证书 certs\cert.pem"

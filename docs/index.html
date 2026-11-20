@@ -373,7 +373,7 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>当前版本</dt><dd>0.4.32</dd></div>
+        <div><dt>当前版本</dt><dd>0.4.33</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
         <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
         <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
@@ -1133,6 +1133,13 @@ section.band{scroll-margin-top:62px}
              同时用自带的会话而不是系统共享会话，因为共享会话没法挂证书处理程序。</p>
           <p>地址写成 <code>http://</code> 也会被自动换成 <code>https://</code>，
              根本没写协议的（只写 <code>192.168.x.x:8000</code>）则补上 <code>https://</code>。</p>
+          <p>证书由服务<strong>自己保证</strong>：<code>hear_cloud.py</code> 启动时发现
+             <code>server/certs/cert.pem</code> 不在，就地生成一份（SAN 带上本机所有局域网 IP）。
+             Windows 的 <code>start-windows.ps1</code> 和启动脚本会在服务起来之前先生成一次，
+             生成失败会明确报错并给出安装 <code>cryptography</code> 的命令，不再静默跳过。</p>
+          <p>没有证书时，TLS 握手会打到 HTTP 的解析器上，日志里会出现一条 400 和一段乱码。
+             现在乱码会被拦下来换成一句「收到一段二进制内容（不是 HTTP 请求），已忽略」，
+             并直接说明多半是没证书——不是编码问题。</p>
           <p><strong>证书没生成 = 手机连不上</strong>：App 只走 https，
              所以 <code>make_cert.py</code> 必须成功跑过一次（<code>start-windows.ps1</code> 会自动跑，
              失败会明确报错）。少了证书时服务仍然起得来，但只说 http，
@@ -1355,7 +1362,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.32</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.33</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>
