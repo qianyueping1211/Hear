@@ -37,6 +37,11 @@ enum CloudModel: String, CaseIterable, Identifiable {
     }
 }
 
+extension Notification.Name {
+    /// 本地网络权限被系统拒了（或者压根没给）
+    static let hearLocalNetworkDenied = Notification.Name("hear.localNetworkDenied")
+}
+
 /// 局域网服务用的是自签证书（电脑上自己生成的），系统默认不认。
 /// 这里只对"内网地址"放行自签证书：
 ///   - 私有网段（10.x / 172.16-31.x / 192.168.x / 169.254.x）和 .local / localhost 才放行
@@ -259,11 +264,21 @@ actor CloudClient {
         do {
             let (data, resp) = try await CloudClient.session.data(for: req)
             return (data, resp as? HTTPURLResponse)
-        } catch let e as URLError where e.code == .networkConnectionLost
-                                            || e.code == .cannotConnectToHost {
-            hearLog("云端连接断了，重试一次：\(path)（\(e.code.rawValue)）", .warning)
-            let (data, resp) = try await CloudClient.session.data(for: req)
-            return (data, resp as? HTTPURLResponse)
+        } catch let e as URLError {
+            // 本地网络权限被系统拒了：告诉界面弹提示。
+            // 系统的授权框只问一次，拒绝了就得用户自己去设置里开，
+            // 不提示的话用户只会看到"连不上"，根本不知道要去哪儿开。
+            if Self.isLocalNetworkDenied(e) {
+                hearLog("本地网络权限被拒绝：\(path)", .warning)
+                NotificationCenter.default.post(name: .hearLocalNetworkDenied, object: nil)
+                throw e
+            }
+            if e.code == .networkConnectionLost || e.code == .cannotConnectToHost {
+                hearLog("云端连接断了，重试一次：\(path)（\(e.code.rawValue)）", .warning)
+                let (data, resp) = try await CloudClient.session.data(for: req)
+                return (data, resp as? HTTPURLResponse)
+            }
+            throw e
         }
     }
 
@@ -342,19 +357,27 @@ actor CloudClient {
         return nil
     }
 
+    /// 连接诊断的结果
+    struct Diagnosis: Equatable {
+        /// 给用户看的话
+        var text: String
+        /// 是不是「本地网络」权限没开（系统直接拦下来了）
+        var localNetworkDenied: Bool = false
+    }
+
     /// 连一下某个地址，把失败的原因说清楚（设置界面"测试连接"用）
     /// 不只说"连不上"，要说清楚是被系统拦了、对方没开、还是被防火墙挡了
-    static func diagnose(address: String) async -> String {
+    static func diagnose(address: String) async -> Diagnosis {
         let s = cleanURL(address)
-        if s.isEmpty { return "还没填地址" }
-        var text = await diagnoseOne(s)
-        if !Self.looksConnected(text) {
+        if s.isEmpty { return Diagnosis(text: "还没填地址") }
+        var r = await diagnoseOne(s)
+        if !Self.looksConnected(r.text) {
             // 第一次访问局域网会弹系统的「本地网络」授权框。
             // 用户点「允许」之前请求是不通的，等一下再试一次就能通。
             try? await Task.sleep(nanoseconds: 1_200_000_000)
-            text = await diagnoseOne(s)
+            r = await diagnoseOne(s)
         }
-        return text
+        return r
     }
 
     /// 这段话是不是表示连上了
@@ -362,9 +385,27 @@ actor CloudClient {
         text.hasPrefix("连接正常") || text.hasPrefix("服务在加载")
     }
 
+    /// 错误链里有没有"操作不被允许"。
+    ///
+    /// 本地网络权限被拒时，系统就是这么报的：
+    /// NSURLErrorCannotConnectToHost + 底下的 POSIX EPERM（errno 1）。
+    /// 这和"电脑没开机"（连接被拒 / 超时）不是一回事，要分开说。
+    static func isLocalNetworkDenied(_ error: Error) -> Bool {
+        let ns = error as NSError
+        if ns.domain == NSPOSIXErrorDomain, ns.code == 1 { return true }   // EPERM
+        if let u = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+            return isLocalNetworkDenied(u)
+        }
+        return false
+    }
+
+    /// 给用户看的那句"本地网络权限没开"
+    static let localNetworkDeniedText =
+        "本地网络权限没开：设置 → 隐私与安全性 → 本地网络 → 听见 → 打开"
+
     /// 真的连一次，把失败的原因说清楚
-    private static func diagnoseOne(_ s: String) async -> String {
-        guard let url = URL(string: s + "/health") else { return "地址格式不对：\(s)" }
+    private static func diagnoseOne(_ s: String) async -> Diagnosis {
+        guard let url = URL(string: s + "/health") else { return Diagnosis(text: "地址格式不对：\(s)") }
         var req = URLRequest(url: url)
         // 放长一点：第一次访问局域网会弹系统的「本地网络」授权框，
         // 用户点「允许」之前请求是等着的，6 秒太短会先超时
@@ -377,47 +418,53 @@ actor CloudClient {
                 // llama-server 加载模型时回 503 {"status":"loading model"}，
                 // 这是"连上了、正在准备"，不是连不上
                 if code == 503, body.contains("loading") {
-                    return "服务在加载模型（稍等几秒再试一次）"
+                    return Diagnosis(text: "服务在加载模型（稍等几秒再试一次）")
                 }
-                return "连上了，但服务返回 \(code)：\(body)"
+                return Diagnosis(text: "连上了，但服务返回 \(code)：\(body)")
             }
-            return "连接正常，服务在运行"
+            return Diagnosis(text: "连接正常，服务在运行")
         } catch let e as URLError {
+            // 系统把本地网络访问拦下来了：这是最常见的原因，
+            // 而且系统只问一次，拒绝了就得自己去设置里开——要单独说清楚
+            if Self.isLocalNetworkDenied(e) {
+                hearLog("本地网络权限被拒绝：\(s)", .warning)
+                return Diagnosis(text: localNetworkDeniedText, localNetworkDenied: true)
+            }
             switch e.code {
             case .appTransportSecurityRequiresSecureConnection:
                 // 地址写错（比如没写 http://、IP 打错）时系统也会报这个，
                 // 界面上别提版本号，就说地址不可用让人去确认，细节写日志里
                 hearLog("云端连接被系统拦下：\(s)（\(e.code.rawValue)）", .warning)
-                return "服务地址不可用，请确认"
+                return Diagnosis(text: "服务地址不可用，请确认")
             case .cannotConnectToHost:
                 let u = URL(string: s)
                 let host = u?.host ?? "电脑的IP"
                 let port = u?.port.map(String.init) ?? "这个端口"
-                return "连不上（\(port) 没有在监听）：确认服务已经启动，而且已经生成了证书（server/certs/cert.pem，没有的话只有 http 能用，App 只走 https）。三个模型都填同一个地址 https://192.168.x.x:8000，8081、8082 只在你电脑上监听，手机访问不了。如果刚弹过系统的「本地网络」授权框，先点「允许」再试一次。"
+                return Diagnosis(text: "连不上（\(port) 没有在监听）：确认服务已经启动，而且已经生成了证书（server/certs/cert.pem，没有的话只有 http 能用，App 只走 https）。三个模型都填同一个地址 https://192.168.x.x:8000，8081、8082 只在你电脑上监听，手机访问不了。如果刚弹过系统的「本地网络」授权框，先点「允许」再试一次。")
             case .timedOut:
                 let u = URL(string: s)
                 let host = u?.host ?? "电脑的IP"
                 let port = u?.port ?? 8000
-                return "超时，手机没收到回应。先在手机浏览器打开 https://\(host):\(port)/ 试试：能打开说明是 App 的「本地网络」权限没给（设置 → 隐私与安全性 → 本地网络），打不开说明网络不通。刚点过系统的授权框的话，再试一次就好。"
+                return Diagnosis(text: "超时，手机没收到回应。先在手机浏览器打开 https://\(host):\(port)/ 试试：能打开说明是 App 的「本地网络」权限没给（设置 → 隐私与安全性 → 本地网络），打不开说明网络不通。刚点过系统的授权框的话，再试一次就好。")
             case .secureConnectionFailed, .serverCertificateUntrusted,
                  .serverCertificateHasUnknownRoot, .serverCertificateHasBadDate,
                  .serverCertificateNotYetValid, .clientCertificateRejected:
                 // 自签证书握手不上：多半是电脑上还没生成证书
                 hearLog("云端连接证书握手失败：\(s)（\(e.code.rawValue)）", .warning)
-                return "服务地址不可用，请确认：连不上多半是电脑上还没生成证书（server/certs/cert.pem），重新跑一次 start-windows.ps1 就会生成"
+                return Diagnosis(text: "服务地址不可用，请确认：连不上多半是电脑上还没生成证书（server/certs/cert.pem），重新跑一次 start-windows.ps1 就会生成")
             case .cannotFindHost:
-                return "找不到这个地址：IP 写错了？"
+                return Diagnosis(text: "找不到这个地址：IP 写错了？")
             case .notConnectedToInternet:
-                return "手机现在没有联网"
+                return Diagnosis(text: "手机现在没有联网")
             case .networkConnectionLost:
-                return "连接断开了：服务可能刚重启，或者 Wi-Fi 断了"
+                return Diagnosis(text: "连接断开了：服务可能刚重启，或者 Wi-Fi 断了")
             default:
                 hearLog("云端连接失败：\(s) 错误码 \(e.code.rawValue) \(e.localizedDescription)", .warning)
-                return "连不上（\(e.code.rawValue)）：\(e.localizedDescription)"
+                return Diagnosis(text: "连不上（\(e.code.rawValue)）：\(e.localizedDescription)")
             }
         } catch {
             hearLog("云端连接失败：\(s) \(error.localizedDescription)", .warning)
-            return "连不上：\(error.localizedDescription)"
+            return Diagnosis(text: "连不上：\(error.localizedDescription)")
         }
     }
 

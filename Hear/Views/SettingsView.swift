@@ -22,6 +22,8 @@ struct SettingsView: View {
     @State private var cloudEdit: CloudEdit?
     /// 本地引擎互斥的提示
     @State private var conflictMessage: String?
+    /// 本地网络权限没开：弹提示告诉用户去哪儿开
+    @State private var showLocalNetworkHelp = false
 
     /// 有云端引擎选了，但地址还没填
     private var cloudMissingAddress: Bool {
@@ -29,6 +31,24 @@ struct SettingsView: View {
             if session.cloudEffectiveAddress(m).isEmpty { return true }
         }
         return false
+    }
+
+    /// 刚选了云端引擎：查一下本地网络权限。
+    ///
+    /// 系统的授权框只问一次，用户选了「不允许」以后 App 再也弹不出来，
+    /// 只能自己去 设置 → 隐私与安全性 → 本地网络 里开。
+    /// 大部分人不知道这个开关在哪儿，所以这里主动查一下、弹个提示。
+    private func checkLocalNetwork() {
+        let usesCloud = session.asrEngine == "cloud"
+            || session.translationEngine == "cloud"
+            || (session.voiceClone && session.voiceCloneCloud)
+        guard usesCloud else { return }
+        let addr = session.cloudAddress
+        guard !addr.isEmpty else { return }
+        Task {
+            let d = await CloudClient.diagnose(address: addr)
+            if d.localNetworkDenied { showLocalNetworkHelp = true }
+        }
     }
 
     /// 在线模型里的一行：名字 + 状态图标（跟本地模型的状态按钮一样）+ 配置入口
@@ -309,11 +329,12 @@ struct SettingsView: View {
             }
             // 引擎换了，模型管理的页签跟着走
             // （有本地引擎 → 本地模型；都是在线 / 在线+苹果 → 在线模型）
-            .onChange(of: session.asrEngine) { _, _ in syncModelTab() }
-            .onChange(of: session.translationEngine) { _, _ in syncModelTab() }
-            .onChange(of: session.voiceCloneCloud) { _, _ in syncModelTab() }
+            .onChange(of: session.asrEngine) { _, _ in syncModelTab(); checkLocalNetwork() }
+            .onChange(of: session.translationEngine) { _, _ in syncModelTab(); checkLocalNetwork() }
+            .onChange(of: session.voiceCloneCloud) { _, _ in syncModelTab(); checkLocalNetwork() }
             .onChange(of: session.voiceClone) { _, on in
                 syncModelTab()
+                checkLocalNetwork()
                 // 打开声音克隆但本地模型还没下载：先问要不要下载
                 if on, !session.voiceCloneCloud, !session.isInstalled(.voiceClone), !session.bgDownloading {
                     askClone = true
@@ -385,6 +406,10 @@ struct SettingsView: View {
                 }
             }
         }
+        // 本地网络权限没开：弹提示告诉用户去哪儿开。
+        // （挂在 NavigationStack 上：里面的 Form 上已经有一个 .alert 了，
+        //   同一个视图挂两个 alert 会互相顶掉）
+        .localNetworkHelp($showLocalNetworkHelp)
         // 屏幕正中的确认框：背后整页虚化
         .centerDialog(isPresented: Binding(get: { confirmKind != nil },
                                            set: { if !$0 { confirmKind = nil } }),
@@ -709,6 +734,8 @@ struct CloudEditSheet: View {
     @State private var asrScheme = "sensevoice+whisper"
     @State private var status: String? = nil
     @State private var busy = false
+    /// 本地网络权限没开：弹提示告诉用户去哪儿开
+    @State private var showLocalNetworkHelp = false
 
     /// 配的是某个模型（才有"默认 / 自定义"）
     private var isModel: Bool {
@@ -805,6 +832,7 @@ struct CloudEditSheet: View {
                 guard !on, address.isEmpty else { return }
                 address = sharedAddressText
             }
+            .localNetworkHelp($showLocalNetworkHelp)
         }
     }
 
@@ -888,13 +916,17 @@ struct CloudEditSheet: View {
             }
             var text = ""
             var okAddr = ""
+            var denied = false
             for a in targets {
-                let t = await CloudClient.diagnose(address: a)
-                if t.hasPrefix("连接正常") || t.hasPrefix("服务在加载") {
+                let d = await CloudClient.diagnose(address: a)
+                let t = d.text
+                if CloudClient.looksConnected(t) {
                     okAddr = a
                     text = t
                     break
                 }
+                // 系统把本地网络访问拦下来了：要单独提示，别的错法不一样
+                if d.localNetworkDenied { denied = true }
                 if text.isEmpty { text = t }
             }
             // 连上了的话，把这个模型自己的状态也带出来
@@ -914,6 +946,8 @@ struct CloudEditSheet: View {
             }
             busy = false
             status = text
+            // 本地网络权限没开：弹提示告诉用户去哪儿开（系统只问一次）
+            if denied { showLocalNetworkHelp = true }
         }
     }
 }

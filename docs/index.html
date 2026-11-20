@@ -373,7 +373,7 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>当前版本</dt><dd>0.4.42</dd></div>
+        <div><dt>当前版本</dt><dd>0.4.43</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
         <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
         <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
@@ -585,6 +585,8 @@ section.band{scroll-margin-top:62px}
               列表里没有「苹果自带」——系统本身没有声音克隆的能力。</li>
           <li><b>克隆失败会明说</b>　云端克隆服务不可用时弹一条「声音克隆服务不可用，已改用系统声音朗读」，
               并在日志里记下原因，不会悄悄换成系统声音。</li>
+          <li><b>生成中会转圈</b>　克隆声音要等电脑算完（好几秒），
+              这时候气泡里的喇叭变成<strong>一直在转的半圈</strong>，一眼就知道「马上就好」。</li>
           <li><b>等得到再放弃</b>　云端克隆要等电脑那边算完，最多等 60 秒；
               同一句只发一次请求（发两次会排队，等太久就超时退回系统声音）。</li>
           <li><b>没有样本时说清楚原因</b>　克隆要拿说话人的原声当样本：
@@ -1229,6 +1231,13 @@ section.band{scroll-margin-top:62px}
              不用每次换网络都重新装证书。</p>
           <p>地址写成 <code>http://</code> 也会被自动换成 <code>https://</code>，
              根本没写协议的（只写 <code>192.168.x.x:8000</code>）则补上 <code>https://</code>。</p>
+          <p><strong>本地网络权限</strong>：访问电脑上的服务需要系统的「本地网络」权限，
+             而<strong>系统的授权框只问一次</strong>——用户选了「不允许」以后 App 再也弹不出来，
+             只能自己去 <code>设置 → 隐私与安全性 → 本地网络 → 听见</code> 里打开。
+             大部分人不知道这个开关在哪儿，所以 App 会自己认出来（系统拒绝时返回的是
+             「操作不被允许」errno 1，跟「电脑没开机」不是一回事），
+             然后弹一个提示把步骤写清楚，还能一键跳到设置页。
+             触发时机：刚把引擎换成云端、点「测试连接」失败、以及用云端引擎时请求被系统拦下。</p>
           <p><strong>声音克隆可以直接回原始 wav</strong>：手机在请求头里带 <code>X-Hear-Audio: wav</code>，
              服务就回 wav 原始数据（<code>Content-Type: audio/wav</code>），省掉 base64，
              手机那边内存占用小很多；不带这个头的老客户端仍然收到 JSON（<code>audio</code> 是 base64）。</p>
@@ -1466,7 +1475,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.42</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.43</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>

@@ -353,6 +353,10 @@ final class LiveSession: ObservableObject {
     /// 正在等克隆声音生成好的那一条。
     /// 声音还没准备好时，界面上的喇叭要显示成灰色（表示"还在生成"），不要蓝色。
     @Published private(set) var clonePreparingID: UUID?
+    /// 正在生成克隆声音的句子（气泡里显示转圈）
+    @Published private(set) var cloneWorking: Set<UUID> = []
+    /// 本地网络权限没开：界面上弹提示
+    @Published var localNetworkHelp = false
 
     // 对话翻译模式：按住某种语言的按钮说话，松开就暂停
     @Published var talkMode: Bool {
@@ -468,6 +472,16 @@ final class LiveSession: ObservableObject {
             guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
                   let reason = AVAudioSession.RouteChangeReason(rawValue: raw) else { return }
             Task { @MainActor in self?.routeChanged(reason) }
+        }
+
+        // 本地网络权限被系统拒了：弹提示告诉用户去哪儿开
+        NotificationCenter.default.addObserver(
+            forName: .hearLocalNetworkDenied, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.localNetworkHelp = true
+                hearLog("本地网络权限没开：请到 设置 → 隐私与安全性 → 本地网络 → 听见 里打开", .warning)
+            }
         }
 
         // iCloud 同步过来的设置：直接换上，不用提示用户重开 App
@@ -2906,7 +2920,10 @@ final class LiveSession: ObservableObject {
         let cloner = self.cloner
         let cloud = self.cloud
         let useCloud = usingCloudClone
+        // 生成中：气泡里的喇叭显示成一直在转的半圈
+        cloneWorking.insert(id)
         let t = Task<CloneAudio?, Never>.detached(priority: .userInitiated) {
+            defer { Task { @MainActor in self.cloneWorking.remove(id) } }
             do {
                 // 之前生成过一样的，直接拿来放，不用再等模型算一遍
                 if let cached = await CloneCache.shared.get(key) {

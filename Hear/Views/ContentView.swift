@@ -92,6 +92,9 @@ struct ContentView: View {
                 Text("本页已保存到历史。配置好 API 后，可以在 历史 → 总结 里随时生成。")
             }
         }
+        // 用云端模型但本地网络权限没开：弹提示告诉用户去哪儿开。
+        // （挂在 NavigationStack 上：里面已经有一个 .alert 了，同一个视图挂两个会互相顶掉）
+        .localNetworkHelp($session.localNetworkHelp)
         .task { await session.bootstrap() }
         // 苹果自带模式：语言包没下载时，由系统弹出下载窗口
         .translationTask(session.translationPrepConfig) { ts in
@@ -289,7 +292,8 @@ struct TranscriptView: View {
                     ForEach(session.items) { item in
                         BubbleView(item: item, leading: item.source == session.langA,
                                    reading: session.readingID == item.id,
-                                   preparing: session.clonePreparingID == item.id,
+                                   preparing: session.clonePreparingID == item.id
+                                        || session.cloneWorking.contains(item.id),
                                    onEdit: { if item.done { onEdit(item) } }) {
                             session.tapRead(item)
                         }
@@ -333,6 +337,29 @@ struct EmptyHint: View {
     }
 }
 
+/// 半圈一直在转的加载圈。
+///
+/// 声音克隆要等电脑那边算完（好几秒），这时候气泡里的喇叭显示成这个，
+/// 一眼就知道"还在生成，马上就好"。
+struct HalfCircleSpinner: View {
+    var size: CGFloat = 17
+    /// 转过的角度
+    @State private var angle: Double = 0
+
+    var body: some View {
+        Circle()
+            .trim(from: 0, to: 0.5)                 // 只要半圈
+            .stroke(Color.secondary, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            .frame(width: size, height: size)
+            .rotationEffect(.degrees(angle))
+            .onAppear {
+                withAnimation(.linear(duration: 0.9).repeatForever(autoreverses: false)) {
+                    angle = 360
+                }
+            }
+    }
+}
+
 struct BubbleView: View {
     let item: TranslationItem
     let leading: Bool
@@ -347,11 +374,16 @@ struct BubbleView: View {
         leading ? Text("\(flag) \(text)") : Text("\(text) \(flag)")
     }
 
+    @ViewBuilder
     private var readingIcon: some View {
-        Image(systemName: "speaker.wave.2.fill")
-            .symbolEffect(.variableColor.iterative, isActive: !preparing)
-            // 声音还没生成好：灰色 + 不闪，提示"还在生成"
-            .foregroundStyle(preparing ? Color.secondary : Color.accentColor)
+        if preparing {
+            // 声音还在生成：灰色的半圈一直在转
+            HalfCircleSpinner()
+        } else {
+            Image(systemName: "speaker.wave.2.fill")
+                .symbolEffect(.variableColor.iterative, isActive: true)
+                .foregroundStyle(Color.accentColor)
+        }
     }
 
     var body: some View {
