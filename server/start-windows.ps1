@@ -21,6 +21,8 @@ $ErrorActionPreference = "Stop"
 # 现在的 Python（3.15 起）默认用 UTF-8 输出，而中文版 Windows 的 cmd 默认是 GBK，
 # 于是每个汉字都被拆成两个乱码字符（"听听见见"这种）。
 # 把控制台代码页改成 UTF-8 就好了。
+# 记下原来的代码页，退出时还回去（.bat 里的中文是 GBK 存的，代码页变了它就乱码了）
+$OrigCodePage = ((chcp) -replace '[^0-9]', '')
 try { chcp 65001 > $null } catch {}
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 # 让 Python 一定用 UTF-8 写日志（不管系统是什么语言）
@@ -59,6 +61,7 @@ trap {
     if ($cloud -and -not $cloud.HasExited) {
         try { Stop-Process -Id $cloud.Id -Force } catch {}
     }
+    try { if ($OrigCodePage) { chcp $OrigCodePage > $null } } catch {}
     Write-Host ""
     Write-Host "!! 出错了：$_" -ForegroundColor Red
     Write-Host "   网络问题的话换个网络/代理再跑一次就行，已经下好的东西不会重下。" -ForegroundColor Red
@@ -563,6 +566,9 @@ Write-Host ""
 
 Write-Host "  模型都准备好了，识别 / 翻译 / 克隆三个接口现在都能用。" -ForegroundColor Green
 Write-Host ""
+
+# 代码页还原（.bat 后面还要用 GBK 的中文）
+try { if ($OrigCodePage) { chcp $OrigCodePage > $null } } catch {}
 
 if ($cloud) {
     if ($cloud.HasExited) {
