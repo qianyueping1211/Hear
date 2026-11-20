@@ -633,6 +633,13 @@ a{color:#007aff;text-decoration:none}
             "speaker_ref_text": req.get("reference_text", ""),
         }
         payload = {k: v for k, v in payload.items() if v}
+        # 采样参数必须和手机本地完全一致（top_k 20 / top_p 0.6 / 用模型默认温度）。
+        # 不传的话 llama-server 用自己的默认值（temp 0.8 / top_k 40 / top_p 0.95），
+        # 对 TTS 来说太松：念出来会跑调、还会冒出一堆杂音。
+        # （翻译那条路早就照抄了手机的参数，克隆这条路以前漏了）
+        payload["top_k"] = 20
+        payload["top_p"] = 0.6
+        payload["temperature"] = -1
         t0 = time.time()
         log("克隆 开始：%d 字，参考音频 %d 字节"
             % (len(payload.get("input", "")), len(payload.get("speaker_ref_b64", "")) * 3 // 4))

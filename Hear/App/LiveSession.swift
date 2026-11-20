@@ -2898,9 +2898,9 @@ final class LiveSession: ObservableObject {
     }
 
     /// 声音克隆的缓存键：语言 + 文字。
-    /// v2 = 参考音频降噪之后的效果（换了降噪方式缓存要重算）
+    /// v3 = 云端那条路也开始用降噪后的参考音频了（跟本地一致），缓存要重算
     private func cloneCacheKey(lang: String, text: String) -> String {
-        "v2|\(lang)|\(text)"
+        "v3|\(lang)|\(text)"
     }
 
     /// 在后台生成这句译文的克隆声音；没有样本、不支持这种语言或模型没加载时返回 nil
@@ -2916,6 +2916,14 @@ final class LiveSession: ObservableObject {
               !item.translated.isEmpty, !item.translated.hasPrefix("（翻译失败"),
               VoiceCloneGGUF.languageNames[item.target.id] != nil else { return nil }
         let text = item.translated, lang = item.target.id
+        // 参考文字是占位符（"…"）或者空的时候别拿去用：
+        // 参考音频和参考文字对不上，模型念出来就是一堆乱响
+        var refText = ref.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if refText == "…" { refText = "" }
+        // 参考音频先降噪再送出去（本地跑的时候就是这么做的）：
+        // 克隆会把参考音频里的环境音一起学过去，
+        // 不降噪的话环境音就跟着念出来，听着是"有杂的声音"
+        let refSamples = usingCloudClone ? GGUFVoiceCloner.denoise(ref.samples) : ref.samples
         let key = cloneCacheKey(lang: lang, text: text)
         let cloner = self.cloner
         let cloud = self.cloud
@@ -2939,7 +2947,7 @@ final class LiveSession: ObservableObject {
                     let out: CloneAudio
                     do {
                         out = try await cloud.clone(text: text, lang: cloudLang,
-                                                    reference: ref.samples, referenceText: ref.text)
+                                                    reference: refSamples, referenceText: refText)
                     } catch {
                         let why = error.localizedDescription
                         await MainActor.run { self.cloudFallbackToApple(.clone, reason: why) }
@@ -2951,7 +2959,7 @@ final class LiveSession: ObservableObject {
                 }
                 hearLogNow("声音克隆（本地）：开始生成")
                 let out = try await cloner.synthesize(text: text, language: lang,
-                                                      reference: ref.samples, referenceText: ref.text)
+                                                      reference: ref.samples, referenceText: refText)
                 hearLogNow("声音克隆（本地）：结束，生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
                 // 存进缓存，下次同一句话直接播放
                 await CloneCache.shared.put(key, out)
