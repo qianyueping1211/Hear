@@ -231,6 +231,16 @@ function Ensure-FirewallRule($ports) {
             New-NetFirewallRule -DisplayName $ruleName -Direction Inbound `
                 -LocalPort $ports -Protocol TCP -Action Allow -Profile $FirewallProfile | Out-Null
             Write-Host "  防火墙已放行 $($ports -join ', ')（网络类型：$FirewallProfile）" -ForegroundColor Green
+            # 公用网络下手机可能连不上：说清楚怎么改
+            try {
+                $pub = @(Get-NetConnectionProfile -ErrorAction SilentlyContinue |
+                         Where-Object { $_.NetworkCategory -eq "Public" })
+                if ($pub.Count -gt 0) {
+                    Write-Host "  注意：现在有网卡被 Windows 标成「公用网络」，手机可能连不上。" -ForegroundColor Yellow
+                    Write-Host "        改成「专用网络」：设置 → 网络和 Internet → Wi-Fi → 属性 → 网络配置文件 → 专用" -ForegroundColor Yellow
+                    Write-Host "        （确实要用公用网络的话，设 HEAR_FIREWALL_PROFILE=Any 再启动）" -ForegroundColor DarkGray
+                }
+            } catch {}
             return
         } catch {
             Write-Host "  防火墙规则没建成：$($_.Exception.Message)" -ForegroundColor Yellow

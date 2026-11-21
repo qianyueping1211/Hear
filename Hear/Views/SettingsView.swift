@@ -822,6 +822,19 @@ struct CloudEditSheet: View {
                         // 信任边界：这个地址上的自签证书，App 才会放宽校验
                         Text("这个地址是你自己填的自建服务：App 只对它放宽自签证书的校验（公网地址照常走系统校验）。别人要是也在同一个网络里冒充它，证书校验是拦不住的——介意的话开「云端证书 → 严格模式」配对一次。")
                             .font(.caption).foregroundStyle(.secondary)
+                        // 访问口令：电脑上的服务开了「要求口令」才填
+                        if case .service = target {
+                            HStack {
+                                Text("访问口令")
+                                Spacer(minLength: 8)
+                                SecureField("电脑窗口里打印的那一串", text: accessTokenBinding)
+                                    .multilineTextAlignment(.trailing)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                            }
+                            Text("电脑上开了「要求口令」时才填：填了以后，同一个网络里的别的设备就不能用你的电脑跑模型了。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                         // 语音识别：在"自定义"下面选识别方案
                         // 选项完全照着电脑上服务报上来的清单来：
                         // 电脑上没装的方案一个都不给（比如没装 SenseVoice 就只有 Whisper）

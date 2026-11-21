@@ -120,6 +120,11 @@ final class LiveSession: ObservableObject {
             }
         }
     }
+    /// 访问口令：电脑上的服务要求时才填。
+    /// 填了以后，同一个局域网里的别的设备就不能用你的电脑跑模型了。
+    @Published var cloudAccessToken: String = "" {
+        didSet { save("cloudAccessToken", cloudAccessToken) }
+    }
     /// 已经配对过的签发根指纹（给用户核对用）
     @Published private(set) var cloudRootFingerprint: String = ""
     /// 正在等用户确认的根
@@ -488,6 +493,8 @@ final class LiveSession: ObservableObject {
         let cloudAddr = d.string(forKey: "cloudAddress") ?? ""
         cloudAddress = cloudAddr
         cloudASRScheme = d.string(forKey: "cloudASRScheme") ?? "sensevoice+whisper"
+        cloudAccessToken = d.string(forKey: "cloudAccessToken") ?? ""
+        CloudClient.accessToken = cloudAccessToken
         let cloudOwn = d.object(forKey: "cloudModelAddress") as? [String: String] ?? [:]
         cloudModelAddress = cloudOwn
         let cloudClient = cloud
