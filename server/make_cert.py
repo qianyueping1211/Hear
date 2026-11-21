@@ -76,6 +76,26 @@ def local_ips():
     return out
 
 
+# 已经作废的证书（SHA-256 指纹）。
+# 2026-11 有一次把生成的证书和私钥误提交进了公开仓库，那把私钥已经泄露，
+# 用过它的部署都必须换一张新的：这里认出它就自动重签。
+REVOKED_CERT_SHA256 = {
+    "1c6c08935e2f9b008514e0311cd49320fe146d5126a7dc4f0122e5b71fd62729",
+}
+
+
+def cert_revoked(path):
+    """这个证书是不是已经作废的（私钥公开过，不能再用）"""
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        with open(path, "rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+        return cert.fingerprint(hashes.SHA256()).hex() in REVOKED_CERT_SHA256
+    except Exception:
+        return False
+
+
 def cert_covers_ip():
     """现有证书里有没有本机现在的所有 IP（换了网络、开了 VPN 就得重新生成）"""
     ips = local_ips()
@@ -100,6 +120,10 @@ def cert_covers_ip():
 
 def main():
     force = "--force" in sys.argv
+    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE) and not force:
+        if cert_revoked(CERT_FILE):
+            print("这张证书的私钥曾经公开过，已经作废，重新生成一张")
+            force = True
     if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE) and not force:
         ok, missing = cert_covers_ip()
         if ok:

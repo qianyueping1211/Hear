@@ -115,7 +115,13 @@ actor SpeechRecognizer {
     /// preview = true：说话过程中的实时预览，只识别一遍、不重试，速度优先
     func recognize(_ samples: [Float], candidates: [String], fallback: String,
                    preview: Bool = false) async throws -> (String, String) {
-        guard let pipe else { return (fallback, "") }
+        guard let pipe else {
+            // 模型不在了（内存不足被卸载、或者没加载成功）：
+            // 静悄悄返回空字符串的话，上层会当成"用户没说话"，
+            // 说的话就被当噪声丢掉了。报错才能让人知道出事了。
+            throw NSError(domain: "Hear", code: 20, userInfo: [NSLocalizedDescriptionKey:
+                "语音识别模型不在了（可能被内存不足卸载了），请重新开始一次"])
+        }
         await acquire(final: !preview); defer { release() }
         let secs = Double(samples.count) / 16_000
 

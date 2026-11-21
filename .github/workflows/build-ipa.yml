@@ -31,6 +31,25 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # 证书和私钥绝对不能进仓库（2026-11 误提交过一次，已经作废重签了）
+      - name: Guard against committed secrets
+        run: |
+          BAD=$(git ls-files | grep -Ei '\.(pem|key|p12|pfx|jks)$' || true)
+          if [ -n "$BAD" ]; then
+            echo "::error::仓库里有证书/私钥文件，请删掉并加进 .gitignore："
+            echo "$BAD"
+            exit 1
+          fi
+          PAT="PRIVATE ""KEY"
+          HITS=$(git grep -Il -e "$PAT" -- . || true)
+          if [ -n "$HITS" ]; then
+            echo "::error::仓库里有私钥内容，不能提交："
+            echo "$HITS"
+            exit 1
+          fi
+          echo "✅ 仓库里没有证书/私钥"
+
+
       # 版本号写在仓库根目录的 VERSION 文件里（三位，例如 1.0.0），每次发布前改这个文件
       - name: Version
         run: |

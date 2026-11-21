@@ -344,14 +344,16 @@ actor CloudClient {
     /// 连接空闲太久被服务端收掉的时候，正好赶上发请求就会断一下——
     /// 重试一次就好，别让用户这一句白说。
     /// （超时不重试：那是服务真的慢，重试只会让等待翻倍。）
-    private func sendWithRetry(_ req: URLRequest, path: String) async throws -> (Data, HTTPURLResponse?) {
+    /// retries = 1 表示不重试（实时预览用：要快，宁可这次失败也不要一直等着）
+    private func sendWithRetry(_ req: URLRequest, path: String, retries: Int = 3) async throws -> (Data, HTTPURLResponse?) {
         // 切到别的 App 以后，系统只给很短的时间跑代码，请求会被掐断。
         // 用后台任务多要一点时间：翻译和声音克隆的请求能跑完。
         try await withBackgroundTime {
         // 网络断了（Wi-Fi 抖一下、刚切过网络、电脑上的服务重启），
         // 等一下再试往往就好了——不用让用户把刚才那句话重新说一遍。
         var lastError: Error = CloudError.notConfigured
-        for attempt in 0..<3 {
+        let tries = max(1, retries)
+        for attempt in 0..<tries {
             do {
                 let (data, resp) = try await CloudClient.session.data(for: req)
                 return (data, resp as? HTTPURLResponse)
@@ -365,7 +367,7 @@ actor CloudClient {
                     NotificationCenter.default.post(name: .hearLocalNetworkDenied, object: nil)
                     throw CloudError.net(Self.friendlyError(e))
                 }
-                if Self.isTransientNetworkError(e), attempt < 2 {
+                if Self.isTransientNetworkError(e), attempt < tries - 1 {
                     let wait = attempt == 0 ? 1.5 : 4.0
                     hearLog("云端连不上，等 \(wait) 秒重试：\(path)（\(e.code.rawValue)）", .warning)
                     try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
@@ -667,15 +669,17 @@ actor CloudClient {
             attempted = true
             do {
                 let wav = Wav.encode(samples: samples, sampleRate: 16_000)
+                // 预览要快：给个短超时，而且不重试
+                // （整句那种慢请求要是排在这里，后面的原文预览就都被它堵住了）
                 var req = try makeRequest("/v1/asr", address: addr, method: "POST", body: wav,
-                                          contentType: "audio/wav", timeout: 120)
+                                          contentType: "audio/wav", timeout: preview ? 12 : 120)
                 req.setValue(candidates.joined(separator: ","), forHTTPHeaderField: "X-Languages")
                 req.setValue(fallback, forHTTPHeaderField: "X-Fallback-Language")
                 // 告诉服务端用哪个识别方案
                 req.setValue(asrScheme, forHTTPHeaderField: "X-ASR-Scheme")
                 // 预览只要快，不要修正
                 if preview { req.setValue("1", forHTTPHeaderField: "X-ASR-Preview") }
-                let (data, resp) = try await sendWithRetry(req, path: "/v1/asr")
+                let (data, resp) = try await sendWithRetry(req, path: "/v1/asr", retries: preview ? 1 : 3)
                 let code = resp?.statusCode ?? 0
                 guard (200..<300).contains(code) else {
                     throw CloudError.http(code, String(data: data.prefix(400), encoding: .utf8) ?? "")

@@ -48,7 +48,11 @@ actor SenseVoiceRecognizer {
     /// 返回 (语言代码, 文字)；没听到人说话时文字为空
     func recognize(_ samples: [Float], candidates: [String], fallback: String) async throws -> (String, String) {
         let forced = candidates.count == 1 ? candidates.first : nil
-        guard let m = manager(for: forced) else { return (fallback, "") }
+        guard let m = manager(for: forced) else {
+            // 模型不在了：报错，别静悄悄返回空字符串（会被当成"没说话"丢掉）
+            throw NSError(domain: "Hear", code: 21, userInfo: [NSLocalizedDescriptionKey:
+                "SenseVoice 模型不在了（可能被内存不足卸载了），请重新开始一次"])
+        }
         let r = try await m.transcribeDetailed(audio: samples)
         var lang = r.language ?? ""
         if lang == "yue" { lang = "zh" }                 // 粤语按中文处理

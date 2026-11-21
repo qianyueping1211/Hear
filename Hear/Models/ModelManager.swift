@@ -46,13 +46,45 @@ enum ModelManager {
     static func importGGUF(from src: URL) throws -> URL {
         let access = src.startAccessingSecurityScopedResource()
         defer { if access { src.stopAccessingSecurityScopedResource() } }
+        let fm = FileManager.default
+        // 先看一眼内容：不是 GGUF 就别碰原来那个模型
+        try checkGGUF(src)
         let dst = modelsDir.appendingPathComponent(src.lastPathComponent)
-        if FileManager.default.fileExists(atPath: dst.path) {
-            try FileManager.default.removeItem(at: dst)
+        // 先复制到临时文件，成功了再换上去：
+        // 中途失败（磁盘满、没权限）的话，原来那个还能用的模型不会被动
+        let tmp = modelsDir.appendingPathComponent(".\(dst.lastPathComponent).importing")
+        try? fm.removeItem(at: tmp)
+        try fm.copyItem(at: src, to: tmp)
+        // 换名替换：先把旧的挪到一边，新的放到位，最后再删旧的
+        let old = modelsDir.appendingPathComponent(".\(dst.lastPathComponent).old")
+        try? fm.removeItem(at: old)
+        if fm.fileExists(atPath: dst.path) {
+            try fm.moveItem(at: dst, to: old)
         }
-        try FileManager.default.copyItem(at: src, to: dst)
+        do {
+            try fm.moveItem(at: tmp, to: dst)
+        } catch {
+            if fm.fileExists(atPath: old.path) { try? fm.moveItem(at: old, to: dst) }
+            try? fm.removeItem(at: tmp)
+            throw error
+        }
+        try? fm.removeItem(at: old)
         select(dst)
         return dst
+    }
+
+    /// 确认这个文件真的是 GGUF（不是的话不能拿去替换正在用的模型）
+    static func checkGGUF(_ url: URL) throws {
+        guard let fh = try? FileHandle(forReadingFrom: url) else {
+            throw NSError(domain: "Hear", code: 4, userInfo: [NSLocalizedDescriptionKey:
+                "读不了这个文件：\(url.lastPathComponent)"])
+        }
+        defer { try? fh.close() }
+        let head = (try? fh.read(upToCount: 4)) ?? Data()
+        guard String(data: head, encoding: .ascii) == "GGUF" else {
+            throw NSError(domain: "Hear", code: 5, userInfo: [NSLocalizedDescriptionKey:
+                "这个文件不是 GGUF 模型（开头不是 GGUF），没有替换原来的模型"])
+        }
     }
 
     private struct HFModelInfo: Decodable {
@@ -145,8 +177,22 @@ enum ModelManager {
         let dst = dir.appendingPathComponent(src.lastPathComponent, isDirectory: true)
         let old = whisperFolder()
         if src.standardizedFileURL.path != dst.standardizedFileURL.path {
-            if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
-            try fm.copyItem(at: src, to: dst)
+            // 先复制到临时目录，成功了再换上去：
+            // 中途失败的话，原来那个还能用的模型不会被动
+            let tmp = dir.appendingPathComponent(".\(src.lastPathComponent).importing", isDirectory: true)
+            try? fm.removeItem(at: tmp)
+            try fm.copyItem(at: src, to: tmp)
+            let oldDst = dir.appendingPathComponent(".\(src.lastPathComponent).old", isDirectory: true)
+            try? fm.removeItem(at: oldDst)
+            if fm.fileExists(atPath: dst.path) { try fm.moveItem(at: dst, to: oldDst) }
+            do {
+                try fm.moveItem(at: tmp, to: dst)
+            } catch {
+                if fm.fileExists(atPath: oldDst.path) { try? fm.moveItem(at: oldDst, to: dst) }
+                try? fm.removeItem(at: tmp)
+                throw error
+            }
+            try? fm.removeItem(at: oldDst)
         }
         // 原来的模型删掉，省空间（选的就是原来那个文件夹时不删）
         if let old, old.standardizedFileURL.path != dst.standardizedFileURL.path,
@@ -259,10 +305,27 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
             return
         }
         do {
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
+            // 换名替换：原来那个先挪到一边，新的放到位了再删它
+            // （直接删掉再移动的话，中途失败就两头都没了）
+            let fm = FileManager.default
+            let tmp = destination.deletingLastPathComponent()
+                .appendingPathComponent(".\(destination.lastPathComponent).downloading")
+            try? fm.removeItem(at: tmp)
+            try fm.moveItem(at: location, to: tmp)
+            let old = destination.deletingLastPathComponent()
+                .appendingPathComponent(".\(destination.lastPathComponent).old")
+            try? fm.removeItem(at: old)
+            if fm.fileExists(atPath: destination.path) {
+                try fm.moveItem(at: destination, to: old)
             }
-            try FileManager.default.moveItem(at: location, to: destination)
+            do {
+                try fm.moveItem(at: tmp, to: destination)
+            } catch {
+                if fm.fileExists(atPath: old.path) { try? fm.moveItem(at: old, to: destination) }
+                try? fm.removeItem(at: tmp)
+                throw error
+            }
+            try? fm.removeItem(at: old)
         } catch { moveError = error }
     }
 

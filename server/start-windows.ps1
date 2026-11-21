@@ -515,9 +515,33 @@ foreach ($p in @($Port, $MtPort, $ClonePort)) {
     if ($busy) {
         foreach ($c in $busy) {
             $owner = (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue)
-            if ($owner -and $owner.ProcessName -match "python|llama") {
-                Step "停掉占着端口 $p 的旧进程"
+            if (-not $owner) { continue }
+            # 先看清楚这个进程是谁：只有"听见"自己起的进程才停，
+            # 别的程序（别人也在跑 python 服务）不能乱杀
+            $cmd = ""
+            try {
+                $w = Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue
+                if ($w) { $cmd = "$($w.CommandLine)" }
+            } catch { $cmd = "" }
+            $ours = $false
+            if ($cmd) {
+                $ours = ($cmd -like "*hear_cloud.py*") -or ($cmd -like "*$ServerDir*") -or ($cmd -like "*$ModelDir*")
+            } else {
+                # 拿不到命令行（权限不够）时保守一点：只认 llama-server
+                $ours = ($owner.ProcessName -like "llama-server*")
+            }
+            if ($ours) {
+                Step "停掉占着端口 $p 的旧进程（$($owner.ProcessName)）"
                 try { Stop-Process -Id $c.OwningProcess -Force } catch {}
+            } else {
+                Write-Host ""
+                Write-Host "!! 端口 $p 被别的程序占着：$($owner.ProcessName)（PID $($c.OwningProcess)）" -ForegroundColor Yellow
+                if ($cmd) { Write-Host "   它的命令行：$cmd" -ForegroundColor DarkGray }
+                Write-Host "   那是别的程序，我没动它（不该乱杀你机器上别的服务）。" -ForegroundColor Yellow
+                Write-Host "   把那个程序关掉再跑一次就行；" -ForegroundColor Yellow
+                Write-Host "   或者换三个端口跑：set HEAR_PORT=8010 && set HEAR_MT_PORT=8091 && set HEAR_CLONE_PORT=8092" -ForegroundColor Yellow
+                Write-Host ""
+                exit 1
             }
         }
         Start-Sleep -Seconds 1
@@ -700,7 +724,7 @@ if (-not $mtOk -and $MtDevice -ne "CPU") {
         $mt = Start-Process -FilePath $cpuMt -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $mtLog -RedirectStandardError "$mtLog.err"
         $procs += $mt
-        Wait-Health "http://127.0.0.1:$MtPort" "翻译模型（CPU）" "mt.log" $mt | Out-Null
+        $mtOk = Wait-Health "http://127.0.0.1:$MtPort" "翻译模型（CPU）" "mt.log" $mt
     }
 }
 $cloneOk = Wait-Health "http://127.0.0.1:$ClonePort" "声音克隆模型" "clone.log" $clone
@@ -716,7 +740,7 @@ if (-not $cloneOk -and $CloneDevice -ne "CPU") {
         $clone = Start-Process -FilePath $cpuClone -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $cloneLog -RedirectStandardError "$cloneLog.err"
         $procs += $clone
-        Wait-Health "http://127.0.0.1:$ClonePort" "声音克隆模型（CPU）" "clone.log" $clone | Out-Null
+        $cloneOk = Wait-Health "http://127.0.0.1:$ClonePort" "声音克隆模型（CPU）" "clone.log" $clone
     }
 }
 
@@ -733,7 +757,30 @@ Write-Host "  关掉这个窗口就等于关掉服务。"
 Write-Host "  （日志文件是 UTF-8 编码，换个窗口看中文乱码的话先执行 chcp 65001）" -ForegroundColor DarkGray
 Write-Host ""
 
-Write-Host "  模型都准备好了，识别 / 翻译 / 克隆三个接口现在都能用。" -ForegroundColor Green
+# 问总服务要真实状态：三个接口到底哪几个能用（不能一口咬定"都能用"）
+$asrTxt = "未知"; $mtTxt = "未知"; $cloneTxt = "未知"
+try {
+    $json = & curl.exe -s -k --max-time 15 "https://127.0.0.1:$Port/health"
+    if ($json) {
+        $o = $json | ConvertFrom-Json
+        if ($o.asr)   { $asrTxt   = "$($o.asr)" }
+        if ($o.mt)    { $mtTxt    = "$($o.mt)" }
+        if ($o.clone) { $cloneTxt = "$($o.clone)" }
+    }
+} catch { }
+$asrOk = $asrTxt.StartsWith("就绪") -or $asrTxt.StartsWith("外部服务")
+$mtOkNow = $mtTxt.StartsWith("就绪")
+$cloneOkNow = $cloneTxt.StartsWith("就绪")
+if ($asrOk -and $mtOkNow -and $cloneOkNow) {
+    Write-Host "  模型都准备好了：识别 / 翻译 / 克隆三个接口现在都能用。" -ForegroundColor Green
+} else {
+    Write-Host "  还没全部准备好（下面写着每一项现在的状态）：" -ForegroundColor Yellow
+    Write-Host "    识别：$asrTxt" -ForegroundColor DarkGray
+    Write-Host "    翻译：$mtTxt" -ForegroundColor DarkGray
+    Write-Host "    克隆：$cloneTxt" -ForegroundColor DarkGray
+    Write-Host "    识别模型第一次要现下（几百 MB），下完自己就好了，不用重跑。" -ForegroundColor DarkGray
+    Write-Host "    翻译/克隆起不来的话看 server\mt.log 和 server\clone.log。" -ForegroundColor DarkGray
+}
 Write-Host ""
 
 # 代码页还原（.bat 后面还要用 GBK 的中文）

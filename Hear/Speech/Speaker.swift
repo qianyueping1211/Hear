@@ -9,6 +9,13 @@ struct SpeakRequest {
     var pan: Float = 0          // -1 只在左耳，0 两耳，1 只在右耳
 }
 
+/// 播一段已经生成好的声音，结果分三种。
+enum PlayOutcome {
+    case played      // 正常播了
+    case failed     // 起不来（引擎、缓冲区的问题）
+    case cancelled  // 被人停了（用户停了朗读、或者切到后台）
+}
+
 /// 朗读译文。
 /// - 两耳都播（pan = 0）：直接用 AVSpeechSynthesizer.speak，最稳定
 /// - 只在左耳或右耳（pan ≠ 0）：先生成语音数据，再用 AVAudioEngine 按左右声道播放
@@ -99,8 +106,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     /// 播放一段已经生成好的声音（声音克隆朗读用），播完（或被 stop 打断）后返回。
-    /// 返回 false 表示没能播出来（引擎起不来之类），调用方可以退回系统声音。
-    func play(samples: [Float], sampleRate: Double, pan: Float) async -> Bool {
+    /// 返回 .failed 表示没能播出来（引擎起不来之类），调用方可以退回系统声音；
+    /// 返回 .cancelled 表示这次是被停掉的——这时候千万别再出声。
+    func play(samples: [Float], sampleRate: Double, pan: Float) async -> PlayOutcome {
         stop()
         // 重新激活音频会话会把"输出到哪"重置掉（setCategory 会清掉 override），
         // 这里再应用一次，保证声音真的从耳机出来
@@ -109,7 +117,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         // 收音的时候不动会话：会话一改，正在跑的麦克风会被打断
         if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         AudioRoute.apply(AudioRoute.lastOutput)
-        guard !samples.isEmpty else { return false }
+        guard !samples.isEmpty else { return .failed }
         // 采样率是 0 的话下面算时长会除出无穷大，Dispatch 会直接崩，这里兜一下
         let sr = sampleRate > 0 ? sampleRate : 24_000
 
@@ -168,13 +176,16 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             }
         }
         let started = queue.sync { playStarted }
+        // 代数变了 = 播放途中被人 stop() 了（用户停了朗读，或者切到后台）
+        let cancelled = queue.sync { gen != generation }
         if started {
             hearLog("朗读：克隆声音 \(String(format: "%.1f", Double(samples.count) / sr)) 秒，\(Int(sr)) Hz，峰值 \(String(format: "%.2f", peak))")
         }
         AudioRoute.speaking = false
         if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         stopEngineIfIdle()
-        return started
+        if cancelled { return .cancelled }
+        return started ? .played : .failed
     }
 
     /// 现在有没有在出声（用来判断能不能放开麦克风）

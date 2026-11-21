@@ -377,6 +377,11 @@ final class LiveSession: ObservableObject {
     @Published private(set) var clonePreparingID: UUID?
     /// 正在生成克隆声音的句子（气泡里显示转圈）
     @Published private(set) var cloneWorking: Set<UUID> = []
+    /// 现在有几个识别正在进行。
+    /// 只有"正在识别"才算忙——翻译慢的时候不算：
+    /// 否则上一句翻译要几十秒，后面那句的实时原文也跟着一起卡住，
+    /// 用户看到的就是一直只有省略号。
+    private var asrBusyCount = 0
     /// 真正在出声的那一条（喇叭显示成绿色）。
     /// 只是"轮到它读了"不算：声音还在生成、或者还没开始播，喇叭都还是转圈。
     @Published private(set) var speakingID: UUID?
@@ -531,6 +536,15 @@ final class LiveSession: ObservableObject {
                 await self.translator.unload()
                 await self.cloner.unload()
                 hearLog("已卸载本地模型，可用内存 \(Self.freeMB()) MB")
+                // 本地模型没了，正在用的本地引擎就没了：
+                // 还继续收音的话，识别只会返回空字符串，
+                // 用户说的话会被当成噪声全丢掉——界面还显示"正在聆听"，更让人困惑。
+                // 所以停下来，把话说清楚（重新开始一次就会重新加载模型）。
+                let usesLocal = Self.isLocalEngine(self.asrEngine) || self.translationEngine == "local"
+                if usesLocal, self.isRunning {
+                    self.stop()
+                    self.showToast("内存不足：已卸载本地模型并停止收音，重新开始一次即可", seconds: 6)
+                }
             }
         }
 
@@ -1389,6 +1403,8 @@ final class LiveSession: ObservableObject {
         let g = holdGen
         hearLog("松开按钮：暂停收音")
         holdReleasing = true
+        // 松手这一刻正在说的那一句（采集层停下来以后会把它交出来）
+        let tailSeg = currentSeg
         isRunning = false
         meter.level = 0
         UIApplication.shared.isIdleTimerDisabled = false
@@ -1400,7 +1416,13 @@ final class LiveSession: ObservableObject {
         previewSamples = nil
         mtPending = nil
         Task {
-            try? await Task.sleep(nanoseconds: 400_000_000)
+            // 等采集层把最后一句交出来（引擎停了以后才 flush，有时要一秒多）。
+            // 这期间 holdReleasing 一直是 true：最后那句话才不会被当成"已经停了"丢掉。
+            var w = 0
+            while w < 40, finishedSeg < tailSeg, currentSeg == tailSeg {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                w += 1
+            }
             guard g == holdGen else { return }
             holdReleasing = false
             finishedSeg = max(finishedSeg, currentSeg)
@@ -1846,8 +1868,10 @@ final class LiveSession: ObservableObject {
             let src = forcedLang ?? (mine ? partialSource : nil) ?? ((lastLangID == langB.id) ? langB : langA)
             let tgt = src == langA ? langB : langA
             // 已经停下来了：这一句不会再走整句识别，
-            // 但这段声音要留下来（声音克隆的样本），译文等下接着补
-            if !isRunning {
+            // 但这段声音要留下来（声音克隆的样本），译文等下接着补。
+            // 松手收尾（对话模式）不算"已经停下来了"：
+            // 那最后一句要照常处理，不然松手时说的最后一句就丢了
+            if !isRunning && !holdReleasing {
                 if id == stopFlushSegID, let fid = stopFlushItemID {
                     stopFlushItemID = nil
                     if let idx = items.firstIndex(where: { $0.id == fid }) {
@@ -1898,7 +1922,11 @@ final class LiveSession: ObservableObject {
             // Whisper：整句识别在进行时不做预览，GPU 先让给整句（否则整句会一直“识别中”）
             // SenseVoice 很快（跑在神经引擎上），不用让
             let sv = useSense
-            guard phase == .ready, isRunning, !liveActive, sv || !working, id == currentSeg, id > finishedSeg else { continue }
+            // 这里看的是"识别忙不忙"，不是整条队列忙不忙——
+            // 上一句翻译慢的时候整条队列是忙的，但识别其实是闲的，
+            // 不该因此把这一句的实时原文也卡住（用户会一直看到省略号）。
+            guard phase == .ready, isRunning, !liveActive, sv || asrBusyCount == 0,
+                  id == currentSeg, id > finishedSeg else { continue }
             let gen = runGen
             let a = langA, b = langB
             let forced = forcedLang
@@ -2376,6 +2404,9 @@ final class LiveSession: ObservableObject {
         do {
             let sv = useSense
             let r: (String, String)
+            // 识别中：这一小段时间里实时预览先让路（GPU/神经引擎给整句用）
+            asrBusyCount += 1
+            defer { asrBusyCount = max(0, asrBusyCount - 1) }
             if usingCloudASR {
                 // 识别方案由后端决定（SenseVoice / Whisper / 两者组合），
                 // App 只把选的方案传过去（X-ASR-Scheme 头）
@@ -2607,9 +2638,19 @@ final class LiveSession: ObservableObject {
         speakingID = item.id
         defer { if speakingID == item.id { speakingID = nil } }
         if let cloned {
-            let ok = await speaker.play(samples: cloned.samples, sampleRate: Double(cloned.sampleRate), pan: pan)
-            if !ok {
+            let outcome = await speaker.play(samples: cloned.samples, sampleRate: Double(cloned.sampleRate), pan: pan)
+            switch outcome {
+            case .played:
+                break
+            case .cancelled:
+                // 播放途中被人停了（用户停了朗读 / 切到后台）：
+                // 千万别再退回系统声音——那会造成"明明停了却又出声"
+                hearLog("朗读：这一句被取消了，不出声", .info)
+                return
+            case .failed:
                 // 克隆声音放不出来，退回系统声音，别让用户听个寂寞
+                // （但如果这时用户已经停了朗读、或者切到后台了，就别再出声）
+                if Task.isCancelled || inBackground || readingID != item.id { return }
                 await speaker.speak(SpeakRequest(text: text, locale: item.target.tts, pan: pan))
             }
         } else {

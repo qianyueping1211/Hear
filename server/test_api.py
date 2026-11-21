@@ -44,9 +44,10 @@ def make_ctx(insecure=True):
     return ctx
 
 
-def request(url, method="GET", body=None, headers=None, timeout=900, insecure=True):
+def request(url, method="GET", body=None, headers=None, timeout=900, insecure=True,
+            content_type="application/json"):
     req = urllib.request.Request(url, data=body, method=method)
-    req.add_header("Content-Type", "application/json")
+    req.add_header("Content-Type", content_type)
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     t0 = time.time()
@@ -95,6 +96,18 @@ def read_wav_mono16k(path):
             raw = struct.pack("<%dh" % len(out), *out)
         rate = 16000
     return raw, rate
+
+
+def make_wav(raw, rate=16000):
+    """把 16 位单声道 PCM 装成 wav 容器（App 传给服务的就是这种）"""
+    import io as _io
+    buf = _io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(raw)
+    return buf.getvalue()
 
 
 def wav_duration(data):
@@ -173,11 +186,10 @@ def test_translate(url, text, insecure):
 def test_asr(url, wav, insecure):
     say("== 语音识别 ==")
     raw, rate = read_wav_mono16k(wav)
-    body = json.dumps({
-        "audio": base64_of(raw),
-        "sample_rate": rate,
-    }).encode("utf-8")
-    code, data, dt = request(url + "/v1/asr", method="POST", body=body, timeout=600, insecure=insecure)
+    # 服务端要的是原始 wav（跟 App 发的一样），不是 JSON
+    body = make_wav(raw, rate)
+    code, data, dt = request(url + "/v1/asr", method="POST", body=body, timeout=600,
+                             insecure=insecure, content_type="audio/wav")
     if code != 200:
         say("   失败：%s %s" % (code, data[:300].decode("utf-8", "replace")))
         return False
@@ -256,35 +268,58 @@ def main():
     say("服务地址：%s" % url)
     say("")
 
-    ok = True
+    # 结果分三种：通过 / 失败 / 跳过。跳过的不能算"都通过了"
+    passed = []
+    failed = []
+    skipped = []
+
     if args.what in ("health", "all"):
-        ok = test_health(url, args.insecure) and ok
+        (passed if test_health(url, args.insecure) else failed).append("服务状态")
         say("")
 
     if args.what in ("translate", "all"):
-        if test_translate(url, "你好，今天天气怎么样？", args.insecure):
-            pass
-        else:
-            ok = False
+        (passed if test_translate(url, "你好，今天天气怎么样？", args.insecure)
+         else failed).append("文本翻译")
         say("")
 
     if args.what in ("asr", "all"):
         if not args.wav:
-            say("== 语音识别 ==\n   跳过（要一个 --wav 参考音频）")
+            say("== 语音识别 ==")
+            say("   跳过（要一个 --wav 音频文件）")
+            skipped.append("语音识别")
         else:
-            ok = test_asr(url, args.wav, args.insecure) and ok
+            (passed if test_asr(url, args.wav, args.insecure) else failed).append("语音识别")
         say("")
 
     if args.what in ("clone", "all"):
         if not args.wav:
-            say("== 声音克隆 ==\n   跳过：要一段中文声音（--wav），才能用这个声音念英文")
+            say("== 声音克隆 ==")
+            say("   跳过：要一段中文声音（--wav），才能用这个声音念英文")
             say("   例如：python test_api.py clone --wav 中文.wav --text \"Hello there\"")
+            skipped.append("声音克隆")
         else:
-            ok = test_clone(url, args.wav, args.text, args.out, args.insecure) and ok
+            (passed if test_clone(url, args.wav, args.text, args.out, args.insecure)
+             else failed).append("声音克隆")
         say("")
 
-    say("结果：%s" % ("都通过了（服务端没问题，问题在 App 那边）" if ok else "有问题（看上面哪一项失败）"))
-    return 0 if ok else 1
+    # 单独测某一项、但没给必须的输入 → 直接报参数错，别装作通过了
+    if args.what in ("asr", "clone") and not args.wav:
+        say("结果：%s 要测%s必须给 --wav（一个 16 位 wav 文件）" %
+            ("有问题" if failed else "没法测", "语音识别" if args.what == "asr" else "声音克隆"))
+        return 2
+
+    say("结果：通过 %d 项%s%s" % (
+        len(passed),
+        ("，失败 %d 项（%s）" % (len(failed), "、".join(failed))) if failed else "",
+        ("，跳过 %d 项（%s）" % (len(skipped), "、".join(skipped))) if skipped else ""))
+    if failed:
+        say("      有问题（看上面哪一项失败）")
+        return 1
+    if skipped:
+        say("      跳过的不算通过：补上 --wav 再测一次")
+        return 2
+    say("      都通过了（服务端没问题，问题在 App 那边）")
+    return 0
 
 
 if __name__ == "__main__":

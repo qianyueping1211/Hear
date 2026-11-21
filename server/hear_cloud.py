@@ -62,6 +62,8 @@ TLS_PEEK_TIMEOUT = float(os.environ.get("HEAR_TLS_PEEK_TIMEOUT", "8"))
 ASR_SCHEME = os.environ.get("HEAR_ASR_SCHEME", "sensevoice+whisper")
 SENSEVOICE_DIR = os.environ.get(
     "HEAR_SENSEVOICE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "sensevoice"))
+# 单个请求最大允许多少（正常请求几 MB 就够）
+MAX_BODY = int(os.environ.get("HEAR_MAX_BODY", str(64 * 1024 * 1024)))
 ASR_DEVICE = os.environ.get("HEAR_ASR_DEVICE", "cpu")
 ASR_COMPUTE = os.environ.get("HEAR_ASR_COMPUTE", "int8")
 # 和 App 本地翻译用的采样参数保持一致（Hy-MT2 官方推荐）
@@ -380,9 +382,14 @@ def recognize(samples, rate, language, fallback, scheme=None, preview=False):
 
     if scheme == "sensevoice":
         sv_lang, sv_text = sensevoice_transcribe(samples, rate)
-        if not sv_text:                     # SenseVoice 没听出来，退回 Whisper
+        if sv_text:
+            return (sv_text, sv_lang or fallback)
+        # 没听出来：只有电脑上有 Whisper 才退回去试它
+        # （用户选了"只用 SenseVoice"、或者电脑上没装 Whisper 时，
+        #   硬去调 Whisper 只会报错，白白把这一句弄失败）
+        if whisper_available():
             return whisper_transcribe(samples, rate, language, fallback)
-        return (sv_text, sv_lang or fallback)
+        return ("", sv_lang or fallback)
 
     if scheme == "sensevoice+whisper":
         # 先用 SenseVoice 快速出结果（快）
@@ -391,7 +398,12 @@ def recognize(samples, rate, language, fallback, scheme=None, preview=False):
         if preview:
             return (fast_text, fast_lang or fallback)
         # 再用 Whisper 修正（准）
-        slow_text, slow_lang = whisper_transcribe(samples, rate, language, fallback)
+        # 修正失败也要保住已经有的结果：慢引擎出错不能把整句话弄丢
+        try:
+            slow_text, slow_lang = whisper_transcribe(samples, rate, language, fallback)
+        except Exception as e:
+            log("Whisper 修正失败，先用 SenseVoice 的结果：%s" % e)
+            return (fast_text, fast_lang or fallback)
         if not slow_text:
             return (fast_text, fast_lang or fallback)
         if not fast_text:
@@ -557,6 +569,11 @@ def ref_get(rid):
         return _REF_CACHE.get(rid)
 
 
+class BodyTooLarge(Exception):
+    """请求体太大了（超过 MAX_BODY），后面直接断开这个连接"""
+    pass
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "HearCloud/1.0"
     # 用 HTTP/1.1：手机那边能复用同一个连接，
@@ -605,6 +622,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _body(self):
         length = int(self.headers.get("Content-Length") or 0)
+        # 别让一个 Content-Length 就把内存吃光：正常的请求最多几十 MB
+        if length > MAX_BODY:
+            self._error("请求太大（%d MB），最多 %d MB" % (length // (1024 * 1024), MAX_BODY // (1024 * 1024)), 413)
+            raise BodyTooLarge()
         return self.rfile.read(length) if length else b""
 
     # -- GET --
@@ -706,7 +727,10 @@ a{color:#007aff;text-decoration:none}
     # -- POST --
 
     def do_POST(self):
-        body = self._body()
+        try:
+            body = self._body()
+        except BodyTooLarge:
+            return
         try:
             if self.path.startswith("/v1/asr"):
                 self.asr(body)
@@ -877,6 +901,26 @@ a{color:#007aff;text-decoration:none}
         })
 
 
+# 已经作废的证书（SHA-256 指纹）。
+# 2026-11 有一次把生成的证书和私钥误提交进了公开仓库，那把私钥已经泄露，
+# 用过它的部署都必须换一张新的：这里认出它就自动重签。
+REVOKED_CERT_SHA256 = {
+    "1c6c08935e2f9b008514e0311cd49320fe146d5126a7dc4f0122e5b71fd62729",
+}
+
+
+def cert_revoked(path):
+    """这个证书是不是已经作废的（私钥公开过，不能再用）"""
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        with open(path, "rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+        return cert.fingerprint(hashes.SHA256()).hex() in REVOKED_CERT_SHA256
+    except Exception:
+        return False
+
+
 def cert_covers_ip():
     """现有证书里有没有这台电脑现在的所有 IP。
 
@@ -912,10 +956,13 @@ def ensure_cert():
     就不会因为"某个文件没下载下来"而没有证书。
     """
     if os.path.exists(TLS_CERT) and os.path.exists(TLS_KEY):
-        ok, missing = cert_covers_ip()
-        if ok:
-            return True
-        log("本机 IP 变成 %s 了（旧证书里没有），重新生成证书" % missing)
+        if cert_revoked(TLS_CERT):
+            log("这张证书的私钥曾经公开过，已经作废，重新签一张")
+        else:
+            ok, missing = cert_covers_ip()
+            if ok:
+                return True
+            log("本机 IP 变成 %s 了（旧证书里没有），重新生成证书" % missing)
     try:
         from cryptography import x509
         from cryptography.x509.oid import NameOID
@@ -1025,11 +1072,12 @@ class MixedServer(ThreadingHTTPServer):
             self._close(sock)
             return None
         if first != b"\x16":
-            sock.settimeout(None)       # 普通 http
+            sock.settimeout(180)        # 普通 http（同样设个读超时）
             return sock
         try:
             wrapped = self.ssl_context.wrap_socket(sock, server_side=True)
-            wrapped.settimeout(None)
+            # 读超时：手机连上了不发数据、或者发一半就断开的，不能一直占着线程
+            wrapped.settimeout(180)
             return wrapped
         except ssl.SSLError as e:
             # 常见两种：手机不认自签证书（certificate unknown）、
