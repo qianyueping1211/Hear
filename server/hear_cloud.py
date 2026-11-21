@@ -219,6 +219,14 @@ def get_sensevoice():
             return None
 
 
+def sensevoice_available():
+    """SenseVoice 的模型文件在不在。
+    不在的话，App 的识别方案里就不该给用户选 SenseVoice。"""
+    model = os.path.join(SENSEVOICE_DIR, "model.int8.onnx")
+    tokens = os.path.join(SENSEVOICE_DIR, "tokens.txt")
+    return os.path.isfile(model) and os.path.isfile(tokens)
+
+
 def sensevoice_transcribe(samples, rate):
     """用 SenseVoice 识别。返回 (语言代码, 文字)"""
     rec = get_sensevoice()
@@ -628,6 +636,8 @@ a{color:#007aff;text-decoration:none}
         # 手机上要能一眼看出"电脑上现在跑的是哪个"
         if not ASR_URL:
             out["asr_model"] = ASR_MODEL
+            # 有没有装 SenseVoice：App 那边要按这个来给识别方案选项
+            out["sensevoice"] = "就绪" if sensevoice_available() else "没装"
         mt_model = backend_model(MT_URL)
         if mt_model:
             out["mt_model"] = mt_model

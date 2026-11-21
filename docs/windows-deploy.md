@@ -39,6 +39,10 @@ powershell -ExecutionPolicy Bypass -File server\start-windows.ps1 -Choose
 选完以后，App 的「功能设置 → 模型管理 → 在线模型」里能看到电脑上现在跑的是
 哪个模型（状态后面会跟着模型名，比如「正常（Hy-MT2-7B-Q4_K_M.gguf）」）。
 
+App 的「在线模型 → 语音识别 → 配置 → 识别方案」也会跟着变：
+只列出这台电脑上真有的方案（没装 SenseVoice 就只留 Whisper），
+Whisper 那一项还会带上型号，比如「最准：Whisper（large-v3）」。
+
 ## 三、注意事项
 
 1. **手机和电脑要在同一个网络**。手机浏览器先打开脚本打印的那个地址，

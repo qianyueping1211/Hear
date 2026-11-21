@@ -100,6 +100,11 @@ final class LiveSession: ObservableObject {
     }
     /// 云端服务返回的各模型状态（asr / mt / clone）
     @Published private(set) var cloudStatus: [String: String] = [:]
+    /// 电脑上跑的识别模型（Whisper 的型号，比如 large-v3）
+    @Published private(set) var cloudASRModelName: String = ""
+    /// 电脑上 SenseVoice 的状态："" = 还不知道（还没问过服务），
+    /// "就绪" / "没装"。老版本的服务没这个字段，就当作不知道（照旧给用户选）。
+    @Published private(set) var cloudSenseVoiceState: String = ""
     /// 每个模型实际连上的地址（模型自己的地址不通、用通用服务地址顶上的，记通用那个）
     @Published private(set) var cloudStatusAddress: [String: String] = [:]
     /// 声音克隆用云端模型（false = 用手机本地的 Qwen）
@@ -2871,6 +2876,9 @@ final class LiveSession: ObservableObject {
         }
 
         var usedAddress: [String: String] = [:]
+        // 识别这边要单独记两件事：电脑上跑的是哪个 Whisper、有没有 SenseVoice
+        var asrModelName = ""
+        var senseState = ""
 
         // 共享服务地址
         if defAddr.isEmpty {
@@ -2926,9 +2934,17 @@ final class LiveSession: ObservableObject {
             }
             status[m.rawValue] = text
             usedAddress[m.rawValue] = ok ? used : ""
+            if m == .asr, ok, !used.isEmpty {
+                let h = models[used] ?? [:]
+                asrModelName = h["asr_model"] ?? ""
+                // 老版本的服务没报这个字段 → 空字符串（当作不知道，照旧给用户选）
+                senseState = h["sensevoice"] ?? ""
+            }
         }
         cloudStatus = status
         cloudStatusAddress = usedAddress
+        cloudASRModelName = asrModelName
+        cloudSenseVoiceState = senseState
     }
 
     // MARK: - 云端失败时的保底

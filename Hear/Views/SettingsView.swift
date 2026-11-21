@@ -783,11 +783,25 @@ struct CloudEditSheet: View {
                                 .disabled(useDefault)
                         }
                         // 语音识别：在"自定义"下面选识别方案
+                        // 可选项按电脑上实际有的来：
+                        // 没装 SenseVoice 的电脑上就不给选它（选了也没用）
                         if case .model(let m) = target, m == .asr {
                             Picker("识别方案", selection: $asrScheme) {
-                                Text("最快：SenseVoice").tag("sensevoice")
-                                Text("最准：Whisper").tag("whisper")
-                                Text("SenseVoice + Whisper").tag("sensevoice+whisper")
+                                if session.cloudSenseVoiceState != "没装" {
+                                    Text("最快：SenseVoice").tag("sensevoice")
+                                    Text("SenseVoice + Whisper").tag("sensevoice+whisper")
+                                }
+                                Text(whisperSchemeLabel).tag("whisper")
+                            }
+                            // 电脑上跑的是哪个 Whisper，一眼能看到
+                            if !session.cloudASRModelName.isEmpty {
+                                LabeledContent("电脑上的 Whisper", value: session.cloudASRModelName)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if session.cloudSenseVoiceState == "没装" {
+                                Text("这台电脑上没装 SenseVoice，只能用 Whisper。在电脑上重跑一次启动脚本就会装上。")
+                                    .font(.caption).foregroundStyle(.secondary)
                             }
                         }
                         // 自己填的地址不通时，通用服务地址（8000）能顶上：
@@ -842,8 +856,21 @@ struct CloudEditSheet: View {
                     // 自己没填地址 = 用默认（通用服务地址）
                     useDefault = own.isEmpty
                     address = normalized(own)
-                    if m == .asr { asrScheme = session.cloudASRScheme }
+                    if m == .asr {
+                        asrScheme = session.cloudASRScheme
+                        // 电脑上没装 SenseVoice 的话，别停在用不了的方案上
+                        if session.cloudSenseVoiceState == "没装", asrScheme != "whisper" {
+                            asrScheme = "whisper"
+                        }
+                        // 顺手刷新一下：要知道电脑上到底跑的是哪个模型、有没有 SenseVoice
+                        Task { await session.refreshCloudStatus() }
+                    }
                 }
+            }
+            // 刷新完才知道有没有 SenseVoice：没有就把选项收掉，选中值也换成能用的
+            .onChange(of: session.cloudSenseVoiceState) { _, state in
+                guard state == "没装", asrScheme != "whisper" else { return }
+                asrScheme = "whisper"
             }
             .onChange(of: useDefault) { _, on in
                 // 从"默认"切到"自定义"：把通用服务地址填进去，用户直接改就行
@@ -852,6 +879,13 @@ struct CloudEditSheet: View {
             }
             .localNetworkHelp($showLocalNetworkHelp)
         }
+    }
+
+    /// Whisper 那一项的名字：把电脑上跑的型号带上去
+    /// （启动时选了 large-v3，这里就能看到）
+    private var whisperSchemeLabel: String {
+        let n = session.cloudASRModelName
+        return n.isEmpty ? "最准：Whisper" : "最准：Whisper（\(n)）"
     }
 
     /// 通用服务地址（8000 那个，三个模型都能用它）
