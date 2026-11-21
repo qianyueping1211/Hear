@@ -2585,14 +2585,12 @@ final class LiveSession: ObservableObject {
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
         let old = items[idx]
         let preview = old.source == src ? old.translated : ""
-        var item = TranslationItem(
+        let item = TranslationItem(
             id: itemID, source: src, target: tgt, sourceText: spoken, translated: preview,
             speakerID: old.speakerID, speakerName: old.speakerName,
             speakerDetails: old.speakerDetails, speakerTracked: old.speakerTracked,
             speakerManuallySet: old.speakerManuallySet,
             sourceSide: leading ? .left : .right, recognizedLanguage: src.id)
-        let shouldIdentify = speakerTrackingEnabled && !talkMode && speakerAddress != nil
-        if shouldIdentify { item.speakerTracked = true }
         guard let idx2 = items.firstIndex(where: { $0.id == itemID }) else { return }
         items[idx2] = item
         rememberReference(itemID, samples: samples, text: spoken, lang: src.id)
@@ -2600,9 +2598,6 @@ final class LiveSession: ObservableObject {
         enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: spoken,
                                   src: src, tgt: tgt, context: [], samples: samples,
                                   isApple: true))
-        if shouldIdentify, let speakerAddress {
-            enqueueSpeaker(samples, for: itemID, address: speakerAddress)
-        }
         _ = preview
     }
 
