@@ -76,6 +76,8 @@ targets:
       path: HearLiveActivity/Info.plist
       properties:
         CFBundleDisplayName: 听见实时翻译
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:
