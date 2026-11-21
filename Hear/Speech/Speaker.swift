@@ -44,6 +44,14 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     /// 引擎启动时的"会话停用代数"（只在 queue 上读写）
     private var engineGen = -1
     private var currentPan: Float = 0
+    private var emittingAudio = false {
+        didSet {
+            if oldValue != emittingAudio { onAudioActivityChanged?() }
+        }
+    }
+
+    var isEmittingAudio: Bool { queue.sync { emittingAudio } }
+    var onAudioActivityChanged: (() -> Void)?
 
     override init() {
         super.init()
@@ -178,6 +186,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
                     }
                 }
                 if !player.isPlaying { player.play() }
+                emittingAudio = player.isPlaying
             }
             queue.asyncAfter(deadline: .now() + limit) { [weak self] in
                 guard let self, gen == self.generation, self.continuation != nil else { return }
@@ -217,6 +226,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         queue.sync {
             generation += 1
             current = nil
+            emittingAudio = false
             let c = continuation
             continuation = nil
             c?.resume()
@@ -266,12 +276,20 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     /// 在 queue 上调用
     private func resume(_ gen: Int) {
         guard gen == generation else { return }
+        emittingAudio = false
         let c = continuation
         continuation = nil
         c?.resume()
     }
 
     // MARK: - speak() 方式的回调
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        queue.async { [self] in
+            guard !usingEngine, utterance === current, continuation != nil else { return }
+            emittingAudio = true
+        }
+    }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         queue.async { [self] in
@@ -310,6 +328,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
                 }
             }
             if !player.isPlaying { player.play() }
+            emittingAudio = player.isPlaying
         }
     }
 
@@ -367,7 +386,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     private func checkDone(_ gen: Int) {
-        guard finished, played >= scheduled else { return }
+        guard played >= scheduled else { return }
+        emittingAudio = false
+        guard finished else { return }
         if scheduled == 0 { hearLog("朗读：系统语音没有生成声音（可能没有安装该语言的语音）", .warning) }
         resume(gen)
     }

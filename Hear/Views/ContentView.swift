@@ -301,8 +301,7 @@ struct TranscriptView: View {
                         BubbleView(item: item, leading: item.isLeading(left: session.langA, right: session.langB),
                                    reading: session.readingID == item.id,
                                    playing: session.speakingID == item.id,
-                                   preparing: session.clonePreparingID == item.id
-                                        || session.cloneWorking.contains(item.id),
+                                   preparing: session.clonePreparingID == item.id,
                                    onEdit: { if item.done { onEdit(item) } },
                                    onSpeaker: item.speakerLabel == nil ? nil : { onSpeaker(item) }) {
                             session.tapRead(item)
@@ -397,13 +396,14 @@ struct BubbleView: View {
 
     @ViewBuilder
     private var readingIcon: some View {
-        if preparing || !playing {
-            // 还没开始出声（声音还在生成、或者正在排队等）：转圈
+        if reading && preparing && !playing {
+            // 等待克隆声音生成时转圈。
             HalfCircleSpinner()
+                .accessibilityLabel("正在准备朗读")
         } else {
-            // 正在播：绿色喇叭
-            Image(systemName: "speaker.wave.2.fill")
-                .foregroundStyle(Color.green)
+            PlaybackSpeakerIcon(playing: playing)
+                .foregroundStyle(playing ? Color.green : Color.secondary)
+                .accessibilityLabel(playing ? "正在播放" : "可朗读")
         }
     }
 
@@ -442,10 +442,10 @@ struct BubbleView: View {
                     if !item.done { ProgressView().controlSize(.small) }
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        if reading && !leading { readingIcon }
+                        if item.canReadAloud && !leading { readingIcon }
                         flagged(item.target.flag, item.translated)
                             .font(.title3.weight(.medium))
-                        if reading && leading { readingIcon }
+                        if item.canReadAloud && leading { readingIcon }
                     }
                 }
             }
@@ -458,7 +458,7 @@ struct BubbleView: View {
                     .stroke(reading ? Color.accentColor : Color.clear, lineWidth: 1.5)
             )
             .contentShape(RoundedRectangle(cornerRadius: 16))
-            .onTapGesture { if !item.translated.isEmpty { onSpeak() } }   // 点句子朗读译文
+            .onTapGesture { if item.canReadAloud { onSpeak() } }
             .modifier(BubbleLongPress(item: item, onEdit: onEdit, onSpeak: onSpeak))
             if leading { Spacer(minLength: 40) }
         }
@@ -486,7 +486,9 @@ private struct BubbleLongPress: ViewModifier {
                 Button { UIPasteboard.general.string = item.sourceText } label: {
                     Label("复制原文", systemImage: "doc.on.doc")
                 }
-                Button(action: onSpeak) { Label("朗读译文", systemImage: "speaker.wave.2") }
+                if item.canReadAloud {
+                    Button(action: onSpeak) { Label("朗读译文", systemImage: "speaker.wave.2") }
+                }
             }
         }
     }
@@ -822,14 +824,19 @@ struct MicButton: View {
 
 // MARK: - 朗读按钮（点按开关，长按 2 秒切换扬声器/耳机）
 
+private struct PlaybackSpeakerIcon: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let playing: Bool
+
+    var body: some View {
+        Image(systemName: "speaker.wave.2.fill")
+            .symbolEffect(.variableColor.iterative.reversing, isActive: playing && !reduceMotion)
+    }
+}
+
 struct SpeakToggle: View {
     @EnvironmentObject var session: LiveSession
     @State private var showEars = false
-
-    private var icon: String {
-        if !session.speakOutput { return "speaker.slash.fill" }
-        return session.outputMode == .headphones ? "headphones" : "speaker.wave.2.fill"
-    }
 
     private var label: String {
         guard session.speakOutput else { return "播报关" }
@@ -838,7 +845,16 @@ struct SpeakToggle: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            Image(systemName: icon).font(.title2)
+            Group {
+                if !session.speakOutput {
+                    Image(systemName: "speaker.slash.fill")
+                } else if session.outputMode == .headphones {
+                    Image(systemName: "headphones")
+                } else {
+                    PlaybackSpeakerIcon(playing: session.speakingID != nil)
+                }
+            }
+            .font(.title2)
             Text(label).font(.caption2)
         }
         .frame(width: 76, height: 56)

@@ -82,6 +82,8 @@ struct TranslationItem: Identifiable, Equatable, Codable {
 
     var defaultSpeakerLanguage: String { recognizedLanguage ?? source.id }
 
+    var canReadAloud: Bool { !translated.isEmpty && !translated.hasPrefix("（翻译失败") }
+
     func isLeading(left: Language, right: Language) -> Bool {
         displayedSide(left: left, right: right) == .left
     }

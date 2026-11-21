@@ -565,6 +565,13 @@ final class LiveSession: ObservableObject {
             talkMode = d.bool(forKey: "hearLastMode")
         }
         hearLog("启动：\(talkMode ? "对话翻译模式" : "实时翻译模式")")
+        speaker.onAudioActivityChanged = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                let id = self.speaker.isEmittingAudio ? self.readingID : nil
+                if self.speakingID != id { self.speakingID = id }
+            }
+        }
         // 播完了：这时候可以考虑把麦克风放开（不然音频会话一直占着）
         speaker.onPlaybackFinished = { [weak self] in
             Task { @MainActor in self?.releaseMicrophoneIfIdle() }
@@ -2015,8 +2022,7 @@ final class LiveSession: ObservableObject {
             let item = items[readIndex]
             guard item.done else { break }                  // 还在翻译，翻译完会再叫醒
             if !oneShot && !autoReadAllowed { break }
-            let usable = !item.translated.isEmpty && !item.translated.hasPrefix("（翻译失败")
-            if usable {
+            if item.canReadAloud {
                 readingID = item.id
                 await speak(item)
                 if Task.isCancelled || g != readerGen { return }   // 被打断：这句下次从头读
@@ -3007,8 +3013,8 @@ final class LiveSession: ObservableObject {
 
     /// 朗读一条译文：决定左右耳、声音和音高
     private func speak(_ item: TranslationItem) async {
+        guard item.canReadAloud else { return }
         let text = item.translated
-        guard !text.isEmpty, !text.hasPrefix("（翻译失败") else { return }
         // 这次朗读的身份：切到后台、或者被用户停了，就不要再出声
         let token = playbackToken
 
@@ -3073,11 +3079,6 @@ final class LiveSession: ObservableObject {
             return
         }
         if mute { capture.muted = true }
-        // 真正开始出声了：气泡里的喇叭这才变绿。
-        // 在这之前（声音还在生成、等克隆结果）都还是转圈，
-        // 免得喇叭已经变绿了却一点声音都还没有。
-        speakingID = item.id
-        defer { if speakingID == item.id { speakingID = nil } }
         if let cloned {
             let outcome = await speaker.play(samples: cloned.samples, sampleRate: Double(cloned.sampleRate), pan: pan)
             switch outcome {
