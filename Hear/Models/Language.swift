@@ -48,6 +48,7 @@ struct TranslationItem: Identifiable, Equatable, Codable {
     var speakerName: String? = nil
     var speakerTracked: Bool? = nil
     var speakerManuallySet: Bool? = nil
+    var sourceProvisional: Bool? = nil
 
     var speakerLabel: String? {
         if let speakerID { return speakerName ?? "说话人 \(speakerID)" }

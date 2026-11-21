@@ -421,6 +421,9 @@ struct BubbleView: View {
                     : Text("")))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                if item.sourceProvisional == true {
+                    Text("原文待确认").font(.caption).foregroundStyle(.secondary)
+                }
                 if item.translated.isEmpty {
                     if !item.done { ProgressView().controlSize(.small) }
                 } else {
@@ -538,7 +541,7 @@ struct ControlBar: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            Text(session.activity.isEmpty ? " " : session.activity)
+            Text(session.recordingStatus.isEmpty ? " " : session.recordingStatus)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 

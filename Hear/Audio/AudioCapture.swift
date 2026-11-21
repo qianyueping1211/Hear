@@ -14,6 +14,8 @@ import AVFoundation
 ///    绝不能悄悄哑掉（用户只能把实时翻译关掉再打开才恢复）。
 final class AudioCapture {
     let segmenter = Segmenter()
+    enum Health: Equatable { case normal, backlogged, reconnecting }
+    var onHealthChanged: ((Health) -> Void)?
 
     /// 语音增强（降噪、回声消除）。下次开始聆听时生效
     var voiceProcessing = true
@@ -73,16 +75,29 @@ final class AudioCapture {
     /// 送进识别队列、还没被消费的声音块数。
     /// 积压说明"麦克风是好的，但识别那边不消费了"——
     /// 这跟"麦克风断了"是两回事，不能混在一起说。
-    private var _pendingBlocks = 0
-    /// 还没被识别那边消费掉的声音块数
-    private var pendingBlocks: Int {
-        lock.lock(); defer { lock.unlock() }; return _pendingBlocks
+    private var pendingFeed = 0
+    private var pendingSegments = 0
+    private var health: Health = .normal
+
+    private var pendingBlocks: (feed: Int, segments: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (pendingFeed, pendingSegments)
     }
 
-    private func changePendingBlocks(by delta: Int) {
+    private func changePendingBlocks(by delta: Int, forFeed: Bool = false) {
         lock.lock()
-        _pendingBlocks += delta
+        if forFeed { pendingFeed += delta } else { pendingSegments += delta }
         lock.unlock()
+    }
+
+    private func reportHealth(_ next: Health) {
+        guard health != next else { return }
+        health = next
+        let round = gen
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.gen == round else { return }
+            self.onHealthChanged?(next)
+        }
     }
 
     /// 最近一次"真的把声音送到识别那里"的时间。
@@ -391,6 +406,7 @@ final class AudioCapture {
             self.watchdog?.cancel()
             self.watchdog = nil
             self.silentTicks = 0
+            self.reportHealth(.normal)
         }
     }
 
@@ -402,6 +418,7 @@ final class AudioCapture {
     private func checkMicAlive() {
         guard isRunning, !interrupted else { return }
         if !tapInstalled || !engine.isRunning {
+            reportHealth(.reconnecting)
             hearLog("麦克风没有声音了（引擎停了或 tap 掉了），自动重新接上", .warning)
             silentTicks = 0
             rearmMic(reason: "看门狗")
@@ -413,11 +430,13 @@ final class AudioCapture {
         // 只看回调时间的话，后一种情况永远发现不了
         // 积压：声音送进去了，识别那边却不消费（后端卡住了）。
         // 这跟麦克风断了不是一回事：重接麦克风没有用，得让用户知道。
-        if pendingBlocks > 40 {
-            hearLog("识别那边不消费声音了（积压 \(pendingBlocks) 块），先继续收音", .warning)
+        let backlog = pendingBlocks
+        if backlog.feed > 40 || backlog.segments > 40 {
+            hearLog("音频积压：听写 \(backlog.feed) 块，断句 \(backlog.segments) 块", .warning)
         }
         if Date().timeIntervalSince(lastSampleAt) > 4 || Date().timeIntervalSince(lastDeliveredAt) > 4 {
             silentTicks += 1
+            reportHealth(.reconnecting)
             // 连续两次（大约 6 秒）没有声音才动手，避免打断正常的短暂卡顿
             if silentTicks >= 2 {
                 silentTicks = 0
@@ -426,6 +445,7 @@ final class AudioCapture {
             }
         } else {
             silentTicks = 0
+            reportHealth(backlog.feed > 40 || backlog.segments > 40 ? .backlogged : .normal)
         }
     }
 
@@ -464,11 +484,11 @@ final class AudioCapture {
         // 喂系统听写，哪一下没赶上就会漏音，听起来是「刺刺」的杂音。
         if let feed = onSamples {
             let input = isMuted ? [Float](repeating: 0, count: samples.count) : samples
-            changePendingBlocks(by: 1)
+            changePendingBlocks(by: 1, forFeed: true)
             feedQueue.async { [weak self] in
                 feed(input)
                 guard let self else { return }
-                self.changePendingBlocks(by: -1)
+                self.changePendingBlocks(by: -1, forFeed: true)
             }
         }
         changePendingBlocks(by: 1)

@@ -127,27 +127,6 @@ final class LLMSettings: ObservableObject {
 
     var active: LLMProvider? { providers.first { $0.id == activeID } ?? providers.first }
 
-    // MARK: - 明文发送（http）的确认
-
-    /// 用户确认过的"明文发送"目标（按 host:port 记）
-    private static let plaintextConfirmedKey = "llmPlaintextConfirmed"
-
-    /// 这个地址是不是已经确认过用明文发送了
-    func isPlaintextConfirmed(_ base: String) -> Bool {
-        let id = LLMClient.endpointDescription(base)
-        let set = (UserDefaults.standard.stringArray(forKey: Self.plaintextConfirmedKey)) ?? []
-        return set.contains(id)
-    }
-
-    /// 记下：这个地址用明文发送，用户确认过了
-    func confirmPlaintext(_ base: String) {
-        let id = LLMClient.endpointDescription(base)
-        var set = (UserDefaults.standard.stringArray(forKey: Self.plaintextConfirmedKey)) ?? []
-        if !set.contains(id) { set.append(id) }
-        UserDefaults.standard.set(set, forKey: Self.plaintextConfirmedKey)
-        hearLog("大模型 API：已确认用明文发送到 \(id)", .warning)
-    }
-
     /// iCloud 同步过来的设置：直接换上，不用重开 App
     func reloadFromDefaults() {
         if let data = UserDefaults.standard.data(forKey: "llmProviders"),
@@ -170,7 +149,8 @@ final class LLMSettings: ObservableObject {
     /// 已选好模型并填了 Key，可以用来总结
     var isReady: Bool {
         guard let p = active else { return false }
-        return !p.selectedModel.isEmpty && !(key(for: p) ?? "").isEmpty
+        return !p.selectedModel.isEmpty &&
+            (!(key(for: p) ?? "").isEmpty || LLMClient.isLocalEndpoint(p.baseURL))
     }
 
     func key(for p: LLMProvider) -> String? { Keychain.get(account: p.id.uuidString) }
@@ -295,37 +275,39 @@ enum LLMClient {
         return "\(host)\(port)\(path)"
     }
 
-    /// 用户确认过的"明文发送"地址（按 host:port 记）
-    static var plaintextApproved: Set<String> {
-        let arr = UserDefaults.standard.stringArray(forKey: "llmPlaintextConfirmed") ?? []
-        return Set(arr)
+    private static func approvalID(_ provider: LLMProvider, secret: String? = nil) -> String {
+        let base = provider.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = [provider.id.uuidString, provider.kind.rawValue, base, secret ?? ""]
+        return SHA256.hash(data: Data(parts.joined(separator: "|").utf8))
+            .map { String(format: "%02x", $0) }.joined()
     }
 
-    /// 这个地址是不是已经确认过用明文发送了
-    static func isPlaintextApproved(_ base: String) -> Bool {
-        plaintextApproved.contains(endpointDescription(base))
+    static func isPlaintextBodyApproved(_ provider: LLMProvider) -> Bool {
+        let approved = UserDefaults.standard.dictionary(forKey: "llmPlaintextProviders") as? [String: String]
+        return approved?[provider.id.uuidString] == approvalID(provider)
     }
 
-    private static func plaintextKeyID(_ provider: LLMProvider, key: String) -> String {
-        let source = provider.id.uuidString + "|" + provider.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-            + "|" + key
-        return SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
+    static func approvePlaintextBody(_ provider: LLMProvider) {
+        guard isPlaintextEndpoint(provider.baseURL), isLocalEndpoint(provider.baseURL) else { return }
+        var approved = UserDefaults.standard.dictionary(forKey: "llmPlaintextProviders") as? [String: String] ?? [:]
+        approved[provider.id.uuidString] = approvalID(provider)
+        UserDefaults.standard.set(approved, forKey: "llmPlaintextProviders")
     }
 
     static func isPlaintextKeyApproved(_ provider: LLMProvider, key: String) -> Bool {
         let approved = UserDefaults.standard.dictionary(forKey: "llmPlaintextKeys") as? [String: String]
-        return approved?[provider.id.uuidString] == plaintextKeyID(provider, key: key)
+        return approved?[provider.id.uuidString] == approvalID(provider, secret: key)
     }
 
     static func approvePlaintextKey(_ provider: LLMProvider, key: String) {
         guard !key.isEmpty, isPlaintextEndpoint(provider.baseURL), isLocalEndpoint(provider.baseURL) else { return }
         var approved = UserDefaults.standard.dictionary(forKey: "llmPlaintextKeys") as? [String: String] ?? [:]
-        approved[provider.id.uuidString] = plaintextKeyID(provider, key: key)
+        approved[provider.id.uuidString] = approvalID(provider, secret: key)
         UserDefaults.standard.set(approved, forKey: "llmPlaintextKeys")
     }
 
     private static func checkCredentials(_ provider: LLMProvider, key: String) throws {
-        try checkEndpoint(provider.baseURL)
+        try checkEndpoint(provider)
         if !key.isEmpty, isPlaintextEndpoint(provider.baseURL), !isPlaintextKeyApproved(provider, key: key) {
             throw LLMError.plaintextKeyNotApproved
         }
@@ -335,8 +317,8 @@ enum LLMClient {
     /// 局域网里的自建服务可以用 http，但要先在设置里确认过
     /// （确认之前一个字节都不发——连"取模型列表"也不行，
     ///   那一次请求里带着 API Key 呢）。
-    static func checkEndpoint(_ base: String) throws {
-        let s = base.trimmingCharacters(in: .whitespacesAndNewlines)
+    private static func checkEndpoint(_ provider: LLMProvider) throws {
+        let s = provider.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let u = URL(string: s), let scheme = u.scheme?.lowercased() else {
             throw LLMError.badURL
         }
@@ -344,7 +326,7 @@ enum LLMClient {
         if scheme == "http" {
             if isLocalEndpoint(s) {
                 // 局域网里的自建服务：允许，但要用户确认过
-                guard isPlaintextApproved(s) else { throw LLMError.plaintextNotApproved }
+                guard isPlaintextBodyApproved(provider) else { throw LLMError.plaintextNotApproved }
                 return
             }
             throw LLMError.plaintextBlocked       // 公网的明文地址，不给发

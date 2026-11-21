@@ -50,6 +50,14 @@ final class LiveSession: ObservableObject {
     /// 音量（每秒变化很多次）单独放一个对象，只有麦克风按钮跟着刷新，整页和弹出的页面不会跟着闪
     let meter = LevelMeter()
     @Published var activity = ""
+    @Published private var captureHealth: AudioCapture.Health = .normal
+    var recordingStatus: String {
+        guard isRunning else { return activity }
+        if captureHealth == .reconnecting { return "正在恢复麦克风连接…" }
+        if captureHealth == .backlogged { return "收音正常，正在处理积压音频…" }
+        let count = recognitionQueue.pendingCount
+        return count > 1 ? "收音正常，\(count) 句等待识别…" : activity
+    }
     /// 实时翻译按钮上方的短暂提示（几秒后自动消失）
     @Published private(set) var toast: String?
     private var toastTask: Task<Void, Never>?
@@ -575,6 +583,9 @@ final class LiveSession: ObservableObject {
         capture.voiceProcessing = voiceProcessing
         AudioRoute.useHeadsetMic = inputSource == "headset"
 
+        capture.onHealthChanged = { [weak self] health in
+            self?.captureHealth = health
+        }
         capture.segmenter.onEvent = { [weak self] e in
             DispatchQueue.main.async { self?.handle(e) }
         }
@@ -2560,6 +2571,7 @@ final class LiveSession: ObservableObject {
         // 听写这一段有没有出字
         let dict = bestApple(segID, requireFinal: true)
         var spoken = dict?.text ?? ""
+        var provisional = false
         var src = forcedItemLang(itemID) ?? dict?.lang ?? (lastLangID == langB.id ? langB : langA)
         if !SpeechRecognizer.isMeaningful(spoken) {
             // 听写最后那几百毫秒没出字：不能把这句话删掉！
@@ -2571,6 +2583,7 @@ final class LiveSession: ObservableObject {
             if let r = recovered ?? bestApple(segID) {
                 spoken = r.text
                 src = r.lang
+                provisional = recovered == nil
             } else {
                 hearLog("系统听写：这一段没听清，留着让用户改", .warning)
                 if let i = items.firstIndex(where: { $0.id == itemID }) {
@@ -2592,7 +2605,8 @@ final class LiveSession: ObservableObject {
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
         let old = items[idx]
         let preview = old.source == src ? old.translated : ""
-        let item = TranslationItem(id: itemID, source: src, target: tgt, sourceText: spoken, translated: preview)
+        let item = TranslationItem(id: itemID, source: src, target: tgt, sourceText: spoken,
+                                   translated: preview, sourceProvisional: provisional ? true : nil)
         guard let idx2 = items.firstIndex(where: { $0.id == itemID }) else { return }
         items[idx2] = item
         rememberReference(itemID, samples: samples, text: spoken, lang: src.id)
@@ -3139,6 +3153,7 @@ final class LiveSession: ObservableObject {
         // 译完要写回原来那一页，不能因为切页就把这次修改弄丢
         let convID = conversationID
         items[i].sourceText = text
+        items[i].sourceProvisional = nil
         items[i].translated = ""          // 译文清空，界面显示转圈；保持 done，停止实时翻译时不会被当成未完成删掉
         // 版本号 +1：前一次翻译回来的时候版本对不上，就不要了
         itemVersions[id] = (itemVersions[id] ?? 0) + 1

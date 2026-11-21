@@ -3,6 +3,8 @@ name: Check build (compile only)
 # 只编译、不打包、不发布：用来快速验证 Swift 代码能不能编过
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
     paths:

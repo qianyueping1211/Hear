@@ -69,6 +69,11 @@ struct ProviderEditView: View {
     @State var provider: LLMProvider
     let isNew: Bool
     @State private var plaintextKeyConfirmation = 0
+    private var plaintextBodyIsApproved: Bool {
+        _ = plaintextKeyConfirmation
+        return LLMClient.isPlaintextBodyApproved(provider)
+    }
+
     private var plaintextKeyIsApproved: Bool {
         _ = plaintextKeyConfirmation
         return LLMClient.isPlaintextKeyApproved(provider, key: apiKey)
@@ -116,11 +121,12 @@ struct ProviderEditView: View {
                                     .font(.footnote)
                                 }
                             }
-                            if LLMSettings.shared.isPlaintextConfirmed(provider.baseURL) {
+                            if plaintextBodyIsApproved {
                                 Text("已确认使用（明文发送）").font(.caption).foregroundStyle(.secondary)
                             } else {
                                 Button("我知道了，仍然使用（明文发送）") {
-                                    LLMSettings.shared.confirmPlaintext(provider.baseURL)
+                                    LLMClient.approvePlaintextBody(provider)
+                                    plaintextKeyConfirmation += 1
                                 }
                                 .font(.footnote)
                             }

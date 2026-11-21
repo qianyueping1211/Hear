@@ -29,12 +29,13 @@ final class SummaryService {
         } else {
             problem = nil
         }
-        guard problem == nil, let provider = settings.active, let apiKey = settings.key(for: provider) else {
+        guard problem == nil, let provider = settings.active else {
             store.updateSummary(conversationID, templateID: templateID,
                                 SummaryRecord(status: .failed, error: problem ?? "大模型 API 配置不完整"))
             hearLog("总结失败：\(problem ?? "配置不完整")", .warning)
             return
         }
+        let apiKey = settings.key(for: provider) ?? ""
         guard !conv.items.isEmpty else {
             store.updateSummary(conversationID, templateID: templateID,
                                 SummaryRecord(status: .failed, error: "这段对话没有内容"))
@@ -43,7 +44,7 @@ final class SummaryService {
         // 明文发送（http）的地址：要先在设置里确认过
         // （要确认的是"这次对话正文会明文发到这个地址"）
         if LLMClient.isPlaintextEndpoint(provider.baseURL),
-           !settings.isPlaintextConfirmed(provider.baseURL) {
+           !LLMClient.isPlaintextBodyApproved(provider) {
             let msg = "这个地址是用明文（http）发送的：对话正文会明文传到 \(LLMClient.endpointDescription(provider.baseURL))。请到 设置 → 大模型 API 里确认一次再生成总结。"
             store.updateSummary(conversationID, templateID: templateID,
                                 SummaryRecord(status: .failed, error: msg))
@@ -95,8 +96,13 @@ final class SummaryService {
         ]
         for (i, item) in c.items.enumerated() {
             let side = item.speakerLabel ?? (item.source == c.langA ? "A方" : "B方")
-            lines.append("\(i + 1). 【\(side)·\(item.source.zhName)】\(item.sourceText)")
-            lines.append("   【译文·\(item.target.zhName)】\(item.translated)")
+            let provisional = item.sourceProvisional == true ? "·原文待确认" : ""
+            lines.append("\(i + 1). 【\(side)·\(item.source.zhName)\(provisional)】\(item.sourceText)")
+            if item.done, !item.translated.isEmpty {
+                lines.append("   【译文·\(item.target.zhName)】\(item.translated)")
+            } else if !item.done {
+                lines.append("   【待翻译·\(item.target.zhName)】")
+            }
         }
         return lines.joined(separator: "\n")
     }
