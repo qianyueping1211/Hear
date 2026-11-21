@@ -105,7 +105,7 @@ struct CenterChoice: ViewModifier {
                                 .contentShape(Rectangle())
                                 .onTapGesture { isPresented = false }
                             card
-                                .frame(width: min(geo.size.width * 0.88, 440))
+                                .frame(width: max(0, min(geo.size.width - 24, 480)))
                                 .transition(.scale(scale: 0.9).combined(with: .opacity))
                         }
                         .frame(width: geo.size.width, height: geo.size.height)
@@ -124,8 +124,8 @@ struct CenterChoice: ViewModifier {
                 .padding(.bottom, 6)
             ForEach(options, id: \.tag) { o in
                 Button {
-                    onSelect(o.tag)
                     isPresented = false
+                    onSelect(o.tag)
                 } label: {
                     HStack(spacing: 12) {
                         Image(systemName: "checkmark")
@@ -155,6 +155,7 @@ struct CenterChoice: ViewModifier {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(o.tag == selected ? .isSelected : [])
             }
         }
         .padding(.horizontal, 16)

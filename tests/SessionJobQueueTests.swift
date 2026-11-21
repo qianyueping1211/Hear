@@ -37,6 +37,7 @@ struct SessionJobQueueTests {
         await until { queue.isIdle }
         precondition(handled == [2, 4, 5] && timedOut == [1], "Canceled worker changed the replacement queue")
         try testSpeakers()
+        try testZipVoiceArchive()
         print("Session queue regressions passed")
     }
 
@@ -64,4 +65,30 @@ struct SessionJobQueueTests {
         let decoded = try JSONDecoder().decode([TranslationItem].self, from: data)
         precondition(decoded == items, "Speaker edits should survive persistence")
     }
+}
+
+private func testZipVoiceArchive() throws {
+    // Fixtures contain a padded model file, voice data and an ignored sample, or an unsafe path.
+    let fixtures = [
+        "QlpoOTFBWSZTWeCM5WUAAL1/gMmABABAA/2AAoAgAO6v38AIKDAAuSGUE1PKaeKZAB6Qaeg9UMAMmmgyGCGmI0YEVE1BppoxAAyaNNA/YY/KRkSgI4SjlRErqs9MGgZolLQ5hzwUCIMAuv8X3VGMNzOITsBW222QNWSLsmrlZBwbYplHHsHYGBc5ZrNZVfcs46Co95/te/x9RtkwUpKb3tZGMNMsS03W2QPDJM5cZhCgid1qjsQsG/reg1EVjWoED+LuSKcKEhwRnKyg",
+        "QlpoOTFBWSZTWcnZvxQAAH15gMmAAAFAA+0A7qneAAgIIAB0GUTNJoA000aMmgklGgDR6gAA+ysJEIOYIQiXp6BqoTIEMDG3DjmrHmFOiiHqBElkL5z4SVyF85rlVk+hAUjFyd1qxopjZVnNS0CSB+LuSKcKEhk7N+KA"
+    ]
+    let fm = FileManager.default
+    let stage = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let model = stage.appendingPathComponent("model")
+    try fm.createDirectory(at: model, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: stage) }
+    let archive = stage.appendingPathComponent("model.tar.bz2")
+    try Data(base64Encoded: fixtures[0])!.write(to: archive)
+    try ZipVoiceArchive.extract(archive, into: model, root: "root", modelFiles: ["model.onnx"])
+    let weight = try Data(contentsOf: model.appendingPathComponent("model.onnx"))
+    let dictionary = try Data(contentsOf: model.appendingPathComponent("espeak-ng-data/en_dict"))
+    precondition(weight == Data(repeating: 120, count: 513) && dictionary == Data("dict".utf8))
+    precondition(!fm.fileExists(atPath: model.appendingPathComponent("test_wavs").path))
+
+    try Data(base64Encoded: fixtures[1])!.write(to: archive)
+    do {
+        try ZipVoiceArchive.extract(archive, into: model, root: "root", modelFiles: [])
+        preconditionFailure("Unsafe archive path was accepted")
+    } catch ZipVoiceArchive.Failure.invalidArchive { }
 }

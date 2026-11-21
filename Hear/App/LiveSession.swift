@@ -851,7 +851,7 @@ final class LiveSession: ObservableObject {
 
             return .init(name: name, detail: detail, installed: true)
         }
-        return .init(name: name, detail: "等待导入模型文件夹", installed: false)
+        return .init(name: name, detail: "未下载", installed: false)
     }
 
     func isInstalled(_ kind: ModelKind) -> Bool {
@@ -929,7 +929,7 @@ final class LiveSession: ObservableObject {
     func redownload(_ kind: ModelKind) async {
         guard !bgDownloading else { return }
         if kind == .voiceClone {
-            showToast("请重新导入 ZipVoice 模型文件夹")
+            startBackgroundDownload(kinds: [.voiceClone], switchWhenDone: false, force: true)
             return
         }
         if isInstalled(kind) {
@@ -1062,8 +1062,13 @@ final class LiveSession: ObservableObject {
         Task {
             UIApplication.shared.isIdleTimerDisabled = true
             var ok = false
-            let host = await HostPicker.best()
-            hfHost = host
+            let host: String
+            if list.contains(where: { $0 != .voiceClone }) {
+                host = await HostPicker.best()
+                hfHost = host
+            } else {
+                host = hfHost
+            }
             do {
                 for kind in list {
                     bgDownloadKind = kind
@@ -1076,11 +1081,17 @@ final class LiveSession: ObservableObject {
                     case .translation: _ = try await ModelManager.downloadGGUF(host: host, progress: onProgress)
                     case .speech: _ = try await ModelManager.downloadWhisper(host: host, force: force, progress: onProgress)
                     case .senseVoice: try await SenseVoiceRecognizer.download(host: host, force: force, progress: onProgress)
-                    case .voiceClone: throw LocalVoiceCloneError.notLoaded
+                    case .voiceClone:
+                        try await ZipVoiceModel.download(progress: onProgress)
+                        cloneLoadTask?.cancel()
+                        cloneTasks.values.forEach { $0.cancel() }
+                        cloneTasks.removeAll()
+                        await cloner.unload()
                     }
                     bgDownloadKind = nil              // 下载完立刻收起进度条
                     bgQueue.removeAll { $0 == kind }
                     modelsRevision += 1
+                    if kind == .voiceClone, voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 0.3) }
                 }
                 ok = true
             } catch {
@@ -1123,7 +1134,7 @@ final class LiveSession: ObservableObject {
         case .translation: return "翻译模型 Hy-MT2"
         case .speech: return "语音识别模型 Whisper"
         case .senseVoice: return "语音识别模型 SenseVoice"
-        case .voiceClone: return "本地克隆模型 ZipVoice"
+        case .voiceClone: return "声音克隆模型 ZipVoice"
         }
     }
 
@@ -3772,7 +3783,7 @@ final class LiveSession: ObservableObject {
         if !usingCloudClone, (!ZipVoiceModel.supports(item.target.id) || !ZipVoiceModel.supports(item.source.id)) {
             return "本地 ZipVoice 仅支持中英文"
         }
-        if !usingCloudClone, !cloneInstalled { return "尚未导入本地 ZipVoice 模型" }
+        if !usingCloudClone, !cloneInstalled { return "尚未下载本地 ZipVoice 模型" }
         if CloudVoiceReference.languageNames[item.target.id] == nil {
             return "\(item.target.displayName)这个语言声音克隆不支持"
         }

@@ -16,13 +16,13 @@ struct SettingsView: View {
     @ObservedObject private var llm = LLMSettings.shared
     @ObservedObject private var cloud = CloudSync.shared
     @State private var showCloudPicker = false
+    @State private var showASREngines = false
     /// 授权 iCloud 云盘的说明框（系统的授权框弹不出来时才需要）
     @State private var askCloudAuth = false
     /// 模型管理里的页签：0 = 本地模型，1 = 在线模型
     @State private var modelTab = 0
     /// 正在配置哪一项：服务（默认地址）或某个模型
     @State private var cloudEdit: CloudEdit?
-    /// 本地引擎互斥的提示
     /// 本地网络权限没开：弹提示告诉用户去哪儿开
     @State private var showLocalNetworkHelp = false
 
@@ -136,35 +136,27 @@ struct SettingsView: View {
 
                 // MARK: 引擎管理（语音识别 / 文本翻译 / 声音克隆）
                 Section {
-                    Picker("语音识别", selection: asrEngineBinding) {
-                        if session.appleAvailable {
-                            Text("iPhone 本机 · 苹果自带").tag("apple")
-                        }
-                        Text("iPhone 本机 · SenseVoice").tag("sensevoice")
-                        Text("iPhone 本机 · Whisper").tag("whisper")
-                        Text("iPhone 本机 · SenseVoice + Whisper").tag("hybrid")
-                        Text("电脑云端 · 语音识别").tag("cloud")
-                    }
+                    asrEngineRow
                     Picker("文本翻译", selection: translationEngineBinding) {
                         if session.appleAvailable {
                             Text("iPhone 本机 · 苹果自带").tag("apple")
                         }
                         Text("iPhone 本机 · Hy-MT2").tag("local")
-                        Text("电脑云端 · 文本翻译").tag("cloud")
+                        Text("云端服务器").tag("cloud")
                     }
                     Picker("声音克隆引擎", selection: voiceCloneEngineBinding) {
-                        Text("电脑云端 · Qwen3-TTS").tag("cloud")
+                        Text("云端服务器 · Qwen3-TTS").tag("cloud")
                         Text("iPhone 本机 · ZipVoice INT8").tag("local")
                     }
                     if !session.voiceCloneCloud {
                         Text("ZipVoice 仅支持中英文。安装模型后可离线克隆声音。")
                             .font(.footnote).foregroundStyle(.secondary)
                         if !session.isInstalled(.voiceClone) {
-                            Link("获取 ZipVoice 模型和 Vocos", destination: ZipVoiceModel.setupGuideURL)
-                            Button("导入 ZipVoice 模型文件夹") {
-                                lastImportKind = .voiceClone
-                                importKind = .voiceClone
+                            Button("下载") {
+                                lastKind = .voiceClone
+                                confirmKind = .voiceClone
                             }
+                            .disabled(session.bgDownloading)
                         }
                     }
                     if session.usingCloudASR {
@@ -172,7 +164,7 @@ struct SettingsView: View {
                             .font(.footnote).foregroundStyle(.secondary)
                         Toggle("实时翻译时区分说话人", isOn: $session.speakerTrackingEnabled)
                         if session.speakerTrackingEnabled {
-                            Text("电脑按声音区分发言。点原文上方的说话人标签可以改名或改分组。")
+                            Text("云端服务器按声音区分发言。点原文上方的说话人标签可以改名或改分组。")
                                 .font(.footnote).foregroundStyle(.secondary)
                         }
                     }
@@ -207,7 +199,7 @@ struct SettingsView: View {
                                  status: session.senseStatus)
                         modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
                                  status: session.translationStatus)
-                        modelRow(.voiceClone, title: "本机声音克隆（ZipVoice）", icon: "person.wave.2",
+                        modelRow(.voiceClone, title: "声音克隆", icon: "person.wave.2",
                                  status: session.cloneStatus)
                         // 选哪个 .gguf、清缓存，都放到各自的"配置"窗口里
                     } else {
@@ -329,7 +321,7 @@ struct SettingsView: View {
                 } header: {
                     Text("朗读")
                 } footer: {
-                    Text("声音克隆用说话人的音色朗读译文。iPhone 本机使用 ZipVoice INT8，电脑云端随听见 Windows 服务使用 Qwen3-TTS。")
+                    Text("声音克隆用说话人的音色朗读译文。iPhone 本机使用 ZipVoice INT8，听见 Windows 服务使用 Qwen3-TTS。")
                 }
 
                 Section {
@@ -469,6 +461,9 @@ struct SettingsView: View {
         // （挂在 NavigationStack 上：里面的 Form 上已经有一个 .alert 了，
         //   同一个视图挂两个 alert 会互相顶掉）
         .localNetworkHelp($showLocalNetworkHelp)
+        .centerChoice(isPresented: $showASREngines, title: "语音识别引擎",
+                      options: asrEngineOptions, selected: session.asrEngine,
+                      onSelect: applyASREngineSelection)
         // 屏幕正中的确认框：背后整页虚化
         .centerDialog(isPresented: Binding(get: { confirmKind != nil },
                                            set: { if !$0 { confirmKind = nil } }),
@@ -517,12 +512,12 @@ struct SettingsView: View {
 
     private var cloudASRDescription: String {
         let available = session.cloudASRSchemes
-        guard !available.isEmpty else { return "电脑云端运行语音识别" }
+        guard !available.isEmpty else { return "语音识别在云端服务器运行" }
         let active = available.contains(session.cloudASRScheme)
             ? session.cloudASRScheme : (available.first ?? session.cloudASRScheme)
         let model = session.cloudASRModelName
         let suffix = model.isEmpty || active == "sensevoice" ? "" : "（\(model)）"
-        return "电脑云端 · \(LiveSession.cloudSchemeName(active))" + suffix
+        return "云端服务器 · \(LiveSession.cloudSchemeName(active))" + suffix
     }
 
     private var voiceCloneEngineBinding: Binding<String> {
@@ -534,20 +529,60 @@ struct SettingsView: View {
     @State private var pendingEngine: String?
     @State private var lastPendingEngine = "sensevoice"
 
-    private var asrEngineBinding: Binding<String> {
-        Binding(
-            get: { session.asrEngine },
-            set: { e in
-                guard e != session.asrEngine else { return }
-                // 本地声音克隆和别的本地引擎互斥
-                if session.missingSpeechKinds(for: e).isEmpty {
-                    session.asrEngine = e
-                } else if !session.bgDownloading {
-                    lastPendingEngine = e
-                    pendingEngine = e
+    private var asrEngineRow: some View {
+        let name = asrEngineName(session.asrEngine)
+        let value = Text(name).lineLimit(1).fixedSize(horizontal: true, vertical: false)
+        return Button {
+            showASREngines = true
+        } label: {
+            HStack(spacing: 8) {
+                Text("语音识别")
+                    .fixedSize()
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 0)
+                ViewThatFits(in: .horizontal) {
+                    value
+                    ScrollView(.horizontal) { value }
+                        .scrollIndicators(.hidden)
                 }
+                .foregroundStyle(.secondary)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
             }
-        )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("语音识别")
+        .accessibilityValue(name)
+    }
+
+    private var asrEngineOptions: [(tag: String, title: String, detail: String)] {
+        let engines = ["sensevoice", "whisper", "hybrid", "cloud"]
+        let options = session.appleAvailable ? ["apple"] + engines : engines
+        return options.map { ($0, asrEngineName($0), "") }
+    }
+
+    private func asrEngineName(_ engine: String) -> String {
+        switch engine {
+        case "apple": return "iPhone 本机 · 苹果自带"
+        case "sensevoice": return "iPhone 本机 · SenseVoice"
+        case "whisper": return "iPhone 本机 · Whisper"
+        case "hybrid": return "iPhone 本机 · SenseVoice + Whisper"
+        case "cloud": return "云端服务器"
+        default: return "请选择"
+        }
+    }
+
+    private func applyASREngineSelection(_ engine: String) {
+        guard engine != session.asrEngine else { return }
+        if session.missingSpeechKinds(for: engine).isEmpty {
+            session.asrEngine = engine
+        } else if !session.bgDownloading {
+            lastPendingEngine = engine
+            pendingEngine = engine
+        }
     }
 
     private var engineDownloadMessage: String {
@@ -565,7 +600,7 @@ struct SettingsView: View {
 
     private var dialogMessage: String {
         let size = Self.kindSize(lastKind)
-        let head = isInstalled(lastKind) ? "会先删除已下载的文件，再重新下载（\(size)）。" : "文件\(size)。"
+        let head = isInstalled(lastKind) ? "重新下载（\(size)），下载完成后替换模型。" : "文件\(size)。"
         return head + "请连接 Wi‑Fi，下载进度显示在「模型管理」里，下载时请保持 App 在前台。"
     }
 
@@ -574,7 +609,7 @@ struct SettingsView: View {
         case .translation: return "翻译模型（MT）"
         case .speech: return "语音识别模型（Whisper）"
         case .senseVoice: return "语音识别模型（SenseVoice）"
-        case .voiceClone: return "本机声音克隆模型（ZipVoice）"
+        case .voiceClone: return "声音克隆模型（ZipVoice）"
         }
     }
 
@@ -583,7 +618,7 @@ struct SettingsView: View {
         case .translation: return "约 2 GB"
         case .speech: return "约 1.6 GB"
         case .senseVoice: return "约 240 MB"
-        case .voiceClone: return "约 150 MB"
+        case .voiceClone: return "约 163 MB"
         }
     }
 
@@ -1177,16 +1212,12 @@ struct LocalModelSheet: View {
                 }
 
                 Section {
-                    if kind == .voiceClone {
-                        Link("获取 ZipVoice 模型和 Vocos", destination: ZipVoiceModel.setupGuideURL)
-                    } else {
-                        Button {
-                            onPick(true)
-                            dismiss()
-                        } label: {
-                            Label(installed ? "重新下载" : "下载",
-                                  systemImage: installed ? "arrow.clockwise" : "arrow.down.circle")
-                        }
+                    Button {
+                        onPick(true)
+                        dismiss()
+                    } label: {
+                        Label(installed ? "重新下载" : "下载",
+                              systemImage: installed ? "arrow.clockwise" : "arrow.down.circle")
                     }
                     Button {
                         onPick(false)

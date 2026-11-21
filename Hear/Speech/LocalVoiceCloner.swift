@@ -26,9 +26,10 @@ enum LocalVoiceCloneError: LocalizedError {
 
 enum ZipVoiceModel {
     static let displayName = "ZipVoice-Distill INT8"
-    static let setupGuideURL = URL(string: "https://k2-fsa.github.io/sherpa/onnx/tts/zipvoice.html")!
     private static let files = ["encoder.int8.onnx", "decoder.int8.onnx", "vocos_24khz.onnx",
                         "tokens.txt", "lexicon.txt", "espeak-ng-data"]
+    private static let archiveRoot = "sherpa-onnx-zipvoice-distill-int8-zh-en-emilia"
+    private static let releaseAssets = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
 
     static var directory: URL {
         ModelManager.documents.appendingPathComponent("ZipVoice", isDirectory: true)
@@ -51,6 +52,31 @@ enum ZipVoiceModel {
                 throw LocalVoiceCloneError.missingFile(name)
             }
         }
+    }
+
+    static func download(progress: @escaping @Sendable (Double) -> Void) async throws {
+        let fm = FileManager.default
+        let staging = ModelManager.documents.appendingPathComponent(".zipvoice-\(UUID().uuidString)")
+        let model = staging.appendingPathComponent("model")
+        try fm.createDirectory(at: model, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: staging) }
+
+        let archive = staging.appendingPathComponent("model.tar.bz2")
+        let archiveURL = URL(string: "\(releaseAssets)/tts-models/\(archiveRoot).tar.bz2")!
+        try await FileDownloader().download(archiveURL, to: archive) { progress($0 * 0.65) }
+        try ZipVoiceArchive.verify(archive, sha256: "77219c8b40f4ee8d73a7f902305ff6c1128ef9b54461c41b4ca6ed890b6c2803")
+        try ZipVoiceArchive.extract(archive, into: model, root: archiveRoot,
+                                    modelFiles: Set(files).subtracting(["vocos_24khz.onnx", "espeak-ng-data"]))
+        try fm.removeItem(at: archive)
+
+        let vocos = model.appendingPathComponent("vocos_24khz.onnx")
+        let vocosURL = URL(string: "\(releaseAssets)/vocoder-models/vocos_24khz.onnx")!
+        try await FileDownloader().download(vocosURL, to: vocos) { progress(0.65 + $0 * 0.34) }
+        try ZipVoiceArchive.verify(vocos, sha256: "bcb3b970e384161c4d634f0bb9e999ff1c471b34c9bc0b1049a5014065ed3cc0")
+        try validate(model)
+        try Task.checkCancellation()
+        try ModelManager.installModelFile(model, at: directory)
+        progress(1)
     }
 
     static func importFolder(_ source: URL) throws {
