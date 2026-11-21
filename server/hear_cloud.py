@@ -624,6 +624,13 @@ a{color:#007aff;text-decoration:none}
         out["mt"] = backend_state(MT_URL)
         if out["mt"] == "连不上":
             out["mt"] = "连不上（%s）" % MT_URL
+        # 把后端跑的是哪个模型报出来：启动时可以让用户按类型选大模型，
+        # 手机上要能一眼看出"电脑上现在跑的是哪个"
+        if not ASR_URL:
+            out["asr_model"] = ASR_MODEL
+        mt_model = backend_model(MT_URL)
+        if mt_model:
+            out["mt_model"] = mt_model
         out["clone"] = backend_state(CLONE_URL)
         if out["clone"] == "连不上":
             out["clone"] = "连不上（%s）" % CLONE_URL
@@ -632,6 +639,7 @@ a{color:#007aff;text-decoration:none}
             m = backend_model(CLONE_URL)
             if m:
                 out["clone"] += "（%s）" % m
+                out["clone_model"] = m
                 if "tts" not in m.lower():
                     out["clone"] += " 模型不对！应该是 Qwen3-TTS"
         return out

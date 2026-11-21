@@ -12,6 +12,9 @@ iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话
 📄 完整介绍与技术架构（功能清单、信号通路、服务接口、在线模型服务）：**[docs/index.html](docs/index.html)**
 （下载后用浏览器打开就行）
 
+🪟 在 Windows 上把模型跑在自己电脑上：**[docs/windows-deploy.md](docs/windows-deploy.md)**
+（部署步骤、启动时按类型选模型、注意事项、已知问题和处理方案）
+
 ---
 
 ## 安装方法（二选一）

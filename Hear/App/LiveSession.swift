@@ -369,6 +369,9 @@ final class LiveSession: ObservableObject {
     @Published private(set) var clonePreparingID: UUID?
     /// 正在生成克隆声音的句子（气泡里显示转圈）
     @Published private(set) var cloneWorking: Set<UUID> = []
+    /// 真正在出声的那一条（喇叭显示成绿色）。
+    /// 只是"轮到它读了"不算：声音还在生成、或者还没开始播，喇叭都还是转圈。
+    @Published private(set) var speakingID: UUID?
     /// 本地网络权限没开：界面上弹提示
     @Published var localNetworkHelp = false
 
@@ -1755,6 +1758,7 @@ final class LiveSession: ObservableObject {
         readerTask?.cancel()
         readerTask = nil
         readingID = nil
+        speakingID = nil
         if wasReading { speaker.stop() }
         capture.muted = false
         // 朗读停了：没在收音的话就把麦克风放开
@@ -2589,6 +2593,11 @@ final class LiveSession: ObservableObject {
         // 电脑那边的克隆请求要跑完，声音存着，回前台就能直接播。
         if inBackground { return }
         if mute { capture.muted = true }
+        // 真正开始出声了：气泡里的喇叭这才变绿。
+        // 在这之前（声音还在生成、等克隆结果）都还是转圈，
+        // 免得喇叭已经变绿了却一点声音都还没有。
+        speakingID = item.id
+        defer { if speakingID == item.id { speakingID = nil } }
         if let cloned {
             let ok = await speaker.play(samples: cloned.samples, sampleRate: Double(cloned.sampleRate), pan: pan)
             if !ok {
@@ -2906,7 +2915,16 @@ final class LiveSession: ObservableObject {
                 }
                 if good { ok = true; used = addr; break }
             }
-            status[m.rawValue] = ok ? Self.cloudStatusOK : Self.cloudStatusBad
+            var text = ok ? Self.cloudStatusOK : Self.cloudStatusBad
+            // 顺便把电脑上跑的是哪个模型写出来：启动时可以按类型选大模型，
+            // 手机上一眼就能看到"现在用的是哪个"
+            if ok, !used.isEmpty {
+                let health = models[used] ?? [:]
+                if let name = health["\(m.rawValue)_model"], !name.isEmpty {
+                    text += "（\(name)）"
+                }
+            }
+            status[m.rawValue] = text
             usedAddress[m.rawValue] = ok ? used : ""
         }
         cloudStatus = status

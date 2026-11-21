@@ -18,3 +18,6 @@ __pycache__/
 
 # 自签证书（每台电脑自己生成，私钥不能进仓库）
 server/certs/
+
+# 每台电脑自己选的模型（启动脚本问完记在这里）
+server/hear_models.json

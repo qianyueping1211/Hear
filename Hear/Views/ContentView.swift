@@ -292,6 +292,7 @@ struct TranscriptView: View {
                     ForEach(session.items) { item in
                         BubbleView(item: item, leading: item.source == session.langA,
                                    reading: session.readingID == item.id,
+                                   playing: session.speakingID == item.id,
                                    preparing: session.clonePreparingID == item.id
                                         || session.cloneWorking.contains(item.id),
                                    onEdit: { if item.done { onEdit(item) } }) {
@@ -364,6 +365,8 @@ struct BubbleView: View {
     let item: TranslationItem
     let leading: Bool
     var reading: Bool = false
+    /// 真的在出声：喇叭显示成绿色的（只有正在播的时候才是绿的）
+    var playing: Bool = false
     /// 声音（克隆原声）还在生成：喇叭显示成灰色，表示"马上就好"
     var preparing: Bool = false
     var onEdit: (() -> Void)? = nil      // 有值时：长按修改原文（对话页）；没有时：长按弹出复制菜单（历史页）
@@ -376,13 +379,13 @@ struct BubbleView: View {
 
     @ViewBuilder
     private var readingIcon: some View {
-        if preparing {
-            // 声音还在生成：灰色的半圈一直在转
+        if preparing || !playing {
+            // 还没开始出声（声音还在生成、或者正在排队等）：转圈
             HalfCircleSpinner()
         } else {
+            // 正在播：绿色喇叭
             Image(systemName: "speaker.wave.2.fill")
-                .symbolEffect(.variableColor.iterative, isActive: true)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(Color.green)
         }
     }
 

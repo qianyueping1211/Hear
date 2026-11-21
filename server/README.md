@@ -9,6 +9,9 @@
 | 文本翻译 | Hy-MT2 (GGUF) | llama.cpp 的 `llama-server` |
 | 声音克隆 | Qwen3-TTS (GGUF) | llama.cpp 的 `llama-server`（`/tts` 接口，带参考音频克隆音色） |
 
+> 📄 完整的部署步骤、注意事项、已知问题和处理方案：
+> **[docs/windows-deploy.md](../docs/windows-deploy.md)**
+
 三个模型默认都走 8000 那个总服务（`hear_cloud.py`），它再转发给 8081（翻译）
 和 8082（克隆）。也可以在 App 里给某个模型单独填地址，直接连那个模型服务：
 
@@ -155,10 +158,34 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\你的用户名\Downloads\Hea
 ==> 模型目录：C:\Users\你的用户名\Downloads\Hear\server\models
 ```
 
-### 4. 脚本会自动做的事
+### 4. 启动时按类型选模型
+
+第一次启动会问三个问题（识别 / 翻译 / 克隆各选一个），选完记在
+`server\hear_models.json` 里，以后启动直接用上次的选择：
+
+```
+  语音识别（Whisper，CPU 上跑）
+    1) tiny      约 75 MB    最快，精度一般
+    2) base      约 145 MB   省空间，日常够用
+    3) small     约 480 MB   速度和准确度都还行 （推荐）
+    4) medium    约 1.5 GB   更准，慢一点
+    5) large-v3  约 3 GB     最准；CPU 上偏慢，有独显会快很多
+```
+
+翻译可以选 Hy-MT2 的 1.8B（1.1 GB，快）/ 7B（4.4 GB，更准）/ 30B-A3B
+（18 GB，混合专家，30B 里只激活 3B，又大又快又好，内存要 24G 以上）；
+克隆可以选 Qwen3-TTS 的 0.6B（快）/ 1.7B（更像原声，推荐）。
+
+想改选择，再跑一次加 `-Choose`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File server\start-windows.ps1 -Choose
+```
+
+### 5. 脚本会自动做的事
 
 - 从 llama.cpp 官方发行版下载 **Vulkan 版**（核显）和 **OpenVINO 版**（NPU，OpenVINO 运行库已经打包在里面了）；
-- 下载三个模型（Hy-MT2 1.1 GB、Qwen3-TTS 两个文件共约 800 MB）；
+- 下载刚才选的三个模型（默认 Hy-MT2 1.1 GB、Qwen3-TTS 两个文件共约 1.7 GB）；
 - 建虚拟环境并装 faster-whisper（识别模型，第一次跑会再下几百 MB）；
 - 起三个服务，最后打印一个地址，填到手机 App 里就行。
 

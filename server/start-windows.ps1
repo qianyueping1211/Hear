@@ -53,6 +53,107 @@ $SvDir     = Join-Path $ModelDir "sensevoice"
 $Context   = if ($env:HEAR_CTX)        { $env:HEAR_CTX }        else { "4096" }
 $HF        = if ($env:HF_ENDPOINT)     { $env:HF_ENDPOINT }     else { "https://huggingface.co" }
 
+# ---------------------------------------------------------------- 用哪些模型
+# 第一次启动的时候按类型问一次（识别 / 翻译 / 克隆），选完记在 hear_models.json 里，
+# 以后启动直接用上次的选择，不用再问。想改就跑一次：start-windows.ps1 -Choose
+$CfgFile = Join-Path $ServerDir "hear_models.json"
+
+# 语音识别：faster-whisper 的模型（手机上没有、电脑上跑）
+$AsrChoices = @(
+    @{ key = "tiny";     size = "约 75 MB";  note = "最快，精度一般" },
+    @{ key = "base";     size = "约 145 MB"; note = "省空间，日常够用" },
+    @{ key = "small";    size = "约 480 MB"; note = "速度和准确度都还行" },
+    @{ key = "medium";   size = "约 1.5 GB"; note = "更准，慢一点" },
+    @{ key = "large-v3"; size = "约 3 GB";   note = "最准；CPU 上偏慢，有独显会快很多" }
+)
+# 文本翻译：腾讯的 Hy-MT2（GGUF，llama.cpp 跑）
+$MtChoices = @(
+    @{ key = "1.8b"; repo = "tencent/Hy-MT2-1.8B-GGUF";    stem = "Hy-MT2-1.8B";    size = "约 1.1 GB";  note = "快，日常够用" },
+    @{ key = "7b";   repo = "tencent/Hy-MT2-7B-GGUF";      stem = "Hy-MT2-7B";      size = "约 4.4 GB";  note = "更准，内存要 8G 以上" },
+    @{ key = "30b";  repo = "tencent/Hy-MT2-30B-A3B-GGUF"; stem = "Hy-MT2-30B-A3B"; size = "约 18 GB";   note = "30B 里只激活 3B，又快又好；内存要 24G 以上" }
+)
+# 声音克隆：Qwen3-TTS（GGUF，llama.cpp 跑）
+$CloneChoices = @(
+    @{ key = "0.6b"; repo = "Shlomo426/Qwen3-TTS-12Hz-0.6B-Base-GGUF"; model = "Qwen3-TTS-12Hz-0.6B-Base-Q4_K_M.gguf"; mmproj = "mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf"; size = "约 0.6 GB"; note = "快" },
+    @{ key = "1.7b"; repo = "ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF"; model = "Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf"; mmproj = "mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf"; size = "约 1.1 GB"; note = "更像原声（推荐）" }
+)
+
+function Read-Choice($prompt) {
+    # 没交互（不是从窗口里跑的）就直接用默认值
+    try { $a = Read-Host $prompt } catch { return "" }
+    if ($null -eq $a) { return "" }
+    return "$a".Trim()
+}
+
+function Read-Pick($title, $choices, $defaultKey) {
+    Write-Host ""
+    Write-Host "  $title" -ForegroundColor Cyan
+    for ($i = 0; $i -lt $choices.Count; $i++) {
+        $c = $choices[$i]
+        $mark = ""
+        if ($c.key -eq $defaultKey) { $mark = "（推荐）" }
+        Write-Host ("    {0}) {1,-9} {2,-10} {3} {4}" -f ($i + 1), $c.key, $c.size, $c.note, $mark) -ForegroundColor Gray
+    }
+    $ans = Read-Choice "  选哪个（直接回车 = $defaultKey）"
+    $pick = $null
+    if ($ans -ne "") {
+        $n = 0
+        if ([int]::TryParse($ans, [ref]$n) -and $n -ge 1 -and $n -le $choices.Count) {
+            $pick = $choices[$n - 1]
+        } else {
+            Write-Host "    没看懂，按推荐的来" -ForegroundColor DarkGray
+        }
+    }
+    if (-not $pick) {
+        $pick = $choices | Where-Object { $_.key -eq $defaultKey } | Select-Object -First 1
+    }
+    return $pick
+}
+
+function Load-Choice {
+    if (-not (Test-Path $CfgFile)) { return $null }
+    try { return (Get-Content $CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
+}
+
+$scriptArgs = $args
+$cfg = Load-Choice
+$wantMenu = ($scriptArgs -contains "-Choose") -or ($scriptArgs -contains "/Choose")
+if ($wantMenu -or -not $cfg) {
+    if (-not $wantMenu) {
+        Write-Host ""
+        Write-Host "  第一次启动：先按类型选一下要用哪些模型（选完会记住，以后不再问）" -ForegroundColor Cyan
+    }
+    $pickAsr   = Read-Pick "语音识别（Whisper，CPU 上跑）" $AsrChoices   "small"
+    $pickMt    = Read-Pick "文本翻译（Hy-MT2）"          $MtChoices    "1.8b"
+    $pickClone = Read-Pick "声音克隆（Qwen3-TTS）"       $CloneChoices "1.7b"
+    $cfg = @{ asr = $pickAsr.key; mt = $pickMt.key; clone = $pickClone.key }
+    try {
+        ($cfg | ConvertTo-Json) | Set-Content -Path $CfgFile -Encoding UTF8
+    } catch {
+        Step "模型选择记不下来（$CfgFile 写不了），这次用刚才选的"
+    }
+}
+
+# 翻译模型：不同大小用的量化不一样（30B 只有 Q4_K_M / Q8_0）
+$mtChoice = $MtChoices  | Where-Object { $_.key -eq $cfg.mt }  | Select-Object -First 1
+if (-not $mtChoice) { $mtChoice = $MtChoices[0] }
+if ($mtChoice.key -eq "30b" -and @("Q4_K_M", "Q8_0") -notcontains $MtQuant) {
+    Step "30B 模型没有 $MtQuant 这个量化版本，改用 Q4_K_M"
+    $MtQuant = "Q4_K_M"
+}
+$MtRepo = $mtChoice.repo
+$MtFile = "$($mtChoice.stem)-$MtQuant.gguf"
+
+# 声音克隆模型
+$cloneChoice = $CloneChoices | Where-Object { $_.key -eq $cfg.clone } | Select-Object -First 1
+if (-not $cloneChoice) { $cloneChoice = $CloneChoices[0] }
+$CloneRepo      = $cloneChoice.repo
+$CloneModelFile = $cloneChoice.model
+$CloneMmprojFile = $cloneChoice.mmproj
+
+# 识别模型：环境变量优先（HEAR_ASR_MODEL），否则用刚才选的
+if (-not $env:HEAR_ASR_MODEL) { $AsrModel = $cfg.asr }
+
 trap {
     # 出错了就把临时服务也停掉，别留下一个占着 8000 端口的孤儿
     if ($tempCloud -and -not $tempCloud.HasExited) {
@@ -461,9 +562,11 @@ if (-not (Test-Path (Join-Path $SvDir "model.int8.onnx"))) {
 }
 else { Step "已有 SenseVoice 模型" }
 
-Get-Model "tencent/Hy-MT2-1.8B-GGUF" "Hy-MT2-1.8B-$MtQuant.gguf" | Out-Null
-Get-Model "Shlomo426/Qwen3-TTS-12Hz-0.6B-Base-GGUF" "Qwen3-TTS-12Hz-0.6B-Base-Q4_K_M.gguf" | Out-Null
-Get-Model "Shlomo426/Qwen3-TTS-12Hz-0.6B-Base-GGUF" "mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf" | Out-Null
+Say "下载翻译模型（$MtRepo / $MtFile）"
+Get-Model $MtRepo $MtFile | Out-Null
+Say "下载声音克隆模型（$CloneRepo / $CloneModelFile）"
+Get-Model $CloneRepo $CloneModelFile | Out-Null
+Get-Model $CloneRepo $CloneMmprojFile | Out-Null
 
 # ---------------------------------------------------------------- 起服务
 # 先问清楚这个 llama-server 认得的显卡设备名（"Vulkan0"、"CUDA0"……）
@@ -496,7 +599,7 @@ if (-not $cloneServer) { Die "没找到 llama-server.exe" }
 $procs = @()
 
 # 监听 0.0.0.0（不是 127.0.0.1），这样手机才能直接连 8081 / 8082
-$mtArgs = @("-m", (Join-Path $ModelDir "Hy-MT2-1.8B-$MtQuant.gguf"),
+$mtArgs = @("-m", (Join-Path $ModelDir $MtFile),
              "--host", "0.0.0.0", "--port", $MtPort, "-c", $Context, "--no-warmup")
 if ($MtDevice -eq "NPU") {
     # OpenVINO 后端：NPU 只支持无状态执行，-np 只能是 1，-c 必须明确给
@@ -508,18 +611,18 @@ if ($MtDevice -eq "NPU") {
     $mtArgs += "--device", $gpuDevice
 }
 
-Say "起翻译模型（Hy-MT2，后端 $MtDevice，端口 $MtPort）"
+Say "起翻译模型（$MtFile，后端 $MtDevice，端口 $MtPort）"
 $mtLog = Join-Path $ServerDir "mt.log"
 $mt = Start-Process -FilePath $mtServer -ArgumentList $mtArgs -PassThru -NoNewWindow `
         -RedirectStandardOutput $mtLog -RedirectStandardError "$mtLog.err"
 $procs += $mt
 
-$cloneArgs = @("-m", (Join-Path $ModelDir "Qwen3-TTS-12Hz-0.6B-Base-Q4_K_M.gguf"),
-                "--mmproj", (Join-Path $ModelDir "mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf"),
+$cloneArgs = @("-m", (Join-Path $ModelDir $CloneModelFile),
+                "--mmproj", (Join-Path $ModelDir $CloneMmprojFile),
                 "--host", "0.0.0.0", "--port", $ClonePort, "-c", $Context, "--no-warmup")
 if ($CloneDevice -eq "GPU") { $cloneArgs += "--device", $gpuDevice }
 
-Say "起声音克隆模型（Qwen3-TTS，后端 $CloneDevice，端口 $ClonePort）"
+Say "起声音克隆模型（$CloneModelFile，后端 $CloneDevice，端口 $ClonePort）"
 $cloneLog = Join-Path $ServerDir "clone.log"
 $clone = Start-Process -FilePath $cloneServer -ArgumentList $cloneArgs -PassThru -NoNewWindow `
             -RedirectStandardOutput $cloneLog -RedirectStandardError "$cloneLog.err"
@@ -562,7 +665,7 @@ if (-not $mtOk -and $MtDevice -ne "CPU") {
     Start-Sleep -Seconds 2
     $cpuMt = Server-For "CPU"
     if ($cpuMt) {
-        $cpuArgs = @("-m", (Join-Path $ModelDir "Hy-MT2-1.8B-$MtQuant.gguf"),
+        $cpuArgs = @("-m", (Join-Path $ModelDir $MtFile),
                      "--host", "0.0.0.0", "--port", $MtPort, "-c", $Context, "--no-warmup")
         $mt = Start-Process -FilePath $cpuMt -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $mtLog -RedirectStandardError "$mtLog.err"
@@ -577,8 +680,8 @@ if (-not $cloneOk -and $CloneDevice -ne "CPU") {
     Start-Sleep -Seconds 2
     $cpuClone = Server-For "CPU"
     if ($cpuClone) {
-        $cpuArgs = @("-m", (Join-Path $ModelDir "Qwen3-TTS-12Hz-0.6B-Base-Q4_K_M.gguf"),
-                     "--mmproj", (Join-Path $ModelDir "mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf"),
+        $cpuArgs = @("-m", (Join-Path $ModelDir $CloneModelFile),
+                     "--mmproj", (Join-Path $ModelDir $CloneMmprojFile),
                      "--host", "0.0.0.0", "--port", $ClonePort, "-c", $Context, "--no-warmup")
         $clone = Start-Process -FilePath $cpuClone -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $cloneLog -RedirectStandardError "$cloneLog.err"

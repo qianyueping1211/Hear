@@ -82,6 +82,7 @@ struct ConversationDetailView: View {
                 ForEach(c.items) { item in
                     BubbleView(item: item, leading: item.source == c.langA,
                                reading: session.readingID == item.id,
+                               playing: session.speakingID == item.id,
                                preparing: session.clonePreparingID == item.id
                                     || session.cloneWorking.contains(item.id)) {
                         session.replay(item)
