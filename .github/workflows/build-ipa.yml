@@ -9,6 +9,7 @@ on:
     paths-ignore:
       - .github/workflows/rename-releases.yml
       - start-hear-cloud.bat
+      - VERSION
       - 'server/**'
       - 'docs/**'
       - README.md
