@@ -25,7 +25,7 @@ enum LocalVoiceCloneError: LocalizedError {
 }
 
 enum ZipVoiceModel {
-    static let displayName = "ZipVoice-Distill INT8"
+    static let displayName = "ZipVoice"
     private static let files = ["encoder.int8.onnx", "decoder.int8.onnx", "vocos_24khz.onnx",
                         "tokens.txt", "lexicon.txt", "espeak-ng-data"]
     private static let archiveRoot = "sherpa-onnx-zipvoice-distill-int8-zh-en-emilia"

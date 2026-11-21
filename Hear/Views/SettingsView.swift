@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import Foundation
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
@@ -17,6 +18,8 @@ struct SettingsView: View {
     @ObservedObject private var cloud = CloudSync.shared
     @State private var showCloudPicker = false
     @State private var showASREngines = false
+    @State private var showTranslationEngines = false
+    @State private var showVoiceCloneEngines = false
     /// 授权 iCloud 云盘的说明框（系统的授权框弹不出来时才需要）
     @State private var askCloudAuth = false
     /// 模型管理里的页签：0 = 本地模型，1 = 云端模型
@@ -25,14 +28,6 @@ struct SettingsView: View {
     @State private var cloudEdit: CloudEdit?
     /// 本地网络权限没开：弹提示告诉用户去哪儿开
     @State private var showLocalNetworkHelp = false
-
-    /// 有云端引擎选了，但地址还没填
-    private var cloudMissingAddress: Bool {
-        for m in CloudModel.allCases where session.cloudEnabled(m) {
-            if session.cloudEffectiveAddress(m).isEmpty { return true }
-        }
-        return false
-    }
 
     /// 刚选了云端引擎：查一下本地网络权限。
     ///
@@ -108,7 +103,8 @@ struct SettingsView: View {
                     .minimumScaleFactor(0.8)
             }
         }
-        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+        // 本地和云端两页共用这一行，垂直留白比旧版增加 25%
+        .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
     }
 
     var body: some View {
@@ -148,37 +144,8 @@ struct SettingsView: View {
                 // MARK: 引擎管理（语音识别 / 文本翻译 / 声音克隆）
                 Section {
                     asrEngineRow
-                    Picker("文本翻译", selection: translationEngineBinding) {
-                        if session.appleAvailable {
-                            Text("本机：苹果自带").tag("apple")
-                        }
-                        Text("本机：Hy-MT2").tag("local")
-                        Text("云端服务器").tag("cloud")
-                    }
-                    Picker("声音克隆引擎", selection: voiceCloneEngineBinding) {
-                        Text("云端服务器 · Qwen3-TTS").tag("cloud")
-                        Text("本机：ZipVoice INT8").tag("local")
-                    }
-                    if !session.voiceCloneCloud {
-                        Text("ZipVoice 仅支持中英文。安装模型后可离线克隆声音。")
-                            .font(.footnote).foregroundStyle(.secondary)
-                        if !session.isInstalled(.voiceClone) {
-                            Button("下载") {
-                                lastKind = .voiceClone
-                                confirmKind = .voiceClone
-                            }
-                            .disabled(session.bgDownloading)
-                        }
-                    }
-                    if session.usingCloudASR {
-                        Toggle("实时翻译时区分说话人", isOn: $session.speakerTrackingEnabled)
-                    }
-                    if session.translationEngine == "local", !session.isInstalled(.translation) {
-                        Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
-                    }
-                    if cloudMissingAddress {
-                        Text("选了云端引擎，但还没填云端模型地址").font(.footnote).foregroundStyle(.orange)
-                    }
+                    translationEngineRow
+                    voiceCloneEngineRow
                 } header: {
                     Text("引擎管理")
                 }
@@ -199,7 +166,7 @@ struct SettingsView: View {
                                  status: session.senseStatus)
                         modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
                                  status: session.translationStatus)
-                        modelRow(.voiceClone, title: "声音克隆", icon: "person.wave.2",
+                        modelRow(.voiceClone, title: "声音克隆（ZipVoice）", icon: "person.wave.2",
                                  status: session.cloneStatus)
                         // 选哪个 .gguf、清缓存，都放到各自的"配置"窗口里
                     } else {
@@ -232,11 +199,9 @@ struct SettingsView: View {
                         Text("耳机麦克风").tag("headset")
                     }
                     Toggle("语音增强（降噪、消除回声）", isOn: $session.voiceProcessing)
-                    // 语音增强用的是系统的语音处理单元：收音的时候它会独占麦克风，
-                    // 同时录屏、录音的话，别的 App 拿到的声音会又刺又碎。
-                    // 不收音的时候不会占着麦克风。录屏时嫌声音发杂就临时关掉。
-                    Text("收音时语音增强会独占麦克风：录屏、录音嫌声音发杂，就临时关掉")
-                        .font(.caption).foregroundStyle(.secondary)
+                    if session.usingCloudASR {
+                        Toggle("实时翻译时区分说话人", isOn: $session.speakerTrackingEnabled)
+                    }
                     VStack(alignment: .leading) {
                         Text("说话灵敏度：\(Int(session.sensitivity)) dB")
                         Slider(value: $session.sensitivity, in: 6...24, step: 1)
@@ -293,7 +258,7 @@ struct SettingsView: View {
                 } header: {
                     Text("朗读")
                 } footer: {
-                    Text("声音克隆用说话人的音色朗读译文。本机使用 ZipVoice INT8，听见 Windows 服务使用 Qwen3-TTS。")
+                    Text("声音克隆用说话人的音色朗读译文。本机使用 ZipVoice，听见 Windows 服务使用 Qwen3-TTS。")
                 }
 
                 Section {
@@ -429,6 +394,13 @@ struct SettingsView: View {
         .centerChoice(isPresented: $showASREngines, title: "语音识别引擎",
                       options: asrEngineOptions, selected: session.asrEngine,
                       onSelect: applyASREngineSelection)
+        .centerChoice(isPresented: $showTranslationEngines, title: "文本翻译",
+                      options: translationEngineOptions, selected: session.translationEngine,
+                      onSelect: applyTranslationEngineSelection)
+        .centerChoice(isPresented: $showVoiceCloneEngines, title: "声音克隆",
+                      options: voiceCloneEngineOptions,
+                      selected: session.voiceCloneCloud ? "cloud" : "local",
+                      onSelect: applyVoiceCloneEngineSelection)
         // 屏幕正中的确认框：背后整页虚化
         .centerDialog(isPresented: Binding(get: { confirmKind != nil },
                                            set: { if !$0 { confirmKind = nil } }),
@@ -436,13 +408,6 @@ struct SettingsView: View {
                       message: dialogMessage,
                       destructive: isInstalled(lastKind)) {
             if let k = confirmKind { Task { await session.redownload(k) } }
-        }
-        // 选了还缺模型的识别引擎：先问要不要下载
-        .centerDialog(isPresented: Binding(get: { pendingEngine != nil },
-                                           set: { if !$0 { pendingEngine = nil } }),
-                      title: "需要先下载模型",
-                      message: engineDownloadMessage) {
-            if let e = pendingEngine { session.downloadForEngine(e) }
         }
     }
 
@@ -471,7 +436,8 @@ struct SettingsView: View {
 
     private var shouldRefreshCloudModels: Bool {
         modelTab == 1 && cloudEdit == nil && localEdit == nil && !showASREngines &&
-            pendingEngine == nil && confirmKind == nil && importKind == nil
+            !showTranslationEngines && !showVoiceCloneEngines &&
+            confirmKind == nil && importKind == nil
     }
 
     static func timeText(_ d: Date) -> String {
@@ -480,18 +446,23 @@ struct SettingsView: View {
         return f.string(from: d)
     }
 
-    private var voiceCloneEngineBinding: Binding<String> {
-        Binding(get: { session.voiceCloneCloud ? "cloud" : "local" },
-                set: { session.voiceCloneCloud = $0 == "cloud" })
-    }
-
-    /// 选了还缺模型的识别引擎（等确认下载）
-    @State private var pendingEngine: String?
-    @State private var lastPendingEngine = "sensevoice"
-
     private var asrEngineRow: some View {
         EngineSelectionRow(title: "语音识别", value: asrEngineName(session.asrEngine)) {
             showASREngines = true
+        }
+    }
+
+    private var translationEngineRow: some View {
+        EngineSelectionRow(title: "文本翻译",
+                           value: translationEngineName(session.translationEngine)) {
+            showTranslationEngines = true
+        }
+    }
+
+    private var voiceCloneEngineRow: some View {
+        EngineSelectionRow(title: "声音克隆",
+                           value: session.voiceCloneCloud ? "云端：Qwen3-TTS" : "本机：ZipVoice") {
+            showVoiceCloneEngines = true
         }
     }
 
@@ -505,25 +476,92 @@ struct SettingsView: View {
         switch engine {
         case "apple": return "本机：苹果自带"
         case "sensevoice": return "本机最快：SenseVoice"
-        case "cloud": return "云端服务器"
+        case "cloud": return "云端：SenseVoice + Whisper"
+        default: return "请选择"
+        }
+    }
+
+    private var translationEngineOptions: [(tag: String, title: String, detail: String)] {
+        var options: [(tag: String, title: String, detail: String)] = []
+        if session.appleAvailable {
+            options.append(("apple", "本机：苹果自带", ""))
+        }
+        options.append(("local", "本机：Hy-MT2", ""))
+        options.append(("cloud", "云端：Hy-MT2", ""))
+        return options
+    }
+
+    private var voiceCloneEngineOptions: [(tag: String, title: String, detail: String)] {
+        [
+            ("cloud", "云端：Qwen3-TTS", ""),
+            ("local", "本机：ZipVoice", "")
+        ]
+    }
+
+    private func translationEngineName(_ engine: String) -> String {
+        switch engine {
+        case "apple": return "本机：苹果自带"
+        case "local": return "本机：Hy-MT2"
+        case "cloud": return "云端：Hy-MT2"
         default: return "请选择"
         }
     }
 
     private func applyASREngineSelection(_ engine: String) {
-        guard engine != session.asrEngine else { return }
-        if session.missingSpeechKinds(for: engine).isEmpty {
+        if engine != session.asrEngine {
             session.asrEngine = engine
-        } else if !session.bgDownloading {
-            lastPendingEngine = engine
-            pendingEngine = engine
+        }
+
+        if engine == "sensevoice", !session.isInstalled(.senseVoice) {
+            openLocalModelConfiguration(.senseVoice)
+        } else if engine == "cloud", !isCloudModelConfigured(.asr) {
+            openCloudModelConfiguration(.asr)
         }
     }
 
-    private var engineDownloadMessage: String {
-        let kinds = session.missingSpeechKinds(for: lastPendingEngine)
-        let names = kinds.map { _ in "SenseVoice（约 240 MB）" }
-        return "这个识别引擎需要 \(names.joined(separator: "、")) 语音识别模型。下载期间继续用现在的引擎，下载完成后自动切换。请连接 Wi‑Fi，并保持 App 在前台。"
+    private func applyTranslationEngineSelection(_ engine: String) {
+        if engine != session.translationEngine {
+            session.translationEngine = engine
+        }
+
+        if engine == "local", !session.isInstalled(.translation) {
+            openLocalModelConfiguration(.translation)
+        } else if engine == "cloud", !isCloudModelConfigured(.mt) {
+            openCloudModelConfiguration(.mt)
+        }
+    }
+
+    private func applyVoiceCloneEngineSelection(_ engine: String) {
+        let cloud = engine == "cloud"
+        if cloud != session.voiceCloneCloud {
+            session.voiceCloneCloud = cloud
+        }
+
+        if cloud, !isCloudModelConfigured(.clone) {
+            openCloudModelConfiguration(.clone)
+        } else if !cloud, !session.isInstalled(.voiceClone) {
+            openLocalModelConfiguration(.voiceClone)
+        }
+    }
+
+    private func isCloudModelConfigured(_ model: CloudModel) -> Bool {
+        !session.cloudEffectiveAddress(model)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
+    }
+
+    /// 引擎管理和模型管理共用同一个“未配置”窗口。
+    /// 延迟到选择弹窗收起的下一帧再打开，避免两个模态互相抢展示。
+    private func openLocalModelConfiguration(_ kind: LiveSession.ModelKind) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            localEdit = .model(kind, Self.modelRowTitle(kind))
+        }
+    }
+
+    private func openCloudModelConfiguration(_ model: CloudModel) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            cloudEdit = .model(model)
+        }
     }
 
     /// 最近一次要下载的模型（确认框收起的动画里文字不会突然变空）
@@ -544,6 +582,14 @@ struct SettingsView: View {
         case .translation: return "翻译模型（MT）"
         case .senseVoice: return "语音识别模型（SenseVoice）"
         case .voiceClone: return "声音克隆模型（ZipVoice）"
+        }
+    }
+
+    static func modelRowTitle(_ kind: LiveSession.ModelKind) -> String {
+        switch kind {
+        case .translation: return "翻译模型（MT）"
+        case .senseVoice: return "语音识别（SenseVoice）"
+        case .voiceClone: return "声音克隆（ZipVoice）"
         }
     }
 
@@ -576,7 +622,7 @@ struct SettingsView: View {
                         Button {
                             session.resumeModelDownload(kind)
                         } label: {
-                            Image(systemName: "play.circle")
+                            Image(systemName: "play.circle.fill")
                         }
                         .disabled(session.bgDownloading)
                         .accessibilityLabel("继续下载")
@@ -584,7 +630,12 @@ struct SettingsView: View {
                         Button {
                             session.pauseModelDownload(kind)
                         } label: {
-                            Image(systemName: "pause.circle")
+                            ZStack {
+                                DownloadProgressIcon(progress: session.bgDownloadProgress)
+                                Image(systemName: "pause.fill")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundStyle(.tint)
+                            }
                         }
                         .accessibilityLabel("暂停下载")
                     } else if status.installed {
@@ -607,7 +658,12 @@ struct SettingsView: View {
                     localEdit = .model(kind, title)
                 } label: {
                     HStack(spacing: 4) {
-                        Text(status.installed ? "已配置" : "未配置").lineLimit(1)
+                        Text(modelRowStatus(status: status,
+                                            downloading: downloading,
+                                            paused: paused,
+                                            waiting: waiting))
+                            .lineLimit(1)
+                            .monospacedDigit()
                         Image(systemName: "chevron.right")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.tertiary)
@@ -617,6 +673,18 @@ struct SettingsView: View {
                 .disabled(session.isBusyWithModels && !paused)
             }
         }
+    }
+
+    private func modelRowStatus(status: LiveSession.ModelStatus,
+                                downloading: Bool,
+                                paused: Bool,
+                                waiting: Bool) -> String {
+        if downloading {
+            return "下载中 \(Int((session.bgDownloadProgress * 100).rounded()))%"
+        }
+        if paused { return "已暂停" }
+        if waiting { return "等待下载" }
+        return status.installed ? "已配置" : "未配置"
     }
 
     /// 本地模型的详情："文件名 · 大小"
@@ -648,19 +716,6 @@ struct SettingsView: View {
         }
     }
 
-    private var translationEngineBinding: Binding<String> {
-        Binding(
-            get: { session.translationEngine },
-            set: { e in
-                guard e != session.translationEngine else { return }
-                // 本地声音克隆和别的本地引擎互斥
-                session.translationEngine = e
-                if e == "local", !session.isInstalled(.translation), !session.bgDownloading {
-                    session.startBackgroundDownload(kinds: [.translation], switchWhenDone: true)
-                }
-            }
-        )
-    }
     @State private var inputNote: String?
 
     private var inputBinding: Binding<String> {
@@ -713,6 +768,35 @@ private struct ProcessingDots: View {
             .animation(.linear(duration: 2.4).repeatForever(autoreverses: false), value: spin)
             .onAppear { spin = true }
             .accessibilityHidden(true)
+    }
+}
+
+/// 下载中的动态圆环：实心进度显示已完成多少，外围短弧持续转动，
+/// 让用户一眼区分“正在下载”和“暂停”。
+private struct DownloadProgressIcon: View {
+    let progress: Double
+    @State private var spin = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.secondary.opacity(0.18), lineWidth: 2.5)
+            Circle()
+                .trim(from: 0, to: max(0.03, min(1, progress)))
+                .stroke(Color.accentColor,
+                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+            Circle()
+                .trim(from: 0, to: 0.18)
+                .stroke(Color.accentColor.opacity(0.7),
+                        style: StrokeStyle(lineWidth: 2.5, lineCap: .round, dash: [1.5, 5]))
+                .rotationEffect(.degrees(spin ? 360 : 0))
+                .animation(.linear(duration: 1.1).repeatForever(autoreverses: false),
+                           value: spin)
+        }
+        .frame(width: 30, height: 30)
+        .onAppear { spin = true }
+        .accessibilityHidden(true)
     }
 }
 
@@ -1153,7 +1237,8 @@ struct LocalModelSheet: View {
                         Text("已暂停").foregroundStyle(.secondary)
                     } else if downloading {
                         HStack(spacing: 8) {
-                            ProgressView(value: progress)
+                            DownloadProgressIcon(progress: progress)
+                            Text("正在下载")
                             Text(String(format: "%.0f%%", progress * 100))
                                 .font(.caption)
                                 .monospacedDigit()

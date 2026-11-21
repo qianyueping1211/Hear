@@ -974,13 +974,6 @@ final class LiveSession: ObservableObject {
         startBackgroundDownload(kinds: [kind], switchWhenDone: isKindInUse(kind), force: true)
     }
 
-    /// 设置里选了还缺模型的识别引擎：下载缺的模型，下载完再切换过去
-    func downloadForEngine(_ engine: String) {
-        let kinds = missingSpeechKinds(for: engine)
-        guard !kinds.isEmpty else { asrEngine = engine; return }
-        startBackgroundDownload(kinds: kinds, switchWhenDone: false, thenEngine: engine)
-    }
-
     // MARK: - 模型
 
     func bootstrap() async {

@@ -105,7 +105,9 @@ struct CenterChoice: ViewModifier {
                                 .contentShape(Rectangle())
                                 .onTapGesture { isPresented = false }
                             card
-                                .frame(width: max(0, min(geo.size.width - 24, 480)))
+                                // 三个引擎选择共用这张卡片。比旧版扩宽约 20%，
+                                // 在 iPhone 上尽量用满可用宽度，长模型名保持一行。
+                                .frame(width: max(0, min(geo.size.width - 8, 576)))
                                 .transition(.scale(scale: 0.9).combined(with: .opacity))
                         }
                         .frame(width: geo.size.width, height: geo.size.height)
