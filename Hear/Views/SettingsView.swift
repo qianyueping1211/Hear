@@ -257,8 +257,6 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("朗读")
-                } footer: {
-                    Text("声音克隆用说话人的音色朗读译文。本机使用 ZipVoice，听见 Windows 服务使用 Qwen3-TTS。")
                 }
 
                 Section {
