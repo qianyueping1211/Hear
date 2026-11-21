@@ -144,14 +144,22 @@ if ($wantMenu) {
     $pickAsr   = Read-Pick "语音识别（Whisper，CPU 上跑）" $AsrChoices   $defAsr
     $pickMt    = Read-Pick "文本翻译（Hy-MT2）"          $MtChoices    $defMt
     $pickClone = Read-Pick "声音克隆（Qwen3-TTS）"       $CloneChoices $defClone
-    $cfg = @{ asr = $pickAsr.key; mt = $pickMt.key; clone = $pickClone.key }
+    # SenseVoice 装不装：装了手机上就多两个识别方案（SenseVoice、SenseVoice+Whisper），
+    # 不装手机上就只有 Whisper 一个
+    $wantSense = $true
+    if ($cfg -and $cfg.sensevoice -eq $false) { $wantSense = $false }
+    $svAns = Read-Choice "  要不要装 SenseVoice（快，能中英日韩粤；不装就只用 Whisper）[Y/n]"
+    if ($svAns -match "^[nN]") { $wantSense = $false }
+    $cfg = @{ asr = $pickAsr.key; mt = $pickMt.key; clone = $pickClone.key; sensevoice = $wantSense }
     try {
         ($cfg | ConvertTo-Json) | Set-Content -Path $CfgFile -Encoding UTF8
     } catch {
         Step "模型选择记不下来（$CfgFile 写不了），这次用刚才选的"
     }
 }
-if (-not $cfg) { $cfg = @{ asr = "small"; mt = "1.8b"; clone = "1.7b" } }
+if (-not $cfg) { $cfg = @{ asr = "small"; mt = "1.8b"; clone = "1.7b"; sensevoice = $true } }
+# 服务端要知道 SenseVoice 装没装（手机上的识别方案列表就是照这个来的）
+$env:HEAR_SENSEVOICE = if ($cfg.sensevoice -eq $false) { "0" } else { "1" }
 
 # 翻译模型：不同大小用的量化不一样（30B 只有 Q4_K_M / Q8_0）
 $mtChoice = $MtChoices  | Where-Object { $_.key -eq $cfg.mt }  | Select-Object -First 1
@@ -567,7 +575,10 @@ function Get-Model($repo, $file) {
     return $out
 }
 # SenseVoice（云端识别的"快"方案用；约 230 MB）
-if (-not (Test-Path (Join-Path $SvDir "model.int8.onnx"))) {
+if ($env:HEAR_SENSEVOICE -eq "0") {
+    Step "按你的选择不装 SenseVoice（手机上只有 Whisper 一个识别方案）"
+}
+elseif (-not (Test-Path (Join-Path $SvDir "model.int8.onnx"))) {
     Say "下载 SenseVoice 模型（云端识别的快速方案）"
     New-Item -ItemType Directory -Force -Path $SvDir | Out-Null
     $svRepo = "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"

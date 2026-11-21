@@ -220,11 +220,47 @@ def get_sensevoice():
 
 
 def sensevoice_available():
-    """SenseVoice 的模型文件在不在。
-    不在的话，App 的识别方案里就不该给用户选 SenseVoice。"""
+    """SenseVoice 能不能用。
+    启动时选了"不装 SenseVoice"（HEAR_SENSEVOICE=0）的话就不能用；
+    模型文件不在也不能用（App 的识别方案里就不该给用户选它）。"""
+    if os.environ.get("HEAR_SENSEVOICE", "1").strip().lower() in ("0", "off", "false", "no"):
+        return False
     model = os.path.join(SENSEVOICE_DIR, "model.int8.onnx")
     tokens = os.path.join(SENSEVOICE_DIR, "tokens.txt")
     return os.path.isfile(model) and os.path.isfile(tokens)
+
+
+def whisper_available():
+    """faster-whisper 装没装（装了 Whisper 方案就能用）"""
+    try:
+        import faster_whisper  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def asr_capabilities():
+    """这台电脑上识别方面到底有什么：给 App 生成识别方案的候选项。
+
+    App 的「在线模型 → 语音识别 → 配置 → 识别方案」就是照着这个列表给的，
+    所以电脑上没装的方案不会出现在手机上。
+    """
+    sv = sensevoice_available()
+    wh = whisper_available()
+    schemes = []
+    if sv:
+        schemes.append("sensevoice")
+    if wh:
+        schemes.append("whisper")
+    if sv and wh:
+        schemes.append("sensevoice+whisper")
+    return {
+        "whisper_model": ASR_MODEL,
+        "sensevoice": "就绪" if sv else "没装",
+        "whisper": "就绪" if wh else "没装",
+        # 逗号分隔：App 那边的 health 只收字符串
+        "schemes": ",".join(schemes),
+    }
 
 
 def sensevoice_transcribe(samples, rate):
@@ -635,9 +671,13 @@ a{color:#007aff;text-decoration:none}
         # 把后端跑的是哪个模型报出来：启动时可以让用户按类型选大模型，
         # 手机上要能一眼看出"电脑上现在跑的是哪个"
         if not ASR_URL:
-            out["asr_model"] = ASR_MODEL
-            # 有没有装 SenseVoice：App 那边要按这个来给识别方案选项
-            out["sensevoice"] = "就绪" if sensevoice_available() else "没装"
+            # 这台电脑上识别方面有什么（Whisper 型号、SenseVoice 装没装、能选哪些方案）
+            # App 的识别方案列表就是照着这个来的
+            cap = asr_capabilities()
+            out["asr_model"] = cap["whisper_model"]
+            out["sensevoice"] = cap["sensevoice"]
+            out["asr_whisper"] = cap["whisper"]
+            out["asr_schemes"] = cap["schemes"]
         mt_model = backend_model(MT_URL)
         if mt_model:
             out["mt_model"] = mt_model

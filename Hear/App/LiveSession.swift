@@ -105,6 +105,9 @@ final class LiveSession: ObservableObject {
     /// 电脑上 SenseVoice 的状态："" = 还不知道（还没问过服务），
     /// "就绪" / "没装"。老版本的服务没这个字段，就当作不知道（照旧给用户选）。
     @Published private(set) var cloudSenseVoiceState: String = ""
+    /// 电脑上实际能用的识别方案（服务报上来的清单）。
+    /// App 的识别方案列表就是照着它来的：电脑上没装的就一个都不给。
+    @Published private(set) var cloudASRSchemes: [String] = []
     /// 每个模型实际连上的地址（模型自己的地址不通、用通用服务地址顶上的，记通用那个）
     @Published private(set) var cloudStatusAddress: [String: String] = [:]
     /// 声音克隆用云端模型（false = 用手机本地的 Qwen）
@@ -2843,6 +2846,8 @@ final class LiveSession: ObservableObject {
     static let cloudStatusUnset = "未填写"
     static let cloudStatusOK = "正常"
     static let cloudStatusBad = "异常"
+    /// 模型还在加载（刚下完、刚起服务）：不是出错，显示成"加载中"
+    static let cloudStatusLoading = "加载中"
     /// 共享服务地址在状态表里的名字
     static let cloudServiceKey = "service"
 
@@ -2879,6 +2884,7 @@ final class LiveSession: ObservableObject {
         // 识别这边要单独记两件事：电脑上跑的是哪个 Whisper、有没有 SenseVoice
         var asrModelName = ""
         var senseState = ""
+        var asrSchemes: [String] = []
 
         // 共享服务地址
         if defAddr.isEmpty {
@@ -2902,9 +2908,16 @@ final class LiveSession: ObservableObject {
             }
             var ok = false
             var used = ""
+            // 不是就绪的时候，是"还在加载"还是"真出错了"要分开：
+            // 模型刚下完还在加载，显示成"加载中"（黄色），别吓唬人
+            var state = Self.cloudStatusBad
+            // 识别这边要拿到服务报上来的能力清单（跟就绪与否无关）
+            var asrHealth: [String: String] = [:]
             for addr in cands {
                 guard reachable.contains(addr) else { continue }
                 let health = models[addr] ?? [:]
+                if m == .asr, asrHealth.isEmpty { asrHealth = health }
+                var st = Self.cloudStatusBad
                 let good: Bool
                 if kinds[addr] == .llamaServer {
                     // 单独的 llama-server（8081 翻译 / 8082 克隆）：
@@ -2912,7 +2925,9 @@ final class LiveSession: ObservableObject {
                     // 但 llama-server 不做语音识别，那个接口只有 8000 的总服务有
                     // llama-server 的 /health 返回 {"status":"ok"}；
                     // 模型还在加载时是 {"status":"loading model"}，那不算就绪
-                    good = m != .asr && (health["status"]?.hasPrefix("ok") == true)
+                    let s = health["status"] ?? ""
+                    good = m != .asr && s.hasPrefix("ok")
+                    if !good, s.lowercased().contains("loading") { st = Self.cloudStatusLoading }
                 } else {
                     // 总服务（8000）：回的是 asr / mt / clone 各自的状态
                     // 服务端回的是"就绪（small）"、"外部服务"、"加载中（第一次要下识别模型）"、
@@ -2920,10 +2935,16 @@ final class LiveSession: ObservableObject {
                     // 只有真的就绪了才算正常：还没装、还在下载、连不上都算异常
                     let s = health[m.rawValue] ?? ""
                     good = s.hasPrefix("就绪") || s.hasPrefix("外部服务")
+                    // "加载中"（模型还在下/还在起）、"未加载"（后台正在准备）
+                    // 都是"还没好"，不是出错
+                    if !good, s.hasPrefix("加载中") || s.hasPrefix("未加载") {
+                        st = Self.cloudStatusLoading
+                    }
                 }
                 if good { ok = true; used = addr; break }
+                state = st
             }
-            var text = ok ? Self.cloudStatusOK : Self.cloudStatusBad
+            var text = ok ? Self.cloudStatusOK : state
             // 顺便把电脑上跑的是哪个模型写出来：启动时可以按类型选大模型，
             // 手机上一眼就能看到"现在用的是哪个"
             if ok, !used.isEmpty {
@@ -2934,17 +2955,21 @@ final class LiveSession: ObservableObject {
             }
             status[m.rawValue] = text
             usedAddress[m.rawValue] = ok ? used : ""
-            if m == .asr, ok, !used.isEmpty {
-                let h = models[used] ?? [:]
-                asrModelName = h["asr_model"] ?? ""
-                // 老版本的服务没报这个字段 → 空字符串（当作不知道，照旧给用户选）
-                senseState = h["sensevoice"] ?? ""
+            if m == .asr {
+                // 老版本的服务没报这些字段 → 空（当作不知道，照旧给用户选）
+                asrModelName = asrHealth["asr_model"] ?? ""
+                senseState = asrHealth["sensevoice"] ?? ""
+                let raw = asrHealth["asr_schemes"] ?? ""
+                asrSchemes = raw.split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
             }
         }
         cloudStatus = status
         cloudStatusAddress = usedAddress
         cloudASRModelName = asrModelName
         cloudSenseVoiceState = senseState
+        cloudASRSchemes = asrSchemes
     }
 
     // MARK: - 云端失败时的保底

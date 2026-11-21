@@ -42,6 +42,11 @@ powershell -ExecutionPolicy Bypass -File server\start-windows.ps1 -Choose
 App 的「在线模型 → 语音识别 → 配置 → 识别方案」也会跟着变：
 只列出这台电脑上真有的方案（没装 SenseVoice 就只留 Whisper），
 Whisper 那一项还会带上型号，比如「最准：Whisper（large-v3）」。
+配置窗口里有一行「电脑上的模型：…」和「刷新」按钮，
+刚在电脑上换完模型，点一下刷新就能读到新的清单。
+
+启动脚本还会问一句「要不要装 SenseVoice」：选「不」就不下载它（约省 230 MB），
+手机上就只剩 Whisper 一个识别方案。
 
 ## 三、注意事项
 

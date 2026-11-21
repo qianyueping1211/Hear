@@ -89,6 +89,7 @@ struct SettingsView: View {
     private static func cloudStatusIcon(_ status: String, configured: Bool) -> String {
         if !configured { return "exclamationmark.circle" }
         if status == "正常" { return "checkmark.circle.fill" }
+        if status == "加载中" { return "hourglass" }
         if status == "异常" { return "exclamationmark.circle.fill" }
         return "checkmark.circle"
     }
@@ -96,6 +97,7 @@ struct SettingsView: View {
     private static func cloudStatusColor(_ status: String, configured: Bool) -> Color {
         if !configured { return .secondary }
         if status == "正常" { return .green }
+        if status == "加载中" { return .orange }    // 还在加载，不是出错
         return .secondary          // 异常也是灰色，不要黄色
     }
 
@@ -783,24 +785,29 @@ struct CloudEditSheet: View {
                                 .disabled(useDefault)
                         }
                         // 语音识别：在"自定义"下面选识别方案
-                        // 可选项按电脑上实际有的来：
-                        // 没装 SenseVoice 的电脑上就不给选它（选了也没用）
+                        // 选项完全照着电脑上服务报上来的清单来：
+                        // 电脑上没装的方案一个都不给（比如没装 SenseVoice 就只有 Whisper）
                         if case .model(let m) = target, m == .asr {
                             Picker("识别方案", selection: $asrScheme) {
-                                if session.cloudSenseVoiceState != "没装" {
-                                    Text("最快：SenseVoice").tag("sensevoice")
-                                    Text("SenseVoice + Whisper").tag("sensevoice+whisper")
+                                ForEach(availableSchemes, id: \.self) { s in
+                                    Text(schemeLabel(s)).tag(s)
                                 }
-                                Text(whisperSchemeLabel).tag("whisper")
                             }
-                            // 电脑上跑的是哪个 Whisper，一眼能看到
-                            if !session.cloudASRModelName.isEmpty {
-                                LabeledContent("电脑上的 Whisper", value: session.cloudASRModelName)
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
+                            // 电脑上跑的是什么，一眼能看到；旁边可以随时刷新
+                            HStack {
+                                Text(cloudModelInfo)
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Spacer(minLength: 8)
+                                Button("刷新") {
+                                    Task { await session.refreshCloudStatus() }
+                                }
+                                .font(.caption)
                             }
                             if session.cloudSenseVoiceState == "没装" {
-                                Text("这台电脑上没装 SenseVoice，只能用 Whisper。在电脑上重跑一次启动脚本就会装上。")
+                                Text("这台电脑上没装 SenseVoice，只能用 Whisper。在电脑上重跑一次启动脚本就可以装上（或者选\"不装\"）。")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else if session.cloudASRSchemes.isEmpty {
+                                Text("还没读到电脑上的模型信息（服务可能是旧版本），先点\"刷新\"试试。")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }
@@ -858,20 +865,16 @@ struct CloudEditSheet: View {
                     address = normalized(own)
                     if m == .asr {
                         asrScheme = session.cloudASRScheme
-                        // 电脑上没装 SenseVoice 的话，别停在用不了的方案上
-                        if session.cloudSenseVoiceState == "没装", asrScheme != "whisper" {
-                            asrScheme = "whisper"
-                        }
-                        // 顺手刷新一下：要知道电脑上到底跑的是哪个模型、有没有 SenseVoice
+                        // 当前选的方案电脑上不支持的话，换成能用的
+                        fixSchemeIfNeeded()
+                        // 顺手刷新一下：要知道电脑上到底跑的是哪个模型、有哪些方案
                         Task { await session.refreshCloudStatus() }
                     }
                 }
             }
-            // 刷新完才知道有没有 SenseVoice：没有就把选项收掉，选中值也换成能用的
-            .onChange(of: session.cloudSenseVoiceState) { _, state in
-                guard state == "没装", asrScheme != "whisper" else { return }
-                asrScheme = "whisper"
-            }
+            // 刷新完才知道电脑上有哪些方案：选中值要是不在里面就换掉
+            .onChange(of: session.cloudASRSchemes) { _, _ in fixSchemeIfNeeded() }
+            .onChange(of: session.cloudSenseVoiceState) { _, _ in fixSchemeIfNeeded() }
             .onChange(of: useDefault) { _, on in
                 // 从"默认"切到"自定义"：把通用服务地址填进去，用户直接改就行
                 guard !on, address.isEmpty else { return }
@@ -881,11 +884,45 @@ struct CloudEditSheet: View {
         }
     }
 
-    /// Whisper 那一项的名字：把电脑上跑的型号带上去
-    /// （启动时选了 large-v3，这里就能看到）
-    private var whisperSchemeLabel: String {
+    /// 电脑上能用的识别方案：照着服务报上来的清单来，一个都不多给
+    /// （服务没报的老版本才退回三种）
+    private var availableSchemes: [String] {
+        let s = session.cloudASRSchemes
+        if !s.isEmpty { return s }
+        return ["sensevoice", "whisper", "sensevoice+whisper"]
+    }
+
+    /// 方案的名字：Whisper 那一项带上电脑上跑的型号
+    private func schemeLabel(_ s: String) -> String {
+        switch s {
+        case "sensevoice": return "最快：SenseVoice"
+        case "whisper": return "最准：Whisper" + whisperModelSuffix
+        case "sensevoice+whisper": return "SenseVoice + Whisper" + whisperModelSuffix
+        default: return s
+        }
+    }
+
+    private var whisperModelSuffix: String {
         let n = session.cloudASRModelName
-        return n.isEmpty ? "最准：Whisper" : "最准：Whisper（\(n)）"
+        return n.isEmpty ? "" : "（\(n)）"
+    }
+
+    /// 电脑上现在跑着什么（一行小字）
+    private var cloudModelInfo: String {
+        var parts: [String] = []
+        if !session.cloudASRModelName.isEmpty { parts.append("Whisper（\(session.cloudASRModelName)）") }
+        if session.cloudSenseVoiceState == "就绪" { parts.append("SenseVoice") }
+        if parts.isEmpty { return "电脑上的模型：还不知道" }
+        return "电脑上的模型：" + parts.joined(separator: " + ")
+    }
+
+    /// 当前选的识别方案电脑上不支持的话，换成一个支持的
+    private func fixSchemeIfNeeded() {
+        let list = session.cloudASRSchemes
+        guard !list.isEmpty else { return }
+        if list.contains(asrScheme) { return }
+        asrScheme = list.contains("whisper") ? "whisper" : (list.first ?? asrScheme)
+        hearLog("云端识别：电脑上只支持 \(list.joined(separator: "、"))，改用 \(asrScheme)")
     }
 
     /// 通用服务地址（8000 那个，三个模型都能用它）
