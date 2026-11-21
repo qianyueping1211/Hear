@@ -8,6 +8,7 @@ on:
     # 只改电脑上的服务端脚本（server/）时也不用重新打包 App
     paths-ignore:
       - .github/workflows/rename-releases.yml
+      - start-hear-cloud.bat
       - 'server/**'
       - 'docs/**'
       - README.md
