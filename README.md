@@ -95,6 +95,17 @@ powershell -ExecutionPolicy Bypass -File server\start-windows.ps1
 最后打印一个地址，填到手机 App 的 **功能设置 → 模型管理 → 在线模型** 里，
 再把「引擎管理」里需要的模型改成「云端：自己电脑上的服务」。
 
+**更省事：双击 `start-hear-cloud.bat`**（Windows）
+
+仓库根目录里的 `start-hear-cloud.bat` 是给不想敲命令的人准备的：
+双击之后它会自己下载（或更新）最新代码、装好依赖、生成证书、启动服务，
+中间会问你识别 / 翻译 / 声音克隆各用哪个模型。
+
+两种摆法都行：
+
+- 把 `start-hear-cloud.bat` 单独放在一个空文件夹里 → 它会把代码下到旁边的 `Hear` 目录
+- 把整个仓库下载下来解压，直接双击里面的 `start-hear-cloud.bat` → 它就在原地跑
+
 Intel 核显（NPU 也行）机器上，翻译可以走核显的 Vulkan 或 NPU 的 OpenVINO 后端；
 WSL2 里访问不到 NPU，所以想用满硬件就别装 WSL。完整说明（端口、防火墙、性能、常见问题）
 看 [server/README.md](server/README.md)。
@@ -118,6 +129,7 @@ Hear/
 └── Views/                       界面
 project.yml                      XcodeGen 工程描述
 setup.sh                         Mac 一键生成工程
+start-hear-cloud.bat             Windows 一键启动（下载代码 + 装依赖 + 起服务）
 scripts/fetch_llama.sh           下载 llama.cpp 的 iOS 框架
 server/                          云端模型服务（WSL2 上跑，README 在里面）
 .github/workflows/build-ipa.yml  GitHub 自动打包 ipa
