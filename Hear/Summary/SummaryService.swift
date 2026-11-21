@@ -62,6 +62,7 @@ final class SummaryService {
         let system = """
         \(template.prompt)
 
+        对标有说话人姓名或编号的发言按记录归属。保留“未分配”，按语言区分的 A 方和 B 方不代表身份。
         输出语言：\(conv.langA.zhName)。直接输出 Markdown 正文，不要加多余的开场白。
         """
         let user = Self.transcript(conv)
@@ -93,7 +94,7 @@ final class SummaryService {
             "",
         ]
         for (i, item) in c.items.enumerated() {
-            let side = item.source == c.langA ? "A方" : "B方"
+            let side = item.speakerLabel ?? (item.source == c.langA ? "A方" : "B方")
             lines.append("\(i + 1). 【\(side)·\(item.source.zhName)】\(item.sourceText)")
             lines.append("   【译文·\(item.target.zhName)】\(item.translated)")
         }

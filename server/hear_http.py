@@ -58,6 +58,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         route = urlsplit(self.path).path
         handlers = {
             "/v1/asr": self.asr,
+            "/v1/speaker": self.speaker,
             "/v1/translate": self.translate,
             "/v1/clone/reference": self.clone_reference,
             "/v1/clone": self.clone,
@@ -79,7 +80,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         if length < 0 or self.headers.get("Transfer-Encoding"):
             self._reject_without_reading("无效的请求体长度或编码", 400)
             return
-        if length > policy.max_body:
+        max_body = min(policy.max_body, 512 * 1024) if route == "/v1/speaker" else policy.max_body
+        if length > max_body:
             self._reject_without_reading("请求体超过服务上限", 413)
             return
 

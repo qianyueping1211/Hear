@@ -25,6 +25,7 @@ final class SessionJobQueue<Job> {
 
     var isIdle: Bool { worker == nil }
     var hasPendingJobs: Bool { !pending.isEmpty }
+    var pendingCount: Int { pending.count }
 
     func cancel() {
         generation += 1

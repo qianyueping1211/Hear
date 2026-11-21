@@ -199,6 +199,19 @@ def check_hybrid_asr(wav):
         finished.wait(2)
 
 
+def check_speaker_endpoint(wav):
+    import hear_cloud
+    replies = []
+    errors = []
+    request = SimpleNamespace(_send_json=replies.append, _error=lambda message, code: errors.append(code))
+    with patch.object(hear_cloud.SPEAKER, "embedding", return_value=[0.25, -0.5]) as detector:
+        hear_cloud.Handler.speaker(request, wav)
+        check("speaker endpoint decodes PCM and returns a vector", replies == [{"embedding": [0.25, -0.5]}])
+        check("speaker endpoint supplies the WAV sample rate", detector.call_args.args[1] == 16000)
+        hear_cloud.Handler.speaker(request, b"not a wave")
+        check("speaker endpoint rejects malformed audio", errors == [400])
+
+
 def main():
     global BASE
     tmp = tempfile.mkdtemp(prefix="hear-contract-")
@@ -387,6 +400,7 @@ def main():
     shutil.rmtree(tmp, ignore_errors=True)
 
     check_hybrid_asr(wav)
+    check_speaker_endpoint(wav)
 
     print("\npassed %d, failed %d" % (len(PASSED), len(FAILED)))
     if FAILED:

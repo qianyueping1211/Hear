@@ -44,4 +44,54 @@ struct TranslationItem: Identifiable, Equatable, Codable {
     var done = false
     var speakerF0: Float? = nil   // 说话人音高（Hz），用于“接近说话人音色”
     var corrected: Bool? = nil    // SenseVoice 的结果被 Whisper 校正过
+    var speakerID: Int? = nil
+    var speakerName: String? = nil
+    var speakerTracked: Bool? = nil
+    var speakerManuallySet: Bool? = nil
+
+    var speakerLabel: String? {
+        if let speakerID { return speakerName ?? "说话人 \(speakerID)" }
+        return speakerTracked == true ? "未分配" : nil
+    }
+}
+
+enum ConversationSpeakerEdit {
+    case rename(String)
+    case assign(Int?)
+    case add
+}
+
+extension Array where Element == TranslationItem {
+    var speakerLabels: [Int: String] {
+        reduce(into: [:]) { labels, item in
+            if let id = item.speakerID, let label = item.speakerLabel { labels[id] = label }
+        }
+    }
+
+    @discardableResult
+    mutating func editSpeaker(itemID: UUID, change: ConversationSpeakerEdit, reservedThrough: Int = 0) -> Bool {
+        guard let index = firstIndex(where: { $0.id == itemID }) else { return false }
+        switch change {
+        case .rename(let input):
+            guard let id = self[index].speakerID else { return false }
+            let name = String(input.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(40))
+            for i in indices where self[i].speakerID == id {
+                self[i].speakerName = name.isEmpty ? nil : name
+            }
+        case .assign(let id):
+            let names = speakerLabels
+            if let id, names[id] == nil { return false }
+            let name = first(where: { $0.speakerID == id && $0.speakerName != nil })?.speakerName
+            self[index].speakerID = id
+            self[index].speakerName = name
+            self[index].speakerTracked = true
+            self[index].speakerManuallySet = true
+        case .add:
+            self[index].speakerID = Swift.max(compactMap(\.speakerID).max() ?? 0, reservedThrough) + 1
+            self[index].speakerName = nil
+            self[index].speakerTracked = true
+            self[index].speakerManuallySet = true
+        }
+        return true
+    }
 }

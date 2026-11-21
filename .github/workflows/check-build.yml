@@ -79,7 +79,7 @@ jobs:
 
       - name: Session queue tests
         run: |
-          swiftc -parse-as-library Hear/App/SessionJobQueue.swift tests/SessionJobQueueTests.swift -o "$RUNNER_TEMP/hear-session-tests"
+          swiftc -parse-as-library Hear/App/SessionJobQueue.swift Hear/App/SpeakerTracker.swift Hear/Models/Language.swift tests/SessionJobQueueTests.swift -o "$RUNNER_TEMP/hear-session-tests"
           "$RUNNER_TEMP/hear-session-tests"
 
       - name: Build

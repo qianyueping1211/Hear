@@ -13,6 +13,7 @@ struct ConversationDetailView: View {
     @State private var showTemplates = false
     @State private var confirmRegenerate = false
     @State private var copied = false
+    @State private var editingSpeaker: TranslationItem?
 
     private var template: SummaryTemplate { SummaryTemplate.find(conv?.activeTemplateID ?? SummaryTemplate.defaultID) }
     private var record: SummaryRecord? { conv?.summaries[template.id] }
@@ -57,6 +58,11 @@ struct ConversationDetailView: View {
                 store.setActiveTemplate(id, templateID: t.id)   // 只切换，不会自动生成
             }
         }
+        .sheet(item: $editingSpeaker) { item in
+            SpeakerEditor(item: item, labels: conv?.items.speakerLabels ?? [:]) { change in
+                session.editSpeaker(in: id, itemID: item.id, change: change)
+            }
+        }
         .confirmationDialog("重新生成会覆盖这个模板当前的总结（包括你的修改）",
                             isPresented: $confirmRegenerate, titleVisibility: .visible) {
             Button("重新生成", role: .destructive) {
@@ -84,7 +90,8 @@ struct ConversationDetailView: View {
                                reading: session.readingID == item.id,
                                playing: session.speakingID == item.id,
                                preparing: session.clonePreparingID == item.id
-                                    || session.cloneWorking.contains(item.id)) {
+                                    || session.cloneWorking.contains(item.id),
+                               onSpeaker: item.speakerLabel == nil ? nil : { editingSpeaker = item }) {
                         session.replay(item)
                     }
                 }

@@ -10,6 +10,7 @@ struct ContentView: View {
     @State private var noLLMAlert = false
     @State private var editingID: UUID?          // 正在修改原文的那一条
     @State private var draft = ""
+    @State private var editingSpeaker: TranslationItem?
     @State private var showMenu = false          // 右上角 ⋯ 菜单
 
     var body: some View {
@@ -24,7 +25,7 @@ struct ContentView: View {
                         TranscriptView(onEdit: { item in
                             draft = item.sourceText
                             editingID = item.id
-                        })
+                        }, onSpeaker: { editingSpeaker = $0 })
                             .overlay(alignment: .top) {
                                 if session.usingAppleTranslation, let note = session.appleNote {
                                     NotePill(text: note).padding(.top, 8)
@@ -71,6 +72,12 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showHistory) { HistoryView() }
+            .sheet(item: $editingSpeaker) { item in
+                let conversation = session.conversationID
+                SpeakerEditor(item: item, labels: session.items.speakerLabels) { change in
+                    session.editSpeaker(in: conversation, itemID: item.id, change: change)
+                }
+            }
             .confirmationDialog("是否需要把本页内容进行后台总结？", isPresented: $askNew, titleVisibility: .visible) {
                 Button("总结并新建") {
                     if llm.isReady {
@@ -281,6 +288,7 @@ struct LanguageMenu: View {
 struct TranscriptView: View {
     @EnvironmentObject var session: LiveSession
     var onEdit: (TranslationItem) -> Void = { _ in }
+    var onSpeaker: (TranslationItem) -> Void = { _ in }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -295,7 +303,8 @@ struct TranscriptView: View {
                                    playing: session.speakingID == item.id,
                                    preparing: session.clonePreparingID == item.id
                                         || session.cloneWorking.contains(item.id),
-                                   onEdit: { if item.done { onEdit(item) } }) {
+                                   onEdit: { if item.done { onEdit(item) } },
+                                   onSpeaker: item.speakerLabel == nil ? nil : { onSpeaker(item) }) {
                             session.tapRead(item)
                         }
                         .id(item.id)
@@ -370,6 +379,7 @@ struct BubbleView: View {
     /// 声音（克隆原声）还在生成：喇叭显示成灰色，表示"马上就好"
     var preparing: Bool = false
     var onEdit: (() -> Void)? = nil      // 有值时：长按修改原文（对话页）；没有时：长按弹出复制菜单（历史页）
+    var onSpeaker: (() -> Void)? = nil
     var onSpeak: () -> Void
 
     /// 左侧气泡国旗在前，右侧气泡国旗在后（靠外侧）
@@ -393,6 +403,17 @@ struct BubbleView: View {
         HStack {
             if !leading { Spacer(minLength: 40) }
             VStack(alignment: leading ? .leading : .trailing, spacing: 6) {
+                if let speaker = item.speakerLabel {
+                    if let onSpeaker {
+                        Button(action: onSpeaker) {
+                            Label(speaker, systemImage: "person.crop.circle").font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("修改说话人")
+                    } else {
+                        Text(speaker).font(.caption.weight(.semibold))
+                    }
+                }
                 // 被 Whisper 校正过的句子，原文后面带一个魔法棒小图标
                 (flagged(item.source.flag, item.sourceText)
                  + (item.corrected == true
@@ -401,7 +422,7 @@ struct BubbleView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 if item.translated.isEmpty {
-                    ProgressView().controlSize(.small)
+                    if !item.done { ProgressView().controlSize(.small) }
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         if reading && !leading { readingIcon }

@@ -471,7 +471,13 @@ final class LiveSession: ObservableObject {
     private var manualSpeaker = false     // 戴着耳机时用户手动切到了扬声器
 
     // 当前这一页对话（自动保存到历史）
-    private(set) var conversationID = UUID()
+    private(set) var conversationID = UUID() {
+        didSet {
+            guard oldValue != conversationID else { return }
+            speakerQueue.cancel()
+            speakerTracker = SpeakerTracker()
+        }
+    }
     private var conversationCreated = Date()
 
     init() {
@@ -1933,6 +1939,11 @@ final class LiveSession: ObservableObject {
             guard let self else { return }
             defer { self.switchingConversation = false }
             if self.isRunning || self.holdReleasing { await self.finishRecording(readAfter: false) }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while !self.speakerQueue.isIdle, ContinuousClock.now < deadline {
+                do { try await Task.sleep(for: .milliseconds(50)) }
+                catch { break }
+            }
             self.archiveConversation(summarize: summarize)
         }
     }
@@ -2206,7 +2217,7 @@ final class LiveSession: ObservableObject {
             let clipped = job.samples.count > maxN
             let clip = clipped ? Array(job.samples.suffix(maxN)) : job.samples
             let t0 = Date()
-            let r: (lang: String, text: String, correctionAddress: String?)
+            let r: (lang: String, text: String, correctionAddress: String?, speakerAddress: String?)
             do {
                 r = try await sentenceRecognizer.recognize(clip, candidates: cands, fallback: fallback, preview: true)
             } catch {
@@ -2754,6 +2765,7 @@ final class LiveSession: ObservableObject {
         let fallback = forced?.id ?? ((lastLangID == b.id) ? b.id : a.id)
         let cands = forced.map { [$0.id] } ?? [a.id, b.id]
         let correctionAddress: String?
+        let speakerAddress: String?
         let detected: String
         let text: String
         let t0 = Date()
@@ -2767,6 +2779,7 @@ final class LiveSession: ObservableObject {
             detected = result.lang
             text = result.text
             correctionAddress = result.correctionAddress
+            speakerAddress = result.speakerAddress
             // 日志里写清楚这次用的是哪个引擎（云端就写"云端"和用的哪个方案）
             let engineName: String
             if usingCloudASR {
@@ -2824,7 +2837,16 @@ final class LiveSession: ObservableObject {
         // 语言和预览一致时先保留预览译文，最终译文出来后再替换，避免闪烁
         let old = items[idx]
         let preview = old.source == src ? old.translated : ""
-        let item = TranslationItem(id: itemID, source: src, target: tgt, sourceText: text, translated: preview)
+        var item = old
+        if old.source != src {
+            item = TranslationItem(id: itemID, source: src, target: tgt, sourceText: text, translated: preview,
+                                   speakerID: old.speakerID, speakerName: old.speakerName,
+                                   speakerTracked: old.speakerTracked, speakerManuallySet: old.speakerManuallySet)
+        } else {
+            item.sourceText = text
+        }
+        let shouldIdentify = speakerTrackingEnabled && !talkMode && speakerAddress != nil
+        if shouldIdentify { item.speakerTracked = true }
         guard let idx2 = items.firstIndex(where: { $0.id == itemID }) else { return }
         items[idx2] = item
         let id = itemID
@@ -2839,7 +2861,57 @@ final class LiveSession: ObservableObject {
         enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: text,
                                   src: src, tgt: tgt, context: context, samples: samples,
                                   isApple: false, correctionAddress: correctionAddress))
+        if shouldIdentify, let speakerAddress {
+            enqueueSpeaker(samples, for: itemID, address: speakerAddress)
+        }
         _ = preview
+    }
+
+    @Published var speakerTrackingEnabled = (UserDefaults.standard.object(forKey: "speakerTrackingEnabled") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(speakerTrackingEnabled, forKey: "speakerTrackingEnabled")
+            if !speakerTrackingEnabled {
+                speakerQueue.cancel()
+                speakerTracker = SpeakerTracker()
+            }
+        }
+    }
+
+    private struct SpeakerJob {
+        let samples: [Float]
+        let itemID: UUID
+        let conversation: UUID
+        let address: String
+    }
+
+    private let speakerQueue = SessionJobQueue<SpeakerJob>(timeout: .seconds(10))
+    private var speakerTracker = SpeakerTracker()
+
+    private func enqueueSpeaker(_ samples: [Float], for itemID: UUID, address: String) {
+        guard samples.count >= 22_400, speakerQueue.pendingCount < 3 else { return }
+        let job = SpeakerJob(samples: Array(samples.prefix(160_000)), itemID: itemID,
+                             conversation: conversationID, address: address)
+        speakerQueue.submit(job) { [weak self] job in
+            guard let self,
+                  let embedding = try? await self.cloud.speakerEmbedding(samples: job.samples, address: job.address),
+                  !Task.isCancelled, job.conversation == self.conversationID,
+                  let index = self.items.firstIndex(where: { $0.id == job.itemID }),
+                  self.items[index].speakerManuallySet != true else { return }
+            let lastID = self.items.compactMap(\.speakerID).max() ?? 0
+            guard let id = self.speakerTracker.assign(embedding, after: lastID) else { return }
+            let name = self.items.first { $0.speakerID == id && $0.speakerName != nil }?.speakerName
+            self.items[index].speakerID = id
+            self.items[index].speakerName = name
+            self.persist()
+        } timedOut: { _ in }
+    }
+
+    func editSpeaker(in conversation: UUID, itemID: UUID, change: ConversationSpeakerEdit) {
+        if conversation == conversationID {
+            if items.editSpeaker(itemID: itemID, change: change, reservedThrough: speakerTracker.lastID) { persist() }
+        } else {
+            ConversationStore.shared.editSpeaker(conversationID: conversation, itemID: itemID, change: change)
+        }
     }
 
     /// 用 Whisper 再识别一遍这句（按 SenseVoice 判断出的语言），明显不同就替换原文并重新翻译

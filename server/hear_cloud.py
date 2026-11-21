@@ -42,9 +42,11 @@ import traceback
 import urllib.error
 import urllib.request
 import wave
+import struct
 from http.server import ThreadingHTTPServer
 
 from hear_http import RequestHandler, RequestPolicy
+from hear_speaker import SpeakerDetector
 
 HOST = os.environ.get("HEAR_HOST", "0.0.0.0")
 PORT = int(os.environ.get("HEAR_PORT", "8000"))
@@ -70,6 +72,9 @@ TLS_PEEK_TIMEOUT = float(os.environ.get("HEAR_TLS_PEEK_TIMEOUT", "8"))
 ASR_SCHEME = os.environ.get("HEAR_ASR_SCHEME", "sensevoice+whisper")
 SENSEVOICE_DIR = os.environ.get(
     "HEAR_SENSEVOICE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "sensevoice"))
+SPEAKER_MODEL = "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+SPEAKER = SpeakerDetector(os.environ.get("HEAR_SPEAKER_MODEL", "") or
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", SPEAKER_MODEL))
 # 单个请求最大允许多少（正常请求几 MB 就够）
 MAX_BODY = int(os.environ.get("HEAR_MAX_BODY", str(64 * 1024 * 1024)))
 ASR_DEVICE = os.environ.get("HEAR_ASR_DEVICE", "cpu")
@@ -787,6 +792,7 @@ a{color:#007aff;text-decoration:none}
         # 机器能判定的就绪状态（启动脚本、App 都看这个）：
         # 别去猜"就绪""外部服务"这些字——
         # "外部服务连不上"开头也是"外部服务"，按字面判就会把连不上的当成能用。
+        out["speaker_ready"] = SPEAKER.available
         if ASR_URL:
             out["asr_ready"] = backend_alive(ASR_URL)
         else:
@@ -845,7 +851,21 @@ a{color:#007aff;text-decoration:none}
             else:
                 text, lang = recognize(samples, rate, language, fallback, scheme, preview)
         log_text("识别（%s）%.1fs：" % (scheme, time.time() - t0), text[:40])
-        self._send_json({"lang": lang or fallback, "text": text, "can_correct": can_correct})
+        self._send_json({"lang": lang or fallback, "text": text, "can_correct": can_correct,
+                         "speaker_available": SPEAKER.available})
+
+    def speaker(self, body):
+        try:
+            samples, rate = decode_wav(body)
+        except (EOFError, ValueError, wave.Error, struct.error):
+            self._error("无效的说话人识别音频", 400)
+            return
+        try:
+            embedding = SPEAKER.embedding(samples, rate)
+        except Exception as error:
+            log("说话人模型暂不可用：%s" % type(error).__name__)
+            embedding = None
+        self._send_json({"embedding": embedding})
 
     def asr_proxy(self, body, langs, fallback):
         """转发给 OpenAI 兼容的转写接口（multipart/form-data）"""

@@ -11,7 +11,7 @@ exit /b %RC%
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $env:HEAR_LAUNCHER_FILE
 $mode = $env:HEAR_LAUNCHER_MODE
-$files = @('start-windows.ps1', 'hear_cloud.py', 'hear_http.py', 'make_cert.py',
+$files = @('start-windows.ps1', 'hear_cloud.py', 'hear_http.py', 'hear_speaker.py', 'make_cert.py',
            'requirements.txt', 'test_api.py', 'test_contract.py')
 $inCheckout = Test-Path -LiteralPath (Join-Path $here 'server\start-windows.ps1')
 $root = if ($inCheckout) { $here } else { Join-Path $here 'Hear' }

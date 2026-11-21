@@ -668,6 +668,26 @@ elseif (-not (Test-Path (Join-Path $SvDir "model.int8.onnx")) -or
 }
 else { Step "已有 SenseVoice 模型" }
 
+$speakerName = "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+$speakerFile = Join-Path $ModelDir $speakerName
+if (-not (Test-Path -LiteralPath $speakerFile -PathType Leaf)) {
+    $speakerDownload = Join-Path $ModelDir "$speakerName.unverified"
+    $speakerURL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/$speakerName"
+    try {
+        Say "准备实时翻译的说话人区分模型（约 28 MB）"
+        Get-File $speakerURL $speakerDownload | Out-Null
+        $speakerHash = "e6af4d4c444f3dab01d991bb9b7d5af98eb979e329f6c8880a19d5553561ed25"
+        if ((Get-FileHash -LiteralPath $speakerDownload -Algorithm SHA256).Hash -ne $speakerHash) {
+            throw "下载文件校验失败"
+        }
+        Move-Item -LiteralPath $speakerDownload -Destination $speakerFile -Force
+    } catch {
+        Step "暂时无法安装说话人区分模型，实时识别和翻译仍可用"
+    } finally {
+        Remove-Item -LiteralPath $speakerDownload -ErrorAction SilentlyContinue
+    }
+}
+
 Say "下载翻译模型（$MtRepo / $MtFile）"
 Get-Model $MtRepo $MtFile | Out-Null
 Say "下载声音克隆模型（$CloneRepo / $CloneModelFile）"

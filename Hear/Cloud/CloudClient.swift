@@ -817,7 +817,7 @@ actor CloudClient {
     }
 
     func transcribe(samples: [Float], candidates: [String], fallback: String)
-        async throws -> (lang: String, text: String, correctionAddress: String?) {
+        async throws -> (lang: String, text: String, correctionAddress: String?, speakerAddress: String?) {
         try await transcribe(samples: samples, candidates: candidates, fallback: fallback, preview: false)
     }
 
@@ -839,7 +839,7 @@ actor CloudClient {
     }
 
     private func transcribe(samples: [Float], candidates: [String], fallback: String,
-                            preview: Bool) async throws -> (lang: String, text: String, correctionAddress: String?) {
+                            preview: Bool) async throws -> (lang: String, text: String, correctionAddress: String?, speakerAddress: String?) {
         // 先试这个模型自己的地址，不行就退回通用服务地址（8000 会转发给识别后端）
         var lastError: Error = CloudError.notConfigured
         var sawOnlyModelService = false
@@ -886,7 +886,8 @@ actor CloudClient {
                 }
                 let lang = (obj["lang"] as? String) ?? fallback
                 let correctionAddress = !preview && (obj["can_correct"] as? Bool == true) ? addr : nil
-                return (lang, text, correctionAddress)
+                let speakerAddress = !preview && (obj["speaker_available"] as? Bool == true) ? addr : nil
+                return (lang, text, correctionAddress, speakerAddress)
             } catch {
                 try Task.checkCancellation()
                 lastError = error
@@ -896,6 +897,18 @@ actor CloudClient {
             throw CloudError.badResponse("这个地址是单独的模型服务，不提供语音识别；识别请用 8000 的总服务地址")
         }
         throw lastError
+    }
+
+    func speakerEmbedding(samples: [Float], address: String) async throws -> [Float]? {
+        try Task.checkCancellation()
+        guard candidateAddresses(asrAddress).contains(address) else { return nil }
+        let wav = Wav.encode(samples: Array(samples.prefix(160_000)), sampleRate: 16_000)
+        let request = try makeRequest("/v1/speaker", address: address, method: "POST", body: wav,
+                                      contentType: "audio/wav", timeout: 8)
+        let (data, response) = try await sendWithRetry(request, path: "/v1/speaker", retries: 1)
+        guard response?.statusCode == 200, data.count < 32_768 else { return nil }
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (object?["embedding"] as? [NSNumber])?.map(\.floatValue)
     }
 
     // MARK: - 文本翻译

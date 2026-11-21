@@ -1,6 +1,13 @@
 import Foundation
 
 extension ConversationStore {
+    func editSpeaker(conversationID: UUID, itemID: UUID, change: ConversationSpeakerEdit) {
+        guard Self.deletedIDs[conversationID.uuidString] == nil,
+              var conversation = load(conversationID),
+              conversation.items.editSpeaker(itemID: itemID, change: change) else { return }
+        save(conversation)
+    }
+
     func saveTranscript(id: UUID, createdAt: Date, langA: Language, langB: Language,
                         items: [TranslationItem]) {
         guard !items.isEmpty, Self.deletedIDs[id.uuidString] == nil else { return }

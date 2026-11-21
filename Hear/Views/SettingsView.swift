@@ -170,6 +170,11 @@ struct SettingsView: View {
                     if session.usingCloudASR {
                         Text(cloudASRDescription)
                             .font(.footnote).foregroundStyle(.secondary)
+                        Toggle("实时翻译时区分说话人", isOn: $session.speakerTrackingEnabled)
+                        if session.speakerTrackingEnabled {
+                            Text("电脑按声音区分发言。点原文上方的说话人标签可以改名或改分组。")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
                     }
                     if session.translationEngine == "local", !session.isInstalled(.translation) {
                         Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
