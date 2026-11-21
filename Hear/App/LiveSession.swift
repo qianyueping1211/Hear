@@ -108,7 +108,7 @@ final class LiveSession: ObservableObject {
 
     /// 严格模式：只认配对过的那台电脑的证书。
     /// 关着的时候是兼容模式：只对"用户自己填的内网地址"放宽自签证书校验。
-    @Published var cloudStrictMode: Bool {
+    @Published var cloudStrictMode: Bool = false {
         didSet {
             save("cloudStrictMode", cloudStrictMode)
             LocalServerTrust.setStrictMode(cloudStrictMode)
@@ -127,10 +127,6 @@ final class LiveSession: ObservableObject {
     @Published var pendingPairRoot: Data = Data()
     /// 弹出"确认指纹"的提示框
     @Published var showPairConfirm = false
-    /// init 里先把严格模式的值读出来，等初始化完了再设到 cloudStrictMode 上
-    private var strictModeOn: Bool = false
-    /// init 里读出来的签发根（DER）
-    private var pinnedRootData: Data?
 
     /// 电脑上没有 SenseVoice 的状态："" = 还不知道（还没问过服务），
     /// "就绪" / "没装"。老版本的服务没这个字段，就当作不知道（照旧给用户选）。
@@ -516,10 +512,15 @@ final class LiveSession: ObservableObject {
             asrEngine = canApple ? "apple" : "sensevoice"
         }
         // 严格模式（只连配对过的电脑）：
-        // 这里只把值读出来，真正设到属性上要等 init 全部结束
-        // （cloudStrictMode 带观察者，初始化没完成时读它/改它编译不过）
-        strictModeOn = d.object(forKey: "cloudStrictMode") as? Bool ?? false
-        pinnedRootData = d.data(forKey: "cloudPinnedRoot")
+        // 这里只赋值（属性带观察者，init 里赋值不会触发观察者）；
+        // 要读就用下面的局部变量——init 没结束前读 self 的属性编译不过。
+        let strictOn = d.object(forKey: "cloudStrictMode") as? Bool ?? false
+        cloudStrictMode = strictOn
+        if let der = d.data(forKey: "cloudPinnedRoot"), !der.isEmpty {
+            LocalServerTrust.pinRoot(der)
+            cloudRootFingerprint = Self.certFingerprint(der)
+        }
+        LocalServerTrust.setStrictMode(strictOn)
         voiceProcessing = d.object(forKey: "voiceProcessing") as? Bool ?? true
         inputSource = d.string(forKey: "inputSource") ?? "phone"
         // 上次用的模式一定要记住：不管存的是 Bool 还是 NSNumber 都能读回来
@@ -646,13 +647,7 @@ final class LiveSession: ObservableObject {
             }
         }
 
-        // 到这里所有属性都初始化完了，可以安全地设严格模式、恢复引擎了
-        cloudStrictMode = strictModeOn
-        if let der = pinnedRootData, !der.isEmpty {
-            LocalServerTrust.pinRoot(der)
-            cloudRootFingerprint = Self.certFingerprint(der)
-        }
-        LocalServerTrust.setStrictMode(strictModeOn)
+        // 到这里所有属性都初始化完了，可以安全地恢复引擎了
         // 上次因为云端连不上自动换过引擎：把用户自己的选择还回去
         restorePreferredEngines()
     }
