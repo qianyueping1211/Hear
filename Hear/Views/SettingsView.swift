@@ -139,14 +139,14 @@ struct SettingsView: View {
                     asrEngineRow
                     Picker("文本翻译", selection: translationEngineBinding) {
                         if session.appleAvailable {
-                            Text("iPhone 本机 · 苹果自带").tag("apple")
+                            Text("本机：苹果自带").tag("apple")
                         }
-                        Text("iPhone 本机 · Hy-MT2").tag("local")
+                        Text("本机：Hy-MT2").tag("local")
                         Text("云端服务器").tag("cloud")
                     }
                     Picker("声音克隆引擎", selection: voiceCloneEngineBinding) {
                         Text("云端服务器 · Qwen3-TTS").tag("cloud")
-                        Text("iPhone 本机 · ZipVoice INT8").tag("local")
+                        Text("本机：ZipVoice INT8").tag("local")
                     }
                     if !session.voiceCloneCloud {
                         Text("ZipVoice 仅支持中英文。安装模型后可离线克隆声音。")
@@ -321,7 +321,7 @@ struct SettingsView: View {
                 } header: {
                     Text("朗读")
                 } footer: {
-                    Text("声音克隆用说话人的音色朗读译文。iPhone 本机使用 ZipVoice INT8，听见 Windows 服务使用 Qwen3-TTS。")
+                    Text("声音克隆用说话人的音色朗读译文。本机使用 ZipVoice INT8，听见 Windows 服务使用 Qwen3-TTS。")
                 }
 
                 Section {
@@ -566,10 +566,10 @@ struct SettingsView: View {
 
     private func asrEngineName(_ engine: String) -> String {
         switch engine {
-        case "apple": return "iPhone 本机 · 苹果自带"
-        case "sensevoice": return "iPhone 本机 · SenseVoice"
-        case "whisper": return "iPhone 本机 · Whisper"
-        case "hybrid": return "iPhone 本机 · SenseVoice + Whisper"
+        case "apple": return "本机：苹果自带"
+        case "sensevoice": return "本机最快：SenseVoice"
+        case "whisper": return "本机最准：Whisper"
+        case "hybrid": return "本机综合：SenseVoice + Whisper"
         case "cloud": return "云端服务器"
         default: return "请选择"
         }
