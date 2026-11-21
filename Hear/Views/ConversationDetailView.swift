@@ -89,7 +89,7 @@ struct ConversationDetailView: View {
                     BubbleView(item: item, leading: item.isLeading(left: c.langA, right: c.langB),
                                reading: session.readingID == item.id,
                                playing: session.speakingID == item.id,
-                               preparing: session.clonePreparingID == item.id,
+                               preparing: session.cloneWorking[item.id] != nil,
                                onSpeaker: item.speakerLabel == nil ? nil : { editingSpeaker = item }) {
                         session.replay(item)
                     }

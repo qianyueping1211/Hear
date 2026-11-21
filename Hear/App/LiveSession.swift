@@ -155,7 +155,7 @@ final class LiveSession: ObservableObject {
             save("voiceCloneCloud", voiceCloneCloud)
             guard voiceCloneCloud != oldValue else { return }
             hearLog("声音克隆引擎改为\(voiceCloneCloud ? "云端" : "本地")")
-            cloneTasks.removeAll()
+            clearCloneTasks()
             if voiceCloneCloud {
                 // 不用本地模型了，卸掉省内存
                 Task { await cloner.unload() }
@@ -212,7 +212,7 @@ final class LiveSession: ObservableObject {
             hearLog("声音克隆朗读：\(voiceClone ? "开" : "关")")
             if voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 0.3) } else {
                 cloneLoadTask?.cancel()
-                cloneTasks.removeAll()
+                clearCloneTasks()
                 Task { await cloner.unload() }
             }
         }
@@ -435,11 +435,8 @@ final class LiveSession: ObservableObject {
 
     // 朗读队列：readIndex 指向下一句要读的译文
     @Published private(set) var readingID: UUID?
-    /// 正在等克隆声音生成好的那一条。
-    /// 声音还没准备好时，界面上的喇叭要显示成灰色（表示"还在生成"），不要蓝色。
-    @Published private(set) var clonePreparingID: UUID?
-    /// 正在生成克隆声音的句子（气泡里显示转圈）
-    @Published private(set) var cloneWorking: Set<UUID> = []
+    /// 每句正在执行的生成任务。旧任务结束时不能清掉新任务的等待状态。
+    @Published private(set) var cloneWorking: [UUID: UUID] = [:]
     /// 现在有几个识别正在进行。
     /// 只有"正在识别"才算忙——翻译慢的时候不算：
     /// 否则上一句翻译要几十秒，后面那句的实时原文也跟着一起卡住，
@@ -638,8 +635,7 @@ final class LiveSession: ObservableObject {
                 CrashGuard.shared.updateMarker(memoryWarning: true)
                 let usesLocal = Self.isLocalEngine(self.asrEngine) || self.translationEngine == "local"
                 self.cloneLoadTask?.cancel()
-                self.cloneTasks.values.forEach { $0.cancel() }
-                self.cloneTasks.removeAll()
+                self.clearCloneTasks()
                 if usesLocal {
                     self.stop(readAfter: false)
                     self.phase = .checking
@@ -965,7 +961,7 @@ final class LiveSession: ObservableObject {
                 await sense.unload()
 
             case .voiceClone:
-                cloneTasks.removeAll()
+                clearCloneTasks()
                 await cloner.unload()
 
             }
@@ -1110,8 +1106,7 @@ final class LiveSession: ObservableObject {
                     case .voiceClone:
                         try await ZipVoiceModel.download(progress: onProgress)
                         cloneLoadTask?.cancel()
-                        cloneTasks.values.forEach { $0.cancel() }
-                        cloneTasks.removeAll()
+                        clearCloneTasks()
                         await cloner.unload()
                     }
                     bgDownloadKind = nil              // 下载完立刻收起进度条
@@ -1337,7 +1332,7 @@ final class LiveSession: ObservableObject {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 cloneBusy = cloneLoading
             }
-            cloneTasks.removeAll()
+            clearCloneTasks()
             cloneHasModel = await cloner.isLoaded
             if cloneHasModel { await cloner.unload() }
         }
@@ -1449,8 +1444,7 @@ final class LiveSession: ObservableObject {
     func importVoiceClone(_ url: URL) async {
         do {
             cloneLoadTask?.cancel()
-            cloneTasks.values.forEach { $0.cancel() }
-            cloneTasks.removeAll()
+            clearCloneTasks()
             await cloner.unload()
             try await Task.detached(priority: .utility) { try ZipVoiceModel.importFolder(url) }.value
             modelsRevision += 1
@@ -3043,11 +3037,7 @@ final class LiveSession: ObservableObject {
             if task == nil { task = prepareClone(item.id) }
             if let t = task {
                 cloneAsked = true
-                if cloneTasks[item.id] == nil { cloneTasks[item.id] = t }
-                // 声音还在生成：告诉界面把喇叭显示成灰色
-                clonePreparingID = item.id
                 cloned = await waitClone(t, seconds: cloneWait)
-                clonePreparingID = nil
                 if Task.isCancelled || inBackground { return }
             }
         }
@@ -3166,10 +3156,10 @@ final class LiveSession: ObservableObject {
         let changed = items[i].translated != text
         items[i].translated = text
         items[i].done = done
-        // 译文定稿后马上在后台生成克隆声音，轮到朗读时就不用等
-        if done, voiceClone, speakOutput, changed || cloneTasks[id] == nil {
-            if changed { cloneTasks[id] = nil }      // 原文改了，之前那次的克隆作废
-            _ = prepareClone(id)                    // 同一句只发一次请求
+        // 播报开关只决定自动播放。译文定稿后仍准备克隆声音，供用户点按播放。
+        if done, voiceClone {
+            if changed { discardCloneTask(id) }
+            _ = prepareClone(id)
         }
     }
 
@@ -3718,7 +3708,7 @@ final class LiveSession: ObservableObject {
         while cloneRefOrder.count > 30 {
             let old = cloneRefOrder.removeFirst()
             cloneRefs[old] = nil
-            cloneTasks[old] = nil
+            discardCloneTask(old)
             cloneNote[old] = nil
         }
     }
@@ -3760,17 +3750,25 @@ final class LiveSession: ObservableObject {
         return "v4|\(lang)|\(text)|\(fp)"
     }
 
-    /// 在后台生成这句译文的克隆声音；没有样本、不支持这种语言或模型没加载时返回 nil
-    ///
-    /// 同一句只发一次请求：已经在生成中就把那个任务原样还回去。
-    /// （云端一次只发一个克隆请求，两个请求排着队会等太久，
-    ///   等不及就退回系统声音了——听着像是"没走云端"）
+    private func discardCloneTask(_ id: UUID) {
+        cloneTasks.removeValue(forKey: id)?.cancel()
+        if cloneWorking[id] != nil { cloneWorking.removeValue(forKey: id) }
+    }
+
+    private func clearCloneTasks() {
+        cloneTasks.values.forEach { $0.cancel() }
+        cloneTasks.removeAll()
+        if !cloneWorking.isEmpty { cloneWorking.removeAll() }
+    }
+
+    /// 在后台准备克隆声音。已有任务直接复用，避免同一句发出重复请求。
     private func prepareClone(_ id: UUID) -> Task<CloneAudio?, Never>? {
+        guard voiceClone else { return nil }
         // 已经有一个任务在跑（或者已经生成好了）：直接用，别再发一遍请求
         if let existing = cloneTasks[id] { return existing }
         guard let ref = cloneRefs[id],
               let item = items.first(where: { $0.id == id }),
-              !item.translated.isEmpty, !item.translated.hasPrefix("（翻译失败"),
+              item.canReadAloud,
               CloudVoiceReference.languageNames[item.target.id] != nil else { return nil }
         let text = item.translated, lang = item.target.id
         // 参考文字是占位符（"…"）或者空的时候别拿去用：
@@ -3788,10 +3786,11 @@ final class LiveSession: ObservableObject {
         let cloud = self.cloud
         let useCloud = usingCloudClone
         // 生成中：气泡里的喇叭显示成一直在转的半圈
-        cloneWorking.insert(id)
+        let jobID = UUID()
+        cloneWorking[id] = jobID
         let t = Task<CloneAudio?, Never>.detached(priority: .userInitiated) {
-            defer { Task { @MainActor in self.cloneWorking.remove(id) } }
             do {
+                try Task.checkCancellation()
                 // 之前生成过一样的，直接拿来放，不用再等模型算一遍
                 if let cached = await CloneCache.shared.get(key) {
                     hearLog("声音克隆：命中缓存，直接播放")
@@ -3811,7 +3810,11 @@ final class LiveSession: ObservableObject {
                         let keepEngine = (error as? CloudClient.CloudError)?.shouldKeepConfiguredEngine ?? false
                         if !Task.isCancelled, !keepEngine {
                             let why = error.localizedDescription
-                            await MainActor.run { self.cloudFallbackToApple(.clone, reason: why) }
+                            await MainActor.run {
+                                if self.cloneWorking[id] == jobID {
+                                    self.cloudFallbackToApple(.clone, reason: why)
+                                }
+                            }
                         }
                         return nil
                     }
@@ -3832,6 +3835,11 @@ final class LiveSession: ObservableObject {
             }
         }
         cloneTasks[id] = t
+        Task { [weak self] in
+            _ = await t.value
+            guard let self, self.cloneWorking[id] == jobID else { return }
+            self.cloneWorking.removeValue(forKey: id)
+        }
         return t
     }
 

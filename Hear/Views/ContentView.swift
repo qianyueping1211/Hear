@@ -301,7 +301,7 @@ struct TranscriptView: View {
                         BubbleView(item: item, leading: item.isLeading(left: session.langA, right: session.langB),
                                    reading: session.readingID == item.id,
                                    playing: session.speakingID == item.id,
-                                   preparing: session.clonePreparingID == item.id,
+                                   preparing: session.cloneWorking[item.id] != nil,
                                    onEdit: { if item.done { onEdit(item) } },
                                    onSpeaker: item.speakerLabel == nil ? nil : { onSpeaker(item) }) {
                             session.tapRead(item)
@@ -396,7 +396,7 @@ struct BubbleView: View {
 
     @ViewBuilder
     private var readingIcon: some View {
-        if reading && preparing && !playing {
+        if preparing && !playing {
             // 等待克隆声音生成时转圈。
             HalfCircleSpinner()
                 .accessibilityLabel("正在准备朗读")
@@ -442,10 +442,10 @@ struct BubbleView: View {
                     if !item.done { ProgressView().controlSize(.small) }
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        if item.canReadAloud && !leading { readingIcon }
+                        if item.canReadAloud && (item.done || playing) && !leading { readingIcon }
                         flagged(item.target.flag, item.translated)
                             .font(.title3.weight(.medium))
-                        if item.canReadAloud && leading { readingIcon }
+                        if item.canReadAloud && (item.done || playing) && leading { readingIcon }
                     }
                 }
             }
