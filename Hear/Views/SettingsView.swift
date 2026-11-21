@@ -23,7 +23,6 @@ struct SettingsView: View {
     /// 正在配置哪一项：服务（默认地址）或某个模型
     @State private var cloudEdit: CloudEdit?
     /// 本地引擎互斥的提示
-    @State private var conflictMessage: String?
     /// 本地网络权限没开：弹提示告诉用户去哪儿开
     @State private var showLocalNetworkHelp = false
 
@@ -139,44 +138,41 @@ struct SettingsView: View {
                 Section {
                     Picker("语音识别", selection: asrEngineBinding) {
                         if session.appleAvailable {
-                            Text("苹果自带").tag("apple")
+                            Text("iPhone 本机 · 苹果自带").tag("apple")
                         }
-                        Text("本地极速：SenseVoice").tag("sensevoice")
-                        Text("本地最准：Whisper").tag("whisper")
-                        Text("SenseVoice + Whisper").tag("hybrid")
-                        Text("云端服务引擎").tag("cloud")
+                        Text("iPhone 本机 · SenseVoice").tag("sensevoice")
+                        Text("iPhone 本机 · Whisper").tag("whisper")
+                        Text("iPhone 本机 · SenseVoice + Whisper").tag("hybrid")
+                        Text("电脑云端 · 语音识别").tag("cloud")
                     }
                     Picker("文本翻译", selection: translationEngineBinding) {
                         if session.appleAvailable {
-                            Text("苹果自带").tag("apple")
+                            Text("iPhone 本机 · 苹果自带").tag("apple")
                         }
-                        Text("本地引擎：MT").tag("local")
-                        Text("云端服务引擎").tag("cloud")
+                        Text("iPhone 本机 · Hy-MT2").tag("local")
+                        Text("电脑云端 · 文本翻译").tag("cloud")
                     }
-                    Picker("声音克隆", selection: voiceCloneEngineBinding) {
-                        Text("云端服务引擎").tag("cloud")
-                        Text("本地引擎").tag("local")
-                    }
-                    Picker("本地克隆模型", selection: zipVoiceBinding) {
-                        Text("Qwen3-TTS").tag(false)
-                        Text("ZipVoice（试验）").tag(true)
+                    Picker("声音克隆引擎", selection: voiceCloneEngineBinding) {
+                        Text("电脑云端 · Qwen3-TTS").tag("cloud")
+                        Text("iPhone 本机 · ZipVoice INT8").tag("local")
                     }
                     if !session.voiceCloneCloud {
-                        if session.useZipVoice {
+                        Text("ZipVoice 仅支持中英文。安装模型后可离线克隆声音。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        if !session.isInstalled(.voiceClone) {
+                            Link("获取 ZipVoice 模型和 Vocos", destination: ZipVoiceModel.setupGuideURL)
                             Button("导入 ZipVoice 模型文件夹") {
                                 lastImportKind = .voiceClone
                                 importKind = .voiceClone
                             }
-                        } else {
-                            Toggle("Qwen3 低内存模式（CPU）", isOn: $session.cloneLowMemory)
                         }
+                    }
+                    if session.usingCloudASR {
+                        Text(cloudASRDescription)
+                            .font(.footnote).foregroundStyle(.secondary)
                     }
                     if session.translationEngine == "local", !session.isInstalled(.translation) {
                         Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
-                    }
-                    if session.voiceClone, !session.voiceCloneCloud, !session.isInstalled(.voiceClone) {
-                        Text(session.useZipVoice ? "请导入 ZipVoice 模型文件夹" : "声音克隆模型还没下载")
-                            .font(.footnote).foregroundStyle(.orange)
                     }
                     if cloudMissingAddress {
                         Text("选了云端引擎，但还没填云端模型地址").font(.footnote).foregroundStyle(.orange)
@@ -206,7 +202,7 @@ struct SettingsView: View {
                                  status: session.senseStatus)
                         modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
                                  status: session.translationStatus)
-                        modelRow(.voiceClone, title: "声音克隆（Qwen-TTS-VC）", icon: "person.wave.2",
+                        modelRow(.voiceClone, title: "本机声音克隆（ZipVoice）", icon: "person.wave.2",
                                  status: session.cloneStatus)
                         // 选哪个 .gguf、清缓存，都放到各自的"配置"窗口里
                     } else {
@@ -328,7 +324,7 @@ struct SettingsView: View {
                 } header: {
                     Text("朗读")
                 } footer: {
-                    Text("开了「声音克隆」就用说话人的原声朗读译文。用的模型在「引擎管理 → 声音克隆」里选：云端服务引擎（默认）或本地 Qwen。")
+                    Text("声音克隆用说话人的音色朗读译文。iPhone 本机使用 ZipVoice INT8，电脑云端随听见 Windows 服务使用 Qwen3-TTS。")
                 }
 
                 Section {
@@ -382,14 +378,9 @@ struct SettingsView: View {
             .onChange(of: session.asrEngine) { _, _ in syncModelTab(); checkLocalNetwork() }
             .onChange(of: session.translationEngine) { _, _ in syncModelTab(); checkLocalNetwork() }
             .onChange(of: session.voiceCloneCloud) { _, _ in syncModelTab(); checkLocalNetwork() }
-            .onChange(of: session.voiceClone) { _, on in
+            .onChange(of: session.voiceClone) { _, _ in
                 syncModelTab()
                 checkLocalNetwork()
-                // 打开声音克隆但本地模型还没下载：先问要不要下载
-                if on, !session.voiceCloneCloud, !session.useZipVoice,
-                   !session.isInstalled(.voiceClone), !session.bgDownloading {
-                    askClone = true
-                }
             }
             // 在线模型页每 2 秒自动更新一次状态，不用手动点刷新
             .task(id: modelTab) {
@@ -446,13 +437,6 @@ struct SettingsView: View {
                     .presentationDetents([.medium])
                     .presentationDragIndicator(.visible)
             }
-            .alert("设置冲突", isPresented: Binding(get: { conflictMessage != nil },
-                                                   set: { if !$0 { conflictMessage = nil } })) {
-                Button("知道了", role: .cancel) { conflictMessage = nil }
-            } message: {
-                Text(conflictMessage ?? "")
-            }
-
             .navigationTitle("功能设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -495,15 +479,7 @@ struct SettingsView: View {
                       message: engineDownloadMessage) {
             if let e = pendingEngine { session.downloadForEngine(e) }
         }
-        // 本地声音克隆模型还没下载：先问要不要下载
-        .centerDialog(isPresented: $askClone,
-                      title: "下载声音克隆模型？",
-                      message: "本地声音克隆需要 Qwen3-TTS 模型（GGUF，约 760 MB），请连接 Wi‑Fi。下载期间先用系统声音朗读，下载完成后自动改用原声。下载时请保持 App 在前台。") {
-            session.startBackgroundDownload(kinds: [.voiceClone], switchWhenDone: false)
-        }
     }
-
-    @State private var askClone = false
 
     /// 打开 iCloud 同步：不用让用户选目录。
     /// 数据固定放在 iCloud 云盘里的「听见」文件夹（就是 App 名字）。
@@ -534,37 +510,21 @@ struct SettingsView: View {
         return f.string(from: d)
     }
 
-    private var zipVoiceBinding: Binding<Bool> {
-        Binding(get: { session.useZipVoice }, set: { useZipVoice in
-            if !useZipVoice, let reason = session.conflictWithOtherLocals(allowZipVoice: false) {
-                conflictMessage = reason
-                return
-            }
-            session.useZipVoice = useZipVoice
-        })
+    private var cloudASRDescription: String {
+        let available = session.cloudASRSchemes
+        guard !available.isEmpty else { return "电脑云端运行语音识别" }
+        let active = available.contains(session.cloudASRScheme)
+            ? session.cloudASRScheme : (available.first ?? session.cloudASRScheme)
+        let model = session.cloudASRModelName
+        let suffix = model.isEmpty || active == "sensevoice" ? "" : "（\(model)）"
+        return "电脑云端 · \(LiveSession.cloudSchemeName(active))" + suffix
     }
 
     private var voiceCloneEngineBinding: Binding<String> {
-        Binding(
-            get: { session.voiceCloneCloud ? "cloud" : "local" },
-            set: { v in
-                if v == "cloud" {
-                    session.voiceCloneCloud = true
-                    return
-                }
-                // 选本地克隆：别的本地引擎开着的话不行（会互相抢内存导致崩溃）
-                if v == "local", let msg = session.conflictWithOtherLocals() {
-                    conflictMessage = msg
-                    return
-                }
-                session.voiceCloneCloud = false
-                // 模型没下载的话，先问要不要下（不自动开开关）
-                if !session.useZipVoice, !session.isInstalled(.voiceClone), !session.bgDownloading {
-                    askClone = true
-                }
-            }
-        )
+        Binding(get: { session.voiceCloneCloud ? "cloud" : "local" },
+                set: { session.voiceCloneCloud = $0 == "cloud" })
     }
+
     /// 选了还缺模型的识别引擎（等确认下载）
     @State private var pendingEngine: String?
     @State private var lastPendingEngine = "sensevoice"
@@ -575,7 +535,6 @@ struct SettingsView: View {
             set: { e in
                 guard e != session.asrEngine else { return }
                 // 本地声音克隆和别的本地引擎互斥
-                if let msg = session.conflictWithClone(e) { conflictMessage = msg; return }
                 if session.missingSpeechKinds(for: e).isEmpty {
                     session.asrEngine = e
                 } else if !session.bgDownloading {
@@ -610,7 +569,7 @@ struct SettingsView: View {
         case .translation: return "翻译模型（MT）"
         case .speech: return "语音识别模型（Whisper）"
         case .senseVoice: return "语音识别模型（SenseVoice）"
-        case .voiceClone: return "声音克隆模型（Qwen-TTS-VC）"
+        case .voiceClone: return "本机声音克隆模型（ZipVoice）"
         }
     }
 
@@ -619,7 +578,7 @@ struct SettingsView: View {
         case .translation: return "约 2 GB"
         case .speech: return "约 1.6 GB"
         case .senseVoice: return "约 240 MB"
-        case .voiceClone: return "约 760 MB"
+        case .voiceClone: return "约 150 MB"
         }
     }
 
@@ -709,7 +668,6 @@ struct SettingsView: View {
             set: { e in
                 guard e != session.translationEngine else { return }
                 // 本地声音克隆和别的本地引擎互斥
-                if let msg = session.conflictWithClone(e) { conflictMessage = msg; return }
                 session.translationEngine = e
                 if e == "local", !session.isInstalled(.translation), !session.bgDownloading {
                     session.startBackgroundDownload(kinds: [.translation], switchWhenDone: true)
@@ -876,7 +834,7 @@ struct CloudEditSheet: View {
                         // 选项完全照着电脑上服务报上来的清单来：
                         // 电脑上没装的方案一个都不给（比如没装 SenseVoice 就只有 Whisper）
                         if case .model(let m) = target, m == .asr {
-                            Picker("识别方案", selection: $asrScheme) {
+                            Picker("电脑端识别方案", selection: $asrScheme) {
                                 ForEach(availableSchemes, id: \.self) { s in
                                     Text(schemeLabel(s)).tag(s)
                                 }
@@ -892,7 +850,7 @@ struct CloudEditSheet: View {
                                 .font(.caption)
                             }
                             if session.cloudSenseVoiceState == "没装" {
-                                Text("这台电脑上没装 SenseVoice，只能用 Whisper。在电脑上重跑一次启动脚本就可以装上（或者选\"不装\"）。")
+                                Text("这台电脑目前只提供 Whisper。可在电脑上运行新版启动器安装 SenseVoice。")
                                     .font(.caption).foregroundStyle(.secondary)
                             } else if session.cloudASRSchemes.isEmpty {
                                 Text("还没读到电脑上的模型信息（服务可能是旧版本），先点\"刷新\"试试。")
@@ -983,9 +941,9 @@ struct CloudEditSheet: View {
     /// 方案的名字：Whisper 那一项带上电脑上跑的型号
     private func schemeLabel(_ s: String) -> String {
         switch s {
-        case "sensevoice": return "最快：SenseVoice"
-        case "whisper": return "最准：Whisper" + whisperModelSuffix
-        case "sensevoice+whisper": return "SenseVoice + Whisper" + whisperModelSuffix
+        case "sensevoice": return "仅 SenseVoice"
+        case "whisper": return "仅 Whisper" + whisperModelSuffix
+        case "sensevoice+whisper": return "SenseVoice 先出字 + Whisper 校正" + whisperModelSuffix
         default: return s
         }
     }
@@ -1009,7 +967,7 @@ struct CloudEditSheet: View {
         let list = session.cloudASRSchemes
         guard !list.isEmpty else { return }
         if list.contains(asrScheme) { return }
-        asrScheme = list.contains("whisper") ? "whisper" : (list.first ?? asrScheme)
+        asrScheme = list.contains("sensevoice+whisper") ? "sensevoice+whisper" : (list.first ?? asrScheme)
         hearLog("云端识别：电脑上只支持 \(list.joined(separator: "、"))，改用 \(asrScheme)")
     }
 
@@ -1214,12 +1172,16 @@ struct LocalModelSheet: View {
                 }
 
                 Section {
-                    Button {
-                        onPick(true)
-                        dismiss()
-                    } label: {
-                        Label(installed ? "重新下载" : "下载",
-                              systemImage: installed ? "arrow.clockwise" : "arrow.down.circle")
+                    if kind == .voiceClone {
+                        Link("获取 ZipVoice 模型和 Vocos", destination: ZipVoiceModel.setupGuideURL)
+                    } else {
+                        Button {
+                            onPick(true)
+                            dismiss()
+                        } label: {
+                            Label(installed ? "重新下载" : "下载",
+                                  systemImage: installed ? "arrow.clockwise" : "arrow.down.circle")
+                        }
                     }
                     Button {
                         onPick(false)

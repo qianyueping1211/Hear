@@ -66,8 +66,8 @@ App 的运行日志和服务端日志都会写清楚这次用的是哪个方案�
 - 服务端把「这台电脑上能用哪些方案」报在 `/health` 的 `asr_schemes` 里，
   App 的识别方案下拉框就是照着这个列表生成的：电脑上没装 SenseVoice，
   列表里就只剩 Whisper 一个，不会有用不了的选项；
-- 启动脚本里选「不装 SenseVoice」，服务就不会下它（约省 230 MB），
-  手机上的列表也就只剩 Whisper（用 `HEAR_SENSEVOICE=0` 也可以关掉）；
+- Windows 启动器默认安装 SenseVoice，并选用「SenseVoice + Whisper」。
+  电脑端只需选择 Whisper 校正档位。需要关闭 SenseVoice 的部署可设置 `HEAR_SENSEVOICE=0`；
 - Whisper 那一项会带上电脑上跑的型号，比如「最准：Whisper（large-v3）」——
   型号是启动时选的（`HEAR_ASR_MODEL` 或启动脚本里选的），
   服务端从 `/health` 里报出来，App 拿到就显示出来；
@@ -173,27 +173,21 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\你的用户名\Downloads\Hea
 
 ### 4. 启动时按类型选模型
 
-每次启动都会问三个问题（识别 / 翻译 / 克隆各选一个），直接回车就是上次选的；
-选完记在 `server\hear_models.json` 里：
+SenseVoice 默认负责先出原文，Whisper 随后校正。两个引擎都在电脑上运行，
+手机连接云端服务即可。Windows 启动器会询问校正、翻译和克隆档位，选项保存在
+`server\hear_models.json`。首次默认使用 `small` 校正，之后直接回车会沿用上次所选档位。
 
 ```
-  语音识别（Whisper，CPU 上跑）
-    1) tiny      约 75 MB    最快，精度一般
-    2) base      约 145 MB   省空间，日常够用
-    3) small     约 480 MB   速度和准确度都还行 （推荐）
-    4) medium    约 1.5 GB   更准，慢一点
-    5) large-v3  约 3 GB     最准；CPU 上偏慢，有独显会快很多
+  云端语音识别：SenseVoice 默认先出原文，选择 Whisper 校正档位
+    1) base      约 145 MB   校正快，适合性能较低的电脑
+    2) small     约 480 MB   兼顾校正速度和准确度（首次默认）
+    3) medium    约 1.5 GB   校正更细，耗时更长
+    4) large-v3  约 3 GB     高精度，CPU 校正耗时较长
 ```
 
 翻译可以选 Hy-MT2 的 1.8B（1.1 GB，快）/ 7B（4.4 GB，更准）/ 30B-A3B
 （18 GB，混合专家，30B 里只激活 3B，又大又快又好，内存要 24G 以上）；
 克隆可以选 Qwen3-TTS 的 0.6B（快）/ 1.7B（更像原声，推荐）。
-
-（也可以随时加 `-Choose` 重新选一次：）
-
-```powershell
-powershell -ExecutionPolicy Bypass -File server\start-windows.ps1 -Choose
-```
 
 ### 5. 脚本会自动做的事
 

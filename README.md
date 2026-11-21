@@ -144,15 +144,20 @@ server/                          云端模型服务（WSL2 上跑，README 在�
 - **版本号**：三位数字，写在仓库根目录的 `VERSION` 文件里（例如 `1.0.0`），打包时用它命名安装包，例如 `Hear-1.0.0.ipa`。之前的版本已改为 0.x.y（例如 4.3 → 0.4.3）。
 
 
-## 本地声音克隆
+## 声音克隆引擎
 
-iPhone 端可选择 Qwen3‑TTS CPU 低内存模式，或使用实验性 ZipVoice‑Distill INT8。
-ZipVoice 支持中文和英文，需要准确匹配的参考音频与原文。请从
-[模型部署说明](https://k2-fsa.github.io/sherpa/onnx/tts/zipvoice.html) 下载 INT8 模型和
-`vocos_24khz.onnx`，解压，并把 Vocos 文件放到包含 `encoder.int8.onnx`、
-`decoder.int8.onnx`、`tokens.txt`、`lexicon.txt` 和 `espeak-ng-data` 的同一目录。
-在听见设置选择「本地克隆模型 → ZipVoice（试验）」和「声音克隆 → 本地引擎」，再导入该目录。
-Qwen3 的低内存模式保留与其他本地模型的互斥。ZipVoice 的多模型共存需在设备上验证。
+- iPhone 本机使用 **ZipVoice-Distill INT8 + Vocos**，支持中文和英文。需要与参考音频匹配的原文。
+- 电脑云端随听见 Windows 服务使用 **Qwen3-TTS**。手机通过局域网提交克隆请求。
+
+从 [ZipVoice 官方安装说明](https://k2-fsa.github.io/sherpa/onnx/tts/zipvoice.html)
+下载中英 INT8 模型和 `vocos_24khz.onnx`。解压模型，把 Vocos 放到包含
+`encoder.int8.onnx`、`decoder.int8.onnx`、`tokens.txt`、`lexicon.txt` 和
+`espeak-ng-data` 的同一目录。可在 Windows 上用 `tar -xf 下载的文件名.tar.bz2` 解压，
+然后把整个模型目录复制到 iPhone 的「文件」中。
+在「功能设置 → 引擎管理 → 声音克隆引擎」选「iPhone 本机 · ZipVoice INT8」，再导入模型目录。
+未安装或模型不可用时会用系统声音朗读。旧版的本地 Qwen 权重不会被加载。
+
+官方模型权重采用 CC BY-NC 许可，详见 [ZipVoice 模型卡](https://huggingface.co/k2-fsa/ZipVoice)。
 
 ## Windows 启动器更新
 

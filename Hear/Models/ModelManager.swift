@@ -240,7 +240,7 @@ enum ModelManager {
         try Task.checkCancellation()
         for name in ["AudioEncoder.mlmodelc", "TextDecoder.mlmodelc", "MelSpectrogram.mlmodelc"] {
             guard FileManager.default.fileExists(atPath: folder.appendingPathComponent(name).path) else {
-                throw VoiceCloneGGUFError.modelMissing(name)
+                throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: name])
             }
         }
         let docPath = documents.standardizedFileURL.path

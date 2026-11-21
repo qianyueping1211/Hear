@@ -54,18 +54,19 @@ $Context   = if ($env:HEAR_CTX)        { $env:HEAR_CTX }        else { "4096" }
 $HF        = if ($env:HF_ENDPOINT)     { $env:HF_ENDPOINT }     else { "https://huggingface.co" }
 
 # ---------------------------------------------------------------- 用哪些模型
-# 第一次启动的时候按类型问一次（识别 / 翻译 / 克隆），选完记在 hear_models.json 里，
-# 以后启动直接用上次的选择，不用再问。想改就跑一次：start-windows.ps1 -Choose
+# 交互启动时选择校正、翻译和克隆档位，直接回车沿用上次的配置。
 $CfgFile = Join-Path $ServerDir "hear_models.json"
 
-# 语音识别：faster-whisper 的模型（手机上没有、电脑上跑）
+# SenseVoice 默认先出原文。下面只选择电脑端的 Whisper 档位。
 $AsrChoices = @(
-    @{ key = "tiny";     size = "约 75 MB";  note = "最快，精度一般" },
-    @{ key = "base";     size = "约 145 MB"; note = "省空间，日常够用" },
-    @{ key = "small";    size = "约 480 MB"; note = "速度和准确度都还行" },
-    @{ key = "medium";   size = "约 1.5 GB"; note = "更准，慢一点" },
-    @{ key = "large-v3"; size = "约 3 GB";   note = "最准；CPU 上偏慢，有独显会快很多" }
+    @{ key = "base";     size = "约 145 MB"; note = "校正快，适合性能较低的电脑" },
+    @{ key = "small";    size = "约 480 MB"; note = "兼顾校正速度和准确度" },
+    @{ key = "medium";   size = "约 1.5 GB"; note = "校正更细，耗时更长" },
+    @{ key = "large-v3"; size = "约 3 GB";   note = "高精度，CPU 校正耗时较长" }
 )
+$senseEnabled = $env:HEAR_SENSEVOICE -notmatch '^(0|off|false|no)$'
+$env:HEAR_SENSEVOICE = if ($senseEnabled) { "1" } else { "0" }
+if (-not $senseEnabled -and -not $env:HEAR_ASR_SCHEME) { $AsrScheme = "whisper" }
 # 文本翻译：腾讯的 Hy-MT2（GGUF，llama.cpp 跑）
 $MtChoices = @(
     @{ key = "1.8b"; repo = "tencent/Hy-MT2-1.8B-GGUF";    stem = "Hy-MT2-1.8B";    size = "约 1.1 GB";  note = "快，日常够用" },
@@ -141,25 +142,22 @@ if ($wantMenu) {
     $defAsr   = Pick-Key $AsrChoices   ($(if ($cfg) { $cfg.asr }   else { "" })) "small"
     $defMt    = Pick-Key $MtChoices    ($(if ($cfg) { $cfg.mt }    else { "" })) "1.8b"
     $defClone = Pick-Key $CloneChoices ($(if ($cfg) { $cfg.clone } else { "" })) "1.7b"
-    $pickAsr   = Read-Pick "语音识别（Whisper，CPU 上跑）" $AsrChoices   $defAsr
+    $asrTitle = if (-not $senseEnabled -or $AsrScheme -eq "whisper") {
+        "语音识别：选择 Whisper 档位"
+    } else {
+        "云端语音识别：SenseVoice 默认先出原文，选择 Whisper 校正档位"
+    }
+    $pickAsr   = Read-Pick $asrTitle $AsrChoices $defAsr
     $pickMt    = Read-Pick "文本翻译（Hy-MT2）"          $MtChoices    $defMt
     $pickClone = Read-Pick "声音克隆（Qwen3-TTS）"       $CloneChoices $defClone
-    # SenseVoice 装不装：装了手机上就多两个识别方案（SenseVoice、SenseVoice+Whisper），
-    # 不装手机上就只有 Whisper 一个
-    $wantSense = $true
-    if ($cfg -and $cfg.sensevoice -eq $false) { $wantSense = $false }
-    $svAns = Read-Choice "  要不要装 SenseVoice（快，能中英日韩粤；不装就只用 Whisper）[Y/n]"
-    if ($svAns -match "^[nN]") { $wantSense = $false }
-    $cfg = @{ asr = $pickAsr.key; mt = $pickMt.key; clone = $pickClone.key; sensevoice = $wantSense }
+    $cfg = @{ asr = $pickAsr.key; mt = $pickMt.key; clone = $pickClone.key }
     try {
         ($cfg | ConvertTo-Json) | Set-Content -Path $CfgFile -Encoding UTF8
     } catch {
         Step "模型选择记不下来（$CfgFile 写不了），这次用刚才选的"
     }
 }
-if (-not $cfg) { $cfg = @{ asr = "small"; mt = "1.8b"; clone = "1.7b"; sensevoice = $true } }
-# 服务端要知道 SenseVoice 装没装（手机上的识别方案列表就是照这个来的）
-$env:HEAR_SENSEVOICE = if ($cfg.sensevoice -eq $false) { "0" } else { "1" }
+if (-not $cfg) { $cfg = @{ asr = "small"; mt = "1.8b"; clone = "1.7b" } }
 
 # 翻译模型：不同大小用的量化不一样（30B 只有 Q4_K_M / Q8_0）
 $mtChoice = $MtChoices  | Where-Object { $_.key -eq $cfg.mt }  | Select-Object -First 1
@@ -179,7 +177,7 @@ $CloneModelFile = $cloneChoice.model
 $CloneMmprojFile = $cloneChoice.mmproj
 
 # 识别模型：环境变量优先（HEAR_ASR_MODEL），否则用刚才选的
-if (-not $env:HEAR_ASR_MODEL) { $AsrModel = $cfg.asr }
+if (-not $env:HEAR_ASR_MODEL) { $AsrModel = Pick-Key $AsrChoices $cfg.asr "small" }
 
 trap {
     # 出错了就把临时服务也停掉，别留下一个占着 8000 端口的孤儿
@@ -653,9 +651,10 @@ function Get-Model($repo, $file) {
 }
 # SenseVoice（云端识别的"快"方案用；约 230 MB）
 if ($env:HEAR_SENSEVOICE -eq "0") {
-    Step "按你的选择不装 SenseVoice（手机上只有 Whisper 一个识别方案）"
+    Step "已通过 HEAR_SENSEVOICE 关闭 SenseVoice"
 }
-elseif (-not (Test-Path (Join-Path $SvDir "model.int8.onnx"))) {
+elseif (-not (Test-Path (Join-Path $SvDir "model.int8.onnx")) -or
+        -not (Test-Path (Join-Path $SvDir "tokens.txt"))) {
     Say "下载 SenseVoice 模型（云端识别的快速方案）"
     New-Item -ItemType Directory -Force -Path $SvDir | Out-Null
     $svRepo = "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"

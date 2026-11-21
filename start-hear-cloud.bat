@@ -4,7 +4,7 @@ set "HEAR_LAUNCHER_FILE=%~f0"
 set "HEAR_LAUNCHER_MODE=%~1"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=[IO.File]::ReadAllText($env:HEAR_LAUNCHER_FILE); $i=$s.LastIndexOf(':__HEAR_POWERSHELL__'); & ([scriptblock]::Create($s.Substring($i+20)))"
 set "RC=%ERRORLEVEL%"
-if /i not "%~1"=="--check" if not "%RC%"=="0" pause
+if /i not "%~1"=="--check" if /i not "%~1"=="--help" if not "%RC%"=="0" pause
 exit /b %RC%
 
 :__HEAR_POWERSHELL__
@@ -70,6 +70,14 @@ function Update-ServerFiles {
 }
 
 try {
+    if ($mode -eq '--help') {
+        Write-Host '听见 Windows 云端服务'
+        Write-Host 'SenseVoice 默认先出原文，Whisper 随后校正。'
+        Write-Host '启动菜单可选择 Whisper 校正档位：base / small / medium / large-v3。首次直接回车用 small。'
+        Write-Host '在手机上连接云端服务即可，校正档位在电脑上管理。'
+        Write-Host 'start-hear-cloud.bat --check    检查启动所需文件'
+        exit 0
+    }
     if ($mode -eq '--check') {
         if (-not (Test-ServerFiles $serverDir)) { throw "Incomplete server folder: $serverDir" }
         Write-Host "Hear server files OK: $serverDir"

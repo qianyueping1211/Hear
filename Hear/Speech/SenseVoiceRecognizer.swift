@@ -136,7 +136,7 @@ actor SenseVoiceRecognizer {
             }
             try Task.checkCancellation()
             guard hasModels(folder) else {
-                throw VoiceCloneGGUFError.modelMissing("SenseVoice 下载后模型文件不完整")
+                throw CocoaError(.fileReadCorruptFile)
             }
             UserDefaults.standard.removeObject(forKey: "senseVoiceFolder")
             if existing { try? files.removeItem(at: previous) }

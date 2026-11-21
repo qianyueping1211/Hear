@@ -141,7 +141,7 @@ final class LiveSession: ObservableObject {
     @Published private(set) var cloudASRSchemes: [String] = []
     /// 每个模型实际连上的地址（模型自己的地址不通、用通用服务地址顶上的，记通用那个）
     @Published private(set) var cloudStatusAddress: [String: String] = [:]
-    /// 声音克隆用云端模型（false = 用手机本地的 Qwen）
+    /// 声音克隆用云端模型（false = 用 iPhone 本机的 ZipVoice）
     @Published var voiceCloneCloud: Bool {
         didSet {
             save("voiceCloneCloud", voiceCloneCloud)
@@ -196,7 +196,7 @@ final class LiveSession: ObservableObject {
     @Published var outputMode: AudioOutput { didSet { save("outputMode", outputMode.rawValue) } }
     @Published var leftEar: String { didSet { save("leftEar", leftEar) } }
     @Published var rightEar: String { didSet { save("rightEar", rightEar) } }
-    // 声音克隆朗读：用说话人自己的声音读出译文（Qwen3-TTS）。打开时加载模型，关掉就卸载省内存
+    // 声音克隆朗读：用说话人自己的声音读出译文。打开时加载模型，关掉就卸载省内存
     @Published var voiceClone: Bool {
         didSet {
             save("voiceClone", voiceClone)
@@ -210,34 +210,6 @@ final class LiveSession: ObservableObject {
         }
     }
     @Published private(set) var cloneLoading = false
-    /// 声音克隆模型这次是放在 CPU 上跑的（内存紧张时的保底，速度较慢）
-    @Published var cloneLowMemory = UserDefaults.standard.bool(forKey: "cloneLowMemory") {
-        didSet {
-            guard cloneLowMemory != oldValue else { return }
-            save("cloneLowMemory", cloneLowMemory)
-            restartCloneBackend()
-        }
-    }
-    @Published var useZipVoice = UserDefaults.standard.bool(forKey: "useZipVoice") {
-        didSet {
-            guard useZipVoice != oldValue else { return }
-            save("useZipVoice", useZipVoice)
-            restartCloneBackend()
-        }
-    }
-
-    private func restartCloneBackend() {
-        cloneLoadTask?.cancel()
-        cloneTasks.values.forEach { $0.cancel() }
-        cloneTasks.removeAll()
-        modelsRevision += 1
-        Task {
-            await cloner.unload()
-            if voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 0.3) }
-        }
-    }
-
-    @Published private(set) var cloneOnCPU = false
     /// 本地模型刚加载好（用来提示用户，过几秒自动消失）
     @Published private(set) var modelsJustLoaded = false
     /// 正在加载的东西（界面上显示进度用）
@@ -516,7 +488,7 @@ final class LiveSession: ObservableObject {
         leftEar = d.string(forKey: "leftEar") ?? "A"
         rightEar = d.string(forKey: "rightEar") ?? "B"
         voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
-        // 声音克隆默认用云端模型（本地 Qwen 要下 760 MB）；已经设置过的按原来的来
+        // 声音克隆默认用云端模型；已经设置过的沿用原选择
         if let v = d.object(forKey: "voiceCloneCloud") as? Bool {
             voiceCloneCloud = v
         } else if d.object(forKey: "voiceCloneCloud") != nil {
@@ -854,15 +826,15 @@ final class LiveSession: ObservableObject {
 
     var cloneStatus: ModelStatus {
         _ = modelFiles()            // 模型变动后让大小缓存重新计算
-        let name = useZipVoice ? "ZipVoice-Distill INT8" : "Qwen3-TTS 0.6B"
+        let name = ZipVoiceModel.displayName
         if cloneInstalled {
-            let folder = useZipVoice ? ZipVoiceModel.directory : VoiceCloneGGUF.base
+            let folder = ZipVoiceModel.directory
             var detail = ModelManager.format(cachedSize(folder, folder: true))
             if cloneLoading { detail += " · 加载中" }
-            else if cloneOnCPU { detail += " · CPU 运行（内存紧张，较慢）" }
+
             return .init(name: name, detail: detail, installed: true)
         }
-        return .init(name: name, detail: useZipVoice ? "等待导入模型文件夹" : "未下载", installed: false)
+        return .init(name: name, detail: "等待导入模型文件夹", installed: false)
     }
 
     func isInstalled(_ kind: ModelKind) -> Bool {
@@ -887,7 +859,7 @@ final class LiveSession: ObservableObject {
 
     private var cloneInstalled: Bool {
         if let c = cloneCache, c.rev == modelsRevision { return c.ok }
-        let ok = useZipVoice ? ZipVoiceModel.installed : VoiceCloneGGUF.installed
+        let ok = ZipVoiceModel.installed
         cloneCache = (modelsRevision, ok)
         return ok
     }
@@ -939,7 +911,7 @@ final class LiveSession: ObservableObject {
     /// 设置 → 下载与导入：下载（或删除后重新下载）某个模型，进度显示在设置里
     func redownload(_ kind: ModelKind) async {
         guard !bgDownloading else { return }
-        if kind == .voiceClone, useZipVoice {
+        if kind == .voiceClone {
             showToast("请重新导入 ZipVoice 模型文件夹")
             return
         }
@@ -993,17 +965,11 @@ final class LiveSession: ObservableObject {
         let d = UserDefaults.standard
         if d.bool(forKey: Self.clonePendingKey) {
             d.removeObject(forKey: Self.clonePendingKey)
-            if voiceClone {
+            if voiceClone, !voiceCloneCloud {
                 hearLog("上次加载声音克隆时 App 退出了，已自动关闭声音克隆（可用内存 \(Self.freeMB()) MB）", .warning)
                 voiceClone = false
                 showToast("上次加载声音克隆时 App 退出，已自动关闭声音克隆")
             }
-        }
-        // 本地声音克隆和别的本地引擎互斥（老版本存下来的设置可能同时开着），先解开
-        if localCloneOn, !useZipVoice, (Self.isLocalEngine(asrEngine) || translationEngine == "local") {
-            hearLog("本地声音克隆和其他本地引擎同时开着，已自动关闭声音克隆", .warning)
-            voiceClone = false
-            showToast("本地声音克隆不能和其他本地引擎同时用，已自动关闭声音克隆")
         }
         hearLog("启动：可用内存 \(Self.freeMB()) MB")
         defer { if voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 3) } }   // 其他模型准备好以后再加载声音克隆
@@ -1093,11 +1059,7 @@ final class LiveSession: ObservableObject {
                     case .translation: _ = try await ModelManager.downloadGGUF(host: host, progress: onProgress)
                     case .speech: _ = try await ModelManager.downloadWhisper(host: host, force: force, progress: onProgress)
                     case .senseVoice: try await SenseVoiceRecognizer.download(host: host, force: force, progress: onProgress)
-                    case .voiceClone:
-                        guard !useZipVoice else {
-                            throw VoiceCloneGGUFError.modelMissing("请从模型管理导入 ZipVoice INT8 和 Vocos 模型文件夹")
-                        }
-                        try await VoiceCloneGGUF.download(host: host, force: force, progress: onProgress)
+                    case .voiceClone: throw LocalVoiceCloneError.notLoaded
                     }
                     bgDownloadKind = nil              // 下载完立刻收起进度条
                     bgQueue.removeAll { $0 == kind }
@@ -1144,7 +1106,7 @@ final class LiveSession: ObservableObject {
         case .translation: return "翻译模型 Hy-MT2"
         case .speech: return "语音识别模型 Whisper"
         case .senseVoice: return "语音识别模型 SenseVoice"
-        case .voiceClone: return "声音克隆模型 Qwen-TTS-VC"
+        case .voiceClone: return "本地克隆模型 ZipVoice"
         }
     }
 
@@ -1315,19 +1277,17 @@ final class LiveSession: ObservableObject {
             return
         }
         // 加载识别和翻译模型前，先等声音克隆结束再卸掉：
-        // 声音克隆（约 3 GB）和识别/翻译模型一起加载，App 的内存额度会被撑爆，直接被系统杀掉
+        // 按顺序加载，降低模型初始化的内存峰值。
         cloneLoadTask?.cancel()
         try? await Task.sleep(nanoseconds: 50_000_000)   // 让被取消的任务有机会跑到设置 cloneLoading 的那一步
         // 注意：Swift 不允许 await 出现在 && / || 右侧，逐个取值
         var cloneBusy = cloneLoading
-        if await cloner.isLoading { cloneBusy = true }
         var cloneHasModel = await cloner.isLoaded
         if cloneBusy || cloneHasModel {
             phase = .loading("正在等待声音克隆加载完成…")
             while cloneBusy {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 cloneBusy = cloneLoading
-                if await cloner.isLoading { cloneBusy = true }
             }
             cloneTasks.removeAll()
             cloneHasModel = await cloner.isLoaded
@@ -1365,12 +1325,10 @@ final class LiveSession: ObservableObject {
             // 声音克隆是单独一个任务，可能还在加载：等它好了再说"可以开始翻译"
             if voiceClone, !voiceCloneCloud {
                 var busy = cloneLoading
-                if await cloner.isLoading { busy = true }
                 var waited = 0
                 while busy, waited < 120 {
                     try? await Task.sleep(nanoseconds: 200_000_000)
                     busy = cloneLoading
-                    if await cloner.isLoading { busy = true }
                     waited += 1
                 }
                 if busy {
@@ -1472,13 +1430,14 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    /// 设置 → 导入声音克隆模型（包含主模型和声音编解码器两个文件夹的大文件夹）
+    /// 设置 → 导入包含 ZipVoice 和 Vocos 的模型文件夹。
     func importVoiceClone(_ url: URL) async {
         do {
+            cloneLoadTask?.cancel()
+            cloneTasks.values.forEach { $0.cancel() }
             cloneTasks.removeAll()
             await cloner.unload()
-            if useZipVoice { try ZipVoiceModel.importFolder(url) }
-            else { try VoiceCloneGGUF.importFolder(at: url) }
+            try await Task.detached(priority: .utility) { try ZipVoiceModel.importFolder(url) }.value
             modelsRevision += 1
             bgDownloadError = nil
             hearLog("已导入声音克隆模型")
@@ -1639,13 +1598,11 @@ final class LiveSession: ObservableObject {
             return false
         }
         // 声音克隆模型正在加载时先等它加载完：
-        // 那会儿 Metal 正在分配显存，麦克风很容易起不来（硬件直接拒绝启动）。
-        let cloneBusy = await cloner.isLoading
-        if cloneLoading || cloneBusy {
+        // 在等待期间，仍要检查这次手势是否有效。
+        if cloneLoading {
             showToast("正在加载声音克隆模型…", seconds: 3)
             for _ in 0..<300 {                     // 最多等 30 秒
-                let busy = await cloner.isLoading
-                if !busy { break }
+                if !cloneLoading { break }
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 // 等模型的时候用户松手/停了：这次启动作废，别再往下走
                 if token != startToken {
@@ -3016,7 +2973,7 @@ final class LiveSession: ObservableObject {
         // 声音克隆：等提前生成好的克隆声音，没有就用系统声音。
         // 云端要等电脑那边算完（自己也要几秒），多给点时间：
         // 宁可多等一会儿用原声，也不要等不及就退回系统声音。
-        let cloneWait: UInt64 = (usingCloudClone || cloneOnCPU) ? 60_000_000_000 : 30_000_000_000
+        let cloneWait: Double = 60
         var cloned: CloneAudio?
         // 发了请求但没拿到声音 = 服务不可用；连请求都没发 = 这句没有声音样本
         var cloneAsked = false
@@ -3029,7 +2986,7 @@ final class LiveSession: ObservableObject {
                 if cloneTasks[item.id] == nil { cloneTasks[item.id] = t }
                 // 声音还在生成：告诉界面把喇叭显示成灰色
                 clonePreparingID = item.id
-                cloned = await waitClone(t, seconds: Double(cloneWait) / 1_000_000_000)
+                cloned = await waitClone(t, seconds: cloneWait)
                 clonePreparingID = nil
                 if Task.isCancelled || inBackground { return }
             }
@@ -3162,7 +3119,7 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 声音克隆
 
-    private static let clonePendingKey = "cloneLoadPending"
+    private static let clonePendingKey = "zipVoiceLoadPending"
     private var cloneLoadTask: Task<Void, Never>?
 
     /// 自己填的地址优先，没填就用默认地址
@@ -3250,24 +3207,6 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    /// 本地声音克隆是不是开着
-    var localCloneOn: Bool { voiceClone && !voiceCloneCloud }
-
-    /// 要切到别的本地引擎，但本地声音克隆开着：会互相抢内存导致崩溃，拦住
-    func conflictWithClone(_ newEngine: String) -> String? {
-        guard localCloneOn, !useZipVoice, Self.isLocalEngine(newEngine) else { return nil }
-        return "已经打开本地声音克隆引擎，同时选择当前引擎会导致软件崩溃，请修改！"
-    }
-
-    /// 要打开本地声音克隆，但别的本地引擎开着：拦住
-    func conflictWithOtherLocals(allowZipVoice: Bool = true) -> String? {
-        guard !voiceCloneCloud, !(allowZipVoice && useZipVoice) else { return nil }
-        if Self.isLocalEngine(asrEngine) || translationEngine == "local" {
-            return "已经打开其他本地引擎，同时选择本地声音克隆引擎会导致软件崩溃，请修改！"
-        }
-        return nil
-    }
-
     // MARK: - 在线模型（三个接口）
 
     /// 这个模型现在是不是走云端
@@ -3279,26 +3218,23 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    /// 打开/关掉某个模型的云端。返回提示文字表示没生效（本地引擎互斥）
+    /// 打开或关闭某个模型的云端模式。
     @discardableResult
     func setCloudEnabled(_ model: CloudModel, _ on: Bool) -> String? {
         switch model {
         case .asr:
             if on { asrEngine = "cloud"; return nil }
             if asrEngine == "cloud" {
-                if let msg = conflictWithClone("sensevoice") { return msg }
                 asrEngine = "sensevoice"
             }
         case .mt:
             if on { translationEngine = "cloud"; return nil }
             if translationEngine == "cloud" {
-                if let msg = conflictWithClone("local") { return msg }
                 translationEngine = "local"
             }
         case .clone:
             if on { voiceCloneCloud = true; voiceClone = true; return nil }
-            // 关掉云端克隆 = 改用本地克隆，要检查和别的本地引擎冲不冲突
-            if let msg = conflictWithOtherLocals() { return msg }
+            // 关掉云端克隆，切回手机上的 ZipVoice。
             voiceCloneCloud = false
         }
         return nil
@@ -3667,55 +3603,40 @@ final class LiveSession: ObservableObject {
     }
 
     private func loadClonerIfNeeded() async {
-        guard voiceClone, !voiceCloneCloud, cloneInstalled, !cloneLoading else { return }
-        if !useZipVoice, conflictWithOtherLocals() != nil { return }
-        let zip = useZipVoice
-        let lowMemory = cloneLowMemory
-        if case .loading = phase { return }                 // 识别、翻译模型还在加载，等它们好了会再叫
-        // GGUF 版模型走 mmap 映射，磁盘上约 760 MB。
-        // 但放 GPU 时 Metal 里会再存一份（常驻、不可回收），mmap 的文件页也要占一份（可回收）。
-        // 翻译模型已经占了 GPU，内存不够就整个放 CPU：慢一点，
-        // 但系统压力大的时候文件页还能被回收，不会被系统直接杀掉。
+        guard !Task.isCancelled, voiceClone, !voiceCloneCloud, cloneInstalled, !cloneLoading else { return }
+        if case .loading = phase { return }
+        cloneLoading = true
+        defer {
+            cloneLoading = false
+            modelsRevision += 1
+        }
+        if await cloner.isLoaded { return }
+        guard !Task.isCancelled, voiceClone, !voiceCloneCloud else { return }
         let free = Self.freeMB()
-        let need = zip ? Int(ModelManager.folderSize(ZipVoiceModel.directory) / 1_048_576) : VoiceCloneGGUF.totalMB
-        var useGPU = !zip && !lowMemory && free >= need * 2 + 300
-        hearLog("声音克隆：准备加载，可用内存 \(free) MB，模型约 \(need) MB\(useGPU ? "，放 GPU" : "，放 CPU")")
-        guard free >= need + 300 else {
-            hearLog("声音克隆：可用内存不够（\(free) MB，需要约 \(need + 300) MB），先用系统声音朗读", .warning)
-            showToast("内存不够，声音克隆暂时用系统声音")
+        let modelMB = Int(ModelManager.folderSize(ZipVoiceModel.directory) / 1_048_576)
+        let required = max(modelMB + 300, 500)
+        guard free >= required else {
+            hearLog("ZipVoice：可用内存 \(free) MB，低于加载门槛 \(required) MB", .warning)
+            showToast("内存不足，暂用系统声音朗读")
             return
         }
-        // 先占位再 await：这样两个加载不会同时进行（模型加载两份，内存翻倍会被系统直接杀掉）
-        cloneLoading = true
-        modelsRevision += 1
-        if await cloner.isLoaded { cloneLoading = false; return }   // 已经加载好了
-        // 记一下“正在加载”：万一加载时 App 被系统强制退出，下次打开会自动关掉声音克隆
-        let d = UserDefaults.standard
-        d.set(true, forKey: Self.clonePendingKey)
-        d.synchronize()
+        let defaults = UserDefaults.standard
+        defaults.set(true, forKey: Self.clonePendingKey)
+        defaults.synchronize()
+        defer { defaults.removeObject(forKey: Self.clonePendingKey) }
+        let start = ContinuousClock.now
+        hearLog("ZipVoice：开始加载，本机可用内存 \(free) MB")
         do {
-            do {
-                try await cloner.load(zipVoice: zip, useGPU: useGPU, lowMemory: lowMemory)
-            } catch {
-                guard useGPU, !Task.isCancelled else { throw error }
-                hearLog("克隆 GPU 初始化失败，改用 CPU 低内存模式", .warning)
-                await cloner.unload()
-                useGPU = false
-                try await cloner.load(zipVoice: false, useGPU: false, lowMemory: true)
-            }
-            cloneOnCPU = !useGPU
-            modelsRevision += 1
-            hearLog("声音克隆：加载后可用内存 \(Self.freeMB()) MB")
-            showToast(useGPU ? "声音克隆模型加载完成" : "内存紧张，声音克隆改用 CPU 运行（较慢）", seconds: 5)
+            try await cloner.load()
+            guard !Task.isCancelled, voiceClone, !voiceCloneCloud else { return }
+            hearLog("ZipVoice：加载完成，可用内存 \(Self.freeMB()) MB，耗时 \(start.duration(to: .now))")
+            showToast("本地声音克隆模型已就绪")
+        } catch is CancellationError {
+            return
         } catch {
-            hearLog("声音克隆：模型加载失败 \(error)", .error)
-            showToast("声音克隆模型加载失败，先用系统声音朗读")
+            hearLog("ZipVoice 加载失败：\(error)", .error)
+            showToast("本地声音克隆模型加载失败，暂用系统声音朗读")
         }
-        cloneLoading = false
-        modelsRevision += 1
-        // 加载完再观察几秒（第一次生成声音时内存还会涨），没退出才清掉标记
-        try? await Task.sleep(nanoseconds: 8_000_000_000)
-        d.removeObject(forKey: Self.clonePendingKey)
     }
 
     /// 记下这句话的声音和文字，给声音克隆当样本（只留最近 30 句）
@@ -3761,7 +3682,11 @@ final class LiveSession: ObservableObject {
         if item.translated.isEmpty { return "这句还没有译文" }
         if item.translated.hasPrefix("（翻译失败") { return "这句翻译失败了" }
         // 克隆模型只会说这几门语言（说译文那门语言，样本是源语言的，这是跨语言克隆）
-        if VoiceCloneGGUF.languageNames[item.target.id] == nil {
+        if !usingCloudClone, (!ZipVoiceModel.supports(item.target.id) || !ZipVoiceModel.supports(item.source.id)) {
+            return "本地 ZipVoice 仅支持中英文"
+        }
+        if !usingCloudClone, !cloneInstalled { return "尚未导入本地 ZipVoice 模型" }
+        if CloudVoiceReference.languageNames[item.target.id] == nil {
             return "\(item.target.displayName)这个语言声音克隆不支持"
         }
         if cloneRefs[item.id] == nil {
@@ -3800,19 +3725,18 @@ final class LiveSession: ObservableObject {
         guard let ref = cloneRefs[id],
               let item = items.first(where: { $0.id == id }),
               !item.translated.isEmpty, !item.translated.hasPrefix("（翻译失败"),
-              VoiceCloneGGUF.languageNames[item.target.id] != nil else { return nil }
+              CloudVoiceReference.languageNames[item.target.id] != nil else { return nil }
         let text = item.translated, lang = item.target.id
         // 参考文字是占位符（"…"）或者空的时候别拿去用：
         // 参考音频和参考文字对不上，模型念出来就是一堆乱响
         var refText = ref.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if refText == "…" { refText = "" }
-        // 参考音频先降噪再送出去（本地跑的时候就是这么做的）：
+        // 云端的参考音频沿用既有降噪。
         // 克隆会把参考音频里的环境音一起学过去，
         // 不降噪的话环境音就跟着念出来，听着是"有杂的声音"
-        let refSamples = usingCloudClone ? GGUFVoiceCloner.denoise(ref.samples) : ref.samples
-        let localZip = useZipVoice && !usingCloudClone
-        if localZip, (lang != "zh" && lang != "en" || refText.isEmpty) { return nil }
-        let backend = usingCloudClone ? "cloud" : (localZip ? "zipvoice" : "qwen")
+        let refSamples = usingCloudClone ? CloudVoiceReference.denoise(ref.samples) : ref.samples
+        if !usingCloudClone, (!ZipVoiceModel.supports(lang) || !ZipVoiceModel.supports(item.source.id) || refText.isEmpty) { return nil }
+        let backend = usingCloudClone ? "cloud" : "zipvoice"
         let key = backend + "-" + cloneCacheKey(lang: lang, text: text + "\n" + refText, ref: ref.samples)
         let cloner = self.cloner
         let cloud = self.cloud
@@ -3832,7 +3756,7 @@ final class LiveSession: ObservableObject {
                     let memMB = await MainActor.run { Self.freeMB() }
                     hearLogNow("声音克隆（云端）：开始生成（可用内存 \(memMB) MB）")
                     // 语言名要用模型认的那种写法（english/chinese），和本地跑的时候一样
-                    let cloudLang = VoiceCloneGGUF.languageNames[lang] ?? lang
+                    let cloudLang = CloudVoiceReference.languageNames[lang] ?? lang
                     let out: CloneAudio
                     do {
                         out = try await cloud.clone(text: text, lang: cloudLang,
