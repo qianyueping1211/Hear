@@ -49,7 +49,7 @@ struct HearLiveActivityWidget: Widget {
             }
             if !state.translationOnly, !state.sourceText.isEmpty {
                 (speakerPrefix(state.speaker) + Text(state.sourceText))
-                    .font(.title3.weight(.medium))
+                    .font(.footnote.weight(.medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
             }
@@ -62,7 +62,7 @@ struct HearLiveActivityWidget: Widget {
         VStack(alignment: .leading, spacing: 4) {
             if !state.translationOnly, !state.sourceText.isEmpty {
                 (speakerPrefix(state.speaker) + Text(state.sourceText))
-                    .font(.body.weight(.medium))
+                    .font(.footnote.weight(.medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
