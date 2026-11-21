@@ -105,6 +105,9 @@ final class CloudSync: ObservableObject {
     private var scopedFolder: URL?
     /// 是不是已经提醒过"没有权限"了（免得每次刷新设置都刷一遍日志）
     private var warnedNoAccess = false
+    /// App 自己的 iCloud 云盘文件夹（有 iCloud 权限时才有）。
+    /// 系统授权完直接用它：一个文件夹都不用让用户挑。
+    private var ownFolder: URL?
 
     /// 有没有可以放同步数据的地方
     /// （App 自己的 iCloud 容器，或者之前授权过的 iCloud 文件夹）
@@ -178,6 +181,10 @@ final class CloudSync: ObservableObject {
     /// 候选的同步文件夹（按优先级排）
     private func folderCandidates() -> [URL] {
         var out: [URL] = []
+        // 0. App 自己的 iCloud 云盘文件夹（有 iCloud 权限时，系统授权完就有）
+        if let own = ownFolder {
+            out.append(own)
+        }
         // 1. 之前授权过的 iCloud 文件夹：里面固定放一个「听见」
         //    （老用户的数据已经在里面了，优先用它）
         if let picked = scopedFolder {
@@ -257,6 +264,34 @@ final class CloudSync: ObservableObject {
         return [url]
     }
 
+    /// 请求 iCloud 云盘的访问权限。
+    ///
+    /// - Returns: true 表示已经拿到权限了（不需要用户再选文件夹）；
+    ///   false 表示这台 App 没有 iCloud 云盘的权限（免费账号自签的都没有），
+    ///   得让用户在系统的文件选择器里点一下。
+    ///
+    /// 有权限（付费账号签名、或者在 Xcode 里带 iCloud 能力）时，
+    /// 系统会自己弹那个「允许访问 iCloud 云盘」的授权框，
+    /// 授权完就直接用 App 自己的云盘文件夹，一个字都不用让用户选。
+    @discardableResult
+    func requestAuthorization() -> Bool {
+        // App 自己的 iCloud 容器（需要 com.apple.developer.ubiquity-container-identifiers 权限）
+        guard let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
+            hearLog("iCloud 同步：这版 App 没有 iCloud 云盘权限，需要用户手动授权一个文件夹", .info)
+            return false
+        }
+        let docs = container.appendingPathComponent("Documents", isDirectory: true)
+        let dir = FileManager.default.fileExists(atPath: docs.path) ? docs : container
+        hearLog("iCloud 同步：用 App 自己的 iCloud 云盘文件夹（系统授权，不用用户挑）", .info)
+        ownFolder = dir
+        cachedFolder = nil
+        closeScopedAccess()
+        enabled = true
+        verifyWritable()
+        scheduleSync(delay: 0.3)
+        return true
+    }
+
     /// 用户选好 iCloud 云盘里的文件夹后调用（只在完全没有 iCloud 权限时才会用到）
     func setFolder(_ url: URL) {
         // 先打开访问权限：建文件夹、写文件都要靠它
@@ -269,22 +304,28 @@ final class CloudSync: ObservableObject {
             UserDefaults.standard.set(data, forKey: Keys.bookmark)
             // 路径也记一份：万一书签数据坏了还能靠它找回来
             UserDefaults.standard.set(url.path, forKey: Keys.bookmarkPath)
-            cachedFolder = nil
-            closeScopedAccess()
-            warnedNoAccess = false
-            // 就用刚刚选中的这个文件夹（权限已经开着了，后面都拿它操作）
-            scopedFolder = url
-            // 换了文件夹：重新判断设置该用哪边的
-            UserDefaults.standard.removeObject(forKey: Keys.settingsHash)
-            hearLog("iCloud 同步：使用 iCloud 云盘里的「\(Self.syncFolderName)」文件夹")
-            enabled = true
-            // 当场验一下能不能真的写进去（有些位置看得见但写不了）
-            verifyWritable()
-            scheduleSync(delay: 0.3)
+            useFolder(url)
         } catch {
             message = "无法使用这个文件夹：\(error.localizedDescription)"
             hearLog("iCloud 同步：保存文件夹失败 \(error)", .error)
         }
+    }
+
+    /// 就用这个文件夹同步（权限已经开着了）
+    private func useFolder(_ url: URL) {
+        ownFolder = nil        // 用户自己挑的，就用它
+        cachedFolder = nil
+        closeScopedAccess()
+        warnedNoAccess = false
+        // 就用这个文件夹（权限已经开着了，后面都拿它操作）
+        scopedFolder = url
+        // 换了文件夹：重新判断设置该用哪边的
+        UserDefaults.standard.removeObject(forKey: Keys.settingsHash)
+        hearLog("iCloud 同步：使用 iCloud 云盘里的「\(Self.syncFolderName)」文件夹")
+        enabled = true
+        // 当场验一下能不能真的写进去（有些位置看得见但写不了）
+        verifyWritable()
+        scheduleSync(delay: 0.3)
     }
 
 
@@ -331,9 +372,15 @@ final class CloudSync: ObservableObject {
     }
 
     /// 打开 iCloud 同步后检查一下能不能拿到云盘里的文件夹。
-    /// 拿不到不弹任何提示：设置里会出现一个「授权 iCloud 云盘」的按钮，点一次就行。
+    ///
+    /// 先试系统的授权（有 iCloud 权限时，iOS 自己会弹「允许访问 iCloud 云盘」，
+    /// 用户点一下允许就行，一个文件夹都不用挑）；
+    /// 拿不到才在设置里显示「授权 iCloud 云盘」按钮，让用户手动挑一次。
     func checkFolderAccess() {
         guard enabled else { return }
+        if !hasFolder {
+            _ = requestAuthorization()
+        }
         if hasFolder, let m = message, m.hasPrefix("iCloud") { message = nil }
     }
 
@@ -621,13 +668,20 @@ struct CloudFolderPicker: UIViewControllerRepresentable {
         return vc
     }
 
-    /// iCloud 云盘的根目录（容器里的 Documents）
+    /// iCloud 云盘的根目录（文件选择器打开时直接定位到这里）
     static func iCloudDriveURL() -> URL? {
-        guard let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) else { return nil }
-        // 容器根下：Documents 就是 iCloud 云盘
-        let docs = container.appendingPathComponent("Documents", isDirectory: true)
-        if FileManager.default.fileExists(atPath: docs.path) { return docs }
-        return container
+        // 1) App 自己的 iCloud 容器（有 iCloud 权限时才有）
+        if let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) {
+            let docs = container.appendingPathComponent("Documents", isDirectory: true)
+            if FileManager.default.fileExists(atPath: docs.path) { return docs }
+            return container
+        }
+        // 2) 系统里 iCloud 云盘挂载的地方（所有 App 的云盘文件夹都在这个共享目录下）。
+        //    文件选择器读的是系统自己给的路径，所以这么写不算越权；
+        //    万一这个路径变了，定位不到也只是回到「上次的位置」，不会出问题。
+        let shared = URL(fileURLWithPath: "/private/var/mobile/Containers/Shared/AppGroup/")
+        if FileManager.default.fileExists(atPath: shared.path) { return shared }
+        return nil
     }
 
     func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}

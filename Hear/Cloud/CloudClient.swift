@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import UIKit
 
 /// 云端模型服务客户端。
 ///
@@ -49,6 +50,36 @@ extension Notification.Name {
 final class LocalServerTrust: NSObject, URLSessionDelegate {
     static let shared = LocalServerTrust()
 
+    /// 用户自己在设置里填的服务地址（他自己的电脑）。
+    ///
+    /// 这些地址上的自签证书也放行——不然换了网络、或者开了 VPN
+    /// （Cloudflare WARP 那种 100.96.x.x 的地址），
+    /// 手机就再也连不上自己的电脑了（系统不认自签证书，直接拒绝）。
+    private static let hostLock = NSLock()
+    private static var userHosts: Set<String> = []
+
+    /// 把用户填的地址记下来（只留主机名，不带协议和端口）
+    static func trustUserAddresses(_ addresses: [String]) {
+        var hosts: Set<String> = []
+        for a in addresses {
+            let s = a.trimmingCharacters(in: .whitespacesAndNewlines)
+            if s.isEmpty { continue }
+            if let u = URL(string: CloudClient.cleanURL(s)), let h = u.host {
+                hosts.insert(h.lowercased())
+            }
+        }
+        hostLock.lock()
+        userHosts = hosts
+        hostLock.unlock()
+    }
+
+    /// 这个主机是不是用户自己填的地址
+    static func isUserHost(_ host: String) -> Bool {
+        hostLock.lock()
+        defer { hostLock.unlock() }
+        return userHosts.contains(host.lowercased())
+    }
+
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
@@ -56,7 +87,7 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
             completionHandler(.performDefaultHandling, nil)
             return
         }
-        if Self.isLocalHost(challenge.protectionSpace.host) {
+        if Self.isLocalHost(challenge.protectionSpace.host) || Self.isUserHost(challenge.protectionSpace.host) {
             // 内网自签证书：把证书本身当成自己的根，并且不校验主机名。
             // （证书里的 IP 是生成证书那一刻的，电脑换了网络、IP 变了，
             //   旧证书里就没有新 IP，手机会直接拒绝：
@@ -100,6 +131,7 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
         if n[0] == 192 && n[1] == 168 { return true }       // 192.168.x
         if n[0] == 169 && n[1] == 254 { return true }       // 169.254.x
         if n[0] == 127 { return true }                      // 127.x
+        if n[0] == 100 && n[1] >= 64 && n[1] <= 127 { return true }  // 100.64-100.127（CGNAT）
         return false
     }
 }
@@ -225,6 +257,7 @@ actor CloudClient {
         asrAddress = a; mtAddress = a; cloneAddress = a
         kinds.removeAll()
         cloneRefID = ""; cloneRefKey = ""; cloneRefUnsupported = false
+        noteUserAddresses()
     }
 
     /// 分别设置三个模型的接口地址
@@ -234,6 +267,15 @@ actor CloudClient {
         cloneAddress = clone.trimmingCharacters(in: .whitespacesAndNewlines)
         kinds.removeAll()
         cloneRefID = ""; cloneRefKey = ""; cloneRefUnsupported = false
+        noteUserAddresses()
+    }
+
+    /// 把用户填的地址告诉证书放行的那个类：
+    /// 用户自己填的地址（自己的电脑，可能开着 VPN）上的自签证书要认。
+    private func noteUserAddresses() {
+        var all = [asrAddress, mtAddress, cloneAddress, sharedAddress]
+        all += candidateAddresses(cloneAddress)
+        LocalServerTrust.trustUserAddresses(all)
     }
 
     var currentAddress: String { asrAddress }
@@ -245,6 +287,7 @@ actor CloudClient {
             sharedAddress = v
             kinds.removeAll()
         }
+        noteUserAddresses()
     }
 
     /// 这个模型要依次试的地址：先它自己的，再通用服务地址。
@@ -302,6 +345,9 @@ actor CloudClient {
     /// 重试一次就好，别让用户这一句白说。
     /// （超时不重试：那是服务真的慢，重试只会让等待翻倍。）
     private func sendWithRetry(_ req: URLRequest, path: String) async throws -> (Data, HTTPURLResponse?) {
+        // 切到别的 App 以后，系统只给很短的时间跑代码，请求会被掐断。
+        // 用后台任务多要一点时间：翻译和声音克隆的请求能跑完。
+        try await withBackgroundTime {
         // 网络断了（Wi-Fi 抖一下、刚切过网络、电脑上的服务重启），
         // 等一下再试往往就好了——不用让用户把刚才那句话重新说一遍。
         var lastError: Error = CloudError.notConfigured
@@ -328,7 +374,20 @@ actor CloudClient {
                 throw CloudError.net(Self.friendlyError(e))
             }
         }
-        throw CloudError.net(Self.friendlyError(lastError))
+            throw CloudError.net(Self.friendlyError(lastError))
+        }
+    }
+
+    /// 在后台（切到别的 App）跑一个请求：向系统多要一点执行时间。
+    ///
+    /// 实时翻译时麦克风一直开着，App 本来就不会被挂起；
+    /// 但没在收音的时候（比如只是在等电脑算克隆声音），
+    /// 没有这个，任务可能刚发出去就被系统掐断了。
+    private func withBackgroundTime<T>(_ body: () async throws -> T) async throws -> T {
+        let token = await BackgroundTaskToken()
+        await token.begin("听见·云端请求")
+        defer { Task { @MainActor in token.finish() } }
+        return try await body()
     }
 
     /// 请求并解析 JSON
@@ -429,7 +488,8 @@ actor CloudClient {
         case .cannotFindHost:
             return "找不到这个地址：IP 写错了？"
         case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasUnknownRoot:
-            return "证书握手不上：电脑上还没生成证书（跑一次 server/start-windows.ps1 就会生成）"
+            return "证书握手不上：电脑上没生成证书，或者电脑的地址变了（换了网络、开了 VPN）" +
+                   "——在电脑上重跑一次 start-windows.ps1，证书会按现在的地址重新生成"
         case .appTransportSecurityRequiresSecureConnection:
             return "服务地址不可用，请确认"
         default:
@@ -799,5 +859,28 @@ actor CloudClient {
     /// 从开始到现在的秒数（一位小数）
     static func secs(_ t0: Date) -> String {
         String(format: "%.1f", Date().timeIntervalSince(t0))
+    }
+}
+
+/// 一个后台任务（切到别的 App 以后，系统只给很短的时间跑代码）。
+///
+/// 用来把云端请求包起来：用户切到别的软件以后，
+/// 翻译和声音克隆的请求还能跑完，不会被系统半路掐断。
+@MainActor
+final class BackgroundTaskToken: @unchecked Sendable {
+    private var id: UIBackgroundTaskIdentifier = .invalid
+
+    func begin(_ name: String) {
+        id = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+            // 时间到了：先把后台任务收掉（不收的话系统会杀掉 App）
+            Task { @MainActor in self?.finish() }
+        }
+    }
+
+    func finish() {
+        guard id != .invalid else { return }
+        let v = id
+        id = .invalid
+        UIApplication.shared.endBackgroundTask(v)
     }
 }

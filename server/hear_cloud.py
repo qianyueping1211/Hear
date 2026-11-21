@@ -94,34 +94,65 @@ def primary_ip():
 
 
 def local_ips():
-    """这台电脑现在用的 IP（去掉 127 开头的回环地址）"""
+    """这台电脑上所有网卡的 IPv4 地址（去掉 127 开头的回环地址）。
+
+    换了网络、开了 VPN（Cloudflare WARP 之类）地址就变了，
+    所以这里把所有网卡的地址都列出来：证书里都带上，
+    手机不管用哪个地址连都能用（同一个证书到处都认）。
+    """
+    import re
     import socket
+    import subprocess
     ips = []
+
+    def add(ip):
+        ip = (ip or "").strip()
+        if not ip or ip.startswith("127."):
+            return
+        if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
+            return
+        if ip not in ips:
+            ips.append(ip)
+
+    # 每张网卡上的地址：Windows 用 ipconfig，Mac/Linux 用 ifconfig / ip
+    for cmd in (["ipconfig"], ["ifconfig", "-a"], ["ip", "-4", "-o", "addr"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, timeout=5).stdout.decode("utf-8", "ignore")
+        except Exception:
+            continue
+        if not out:
+            continue
+        if cmd[0] == "ipconfig":
+            # 中文："IPv4 地址. . . . . . . . . . . : 192.168.1.5"
+            # 英文："IPv4 Address. . . . . . . . . . . : 192.168.1.5"
+            for m in re.finditer(r"IPv4[^\n:]*[:：]\s*(\d{1,3}(?:\.\d{1,3}){3})", out, re.I):
+                add(m.group(1))
+        else:
+            for m in re.finditer(r"inet (?:addr:)?(\d{1,3}(?:\.\d{1,3}){3})", out):
+                add(m.group(1))
+        if ips:
+            break
+
+    # 走默认路由出去用的那个地址（开了 VPN 的话就是 VPN 的地址）
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("10.255.255.255", 1))
-        ips.append(s.getsockname()[0])
+        add(s.getsockname()[0])
         s.close()
     except Exception:
         pass
-    # getaddrinfo 有时候会卡好几秒（域名解析），放到后台线程里，最多等 1 秒
-    found = []
 
+    # 主机名解析出来的地址（getaddrinfo 有时候会卡好几秒，最多等 1 秒）
     def work():
         try:
             for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-                ip = info[4][0]
-                if not ip.startswith("127.") and ip not in found:
-                    found.append(ip)
+                add(info[4][0])
         except Exception:
             pass
 
     t = threading.Thread(target=work, daemon=True)
     t.start()
     t.join(1.0)
-    for ip in found:
-        if ip not in ips:
-            ips.append(ip)
     return ips
 
 
@@ -727,7 +758,13 @@ a{color:#007aff;text-decoration:none}
         self._send_json({"id": rid})
 
     def clone(self, body):
-        req = json.loads(body.decode("utf-8"))
+        try:
+            req = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            # 手机把 wav 二进制发到这个接口来了（老版本服务没有
+            # /v1/clone/reference，路径会落到这里）：说清楚，别抛一屏乱码
+            self._error("这个接口要的是 JSON（不是 wav）", 400)
+            return
         # 参考音频：手机上先传过一次（/v1/clone/reference），
         # 后面每句话只带 reference_id，不用再传几百 KB。
         ref_b64 = ""
@@ -783,13 +820,14 @@ a{color:#007aff;text-decoration:none}
 
 
 def cert_covers_ip():
-    """现有证书里有没有这台电脑现在的 IP。
+    """现有证书里有没有这台电脑现在的所有 IP。
 
-    换了网络、路由器重新分配了 IP，旧证书里就没有新 IP 了，
-    手机会直接拒绝（certificate unknown）—— 这种时候要重新生成。
+    换了网络、路由器重新分配了 IP、开了 VPN（Cloudflare WARP 之类），
+    旧证书里就没有新地址了，手机会直接拒绝（certificate unknown）
+    —— 这种时候要重新生成。
     """
-    ip = primary_ip()
-    if not ip:
+    want = local_ips()
+    if not want:
         return True, ""
     try:
         from cryptography import x509
@@ -800,8 +838,9 @@ def cert_covers_ip():
         for name in san:
             if isinstance(name, x509.IPAddress):
                 have.add(str(name.value))
-        if ip not in have:
-            return False, ip
+        missing = [ip for ip in want if ip not in have]
+        if missing:
+            return False, ", ".join(missing)
         return True, ""
     except Exception:
         # 看不出来就先当没问题（别把还能用的证书弄没了）
@@ -840,6 +879,10 @@ def ensure_cert():
                 pass
         ips.append(ipaddress.ip_address("127.0.0.1"))
         san = [x509.DNSName("localhost"), x509.DNSName("hear-cloud.local")]
+        try:
+            san.append(x509.DNSName(socket.gethostname()))
+        except Exception:
+            pass
         san += [x509.IPAddress(i) for i in ips]
         now = datetime.datetime.now(datetime.timezone.utc)
         cert = (

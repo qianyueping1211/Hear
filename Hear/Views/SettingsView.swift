@@ -16,6 +16,8 @@ struct SettingsView: View {
     @ObservedObject private var llm = LLMSettings.shared
     @ObservedObject private var cloud = CloudSync.shared
     @State private var showCloudPicker = false
+    /// 授权 iCloud 云盘的说明框（系统的授权框弹不出来时才需要）
+    @State private var askCloudAuth = false
     /// 模型管理里的页签：0 = 本地模型，1 = 在线模型
     @State private var modelTab = 0
     /// 正在配置哪一项：服务（默认地址）或某个模型
@@ -121,7 +123,7 @@ struct SettingsView: View {
                     }
                     if cloud.enabled && !cloud.hasFolder {
                         // 只有系统还没给过云盘权限时才有这一个按钮（授权一次，以后不用再管）
-                        Button("授权 iCloud 云盘") { showCloudPicker = true }
+                        Button("授权 iCloud 云盘") { askCloudAuth = true }
                             .buttonStyle(.bordered)
                     }
                     if let m = cloud.message {
@@ -351,6 +353,18 @@ struct SettingsView: View {
             .sheet(isPresented: $showCloudPicker) {
                 CloudFolderPicker { url in cloud.setFolder(url) }
                     .ignoresSafeArea()
+            }
+            // 授权 iCloud 云盘：先试系统的（自己就弹「允许访问 iCloud 云盘」），
+            // 没有权限才让用户在文件里挑一个文件夹。
+            .alert("授权 iCloud 云盘", isPresented: $askCloudAuth) {
+                Button("继续") {
+                    if !cloud.requestAuthorization() {
+                        showCloudPicker = true
+                    }
+                }
+                Button("以后再说", role: .cancel) {}
+            } message: {
+                Text("允许「听见」访问 iCloud 云盘，把设置和对话记录同步到云盘里的「听见」文件夹。\n只需要授权一次，以后不用再管。")
             }
             // 在线模型里某一项的配置
             .sheet(item: $cloudEdit) { e in

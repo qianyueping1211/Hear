@@ -509,9 +509,12 @@ final class LiveSession: ObservableObject {
             }
         }
 
-        // 切到别的 App：别在后台继续出声。
-        // 麦克风照旧留着听（实时翻译不能断），但喇叭得停：
-        // 不然用户切走了还在那儿放声音，以为 App 关不掉。
+        // 切到别的 App：别在后台继续出声，但别的照旧。
+        //
+        // 麦克风留着听（实时翻译不能断），网络也留着
+        // （切到别的软件以后，电脑那边的翻译和声音克隆服务还要接着调用，
+        //   不然切一下 App 这段对话就断了）。
+        // 只是喇叭停下来：用户不在跟前听，吵得慌。
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -519,14 +522,17 @@ final class LiveSession: ObservableObject {
                 guard let self else { return }
                 self.inBackground = true
                 self.stopReading()
-                hearLog("切到后台：停止朗读", .info)
+                hearLog("切到后台：停止朗读（翻译和云端服务继续跑）", .info)
             }
         }
         NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.inBackground = false
+                guard let self else { return }
+                self.inBackground = false
+                // 回到前台：把后台攒下的译文接着读出来
+                self.kickReader()
             }
         }
 
@@ -1685,6 +1691,9 @@ final class LiveSession: ObservableObject {
     // 点某一句：从这句开始往后读；之后的自动朗读也从这句往后接着读。
 
     /// 现在能不能自动朗读
+    ///
+    /// 只有「要不要出声」这一件事受后台影响：
+    /// 翻译、声音克隆的请求在后台照旧发出去（电脑那边照常干活）。
     private var autoReadAllowed: Bool {
         // 在后台（切到别的 App 了）不朗读：用户不在跟前听，吵得慌
         !inBackground && speakOutput && (outputMode == .headphones || !isRunning)
@@ -2561,7 +2570,9 @@ final class LiveSession: ObservableObject {
         } else if cloned != nil {
             cloneUnavailableNotified = false
         }
-        // 切到后台了：别出声（用户不在跟前听，吵得慌）
+        // 切到后台了：别出声（用户不在跟前听，吵得慌）。
+        // 注意：上面等克隆声音的那段照样等完了——
+        // 电脑那边的克隆请求要跑完，声音存着，回前台就能直接播。
         if inBackground { return }
         if mute { capture.muted = true }
         if let cloned {

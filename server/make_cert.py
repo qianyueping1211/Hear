@@ -21,36 +21,65 @@ KEY_FILE = os.path.join(CERT_DIR, "key.pem")
 
 
 def local_ips():
-    """这台电脑现在用的 IP（去掉回环地址）"""
+    """这台电脑上所有网卡的 IPv4 地址（去掉回环地址）。
+
+    换了网络、开了 VPN（Cloudflare WARP 之类）地址就变了，
+    这里把每张网卡的地址都列出来：证书里都带上，
+    手机不管用哪个地址连都认这个证书。
+    """
+    import re
+    import socket
+    import subprocess
     out = []
+
+    def add(ip):
+        ip = (ip or "").strip()
+        if not ip or ip.startswith("127."):
+            return
+        if not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
+            return
+        if ip not in out:
+            out.append(ip)
+
+    # 每张网卡上的地址：Windows 用 ipconfig，Mac/Linux 用 ifconfig / ip
+    for cmd in (["ipconfig"], ["ifconfig", "-a"], ["ip", "-4", "-o", "addr"]):
+        try:
+            text = subprocess.run(cmd, capture_output=True, timeout=5).stdout.decode("utf-8", "ignore")
+        except Exception:
+            continue
+        if not text:
+            continue
+        if cmd[0] == "ipconfig":
+            # 中文："IPv4 地址. . . . . . . . . . . : 192.168.1.5"
+            # 英文："IPv4 Address. . . . . . . . . . . : 192.168.1.5"
+            for m in re.finditer(r"IPv4[^\n:]*[:：]\s*(\d{1,3}(?:\.\d{1,3}){3})", text, re.I):
+                add(m.group(1))
+        else:
+            for m in re.finditer(r"inet (?:addr:)?(\d{1,3}(?:\.\d{1,3}){3})", text):
+                add(m.group(1))
+        if out:
+            break
+
+    # 走默认路由出去用的那个地址（开了 VPN 的话就是 VPN 的地址）
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("10.255.255.255", 1))
-        out.append(s.getsockname()[0])
+        add(s.getsockname()[0])
         s.close()
     except Exception:
         pass
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if not ip.startswith("127.") and ip not in out:
-                out.append(ip)
+            add(info[4][0])
     except Exception:
         pass
     return out
 
 
 def cert_covers_ip():
-    """现有证书里有没有本机现在的 IP（换了网络、IP 变了就得重新生成）"""
-    ip = ""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("10.255.255.255", 1))
-        ip = s.getsockname()[0]
-        s.close()
-    except Exception:
-        pass
-    if not ip:
+    """现有证书里有没有本机现在的所有 IP（换了网络、开了 VPN 就得重新生成）"""
+    ips = local_ips()
+    if not ips:
         return True, ""
     try:
         from cryptography import x509
@@ -61,8 +90,9 @@ def cert_covers_ip():
         for name in san:
             if isinstance(name, x509.IPAddress):
                 have.add(str(name.value))
-        if ip not in have:
-            return False, ip
+        missing = [ip for ip in ips if ip not in have]
+        if missing:
+            return False, ", ".join(missing)
         return True, ""
     except Exception:
         return True, ""
