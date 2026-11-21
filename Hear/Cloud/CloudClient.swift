@@ -806,7 +806,7 @@ actor CloudClient {
                 // 预览要快：给个短超时，而且不重试
                 // （整句那种慢请求要是排在这里，后面的原文预览就都被它堵住了）
                 // 这一次请求最多只能用"总时限里还剩下的时间"
-                let budget: TimeInterval = deadline.map { max(2, $0.timeIntervalSinceNow)) } ?? 120
+                let budget: TimeInterval = deadline.map { max(2, $0.timeIntervalSinceNow) } ?? 120
                 var req = try makeRequest("/v1/asr", address: addr, method: "POST", body: wav,
                                           contentType: "audio/wav", timeout: preview ? budget : 120)
                 req.setValue(candidates.joined(separator: ","), forHTTPHeaderField: "X-Languages")

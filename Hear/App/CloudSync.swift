@@ -532,8 +532,17 @@ final class CloudSync: ObservableObject {
                     hearLog("iCloud 同步：本地这页刚改过，不用云上的旧版本盖掉", .info)
                     continue
                 }
-                if let data = await Self.read(file), store.importRaw(data) {
-                    pulled += 1
+                if let data = await Self.read(file) {
+                    // 读文件是异步的：这段时间用户可能又改了这一页。
+                    // 导入之前再核对一次本地版本，
+                    // 别把人家刚改的东西盖掉（差一秒以内也算改过）。
+                    if let l3 = store.allUpdated[id], let l, l3 > l {
+                        hearLog("iCloud 同步：这一页刚被改过，不用云上的旧版本盖掉", .info)
+                        continue
+                    }
+                    if store.importRaw(data) {
+                        pulled += 1
+                    }
                 }
             }
         }
@@ -552,11 +561,14 @@ final class CloudSync: ObservableObject {
             lastSync = Date()
             UserDefaults.standard.set(lastSync, forKey: Keys.lastSync)
         } else {
-            // 没写回去就别装作同步成功了
+            // 没写回去就别装作同步成功了。
+            // （下面那句"已上传…"不能把它盖掉——盖掉了用户还以为同步好了）
             message = "同步结果没能写回 iCloud（稍后再试一次）"
             hearLog("iCloud 同步：清单没写回去，不记同步时间", .warning)
         }
-        message = settingsNote ?? (pushedSettings > 0 ? "已上传 \(pushedSettings) 项设置到 iCloud" : nil)
+        if wrote {
+            message = settingsNote ?? (pushedSettings > 0 ? "已上传 \(pushedSettings) 项设置到 iCloud" : nil)
+        }
         if pushed + pulled + removed > 0 || settingsNote != nil || pushedSettings > 0 {
             hearLog("iCloud 同步：上传 \(pushed) 页，下载 \(pulled) 页，删除 \(removed) 页")
         }

@@ -1469,7 +1469,7 @@ final class LiveSession: ObservableObject {
         }
         // 苹果听写：上一段最后一句还在定稿，稍等一下再换听写（否则那句会丢）
         var w = 0
-        while !appleEngines.isEmpty, working || !queue.isEmpty, w < 8 {
+        while !appleEngines.isEmpty, working || !queue.isEmpty || !mtQueue.isEmpty, w < 8 {
             try? await Task.sleep(nanoseconds: 100_000_000)
             w += 1
         }
@@ -1717,6 +1717,10 @@ final class LiveSession: ObservableObject {
         drainTask?.cancel()
         drainTask = nil
         working = false
+        // 翻译队列也收掉：停了以后不要再翻，也不要写回
+        mtQueue.removeAll()
+        mtTask?.cancel()
+        mtTask = nil
         translator.cancelCurrent()
         translator.cancelPreview()
         previewSamples = nil
@@ -1867,19 +1871,38 @@ final class LiveSession: ObservableObject {
         hearLogText("补翻译写回上一页：", String(text.prefix(30)))
     }
 
+    /// 等这一页的译文补完（最多等这么久）。
+    /// 停录时没译完的句子会在后台接着译，等它们译完再总结才对。
+    private func waitTranslationsDone(conversation: UUID, seconds: Double = 20) async {
+        let store = ConversationStore.shared
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            guard let c = store.load(conversation) else { return }
+            if !c.items.contains(where: { !$0.done }) { return }   // 都译完了
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+    }
+
     /// 新建一页。summarize = true 时在后台用默认模板总结刚才那一页
     func newConversation(summarize: Bool) {
         if isRunning { stop(readAfter: false) }
         persist()
         let oldID = conversationID
-        let hadContent = items.contains { $0.done }
+        // 有内容就算：原文已经认出来了、译文还在补，也值得总结
+        let hadContent = items.contains { $0.done || Self.hasRealText($0.sourceText) }
         clear()
         conversationID = UUID()
         conversationCreated = Date()
         lastLangID = nil
         hearLog("新建对话\(summarize && hadContent ? "，后台总结上一页" : "")")
         if summarize && hadContent {
-            SummaryService.shared.generate(conversationID: oldID, templateID: SummaryTemplate.defaultID)
+            // 等这一页的译文补完再总结：
+            // 立刻总结的话，用的是半截内容（译文还没出来的那些句子就没了）。
+            Task { [weak self] in
+                await self?.waitTranslationsDone(conversation: oldID)
+                SummaryService.shared.generate(conversationID: oldID,
+                                              templateID: SummaryTemplate.defaultID)
+            }
         }
     }
 
@@ -2573,20 +2596,11 @@ final class LiveSession: ObservableObject {
         guard let idx2 = items.firstIndex(where: { $0.id == itemID }) else { return }
         items[idx2] = item
         rememberReference(itemID, samples: samples, text: spoken, lang: src.id)
-        activity = "翻译中…"
-        do {
-            let out = try await translateFinal(spoken, from: src, to: tgt, context: []) { _ in }
-            guard gen == runGen else { return }
-            update(itemID, out, done: true, token: token)
-            jobTokens[itemID] = nil
-        } catch {
-            hearLog("翻译失败：\(error)", .error)
-            update(itemID, "（翻译失败：\(error.localizedDescription)）", done: true, token: token)
-            if usingAppleTranslation { appleTranslationFailed() } else { prepareAppleTranslation() }
-        }
-        persist()
-        activity = isRunning ? "正在聆听" : ""
-        kickReader()
+        // 翻译排到另一条队列（跟识别分开）
+        enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: spoken,
+                                  src: src, tgt: tgt, context: [], samples: samples,
+                                  isApple: true))
+        _ = preview
     }
 
     /// 听写没给出结果时：用本地的识别再认一遍这段声音。
@@ -2632,6 +2646,26 @@ final class LiveSession: ObservableObject {
     private final class JobState: @unchecked Sendable {
         var finished = false
     }
+
+    /// 翻译队列里的一项：识别完了，原文已经显示出来，译文慢慢补
+    private struct MTJob {
+        let itemID: UUID
+        let token: UUID
+        let gen: Int
+        let text: String
+        let src: Language
+        let tgt: Language
+        let context: [String]
+        let samples: [Float]
+        /// 这一句是不是系统听写来的（翻译失败时的处理不一样）
+        let isApple: Bool
+    }
+
+    /// 待翻译的句子。
+    /// 跟识别队列分开：识别完就把原文显示出来，
+    /// 不用等上一句翻完（上一句翻得慢也不挡着下一句的原文）。
+    private var mtQueue: [MTJob] = []
+    private var mtTask: Task<Void, Never>?
 
     private func enqueueDrain() {
         guard drainTask == nil else { return }
@@ -2690,6 +2724,101 @@ final class LiveSession: ObservableObject {
                 markJobFailed(job.itemID, token: job.token)
             } else {
                 _ = await jobTask.value
+            }
+        }
+    }
+
+    /// 把这一句排进翻译队列
+    private func enqueueTranslation(_ job: MTJob) {
+        mtQueue.append(job)
+        startTranslationDrain()
+    }
+
+    /// 翻译队列的任务（同时只跑一个）
+    private func startTranslationDrain() {
+        guard mtTask == nil else { return }
+        mtTask = Task { [weak self] in
+            guard let self else { return }
+            await self.drainTranslations()
+            self.mtTask = nil
+            // 收尾这一小会儿要是又来了新句子，接着处理
+            if !self.mtQueue.isEmpty { self.startTranslationDrain() }
+        }
+    }
+
+    /// 翻译队列：一句一句来，每句都有上限，卡住了不挡着后面
+    private func drainTranslations() async {
+        while !mtQueue.isEmpty {
+            if Task.isCancelled { break }
+            let job = mtQueue.removeFirst()
+            let state = JobState()
+            let t = Task { [weak self] in
+                defer { state.finished = true }
+                guard let self else { return }
+                await self.translateItem(job)
+            }
+            var waited = 0
+            while !state.finished {
+                if waited >= 1500 { break }        // 最多 150 秒
+                do {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                } catch {
+                    break
+                }
+                waited += 1
+            }
+            if !state.finished {
+                t.cancel()
+                if Task.isCancelled { break }
+                hearLog("这句翻译太久了，先跳过，后面的继续", .warning)
+                markJobFailed(job.itemID, token: job.token)
+            } else {
+                _ = await t.value
+            }
+        }
+    }
+
+    /// 翻译一句：译文出来以后写回去
+    private func translateItem(_ job: MTJob) async {
+        let id = job.itemID
+        let token = job.token
+        guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
+        // 语言和预览一致时先保留预览译文，最终译文出来后再替换，避免闪烁
+        let preview = items[idx].source == job.src ? items[idx].translated : ""
+        activity = "翻译中…"
+        translator.cancelPreview()        // 正在跑的实时预览翻译先让路
+        let result: String
+        do {
+            result = try await translateFinal(job.text, from: job.src, to: job.tgt,
+                                              context: job.context) { partialText in
+                // 有预览译文时，等最终结果完整再替换；没有预览时边生成边显示
+                guard preview.isEmpty else { return }
+                Task { @MainActor in self.update(id, partialText, done: false, token: token) }
+            }
+        } catch {
+            hearLog("翻译失败：\(error)", .error)
+            update(id, "（翻译失败：\(error.localizedDescription)）", done: true, token: token)
+            // 系统听写这条线：翻译失败要另外处理（可能是语言包没下）
+            if job.isApple {
+                if usingAppleTranslation { appleTranslationFailed() } else { prepareAppleTranslation() }
+            }
+            kickReader()
+            return
+        }
+        guard job.gen == runGen else { return }        // 翻译中途被停止：stop() 已经收尾
+        guard isCurrentJob(id, token: token) else { return }
+        update(id, result, done: true, token: token)
+        jobTokens[id] = nil                            // 这一句处理完了
+        persist()
+        activity = isRunning ? "正在聆听" : ""
+        kickReader()
+        // SenseVoice + Whisper 校正：后面没有排队的句子时，用 Whisper 再识别一遍，有明显差别就替换。
+        // 放在后台跑：校正很慢，不能挡住用户刚说的下一句。
+        if asrEngine == "hybrid", queue.isEmpty {
+            let cSamples = job.samples, cSrc = job.src, cText = job.text, cID = id
+            Task { [weak self] in
+                await self?.whisperCorrect(id: cID, samples: cSamples, src: cSrc,
+                                           oldText: cText, gen: job.gen)
             }
         }
     }
@@ -2826,38 +2955,12 @@ final class LiveSession: ObservableObject {
         let context: [String] = useContext
             ? Array(items[..<idx2].filter { $0.done }.suffix(2).map(\.sourceText))
             : []
-        activity = "翻译中…"
-        translator.cancelPreview()        // 正在跑的实时预览翻译先让路
-        let result: String
-        do {
-            result = try await translateFinal(text, from: src, to: tgt, context: context) { partialText in
-                // 有预览译文时，等最终结果完整再替换；没有预览时边生成边显示
-                guard preview.isEmpty else { return }
-                Task { @MainActor in self.update(id, partialText, done: false, token: token) }
-            }
-        } catch {
-            hearLog("翻译失败：\(error)", .error)
-            update(id, "（翻译失败：\(error.localizedDescription)）", done: true, token: token)
-            kickReader()
-            return
-        }
-        guard gen == runGen else { return }              // 翻译中途被停止：stop() 已经收尾
-        guard isCurrentJob(itemID, token: token) else { return }   // 这一句已经被放弃/顶掉
-        update(id, result, done: true, token: token)
-        jobTokens[itemID] = nil                          // 这一句处理完了
-        persist()
-        activity = isRunning ? "正在聆听" : ""
-        // 朗读在单独的队列里进行，不会挡住后面的识别和翻译
-        kickReader()
-        // SenseVoice + Whisper 校正：后面没有排队的句子时，用 Whisper 再识别一遍，有明显差别就替换。
-        // 放在后台跑：校正很慢，不能挡住用户刚说的下一句。
-        if asrEngine == "hybrid", queue.isEmpty {
-            let cSamples = samples, cSrc = src, cText = text, cID = id
-            Task { [weak self] in
-                await self?.whisperCorrect(id: cID, samples: cSamples, src: cSrc,
-                                           oldText: cText, gen: gen)
-            }
-        }
+        // 原文已经显示出来了，翻译排到另一条队列：
+        // 上一句翻得慢也不挡着下一句的原文。
+        enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: text,
+                                  src: src, tgt: tgt, context: context, samples: samples,
+                                  isApple: false))
+        _ = preview
     }
 
     /// 用 Whisper 再识别一遍这句（按 SenseVoice 判断出的语言），明显不同就替换原文并重新翻译
