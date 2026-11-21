@@ -275,8 +275,6 @@ struct SettingsView: View {
                 Section {
                     Toggle("开启日志", isOn: $log.enabled)
                     Toggle("记录对话内容（排查问题时用）", isOn: $log.contentEnabled)
-                    Text("关着的时候日志里只有状态和耗时，不留你说的话。日志经常要导出发给别人看，默认不记内容更稳妥。")
-                        .font(.caption).foregroundStyle(.secondary)
                     Picker("最大日志文件大小", selection: $log.maxMB) {
                         ForEach(AppLog.sizeOptions, id: \.self) { mb in
                             Text("\(mb) MB").tag(mb)
