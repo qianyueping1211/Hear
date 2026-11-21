@@ -6,6 +6,7 @@ struct ContentView: View {
     @ObservedObject private var llm = LLMSettings.shared
     @State private var showSettings = false
     @State private var showHistory = false
+    @State private var showGlossary = false
     @State private var askNew = false
     @State private var noLLMAlert = false
     @State private var editingID: UUID?          // 正在修改原文的那一条
@@ -52,6 +53,7 @@ struct ContentView: View {
                         MoreMenuPanel(
                             onNew: { showMenu = false; newTapped() },
                             onHistory: { showMenu = false; showHistory = true },
+                            onGlossary: { showMenu = false; showGlossary = true },
                             onSettings: { showMenu = false; showSettings = true }
                         )
                         .padding(.top, 54)
@@ -72,6 +74,7 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .sheet(isPresented: $showHistory) { HistoryView() }
+            .sheet(isPresented: $showGlossary) { GlossaryView() }
             .sheet(item: $editingSpeaker) { item in
                 let conversation = session.conversationID
                 SpeakerEditor(item: item, labels: session.items.speakerLabels) { change in
@@ -162,12 +165,14 @@ struct TopBar: View {
 struct MoreMenuPanel: View {
     var onNew: () -> Void
     var onHistory: () -> Void
+    var onGlossary: () -> Void
     var onSettings: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             row("新建对话", "square.and.pencil", onNew)
             row("历史记录", "clock.arrow.circlepath", onHistory)
+            row("术语配置", "text.book.closed", onGlossary)
             row("功能设置", "gearshape", onSettings)
         }
         .padding(.vertical, 4)

@@ -179,14 +179,25 @@ actor SenseVoiceRecognizer {
         if existing { try files.copyItem(at: folder, to: previous) }
         do {
             _ = try await SenseVoiceModels.download(precision: .int8, force: force) { p in
-                progress(p.fractionCompleted)
+                progress(p.fractionCompleted * 0.9)
             }
             try Task.checkCancellation()
             guard hasModels(folder) else {
                 throw CocoaError(.fileReadCorruptFile)
             }
+            progress(0.92)
+            do {
+                try await LocalSpeakerEmbedder.download(into: folder) { p in
+                    progress(0.92 + p * 0.07)
+                }
+                hearLog("SenseVoice：本机说话人模型已安装")
+            } catch {
+                // 老版本也可以先只用识别；下次重新下载模型时会再补齐。
+                hearLog("SenseVoice：本机说话人模型安装失败：\(error)", .warning)
+            }
             UserDefaults.standard.removeObject(forKey: "senseVoiceFolder")
             if existing { try? files.removeItem(at: previous) }
+            progress(1)
         } catch {
             if existing { try ModelManager.installModelFile(previous, at: folder) }
             throw error

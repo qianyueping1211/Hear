@@ -196,7 +196,7 @@ struct SettingsView: View {
                         Text("耳机麦克风").tag("headset")
                     }
                     Toggle("语音增强（降噪、消除回声）", isOn: $session.voiceProcessing)
-                    if session.usingCloudASR {
+                    if session.speakerTrackingAvailable {
                         Toggle("实时翻译时区分说话人", isOn: $session.speakerTrackingEnabled)
                     }
                     VStack(alignment: .leading) {
@@ -254,16 +254,6 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("朗读")
-                }
-
-                Section {
-                    TextEditor(text: $session.glossary)
-                        .frame(minHeight: 100)
-                        .font(.body.monospaced())
-                } header: {
-                    Text("术语表")
-                } footer: {
-                    Text("每行一条，格式：原文=译文\n例如：张伟=Zhang Wei")
                 }
 
                 // MARK: 日志

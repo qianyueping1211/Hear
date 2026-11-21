@@ -171,6 +171,15 @@ final class LiveSession: ObservableObject {
     var usingCloudMT: Bool { translationEngine == "cloud" }
     /// 声音克隆走云端
     var usingCloudClone: Bool { voiceClone && voiceCloneCloud }
+    /// 当前识别引擎能不能做说话人区分。
+    /// 云端始终可以；本地需要 SenseVoice 文件夹里带 CAM++ 声纹模型。
+    var speakerTrackingAvailable: Bool {
+        if usingCloudASR { return true }
+        guard asrEngine == "sensevoice", let folder = SenseVoiceRecognizer.installedFolder() else {
+            return false
+        }
+        return LocalSpeakerEmbedder.isInstalled(in: folder)
+    }
 
     /// 模型管理默认显示哪一边：0 = 本地模型，1 = 在线模型
     ///
@@ -644,6 +653,7 @@ final class LiveSession: ObservableObject {
                     self.showToast("内存不足，已暂停本地识别和翻译", seconds: 6)
                 }
                 await self.sense.unload()
+                await self.localSpeaker.unload()
                 await self.translator.unload()
                 await self.cloner.unload()
                 hearLog("已卸载本地模型，可用内存 \(Self.freeMB()) MB")
@@ -2831,7 +2841,14 @@ final class LiveSession: ObservableObject {
         }
         item.sourceSide = src == a ? .left : .right
         item.recognizedLanguage = Language.all.first { $0.id == detected }?.id
-        let shouldIdentify = speakerTrackingEnabled && !talkMode && speakerAddress != nil
+        let localSpeakerFolder: URL? = {
+            guard speakerTrackingEnabled, !usingCloudASR,
+                  let folder = SenseVoiceRecognizer.installedFolder(),
+                  LocalSpeakerEmbedder.isInstalled(in: folder) else { return nil }
+            return folder
+        }()
+        let shouldIdentify = speakerTrackingEnabled && !talkMode &&
+            (speakerAddress != nil || localSpeakerFolder != nil)
         if shouldIdentify { item.speakerTracked = true }
         guard let idx2 = items.firstIndex(where: { $0.id == itemID }) else { return }
         items[idx2] = item
@@ -2847,8 +2864,12 @@ final class LiveSession: ObservableObject {
         enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: text,
                                   src: src, tgt: tgt, context: context, samples: samples,
                                   isApple: false, correctionAddress: correctionAddress))
-        if shouldIdentify, let speakerAddress {
-            enqueueSpeaker(samples, for: itemID, address: speakerAddress)
+        if shouldIdentify {
+            if let speakerAddress {
+                enqueueSpeaker(samples, for: itemID, source: .cloud(speakerAddress))
+            } else if let localSpeakerFolder {
+                enqueueSpeaker(samples, for: itemID, source: .local(localSpeakerFolder))
+            }
         }
         _ = preview
     }
@@ -2859,27 +2880,46 @@ final class LiveSession: ObservableObject {
             if !speakerTrackingEnabled {
                 speakerQueue.cancel()
                 speakerTracker = SpeakerTracker()
+                Task { await localSpeaker.unload() }
             }
         }
+    }
+
+    private enum SpeakerSource {
+        case cloud(String)
+        case local(URL)
     }
 
     private struct SpeakerJob {
         let samples: [Float]
         let itemID: UUID
         let conversation: UUID
-        let address: String
+        let source: SpeakerSource
     }
 
     private let speakerQueue = SessionJobQueue<SpeakerJob>(timeout: .seconds(10))
+    private let localSpeaker = LocalSpeakerEmbedder()
     private var speakerTracker = SpeakerTracker()
 
-    private func enqueueSpeaker(_ samples: [Float], for itemID: UUID, address: String) {
+    private func enqueueSpeaker(_ samples: [Float], for itemID: UUID, source: SpeakerSource) {
         guard samples.count >= 22_400, speakerQueue.pendingCount < 3 else { return }
         let job = SpeakerJob(samples: Array(samples.prefix(160_000)), itemID: itemID,
-                             conversation: conversationID, address: address)
+                             conversation: conversationID, source: source)
         speakerQueue.submit(job) { [weak self] job in
-            guard let self,
-                  let embedding = try? await self.cloud.speakerEmbedding(samples: job.samples, address: job.address),
+            guard let self else { return }
+            let embedding: [Float]?
+            do {
+                switch job.source {
+                case .cloud(let address):
+                    embedding = try await self.cloud.speakerEmbedding(samples: job.samples, address: address)
+                case .local(let folder):
+                    embedding = try await self.localSpeaker.embedding(samples: job.samples, folder: folder)
+                }
+            } catch {
+                hearLog("本机说话人识别失败：\(error)", .warning)
+                return
+            }
+            guard let embedding,
                   !Task.isCancelled, job.conversation == self.conversationID,
                   let index = self.items.firstIndex(where: { $0.id == job.itemID }),
                   self.items[index].speakerManuallySet != true else { return }
