@@ -576,7 +576,7 @@ final class CloudSync: ObservableObject {
             hearLog("iCloud 同步：清单没写回去，不记同步时间", .warning)
         }
         if wrote {
-            message = settingsNote ?? (pushedSettings > 0 ? "已上传 \(pushedSettings) 项设置到 iCloud" : nil)
+            message = settingsNote
         }
         if pushed + pulled + removed > 0 || settingsNote != nil || pushedSettings > 0 {
             hearLog("iCloud 同步：上传 \(pushed) 页，下载 \(pulled) 页，删除 \(removed) 页")
