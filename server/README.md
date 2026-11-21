@@ -160,8 +160,8 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\你的用户名\Downloads\Hea
 
 ### 4. 启动时按类型选模型
 
-第一次启动会问三个问题（识别 / 翻译 / 克隆各选一个），选完记在
-`server\hear_models.json` 里，以后启动直接用上次的选择：
+每次启动都会问三个问题（识别 / 翻译 / 克隆各选一个），直接回车就是上次选的；
+选完记在 `server\hear_models.json` 里：
 
 ```
   语音识别（Whisper，CPU 上跑）
@@ -176,7 +176,7 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\你的用户名\Downloads\Hea
 （18 GB，混合专家，30B 里只激活 3B，又大又快又好，内存要 24G 以上）；
 克隆可以选 Qwen3-TTS 的 0.6B（快）/ 1.7B（更像原声，推荐）。
 
-想改选择，再跑一次加 `-Choose`：
+（也可以随时加 `-Choose` 重新选一次：）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File server\start-windows.ps1 -Choose

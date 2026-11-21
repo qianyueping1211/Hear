@@ -115,17 +115,35 @@ function Load-Choice {
     try { return (Get-Content $CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { return $null }
 }
 
+# 每次启动都问一次：直接回车就是上次的选择。
+# 后台（非交互）跑的时候不问，直接用上次的选择，免得卡在那儿等输入。
 $scriptArgs = $args
 $cfg = Load-Choice
-$wantMenu = ($scriptArgs -contains "-Choose") -or ($scriptArgs -contains "/Choose")
-if ($wantMenu -or -not $cfg) {
-    if (-not $wantMenu) {
-        Write-Host ""
-        Write-Host "  第一次启动：先按类型选一下要用哪些模型（选完会记住，以后不再问）" -ForegroundColor Cyan
+$wantMenu = [Environment]::UserInteractive
+if (-not $wantMenu) { Step "非交互运行：用上次选的模型" }
+
+function Pick-Key($choices, $key, $fallback) {
+    # 上次选的那个还在列表里就用它，不在了就用推荐的
+    if ($key) {
+        $hit = $choices | Where-Object { $_.key -eq $key } | Select-Object -First 1
+        if ($hit) { return $hit.key }
     }
-    $pickAsr   = Read-Pick "语音识别（Whisper，CPU 上跑）" $AsrChoices   "small"
-    $pickMt    = Read-Pick "文本翻译（Hy-MT2）"          $MtChoices    "1.8b"
-    $pickClone = Read-Pick "声音克隆（Qwen3-TTS）"       $CloneChoices "1.7b"
+    return $fallback
+}
+
+if ($wantMenu) {
+    Write-Host ""
+    if ($cfg) {
+        Write-Host "  按类型选一下这次要用哪些模型（直接回车 = 上次的选择）" -ForegroundColor Cyan
+    } else {
+        Write-Host "  第一次启动：先按类型选一下要用哪些模型（选完会记住）" -ForegroundColor Cyan
+    }
+    $defAsr   = Pick-Key $AsrChoices   ($(if ($cfg) { $cfg.asr }   else { "" })) "small"
+    $defMt    = Pick-Key $MtChoices    ($(if ($cfg) { $cfg.mt }    else { "" })) "1.8b"
+    $defClone = Pick-Key $CloneChoices ($(if ($cfg) { $cfg.clone } else { "" })) "1.7b"
+    $pickAsr   = Read-Pick "语音识别（Whisper，CPU 上跑）" $AsrChoices   $defAsr
+    $pickMt    = Read-Pick "文本翻译（Hy-MT2）"          $MtChoices    $defMt
+    $pickClone = Read-Pick "声音克隆（Qwen3-TTS）"       $CloneChoices $defClone
     $cfg = @{ asr = $pickAsr.key; mt = $pickMt.key; clone = $pickClone.key }
     try {
         ($cfg | ConvertTo-Json) | Set-Content -Path $CfgFile -Encoding UTF8
@@ -133,6 +151,7 @@ if ($wantMenu -or -not $cfg) {
         Step "模型选择记不下来（$CfgFile 写不了），这次用刚才选的"
     }
 }
+if (-not $cfg) { $cfg = @{ asr = "small"; mt = "1.8b"; clone = "1.7b" } }
 
 # 翻译模型：不同大小用的量化不一样（30B 只有 Q4_K_M / Q8_0）
 $mtChoice = $MtChoices  | Where-Object { $_.key -eq $cfg.mt }  | Select-Object -First 1

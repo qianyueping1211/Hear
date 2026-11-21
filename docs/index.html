@@ -373,7 +373,7 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>当前版本</dt><dd>0.4.51</dd></div>
+        <div><dt>当前版本</dt><dd>0.4.52</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
         <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
         <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
@@ -1019,9 +1019,9 @@ section.band{scroll-margin-top:62px}
 
     <div class="note">
       <span class="h">启动时按类型选模型</span>
-      <p>Windows 部署脚本第一次启动会按<b>语音识别 / 文本翻译 / 声音克隆</b>分别问你要用哪个模型，
-         选完记在 <code>server/hear_models.json</code> 里，以后启动直接用上次的；想改就加
-         <code>-Choose</code> 再跑一次。识别可选 tiny ~ large-v3，
+      <p>Windows 部署脚本每次启动都会按<b>语音识别 / 文本翻译 / 声音克隆</b>分别问你要用哪个模型
+         （直接回车就是上次选的），选完记在 <code>server/hear_models.json</code> 里。
+         识别可选 tiny ~ large-v3，
          翻译可选 Hy-MT2 1.8B / 7B / 30B-A3B（混合专家，30B 里只激活 3B，又大又快又好），
          克隆可选 Qwen3-TTS 0.6B / 1.7B。
          手机端「在线模型」的状态后面会直接写出电脑上跑的是哪个模型。
@@ -1500,7 +1500,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.51</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.52</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>

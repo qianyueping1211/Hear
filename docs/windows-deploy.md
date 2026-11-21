@@ -8,8 +8,8 @@
 1. 装 Python 3.9 以上。安装时**勾上 `Add python.exe to PATH`**（不勾的话脚本找不到 Python）。
 2. 把仓库放本地（比如 `D:\Documents\Learn\GitHub\Hear`），或者直接跑一键启动的
    `start-hear-cloud.bat`（它会把代码、证书、服务都准备好）。
-3. 双击 `start-hear-cloud.bat`。第一次运行会问三个问题（用哪些模型），
-   选完记在 `server\hear_models.json` 里，以后启动不再问。
+3. 双击 `start-hear-cloud.bat`。每次运行都会问三个问题（用哪些模型），
+   直接回车就是上次选的那个；选完记在 `server\hear_models.json` 里。
 4. 第一次要下载模型（几 GB），网络慢的话脚本会自动换国内镜像
    （`HF_ENDPOINT=https://hf-mirror.com`），下过的不会重下。
 5. 服务起来后，窗口会打印局域网地址。手机浏览器先打开那个地址验证一下，
@@ -17,8 +17,8 @@
 
 ## 二、启动时按类型选模型
 
-脚本启动时会问三个问题，分别对应三种模型。选完写进
-`server\hear_models.json`，下次启动直接用；想改就再跑一次：
+脚本启动时会问三个问题，分别对应三种模型。**每次启动都问一次**，
+直接回车就是上次选的那个；选完写进 `server\hear_models.json`。
 
 ```
 powershell -ExecutionPolicy Bypass -File server\start-windows.ps1 -Choose
@@ -30,7 +30,7 @@ powershell -ExecutionPolicy Bypass -File server\start-windows.ps1 -Choose
 | 文本翻译（Hy-MT2） | **1.8b** / 7b / 30b | 1.1 GB ~ 18 GB | `1.8b` 快；`7b` 更准（内存 8G 以上）；`30b` 是混合专家，30B 里只激活 3B，**又大又快又好**，内存要 24G 以上 |
 | 声音克隆（Qwen3-TTS） | 0.6b / **1.7b** | 0.6 GB ~ 1.1 GB | `1.7b` 更像原声，推荐 |
 
-带粗体的是推荐值，直接回车就选它。
+带粗体的是推荐值。已经有选择记录时，默认的就是上次选的那个（菜单里会标出来）。
 
 环境变量仍然可以覆盖菜单的选择（`HEAR_ASR_MODEL` / `HEAR_MT_QUANT` /
 `HEAR_MT_DEVICE` / `HEAR_CLONE_DEVICE` / `HEAR_CTX` / `HEAR_PORT` 等），
