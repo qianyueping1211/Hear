@@ -46,7 +46,10 @@ actor LlamaTranslator {
     private var ctx: OpaquePointer?
     private var vocab: OpaquePointer?
     private var sampler: UnsafeMutablePointer<llama_sampler>?
-    private let nCtx: UInt32 = 4096
+    // 句子级实时翻译不需要 4K 上下文。2K 上下文、256 批处理
+    // 能明显降低 KV cache 和临时 batch 的内存峰值，仍足够容纳
+    // 两段上下文、术语表和最多 512 个输出 token。
+    private let nCtx: UInt32 = 2048
     private(set) var loadedPath: String?
 
     private static let backendOnce: Void = { LlamaBackend.ensureReady() }()
@@ -66,7 +69,7 @@ actor LlamaTranslator {
 
         var cp = llama_context_default_params()
         cp.n_ctx = nCtx
-        cp.n_batch = nCtx
+        cp.n_batch = 256
         let threads = Int32(max(2, min(6, ProcessInfo.processInfo.activeProcessorCount - 1)))
         cp.n_threads = threads
         cp.n_threads_batch = threads

@@ -13,7 +13,9 @@ actor CloneCache {
     /// 内存里再留一份 recently used 的，命中就不用读盘
     private var memory: [String: CloneAudio] = [:]
     private var order: [String] = []
-    private let limit = 60
+    // 生成音频还会落盘缓存，内存只保留最近几段；
+    // 避免三个本地模型同时运行时再占住几十 MB 音频。
+    private let limit = 16
 
     init() {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
