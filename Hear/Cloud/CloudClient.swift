@@ -270,6 +270,11 @@ actor CloudClient {
         case badResponse(String)
         case net(String)          // 网络不通，说清楚为什么
 
+        var shouldKeepConfiguredEngine: Bool {
+            if case .http(let status, _) = self { return [401, 403, 429, 503].contains(status) }
+            return false
+        }
+
         var errorDescription: String? {
             switch self {
             case .notConfigured: return "还没填云端模型地址"
@@ -356,10 +361,10 @@ actor CloudClient {
 
     /// 这个地址上跑的是哪种服务
     /// （探测失败时不缓存：可能只是暂时连不上，下次还要再问一次）
-    func kind(of address: String) async -> ServiceKind {
+    func kind(of address: String, timeout: TimeInterval = 5) async -> ServiceKind {
         let a = Self.cleanURL(address)
         if let k = kinds[a] { return k }
-        if let info = await Self.probe(address: a) {
+        if let info = await Self.probe(address: a, timeout: timeout) {
             kinds[a] = info.kind
             return info.kind
         }
@@ -602,11 +607,11 @@ actor CloudClient {
     }
 
     /// 顺便看一下这个地址上跑的是哪种服务
-    static func probe(address: String) async -> (kind: ServiceKind, health: [String: String])? {
+    static func probe(address: String, timeout: TimeInterval = 5) async -> (kind: ServiceKind, health: [String: String])? {
         let s = cleanURL(address)
         guard !s.isEmpty, let url = URL(string: s + "/health") else { return nil }
         var req = URLRequest(url: url)
-        req.timeoutInterval = 5
+        req.timeoutInterval = timeout
         guard let (data, resp) = try? await CloudClient.session.data(for: req),
               let code = (resp as? HTTPURLResponse)?.statusCode else { return nil }
         var out: [String: String] = [:]
@@ -828,7 +833,8 @@ actor CloudClient {
             // 总时限到了就别再试下一个地址了
             if let d = deadline, Date() >= d { break }
             // 单独的 llama-server 没有识别接口，识别只能用 8000 的总服务
-            if await kind(of: addr) == .llamaServer {
+            let probeBudget = deadline.map { min(5, max(0.05, $0.timeIntervalSinceNow)) } ?? 5
+            if await kind(of: addr, timeout: probeBudget) == .llamaServer {
                 sawOnlyModelService = true
                 continue
             }

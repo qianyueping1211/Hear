@@ -1876,14 +1876,17 @@ final class LiveSession: ObservableObject {
         // 记住是哪一页：用户可能已经新建对话了，译文要写回原来那一页
         let convID = conversationID
         for (id, text, src, tgt) in pending {
+            let version = itemVersions[id] ?? 0
             Task { [weak self] in
                 guard let self else { return }
                 do {
                     let out = try await self.translateFinal(text, from: src, to: tgt, context: []) { _ in }
+                    guard (self.itemVersions[id] ?? 0) == version else { return }
                     self.applyTranslation(id, out, done: true, conversation: convID, expectedSource: text)
                     self.kickReader()          // 译完了，朗读那边等着这句呢
                 } catch {
                     hearLog("补翻译失败：\(error)", .error)
+                    guard (self.itemVersions[id] ?? 0) == version else { return }
                     self.applyTranslation(id, "（翻译失败）", done: true, conversation: convID, expectedSource: text)
                     self.kickReader()
                 }
@@ -2377,7 +2380,8 @@ final class LiveSession: ObservableObject {
                 if let out = try? await fallbackTranslate(text, from: src, to: tgt) { return out }
             case .cloud:
                 hearLog("云端翻译失败：\(error)", .error)
-                if cloudFallbackToApple(.mt, reason: error.localizedDescription) {
+                let keepEngine = (error as? CloudClient.CloudError)?.shouldKeepConfiguredEngine ?? false
+                if !keepEngine, cloudFallbackToApple(.mt, reason: error.localizedDescription) {
                     let alternate: SessionTextEngine = usingAppleTranslation ? .system(systemTranslator) : .local(translator)
                     return try await alternate.translate(text: text, source: src, target: tgt, context: context,
                                                          glossary: glossary, onPartial: onPartial)
@@ -2859,7 +2863,8 @@ final class LiveSession: ObservableObject {
         } catch {
             guard !Task.isCancelled, gen == runGen, isCurrentJob(itemID, token: token) else { return }
             hearLog("识别失败：\(error)", .error)
-            if usingCloudASR {
+            let keepEngine = (error as? CloudClient.CloudError)?.shouldKeepConfiguredEngine ?? false
+            if usingCloudASR, !keepEngine {
                 cloudFallbackToApple(.asr, reason: error.localizedDescription)
             }
             if gen == runGen, isCurrentJob(itemID, token: token) {
@@ -3869,8 +3874,11 @@ final class LiveSession: ObservableObject {
                         out = try await cloud.clone(text: text, lang: cloudLang,
                                                     reference: refSamples, referenceText: refText)
                     } catch {
-                        let why = error.localizedDescription
-                        await MainActor.run { self.cloudFallbackToApple(.clone, reason: why) }
+                        let keepEngine = (error as? CloudClient.CloudError)?.shouldKeepConfiguredEngine ?? false
+                        if !Task.isCancelled, !keepEngine {
+                            let why = error.localizedDescription
+                            await MainActor.run { self.cloudFallbackToApple(.clone, reason: why) }
+                        }
                         return nil
                     }
                     hearLogNow("声音克隆（云端）：结束，生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")

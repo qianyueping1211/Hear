@@ -21,15 +21,15 @@ struct SessionJobQueueTests {
         let process: @MainActor (Int) async -> Void = { handled.append($0) }
         let failure: @MainActor (Int) -> Void = { timedOut.append($0) }
 
-        queue.submit(1) { _ in try? await Task.sleep(for: .seconds(20)) } timedOut: failure
+        queue.submit(1, process: { _ in try? await Task.sleep(for: .seconds(20)) }, timedOut: failure)
         queue.submit(2, process: process, timedOut: failure)
         await until { queue.isIdle }
         precondition(handled == [2] && timedOut == [1], "A timed-out job blocked the next one")
 
-        queue.submit(3) { _ in
+        queue.submit(3, process: { _ in
             oldWorkerStarted = true
             try? await Task.sleep(for: .seconds(20))
-        } timedOut: failure
+        }, timedOut: failure)
         await until { oldWorkerStarted }
         queue.cancel()
         queue.submit(4, process: process, timedOut: failure)

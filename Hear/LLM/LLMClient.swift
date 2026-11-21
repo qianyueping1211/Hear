@@ -290,7 +290,9 @@ enum LLMClient {
         let s = base.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let u = URL(string: s), let host = u.host else { return s }
         let port = u.port.map { ":\($0)" } ?? ""
-        return "\(host)\(port)"
+        var path = u.path
+        while path.hasSuffix("/") { path.removeLast() }
+        return "\(host)\(port)\(path)"
     }
 
     /// 用户确认过的"明文发送"地址（按 host:port 记）
