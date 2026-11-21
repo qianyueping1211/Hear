@@ -547,13 +547,9 @@ final class CloudSync: ObservableObject {
         // 核对发现自己刚写的东西不见了，就再合并一次再写（最多三次）。
         var wrote = false
         for attempt in 0..<3 {
-            if let latest = await Self.readManifest(dir) {
-                manifest = Self.mergeManifest(latest, manifest)
-            }
-            manifest.updatedAt = Date()
-            guard let data = try? Self.encoder.encode(manifest) else { break }
-            let ok = await Self.io { Self.write(data, to: manifestURL) }
-            if !ok { break }
+            let candidate = manifest
+            guard let stored = await Self.io({ Self.publishManifest(candidate, to: manifestURL) }) else { break }
+            manifest = stored
             guard let after = await Self.readManifest(dir) else { continue }
             let includesConversations = manifest.conversations.allSatisfy { key, revision in
                 max(after.conversations[key] ?? .distantPast, after.deleted[key] ?? .distantPast) >= revision
@@ -635,7 +631,7 @@ final class CloudSync: ObservableObject {
         parseSettings(await read(dir.appendingPathComponent("settings.plist")))
     }
     /// 两份清单合并：每页取更新的那个时间，删除记录也取更新的那个
-    private static func mergeManifest(_ a: Manifest, _ b: Manifest) -> Manifest {
+    private nonisolated static func mergeManifest(_ a: Manifest, _ b: Manifest) -> Manifest {
         var out = a
         for (k, v) in b.conversations {
             if let cur = out.conversations[k] { out.conversations[k] = max(cur, v) }
@@ -707,6 +703,39 @@ final class CloudSync: ObservableObject {
             out = try? Data(contentsOf: u)
         }
         return out
+    }
+
+    /// Coordinate the read/merge/write as one operation. Each device still verifies
+    /// the result after upload, because iCloud can deliver changes later.
+    private nonisolated static func publishManifest(_ candidate: Manifest, to url: URL) -> Manifest? {
+        var result: Manifest?
+        var coordinationError: NSError?
+        NSFileCoordinator().coordinate(writingItemAt: url, options: .forReplacing,
+                                       error: &coordinationError) { path in
+            let latest: Manifest
+            if FileManager.default.fileExists(atPath: path.path) {
+                guard let bytes = try? Data(contentsOf: path), let parsed = parseManifest(bytes) else { return }
+                latest = parsed
+            } else {
+                guard !isCloudPlaceholder(path) else { return }
+                latest = Manifest()
+            }
+            var merged = mergeManifest(latest, candidate)
+            // Remove stale conversation entries that are covered by a deletion.
+            for (key, timestamp) in merged.deleted where timestamp >= (merged.conversations[key] ?? .distantFuture) {
+                merged.conversations[key] = nil
+            }
+            merged.updatedAt = Date()
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            guard let data = try? encoder.encode(merged),
+                  let encodedRevision = parseManifest(data),
+                  (try? data.write(to: path, options: .atomic)) != nil else { return }
+            // Compare the exact version on disk (ISO 8601 stores whole seconds).
+            result = encodedRevision
+        }
+        return coordinationError == nil ? result : nil
     }
 
     @discardableResult

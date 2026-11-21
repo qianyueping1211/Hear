@@ -1313,7 +1313,7 @@ def main():
     log("克隆后端：%s" % CLONE_URL)
     log("识别后端：%s" % (ASR_URL or "本机 faster-whisper（%s）" % ASR_MODEL))
     # 这些都在后台做，不要挡住服务接收请求
-    if not ASR_URL:
+    if not ASR_URL and ASR_SCHEME != "sensevoice":
         threading.Thread(target=preload_whisper, daemon=True).start()
     threading.Thread(target=warm_backends, daemon=True).start()
     threading.Thread(target=self_check, daemon=True).start()

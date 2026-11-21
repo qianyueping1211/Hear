@@ -197,6 +197,51 @@ trap {
     exit 1
 }
 
+# Only stop instances recorded by this installation. PID alone can be reused.
+$ProcessLedger = Join-Path $ServerDir ".hear-processes.json"
+$OwnedProcesses = @{}
+try {
+    foreach ($entry in @(Get-Content -LiteralPath $ProcessLedger -Raw -ErrorAction Stop | ConvertFrom-Json)) {
+        if ($entry) { $OwnedProcesses[[string]$entry.Id] = $entry }
+    }
+} catch { }
+
+function Get-HearProcessIdentity($Process) {
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $Process.Id) -ErrorAction Stop
+        if (-not $proc.ExecutablePath -or -not $proc.CommandLine) { return $null }
+        return [pscustomobject]@{
+            Id = $Process.Id
+            StartTicks = [string]$Process.StartTime.ToUniversalTime().Ticks
+            Executable = $proc.ExecutablePath
+            CommandLine = $proc.CommandLine
+        }
+    } catch { return $null }
+}
+
+function Record-HearProcess($Process) {
+    $identity = Get-HearProcessIdentity $Process
+    if (-not $identity) { return }
+    $OwnedProcesses[[string]$identity.Id] = $identity
+    $tempLedger = "$ProcessLedger.new"
+    try {
+        ConvertTo-Json -InputObject @($OwnedProcesses.Values) -Compress |
+            Set-Content -LiteralPath $tempLedger -Encoding UTF8
+        Move-Item -LiteralPath $tempLedger -Destination $ProcessLedger -Force
+    } catch {
+        Write-Warning "Hear process ownership could not be saved."
+    }
+}
+
+function Test-HearProcessOwnership($Process) {
+    $before = $OwnedProcesses[[string]$Process.Id]
+    if (-not $before) { return $false }
+    $current = Get-HearProcessIdentity $Process
+    return ($current -and $before.StartTicks -eq $current.StartTicks -and
+            $before.Executable -eq $current.Executable -and
+            $before.CommandLine -ceq $current.CommandLine)
+}
+
 function Say($t)  { Write-Host "==> $t" -ForegroundColor Cyan }
 function Step($t) { Write-Host "    $t" -ForegroundColor DarkGray }
 function Die($t)  { Write-Host "!! $t" -ForegroundColor Red; exit 1 }
@@ -427,6 +472,7 @@ $env:HEAR_SENSEVOICE_DIR = $SvDir
         $tempCloud = Start-Process -FilePath $py0 -ArgumentList "`"$cloudScript`"" `
                         -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $ServerDir "cloud.log") `
                         -RedirectStandardError (Join-Path $ServerDir "cloud.log.err")
+        Record-HearProcess $tempCloud
         Start-Sleep -Seconds 2
         Say "临时服务已启动（端口 $Port），现在就能在手机浏览器上测网络"
         Write-Host "    电脑浏览器： https://127.0.0.1:$Port/" -ForegroundColor Cyan
@@ -536,38 +582,14 @@ foreach ($p in @($Port, $MtPort, $ClonePort)) {
         foreach ($c in $busy) {
             $owner = (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue)
             if (-not $owner) { continue }
-            # 先看清楚这个进程是谁：只有"听见"自己起的进程才停，
-            # 别的程序（别人也在跑 python 服务）不能乱杀
-            $cmd = ""
-            try {
-                $w = Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue
-                if ($w) { $cmd = "$($w.CommandLine)" }
-            } catch { $cmd = "" }
-            $ours = $false
-            $unknown = $false
-            if ($cmd) {
-                # 要同时满足：是我们这个目录里的脚本 / 模型，
-                # 光是命令行里出现个同名文件不算（别的程序也可能提到它）
-                $isPython = ($cmd -like "*python*")
-                $hasScript = ($cmd -like "*hear_cloud.py*") -and ($cmd -like "*$ServerDir*")
-                $hasModel = ($owner.ProcessName -like "llama-server*") -and ($cmd -like "*$ModelDir*")
-                $ours = ($isPython -and $hasScript) -or $hasModel
-            } else {
-                # 拿不到命令行（权限不够）：没法确认是谁的，就不动它
-                $unknown = $true
-            }
+            $ours = Test-HearProcessOwnership $owner
             if ($ours) {
                 Step "停掉占着端口 $p 的旧进程（$($owner.ProcessName)）"
                 try { Stop-Process -Id $c.OwningProcess -Force } catch {}
             } else {
                 Write-Host ""
                 Write-Host "!! 端口 $p 被别的程序占着：$($owner.ProcessName)（PID $($c.OwningProcess)）" -ForegroundColor Yellow
-                if ($cmd) { Write-Host "   它的命令行：$cmd" -ForegroundColor DarkGray }
-                if ($unknown) {
-                    Write-Host "   查不到它的命令行（权限不够），没法确认是不是「听见」起的进程，所以我没动它。" -ForegroundColor Yellow
-                } else {
-                    Write-Host "   那是别的程序，我没动它（不该乱杀你机器上别的服务）。" -ForegroundColor Yellow
-                }
+                Write-Host "   Instance ownership could not be verified; it was left running." -ForegroundColor Yellow
                 Write-Host "   把那个程序关掉再跑一次就行；" -ForegroundColor Yellow
                 Write-Host "   或者换三个端口跑：set HEAR_PORT=8010 && set HEAR_MT_PORT=8091 && set HEAR_CLONE_PORT=8092" -ForegroundColor Yellow
                 Write-Host ""
@@ -607,6 +629,7 @@ if (-not (Test-Path $certFile)) {
 
 $cloud = Start-Process -FilePath $venvPy -ArgumentList "`"$cloudScript`"" `
             -PassThru -NoNewWindow
+Record-HearProcess $cloud
 Start-Sleep -Seconds 3
 Say "云端服务已启动（端口 $Port），模型还在准备中"
 Write-Host "    电脑浏览器打开 https://127.0.0.1:$Port/ 看看服务在不在（自签证书，浏览器会提示不安全，点继续就行）" -ForegroundColor Cyan
@@ -703,7 +726,7 @@ $mtLog = Join-Path $ServerDir "mt.log"
 $mt = Start-Process -FilePath $mtServer -ArgumentList $mtArgs -PassThru -NoNewWindow `
         -RedirectStandardOutput $mtLog -RedirectStandardError "$mtLog.err"
 $procs += $mt
-
+Record-HearProcess $mt
 $cloneArgs = @("-m", (Join-Path $ModelDir $CloneModelFile),
                 "--mmproj", (Join-Path $ModelDir $CloneMmprojFile),
                 "--host", $ModelHost, "--port", $ClonePort, "-c", $Context, "--no-warmup")
@@ -714,7 +737,7 @@ $cloneLog = Join-Path $ServerDir "clone.log"
 $clone = Start-Process -FilePath $cloneServer -ArgumentList $cloneArgs -PassThru -NoNewWindow `
             -RedirectStandardOutput $cloneLog -RedirectStandardError "$cloneLog.err"
 $procs += $clone
-
+Record-HearProcess $clone
 function Wait-Health($url, $name, $logName, $proc) {
     # 模型大的时候要加载一会儿，给足 10 分钟
     for ($i = 0; $i -lt 300; $i++) {
@@ -757,6 +780,7 @@ if (-not $mtOk -and $MtDevice -ne "CPU") {
         $mt = Start-Process -FilePath $cpuMt -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $mtLog -RedirectStandardError "$mtLog.err"
         $procs += $mt
+        Record-HearProcess $mt
         $mtOk = Wait-Health "http://127.0.0.1:$MtPort" "翻译模型（CPU）" "mt.log" $mt
     }
 }
@@ -773,6 +797,7 @@ if (-not $cloneOk -and $CloneDevice -ne "CPU") {
         $clone = Start-Process -FilePath $cpuClone -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $cloneLog -RedirectStandardError "$cloneLog.err"
         $procs += $clone
+        Record-HearProcess $clone
         $cloneOk = Wait-Health "http://127.0.0.1:$ClonePort" "声音克隆模型（CPU）" "clone.log" $clone
     }
 }

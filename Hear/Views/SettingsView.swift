@@ -157,11 +157,11 @@ struct SettingsView: View {
                         Text("云端服务引擎").tag("cloud")
                         Text("本地引擎").tag("local")
                     }
+                    Picker("本地克隆模型", selection: zipVoiceBinding) {
+                        Text("Qwen3-TTS").tag(false)
+                        Text("ZipVoice（试验）").tag(true)
+                    }
                     if !session.voiceCloneCloud {
-                        Picker("本地克隆模型", selection: zipVoiceBinding) {
-                            Text("Qwen3-TTS").tag(false)
-                            Text("ZipVoice（试验）").tag(true)
-                        }
                         if session.useZipVoice {
                             Button("导入 ZipVoice 模型文件夹") {
                                 lastImportKind = .voiceClone
@@ -175,7 +175,8 @@ struct SettingsView: View {
                         Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
                     }
                     if session.voiceClone, !session.voiceCloneCloud, !session.isInstalled(.voiceClone) {
-                        Text("声音克隆模型还没下载").font(.footnote).foregroundStyle(.orange)
+                        Text(session.useZipVoice ? "请导入 ZipVoice 模型文件夹" : "声音克隆模型还没下载")
+                            .font(.footnote).foregroundStyle(.orange)
                     }
                     if cloudMissingAddress {
                         Text("选了云端引擎，但还没填云端模型地址").font(.footnote).foregroundStyle(.orange)

@@ -24,9 +24,20 @@ enum AudioRoute {
     private static var appliedOutput: AudioOutput?
 
     /// 正在收音（要麦克风）
-    static var capturing = false
-    /// 正在放声音（只是播放）
-    static var speaking = false
+    private static let sessionLock = NSRecursiveLock()
+    private static var captureRequested = false
+    private static var playbackRequested = false
+
+    static var capturing: Bool {
+        get { sessionLock.lock(); defer { sessionLock.unlock() }; return captureRequested }
+        set { sessionLock.lock(); defer { sessionLock.unlock() }; captureRequested = newValue }
+    }
+
+    /// Also true while the next audio buffer is being prepared.
+    static var speaking: Bool {
+        get { sessionLock.lock(); defer { sessionLock.unlock() }; return playbackRequested }
+        set { sessionLock.lock(); defer { sessionLock.unlock() }; playbackRequested = newValue }
+    }
 
     /// 按当前状态设置音频会话。
     ///
@@ -40,6 +51,8 @@ enum AudioRoute {
     /// 用手机麦克风时，蓝牙耳机走高音质 A2DP（只播放）；
     /// 用耳机麦克风时，需要蓝牙通话模式（HFP），耳机播放会变成单声道通话音质。
     static func updateSession() throws {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
         let s = AVAudioSession.sharedInstance()
         if capturing {
             // .defaultToSpeaker：没有耳机时走扬声器（不是听筒）。
@@ -98,6 +111,8 @@ enum AudioRoute {
     /// 必须在后台线程调用：关会话时蓝牙耳机会从通话模式切回音乐模式，
     /// 要好几百毫秒，卡住主线程会让界面发涩。
     static func deactivate() {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
         if capturing { return }          // 还在收音，不能停会话
         if speaking { return }           // 还在放声音：停了会把声音切断
         genLock.lock(); deactivateGen += 1; genLock.unlock()
@@ -166,6 +181,8 @@ enum AudioRoute {
     ///
     /// 每次改路由都会打断正在播放的声音、让麦克风重新连接，已经是对的就别动。
     static func apply(_ output: AudioOutput) {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
         lastOutput = output
         guard appliedOutput != output else { return }
         let s = AVAudioSession.sharedInstance()

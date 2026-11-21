@@ -8,7 +8,13 @@ final class SessionJobQueue<Job> {
         var finished = false
     }
 
-    private var pending: [Job] = []
+    private struct Entry {
+        let job: Job
+        let process: @MainActor (Job) async -> Void
+        let timedOut: @MainActor (Job) -> Void
+    }
+
+    private var pending: [Entry] = []
     private var worker: Task<Void, Never>?
     private var generation = 0
     private let timeout: Duration
@@ -29,25 +35,24 @@ final class SessionJobQueue<Job> {
 
     func submit(_ job: Job, process: @escaping @MainActor (Job) async -> Void,
                 timedOut: @escaping @MainActor (Job) -> Void) {
-        pending.append(job)
+        pending.append(Entry(job: job, process: process, timedOut: timedOut))
         guard worker == nil else { return }
         let round = generation
         worker = Task { [weak self] in
             guard let self else { return }
-            await self.drain(round, process: process, timedOut: timedOut)
+            await self.drain(round)
         }
     }
 
-    private func drain(_ round: Int, process: @escaping @MainActor (Job) async -> Void,
-                       timedOut: @escaping @MainActor (Job) -> Void) async {
+    private func drain(_ round: Int) async {
         defer { if generation == round { worker = nil } }
         let clock = ContinuousClock()
         while generation == round, !Task.isCancelled, !pending.isEmpty {
-            let job = pending.removeFirst()
+            let entry = pending.removeFirst()
             let completion = Completion()
             let task = Task {
                 defer { completion.finished = true }
-                await process(job)
+                await entry.process(entry.job)
             }
             let deadline = clock.now.advanced(by: timeout)
             while !completion.finished, clock.now < deadline, !Task.isCancelled {
@@ -57,7 +62,7 @@ final class SessionJobQueue<Job> {
             guard !completion.finished else { continue }
             task.cancel()
             guard generation == round, !Task.isCancelled else { return }
-            timedOut(job)
+            entry.timedOut(entry.job)
         }
     }
 }

@@ -118,6 +118,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     /// 返回 .failed 表示没能播出来（引擎起不来之类），调用方可以退回系统声音；
     /// 返回 .cancelled 表示这次是被停掉的——这时候千万别再出声。
     func play(samples: [Float], sampleRate: Double, pan: Float) async -> PlayOutcome {
+        guard !samples.isEmpty else { return .failed }
         stop()
         // 重新激活音频会话会把"输出到哪"重置掉（setCategory 会清掉 override），
         // 这里再应用一次，保证声音真的从耳机出来
@@ -126,7 +127,6 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         // 收音的时候不动会话：会话一改，正在跑的麦克风会被打断
         if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         AudioRoute.apply(AudioRoute.lastOutput)
-        guard !samples.isEmpty else { return .failed }
         // 采样率是 0 的话下面算时长会除出无穷大，Dispatch 会直接崩，这里兜一下
         let sr = sampleRate > 0 ? sampleRate : 24_000
 

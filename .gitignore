@@ -26,3 +26,5 @@ server/certs_bak/
 
 # 每台电脑自己选的模型（启动脚本问完记在这里）
 server/hear_models.json
+server/.hear-processes.json*
+server/.hear-start-*.ps1
