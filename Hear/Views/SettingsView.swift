@@ -633,7 +633,6 @@ struct SettingsView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(session.isBusyWithModels && !paused)
             }
         }
     }
