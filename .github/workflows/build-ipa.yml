@@ -107,7 +107,7 @@ jobs:
             -skipPackagePluginValidation \
             -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            CURRENT_PROJECT_VERSION=${{ github.run_number }} MARKETING_VERSION=${VER} \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} MARKETING_VERSION=${VER} HEAR_SOURCE_REVISION="$GITHUB_SHA" \
             build > build.log 2>&1 || RC=$?
           grep -E "error:|warning: .*deprecated|BUILD" build.log | tail -30 || true
           if [ "$RC" -ne 0 ] || ! test -f build/Build/Products/Release-iphoneos/Hear.app/Hear; then
@@ -124,7 +124,7 @@ jobs:
           zip -qry "Hear-${VER}.ipa" Payload
           ls -lh "Hear-${VER}.ipa"
 
-      # 发布：标签和标题都用版本号（例如 v1.0.0 / 听见 1.0.0）。同一版本号重新打包会覆盖原来的发布
+      # 重建同一个版本号时使用带构建号的新标签，确保安装包对应源代码。
       - name: Publish release
         if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[no release]')
         env:
@@ -137,7 +137,7 @@ jobs:
             echo "**更新内容：** $(printf '%s' "${COMMIT_MSG:-手动打包}" | head -1)"
             echo ""
             echo "源代码提交：$(git rev-parse HEAD)"
-            echo "构建号：\${GITHUB_RUN_NUMBER}"
+            echo "构建号：${GITHUB_RUN_NUMBER}"
             echo "llama.cpp：$(cat Frameworks/LLAMA_VERSION)"
             echo ""
             echo "### 安装"

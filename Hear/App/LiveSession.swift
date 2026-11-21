@@ -1251,9 +1251,9 @@ final class LiveSession: ObservableObject {
                     Task { @MainActor in self.setProgress(name, p) }
                 }
                 if kind == .senseVoice {
-                    try await SenseVoiceRecognizer.download(host: host, force: force, progress: onProgress)
+                    try await SenseVoiceRecognizer.download(host: host, progress: onProgress)
                 } else {
-                    _ = try await ModelManager.downloadWhisper(host: host, force: force, progress: onProgress)
+                    _ = try await ModelManager.downloadWhisper(host: host, progress: onProgress)
                 }
                 modelsRevision += 1
             }
@@ -2540,50 +2540,8 @@ final class LiveSession: ObservableObject {
         guard !appleEngines.isEmpty, isRunning, currentSeg > finishedSeg, partialSeg == currentSeg,
               let b = bestApple(currentSeg), SpeechRecognizer.isMeaningful(b.text) else { return }
         partialSource = b.lang
-        // 中间停顿过的一句话：系统听写会把上一句的内容再带一遍，这里只显示新说的部分
-        var text = b.text
-        if let c = continuation(of: b.text, lang: b.lang, segID: currentSeg) {
-            guard SpeechRecognizer.isMeaningful(c.rest) else { partial = "…"; return }
-            text = c.rest
-        }
-        partial = text
-        requestPreviewTranslation(id: currentSeg, text: text, src: b.lang, tgt: b.lang == langA ? langB : langA)
-    }
-
-    /// 上一条苹果听写定稿的句子（用来识别“同一句话被拆成两段”）
-    private var lastCommit: (id: UUID, segID: Int, text: String, lang: Language, at: Date)?
-
-    /// text 是不是上一句的延续（开头和上一句基本一样）。是的话返回上一句的 id 和新多出来的部分
-    private func continuation(of text: String, lang: Language, segID: Int) -> (prevID: UUID, rest: String)? {
-        guard let c = lastCommit, c.lang == lang, Date().timeIntervalSince(c.at) < 12,
-              items.contains(where: { $0.id == c.id }) else { return nil }
-        // 两句在时间上挨得近吗？
-        // 挨得不近说明是用户真的又说了一遍，不能合并；
-        // 拿不到时间（不知道）的时候也不合并——
-        // 宁可多出一条，也别把用户说的第二遍吞掉。
-        guard let adjacent = appleAdjacent(c.segID, segID), adjacent else { return nil }
-        func norm(_ s: String) -> [Character] {
-            Array(s.lowercased().filter { $0.isLetter || $0.isNumber })
-        }
-        let a = norm(c.text), b = norm(text)
-        guard a.count >= 2 else { return nil }
-        var same = 0
-        while same < a.count, same < b.count, a[same] == b[same] { same += 1 }
-        // 系统听写后面会更正前面的字，所以不要求完全一样：前 80% 对得上就算同一句
-        guard same >= max(2, Int((Double(a.count) * 0.8).rounded(.up))) else { return nil }
-        // 但得是真的"后面补充了内容"：字数没变（用户连着说了两遍一样的话）
-        // 不能合并——那样会把用户说的第二遍吞掉
-        guard b.count > a.count else { return nil }
-        // 跳过已经对上的字，剩下的就是新说的
-        var skipped = 0
-        var idx = text.startIndex
-        while idx < text.endIndex, skipped < same {
-            let ch = text[idx]
-            if ch.isLetter || ch.isNumber { skipped += 1 }
-            idx = text.index(after: idx)
-        }
-        let rest = String(text[idx...]).trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
-        return (c.id, rest)
+        partial = b.text
+        requestPreviewTranslation(id: currentSeg, text: b.text, src: b.lang, tgt: b.lang == langA ? langB : langA)
     }
 
     /// 把新的快照接到已经稳定的那一段后面。
@@ -2606,19 +2564,6 @@ final class LiveSession: ObservableObject {
         }
         // 实在对不上：标出来，别装作是一句完整的话
         return old + " … " + new
-    }
-
-    /// 两段声音在时间上挨不挨着（拿不到范围就返回 nil，表示不知道）
-    private func appleAdjacent(_ prevSeg: Int, _ seg: Int) -> Bool? {
-        for e in appleEngines {
-            guard let a = e.segmentRange(prevSeg), let b = e.segmentRange(seg) else { continue }
-            // 后一句开始的时候，前一句已经结束多久了（负数=有重叠）。
-            // 系统听写"更正"上一句的时候，两段是挨着的（重叠或者只隔一点点）；
-            // 用户重新说一遍的话，中间会有一段停顿——那个不能合并。
-            let gap = b.start - a.end
-            return gap < 0 && b.start >= a.start
-        }
-        return nil
     }
 
     /// 等系统听写把这一段定稿（最多等这么久）。
@@ -2674,7 +2619,6 @@ final class LiveSession: ObservableObject {
         lastLangID = src.id
         hearLogText("系统听写（\(src.name)）：", String(spoken.prefix(40)))
 
-        lastCommit = (itemID, segID, spoken, src, Date())
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
         let old = items[idx]
         let preview = old.source == src ? old.translated : ""

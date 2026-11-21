@@ -315,15 +315,7 @@ actor SpeechRecognizer {
                     "Thank you for watching", "Thanks for watching", "Subtitles by", "明镜", "请不吝",
                     "Продолжение следует", "Субтитры", "Редактор субтитров", "ご視聴ありがとうございました",
                     "MBC 뉴스", "시청해주셔서"]
-        // 黑名单：整句就是这些短语才丢。
-        // 长句里顺带提到"谢谢观看""字幕"这种，不能把整句话丢掉；
-        // 短句也一样：像"字幕由你提供"这种是真的有人在说话，不能因为里面
-        // 有"字幕由"三个字就把整句丢了——只有四个字以上的整句黑名单短语
-        // 才允许"包含即丢"。
-        if junk.contains(where: { p in
-            if t.localizedCaseInsensitiveCompare(p) == .orderedSame { return true }
-            return p.count >= 4 && t.count <= 8 && t.localizedCaseInsensitiveContains(p)
-        }) { return false }
+        if junk.contains(where: { t.localizedCaseInsensitiveCompare($0) == .orderedSame }) { return false }
         if t.hasPrefix("[") || t.hasPrefix("(") || t.hasPrefix("（") { return false }
         // 背景声的描述，例如 *Humming*、♪音乐♪、(笑声)
         let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)

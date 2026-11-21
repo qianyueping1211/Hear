@@ -1,6 +1,7 @@
 import Foundation
 import llama
 import AVFoundation
+import os
 
 /// 声音克隆朗读：Qwen3-TTS 0.6B（GGUF，走 llama.cpp，和翻译模型共用同一套运行时）。
 ///
@@ -233,6 +234,8 @@ actor GGUFVoiceCloner {
         // 这里绝不能调 llama_backend_free()：翻译模型还在用，释放了会把它的运行时一起关掉。
         LlamaBackend.ensureReady()
 
+        let started = ContinuousClock.now
+        Self.logMemory("开始加载", since: started)
         // 骨架模型：内存够就整个放 GPU
         usingGPU = useGPU
         var mp = llama_model_default_params()
@@ -241,6 +244,7 @@ actor GGUFVoiceCloner {
             throw VoiceCloneGGUFError.loadFailed("backbone")
         }
         model = m
+        Self.logMemory("主模型已加载", since: started)
 
         // 上下文：需要 embedding 模式才能把 hidden state 传给音频生成器
         var cp = llama_context_default_params()
@@ -257,6 +261,7 @@ actor GGUFVoiceCloner {
             throw VoiceCloneGGUFError.loadFailed("context")
         }
         ctx = c
+        Self.logMemory("推理上下文已创建", since: started)
 
         // mmproj：语音 tokenizer 的编码器 + 解码器
         var mp2 = mtmd_context_params_default()
@@ -284,7 +289,13 @@ actor GGUFVoiceCloner {
             throw VoiceCloneGGUFError.loadFailed("gen")
         }
         gen = g
+        Self.logMemory("语音模块已就绪", since: started)
         hearLog("声音克隆（GGUF）：加载完成\(useGPU ? "" : "（CPU 运行：内存紧张，速度较慢）")")
+    }
+
+    private static func logMemory(_ stage: String, since start: ContinuousClock.Instant) {
+        let availableMB = os_proc_available_memory() / 1_048_576
+        hearLog("Qwen3 \(stage)：进程可用内存 \(availableMB) MB，耗时 \(start.duration(to: .now))")
     }
 
     func unload() {
@@ -312,6 +323,10 @@ actor GGUFVoiceCloner {
             throw VoiceCloneGGUFError.unsupportedLanguage
         }
         guard !text.isEmpty else { return CloneAudio(samples: [], sampleRate: VoiceCloneGGUF.sampleRate) }
+
+        let started = ContinuousClock.now
+        Self.logMemory("开始合成", since: started)
+        defer { Self.logMemory("合成结束", since: started) }
 
         // 0) 先把上下文清空
         //    Qwen3-TTS 这条管线在生成完以后不会自己清 KV 缓存，

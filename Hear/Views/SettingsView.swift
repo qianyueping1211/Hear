@@ -365,6 +365,9 @@ struct SettingsView: View {
                 // MARK: 关于
                 Section {
                     LabeledContent("版本", value: Self.appVersion)
+                    if let revision = Bundle.main.object(forInfoDictionaryKey: "HearSourceRevision") as? String {
+                        LabeledContent("源代码提交", value: String(revision.prefix(12)))
+                    }
                 } header: {
                     Text("关于")
                 }

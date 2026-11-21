@@ -7,6 +7,9 @@ struct HearApp: App {
     init() {
         // 崩溃/被杀掉的诊断：越早装上越好
         CrashGuard.shared.install()
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
+        let revision = Bundle.main.infoDictionary?["HearSourceRevision"] as? String ?? "-"
+        AppLog.appendDirect("启动版本：构建 \(build)，提交 \(revision)", .info)
         // 退到后台：正常结束，把"正在运行"的标记删掉
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main

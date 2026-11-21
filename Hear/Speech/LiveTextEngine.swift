@@ -27,7 +27,6 @@ protocol LiveTextEngine: AnyObject {
     /// 第 id 句覆盖的时间范围（秒）
     /// 用来判断两句话是不是同一段声音：
     /// 范围不重叠 = 用户真的说了两遍，要分开记，不能合并
-    func segmentRange(_ id: Int) -> (start: Double, end: Double)?
 }
 
 enum LiveTextEngineFactory {
@@ -229,12 +228,6 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         lock.lock()
         if let s = segs[id] { segs[id] = (s.start, now) }
         lock.unlock()
-    }
-
-    func segmentRange(_ id: Int) -> (start: Double, end: Double)? {
-        lock.lock(); defer { lock.unlock() }
-        guard let seg = segs[id] else { return nil }
-        return (seg.start, seg.end ?? .greatestFiniteMagnitude)
     }
 
     func segmentText(_ id: Int) -> (text: String, confidence: Double) {
