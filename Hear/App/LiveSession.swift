@@ -307,6 +307,7 @@ final class LiveSession: ObservableObject {
     var modelsInstalled: Bool {
         _ = modelsRevision
         if translationEngine == "local", modelFiles().gguf == nil { return false }
+        if voiceClone, !voiceCloneCloud, !isInstalled(.voiceClone) { return false }
         return missingSpeechKinds(for: asrEngine).isEmpty
     }
 
@@ -1297,11 +1298,39 @@ final class LiveSession: ObservableObject {
     /// 每次加载的编号：只有最新那次的结果算数，旧的不要覆盖状态
     private var loadGen = 0
 
-    /// 是不是还有模型在加载（识别/翻译都算）。
-    /// 声音克隆不算：克隆在加载的时候是"等它加载完再开始"，不是不让开始。
+    /// 当前选择需要的本地识别、翻译和声音克隆是否还有未完成加载。
     var isAnyModelLoading: Bool {
-        if isLoadingPhase { return true }
+        if isLoadingPhase || cloneLoading { return true }
         return modelLoadCount > 0
+    }
+
+    private var needsLocalVoiceClone: Bool {
+        voiceClone && !voiceCloneCloud
+    }
+
+    /// 实时翻译开始前的统一模型检查。只检查当前真正会使用的本地模型。
+    private func allSelectedLocalModelsLoaded() async -> Bool {
+        if useSense, !(await sense.isLoaded) { return false }
+        if translationEngine == "local", !(await translator.isLoaded) { return false }
+        if needsLocalVoiceClone, !(await cloner.isLoaded) { return false }
+        return true
+    }
+
+    private func finishModelLoading(start: Date, gen: Int) async {
+        if needsLocalVoiceClone, !(await cloner.isLoaded) {
+            await loadClonerIfNeeded(allowDuringModelLoading: true)
+        }
+        guard gen == loadGen, !Task.isCancelled else { return }
+        guard await allSelectedLocalModelsLoaded() else {
+            let missing = needsLocalVoiceClone ? "声音克隆" : "本地识别或翻译"
+            hearLog("模型尚未全部就绪（缺少 \(missing)），暂不提示可以开始", .warning)
+            phase = .failed("\(missing)模型还没有加载完成，请检查模型配置或重新加载。")
+            return
+        }
+        phase = .ready
+        hearLog("全部就绪，用时 \(Int(Date().timeIntervalSince(start)))s，可用内存 \(Self.freeMB()) MB")
+        modelsJustLoaded = true
+        showToast("模型加载完成，可以开始翻译了", seconds: 5)
     }
 
     func loadModels() async {
@@ -1329,7 +1358,7 @@ final class LiveSession: ObservableObject {
         let needSV = wantsSense && !svLoaded
         let needMT = needLocalMT && (!mtLoaded || needSV)
         if !needSV && !needMT {
-            phase = .ready
+            await finishModelLoading(start: start, gen: gen)
             return
         }
         // 加载识别和翻译模型前，先等声音克隆结束再卸掉：
@@ -1349,7 +1378,6 @@ final class LiveSession: ObservableObject {
             cloneHasModel = await cloner.isLoaded
             if cloneHasModel { await cloner.unload() }
         }
-        defer { if voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 3) } }
         // 每秒刷新一次已用时间，让用户知道没有卡死
         let ticker = Task { @MainActor in
             var warned = false
@@ -1381,26 +1409,7 @@ final class LiveSession: ObservableObject {
                 hearLog("有新的模型加载任务，忽略这次的结果", .warning)
                 return
             }
-            // 声音克隆是单独一个任务，可能还在加载：等它好了再说"可以开始翻译"
-            if voiceClone, !voiceCloneCloud {
-                var busy = cloneLoading
-                var waited = 0
-                while busy, waited < 120 {
-                    try? await Task.sleep(nanoseconds: 200_000_000)
-                    busy = cloneLoading
-                    waited += 1
-                }
-                if busy {
-                    hearLog("声音克隆还在加载，先不提示可以开始翻译", .warning)
-                    return
-                }
-            }
-            guard gen == loadGen, !Task.isCancelled else { return }
-            phase = .ready
-            hearLog("全部就绪，用时 \(Int(Date().timeIntervalSince(start)))s，可用内存 \(Self.freeMB()) MB")
-            // 加载好了，提示一下（5 秒；用户按了按钮就立刻消失）
-            modelsJustLoaded = true
-            showToast("模型加载完成，可以开始翻译了", seconds: 5)
+            await finishModelLoading(start: start, gen: gen)
         } catch {
             guard gen == loadGen, !Task.isCancelled else { return }
             hearLog("模型加载失败：\(error)", .error)
@@ -1609,6 +1618,10 @@ final class LiveSession: ObservableObject {
             // 按钮上方本来就显示"正在准备模型 · N 秒"，不用再弹一次提示
             return false
         }
+        guard await allSelectedLocalModelsLoaded() else {
+            showToast("还有本地模型没有加载完成，请稍候", seconds: 3)
+            return false
+        }
         guard phase == .ready else { return false }
         guard await AudioCapture.requestPermission() else {
             activity = "请在 设置 → 听见 里允许使用麦克风"
@@ -1618,20 +1631,6 @@ final class LiveSession: ObservableObject {
         guard token == startToken else {
             hearLog("开始收音：等待期间用户已经松开了，不启动", .info)
             return false
-        }
-        // 声音克隆模型正在加载时先等它加载完：
-        // 在等待期间，仍要检查这次手势是否有效。
-        if cloneLoading {
-            showToast("正在加载声音克隆模型…", seconds: 3)
-            for _ in 0..<300 {                     // 最多等 30 秒
-                if !cloneLoading { break }
-                try? await Task.sleep(nanoseconds: 100_000_000)
-                // 等模型的时候用户松手/停了：这次启动作废，别再往下走
-                if token != startToken {
-                    hearLog("开始收音：等模型期间用户已经松开了，不启动", .info)
-                    return false
-                }
-            }
         }
         guard token == startToken else { return false }
         // 已经插着耳机就用耳机朗读（除非用户手动选了扬声器）；耳机已拔掉就改回扬声器
@@ -3726,9 +3725,9 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    private func loadClonerIfNeeded() async {
+    private func loadClonerIfNeeded(allowDuringModelLoading: Bool = false) async {
         guard !Task.isCancelled, voiceClone, !voiceCloneCloud, cloneInstalled, !cloneLoading else { return }
-        if case .loading = phase { return }
+        if isLoadingPhase, !allowDuringModelLoading { return }
         cloneLoading = true
         defer {
             cloneLoading = false
