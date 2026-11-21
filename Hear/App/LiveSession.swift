@@ -3218,12 +3218,22 @@ final class LiveSession: ObservableObject {
         let item = itemID.flatMap { id in items.first(where: { $0.id == id }) }
             ?? items.last(where: { !$0.translated.isEmpty })
             ?? items.last
+        let namedSpeaker: String? = {
+            guard let raw = item?.speakerName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  raw != "未分配",
+                  raw.range(of: "^说话人\\s*\\d+$", options: .regularExpression) == nil else {
+                return nil
+            }
+            return raw
+        }()
         return HearLiveActivityAttributes.ContentState(
             sourceText: item?.sourceText ?? "",
             translatedText: item?.translated ?? "",
             sourceLanguage: item?.source.name ?? langA.name,
             targetLanguage: item?.target.name ?? langB.name,
-            speaker: item?.speakerLabel,
+            speaker: namedSpeaker,
+            speakerGender: item?.speakerDetails?.gender?.rawValue,
             translationOnly: liveActivityOnlyTranslation,
             isLive: isLive,
             updatedAt: Date())

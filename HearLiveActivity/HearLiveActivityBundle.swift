@@ -53,9 +53,7 @@ struct HearLiveActivityWidget: Widget {
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
             }
-            Text(state.translatedText.isEmpty ? "正在等待译文…" : state.translatedText)
-                .font(.title2.weight(.semibold))
-                .lineLimit(4)
+            translatedRow(state, lineLimit: 4, size: .title2)
         }
         .padding(14)
     }
@@ -68,9 +66,7 @@ struct HearLiveActivityWidget: Widget {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
-            Text(state.translatedText.isEmpty ? "正在等待译文…" : state.translatedText)
-                .font(.title2.weight(.semibold))
-                .lineLimit(3)
+            translatedRow(state, lineLimit: 3, size: .title2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -78,5 +74,35 @@ struct HearLiveActivityWidget: Widget {
     private func speakerPrefix(_ speaker: String?) -> Text {
         guard let speaker, !speaker.isEmpty else { return Text("") }
         return Text("\(speaker)：").fontWeight(.semibold)
+    }
+
+    @ViewBuilder
+    private func translatedRow(_ state: HearLiveActivityAttributes.ContentState,
+                               lineLimit: Int, size: Font) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            if state.translationOnly,
+               let speaker = state.speaker,
+               !speaker.isEmpty {
+                Image(systemName: genderSymbol(state.speakerGender))
+                    .foregroundStyle(genderColor(state.speakerGender))
+                Text("\(speaker)：")
+                    .fontWeight(.semibold)
+            }
+            Text(state.translatedText.isEmpty ? "正在等待译文…" : state.translatedText)
+                .font(size.weight(.semibold))
+                .lineLimit(lineLimit)
+        }
+    }
+
+    private func genderSymbol(_ gender: String?) -> String {
+        gender == "male" || gender == "female" ? "person.crop.circle.fill" : "person.crop.circle"
+    }
+
+    private func genderColor(_ gender: String?) -> Color {
+        switch gender {
+        case "male": return Color(red: 0.49, green: 0.74, blue: 0.98)
+        case "female": return Color(red: 0.97, green: 0.57, blue: 0.62)
+        default: return .secondary
+        }
     }
 }
