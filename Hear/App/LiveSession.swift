@@ -2367,6 +2367,14 @@ final class LiveSession: ObservableObject {
             e.onUpdate = { [weak self] in
                 Task { @MainActor in self?.appleUpdated() }
             }
+            // 听写自己坏了：告诉用户，并且退回 Whisper 实时预览
+            e.onFailure = { [weak self] msg in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.liveActive = false
+                    self.showToast("系统听写出错了（\(msg)），改用 Whisper 实时预览", seconds: 4)
+                }
+            }
             engines.append(e)
             Task {
                 do {

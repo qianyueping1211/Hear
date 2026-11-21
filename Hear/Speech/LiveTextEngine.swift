@@ -8,6 +8,9 @@ import Speech
 protocol LiveTextEngine: AnyObject {
     /// 有新的识别结果（在任意线程回调）；用 segmentText 取某一句的文字
     var onUpdate: (() -> Void)? { get set }
+    /// 听写自己出错了（结果流断了之类）：上层要知道，
+    /// 不然界面一直等着没反应，用户以为是自己说错了
+    var onFailure: ((String) -> Void)? { get set }
     /// 正在听的语言（Whisper 语言代码，例如 "zh"）
     var languageID: String? { get }
     /// 按某种语言开始听写；第一次使用某种语言时系统会先下载语言包
@@ -104,6 +107,13 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
 
     var languageID: String? { lock.lock(); defer { lock.unlock() }; return _languageID }
 
+    /// 出错时回调上层（在结果流所在的那个线程上）
+    var onFailure: ((String) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onFailure }
+        set { lock.lock(); _onFailure = newValue; lock.unlock() }
+    }
+    private var _onFailure: ((String) -> Void)?
+
     func start(languageID: String, locale: String) async throws {
         await stop()
         guard let loc = await SpeechTranscriber.supportedLocale(equivalentTo: Locale(identifier: locale)) else {
@@ -171,6 +181,9 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
                     || (ns.domain == "kAFErrorDomain" && ns.code == -999)
                 if !cancelled {
                     hearLog("系统听写结束：\(error)", .warning)
+                    // 告诉上层：这一路的听写坏了，
+                    // 上层好赶紧提示用户（或者改用 Whisper 实时预览）
+                    self?.onFailure?(error.localizedDescription)
                 }
             }
         }

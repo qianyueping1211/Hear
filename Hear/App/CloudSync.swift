@@ -547,15 +547,29 @@ final class CloudSync: ObservableObject {
             }
         }
 
-        // 提交前再读一次：别的设备可能刚改过，
-        // 直接把整份清单盖上去会把人家的改动抹掉。两份合并着写。
-        if let latest = await Self.readManifest(dir) {
-            manifest = Self.mergeManifest(latest, manifest)
-        }
-        manifest.updatedAt = Date()
+        // 提交：先读一次合并，再写；写完再核对一遍——
+        // 两台设备同时同步时，后写的那台可能把前一台的改动盖掉。
+        // 核对发现自己刚写的东西不见了，就再合并一次再写（最多三次）。
         var wrote = false
-        if let data = try? Self.encoder.encode(manifest) {
-            wrote = await Self.io { Self.write(data, to: manifestURL) }
+        for attempt in 0..<3 {
+            if let latest = await Self.readManifest(dir) {
+                manifest = Self.mergeManifest(latest, manifest)
+            }
+            manifest.updatedAt = Date()
+            guard let data = try? Self.encoder.encode(manifest) else { break }
+            let ok = await Self.io { Self.write(data, to: manifestURL) }
+            if !ok { break }
+            wrote = true
+            guard let after = await Self.readManifest(dir) else { break }
+            // 少了的：既不在清单里、也没被删除记录说明的 = 被别人盖掉了
+            let lost = manifest.conversations.keys.filter { k in
+                after.conversations[k] == nil && after.deleted[k] == nil
+            }
+            if lost.isEmpty { break }
+            hearLog("iCloud 同步：刚写的内容被别的设备盖掉了，再合并一次（第 \(attempt + 1) 次）", .info)
+            for k in lost {
+                if let v = manifest.conversations[k] { manifest.conversations[k] = v }
+            }
         }
         if wrote {
             lastSync = Date()
