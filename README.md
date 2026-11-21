@@ -9,7 +9,7 @@ iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话
 - 支持上下文连贯翻译、自定义术语表
 - 适配 iPhone 16 Pro / Pro Max 等 8GB 内存机型，iOS 18+
 
-📄 完整介绍与技术架构（功能清单、信号通路、服务接口、在线模型服务）：**[docs/index.html](docs/index.html)**
+📄 完整介绍与技术架构（功能清单、信号通路、服务接口、云端模型服务）：**[docs/index.html](docs/index.html)**
 （下载后用浏览器打开就行）
 
 🪟 在 Windows 上把模型跑在自己电脑上：**[docs/windows-deploy.md](docs/windows-deploy.md)**
@@ -91,7 +91,7 @@ powershell -ExecutionPolicy Bypass -File server\start-windows.ps1
 ```
 
 脚本会自己下载 llama.cpp 的运行包、三个模型、faster-whisper，不用编译也不用装 WSL，
-最后打印一个地址，填到手机 App 的 **功能设置 → 模型管理 → 在线模型** 里，
+最后打印一个地址，填到手机 App 的 **功能设置 → 模型管理 → 云端模型** 里，
 再把「引擎管理」里需要的模型改成「云端：自己电脑上的服务」。
 
 **更省事：双击 `start-hear-cloud.bat`**（Windows）

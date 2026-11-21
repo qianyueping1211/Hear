@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>听见 Hear · 应用介绍与技术架构</title>
-<meta name="description" content="听见 Hear — iPhone 上的实时语音翻译 App。功能架构、功能清单、技术架构与关键技术点，以及可选的自建在线模型服务。">
+<meta name="description" content="听见 Hear — iPhone 上的实时语音翻译 App。功能架构、功能清单、技术架构与关键技术点，以及可选的自建云端模型服务。">
 <style>
 /* ============================================================
    听见 Hear · 介绍文档
@@ -352,7 +352,7 @@ section.band{scroll-margin-top:62px}
       <a href="#top">首页</a>
       <a href="#features">功能架构</a>
       <a href="#tech">技术架构</a>
-      <a href="#cloud">在线模型服务</a>
+      <a href="#cloud">云端模型服务</a>
       <a class="gh" href="https://github.com/qianyueping1211/Hear" target="_blank" rel="noopener">GitHub ↗</a>
     </nav>
   </div>
@@ -378,7 +378,7 @@ section.band{scroll-margin-top:62px}
         <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
         <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
         <div><dt>支持语言</dt><dd>13 种（双向互译）</dd></div>
-        <div><dt>在线模型服务</dt><dd>可选，自建局域网服务</dd></div>
+        <div><dt>云端模型服务</dt><dd>可选，自建局域网服务</dd></div>
       </dl>
 
       <div class="cta-row">
@@ -624,9 +624,9 @@ section.band{scroll-margin-top:62px}
           <li><b>断点续传</b>　网络中断自动续传，网络类错误最多重试 8 次，指数退避。</li>
           <li><b>镜像加速</b>　自动探测所在网络，国内走 hf-mirror，海外走 huggingface.co。</li>
           <li><b>本地导入</b>　从「文件」App 直接导入 .gguf 或模型目录。</li>
-          <li><b>在线模型</b>　识别 / 翻译 / 克隆三个模型各自独立配置地址，支持「测试连接」。</li>
+          <li><b>云端模型</b>　识别 / 翻译 / 克隆三个模型各自独立配置地址，支持「测试连接」。</li>
           <li><b>页签跟着引擎走</b>　三个引擎（识别 / 翻译 / 克隆）里只要有一个是本地引擎，就停在「本地模型」；
-              都是在线引擎、或者在线 + 苹果自带混着用，就默认「在线模型」。</li>
+              都是在线引擎、或者在线 + 苹果自带混着用，就默认「云端模型」。</li>
           <li><b>状态可视</b>　每个模型行直接显示「未配置 / 正常 / 异常」，异常时给出具体原因。</li>
         </ul>
       </div>
@@ -689,7 +689,7 @@ section.band{scroll-margin-top:62px}
           <tr><th>层</th><th>技术 / 依赖</th><th>版本</th><th>在项目里做什么</th></tr>
         </thead>
         <tbody>
-          <tr><td>界面</td><td class="mono">SwiftUI</td><td class="mono">Swift 5</td><td>全部界面：对话页、历史页、设置、在线模型配置、日志查看</td></tr>
+          <tr><td>界面</td><td class="mono">SwiftUI</td><td class="mono">Swift 5</td><td>全部界面：对话页、历史页、设置、云端模型配置、日志查看</td></tr>
           <tr><td>音频</td><td class="mono">AVAudioEngine / AVAudioConverter</td><td class="mono">系统</td><td>麦克风采集、16 kHz 重采样、语音增强、音频路由与输出</td></tr>
           <tr><td>识别</td><td class="mono">WhisperKit（SPM）</td><td class="mono">≥ 1.0.0</td><td>Whisper large-v3 turbo 的 CoreML 推理，GPU / 神经引擎</td></tr>
           <tr><td>识别</td><td class="mono">FluidAudio（SPM）</td><td class="mono">0.18.3</td><td>SenseVoice ONNX 识别（int8 优先），中英日韩粤</td></tr>
@@ -943,13 +943,13 @@ section.band{scroll-margin-top:62px}
           <p>同步三类数据：<code>settings.plist</code>（设置，26 个键，用 SHA256 指纹判断是否被改过；
              「实时翻译 / 对话翻译」这个模式<strong>只存在本机</strong>，不跟 iCloud 走，
              否则每次启动都会被云盘里的旧值改回去；
-             含在线模型：通用服务地址、三个模型各自的地址、识别方案、用不用云端翻译/克隆）、
+             含云端模型：通用服务地址、三个模型各自的地址、识别方案、用不用云端翻译/克隆）、
              <code>conversations/&lt;uuid&gt;.json</code>（历史）、<code>manifest.json</code>（各页修改时间、删除记录、设置哈希）。</p>
           <p>方向判定：对话按每页 <code>updatedAt</code> 谁新推谁；删除用 <code>deletedConversations</code> 字典两边合并；
              设置是三态——只有 iCloud 改过而本机没改过才 pull，两边都改以本机为准。读写走 <code>NSFileCoordinator</code>，
              文件未下载到本机时识别 <code>.文件名.icloud</code> 占位并触发下载，最多等 5 秒。</p>
           <p>从 iCloud 拉下来的设置<strong>直接换上，不用重开 App</strong>：语言、灵敏度、词表、引擎、
-             在线模型地址都会立刻生效；改地址之后 2 秒内自动同步一次，
+             云端模型地址都会立刻生效；改地址之后 2 秒内自动同步一次，
              同步进行中改的会等这轮结束再补一次，不会漏。</p>
           <p><strong>模型文件与 API Key 不参与同步。</strong></p>
         </div>
@@ -996,13 +996,13 @@ section.band{scroll-margin-top:62px}
   </div>
 </section>
 
-<!-- ===================== 3. 在线模型服务 ===================== -->
+<!-- ===================== 3. 云端模型服务 ===================== -->
 <section class="band" id="cloud">
   <div class="wrap">
     <div class="sechead">
       <div class="num">03</div>
       <div>
-        <h2>在线模型服务</h2>
+        <h2>云端模型服务</h2>
         <p class="lede">
           「听见」的在线能力分两类，职责完全不同：
           一类是<strong>自建的局域网模型服务</strong>，把识别、翻译、声音克隆三个模型搬到自家电脑上跑，手机通过 Wi-Fi 调用；
@@ -1024,7 +1024,7 @@ section.band{scroll-margin-top:62px}
          识别可选 tiny ~ large-v3，
          翻译可选 Hy-MT2 1.8B / 7B / 30B-A3B（混合专家，30B 里只激活 3B，又大又快又好），
          克隆可选 Qwen3-TTS 0.6B / 1.7B。
-         手机端「在线模型」的状态后面会直接写出电脑上跑的是哪个模型。
+         手机端「云端模型」的状态后面会直接写出电脑上跑的是哪个模型。
          完整的部署清单（步骤、注意事项、已知问题和处理方案）见
          <a href="windows-deploy.md" target="_blank" rel="noopener">docs/windows-deploy.md</a>。</p>
     </div>

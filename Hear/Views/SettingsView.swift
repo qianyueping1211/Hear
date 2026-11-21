@@ -19,7 +19,7 @@ struct SettingsView: View {
     @State private var showASREngines = false
     /// 授权 iCloud 云盘的说明框（系统的授权框弹不出来时才需要）
     @State private var askCloudAuth = false
-    /// 模型管理里的页签：0 = 本地模型，1 = 在线模型
+    /// 模型管理里的页签：0 = 本地模型，1 = 云端模型
     @State private var modelTab = 0
     /// 正在配置哪一项：服务（默认地址）或某个模型
     @State private var cloudEdit: CloudEdit?
@@ -52,7 +52,7 @@ struct SettingsView: View {
         }
     }
 
-    /// 在线模型里的一行：名字 + 状态图标（跟本地模型的状态按钮一样）+ 配置入口
+    /// 云端模型里的一行：名字 + 状态图标（跟本地模型的状态按钮一样）+ 配置入口
     private func cloudRow(title: String, icon: String, status: String,
                           configured: Bool, onConfig: @escaping () -> Void) -> some View {
         let readiness: String
@@ -158,9 +158,6 @@ struct SettingsView: View {
                         }
                     }
                     if session.usingCloudASR {
-                        EngineSelectionRow(title: "云端识别方案", value: cloudASRDescription, arrow: "chevron.right") {
-                            cloudEdit = .model(.asr)
-                        }
                         Toggle("实时翻译时区分说话人", isOn: $session.speakerTrackingEnabled)
                     }
                     if session.translationEngine == "local", !session.isInstalled(.translation) {
@@ -173,11 +170,11 @@ struct SettingsView: View {
                     Text("引擎管理")
                 }
 
-                // MARK: 模型管理（本地模型 / 在线模型）
+                // MARK: 模型管理（本地模型 / 云端模型）
                 Section {
                     // 页签自己画：高度和字号都能自己定
                     // （系统的分段控件高度跟着 controlSize 变，字号又比界面里其它文字小）
-                    ModelTabBar(selection: $modelTab, titles: ["本地模型", "在线模型"])
+                    ModelTabBar(selection: $modelTab, titles: ["本地模型", "云端模型"])
                         // 页签和下面第一行之间不要有横线
                         .listRowSeparator(.hidden)
                         // 顶部多留一点，离"模型管理"这个标题远一点；
@@ -331,7 +328,7 @@ struct SettingsView: View {
                 syncModelTab()
             }
             // 引擎换了，模型管理的页签跟着走
-            // （有本地引擎 → 本地模型；都是在线 / 在线+苹果 → 在线模型）
+            // （有本地引擎 → 本地模型；都是在线 / 在线+苹果 → 云端模型）
             .onChange(of: session.asrEngine) { _, _ in syncModelTab(); checkLocalNetwork() }
             .onChange(of: session.translationEngine) { _, _ in syncModelTab(); checkLocalNetwork() }
             .onChange(of: session.voiceCloneCloud) { _, _ in syncModelTab(); checkLocalNetwork() }
@@ -339,9 +336,9 @@ struct SettingsView: View {
                 syncModelTab()
                 checkLocalNetwork()
             }
-            // 在线模型页每 2 秒自动更新一次状态，不用手动点刷新
-            .task(id: shouldRefreshOnlineModels) {
-                guard shouldRefreshOnlineModels else { return }
+            // 云端模型页每 2 秒自动更新一次状态，不用手动点刷新
+            .task(id: shouldRefreshCloudModels) {
+                guard shouldRefreshCloudModels else { return }
                 while !Task.isCancelled {
                     await session.refreshCloudStatus()
                     do { try await Task.sleep(for: .seconds(2)) }
@@ -364,7 +361,7 @@ struct SettingsView: View {
             } message: {
                 Text("允许「听见」访问 iCloud 云盘，把设置和对话记录同步到云盘里的「听见」文件夹。\n只需要授权一次，以后不用再管。")
             }
-            // 在线模型里某一项的配置
+            // 云端模型里某一项的配置
             .sheet(item: $cloudEdit) { e in
                 CloudEditSheet(target: e)
                     .environmentObject(session)
@@ -449,16 +446,16 @@ struct SettingsView: View {
     }
 
     /// 每次打开设置都重新判断一次：模型管理该显示哪一边
-    /// （引擎换了、在线模型配没配，都要跟着变，省得用户自己再点一下）
+    /// （引擎换了、云端模型配没配，都要跟着变，省得用户自己再点一下）
     private func syncModelTab() {
         let want = session.preferredModelTab
         if modelTab != want {
             modelTab = want
-            hearLog("模型管理：默认选中\(want == 1 ? "在线模型" : "本地模型")")
+            hearLog("模型管理：默认选中\(want == 1 ? "云端模型" : "本地模型")")
         }
     }
 
-    private var shouldRefreshOnlineModels: Bool {
+    private var shouldRefreshCloudModels: Bool {
         modelTab == 1 && cloudEdit == nil && localEdit == nil && !showASREngines &&
             pendingEngine == nil && confirmKind == nil && importKind == nil
     }
@@ -467,14 +464,6 @@ struct SettingsView: View {
         let f = DateFormatter()
         f.dateFormat = "M月d日 HH:mm"
         return f.string(from: d)
-    }
-
-    private var cloudASRDescription: String {
-        let available = session.cloudASRSchemes
-        guard !available.isEmpty else { return "配置" }
-        let active = available.contains(session.cloudASRScheme)
-            ? session.cloudASRScheme : (available.first ?? session.cloudASRScheme)
-        return cloudASRSchemeLabel(active, model: session.cloudASRModelName)
     }
 
     private var voiceCloneEngineBinding: Binding<String> {
@@ -565,7 +554,7 @@ struct SettingsView: View {
         let downloading = session.bgDownloadKind == kind
         let paused = session.isModelDownloadPaused(kind)
         let waiting = !downloading && session.bgDownloading && session.bgQueue.contains(kind)
-        // 跟在线模型那一行一模一样的结构，两个页签高度才一样
+        // 跟云端模型那一行一模一样的结构，两个页签高度才一样
         LabeledContent {
             HStack(spacing: 8) {
                 // 状态：已下载是绿色对勾；没配置是灰色圆圈感叹号；下载中转圈
@@ -728,7 +717,6 @@ private struct ProcessingDots: View {
 private struct EngineSelectionRow: View {
     let title: String
     let value: String
-    var arrow = "chevron.up.chevron.down"
     let onTap: () -> Void
 
     var body: some View {
@@ -743,7 +731,7 @@ private struct EngineSelectionRow: View {
                         .scrollIndicators(.hidden)
                 }
                 .foregroundStyle(.secondary)
-                Image(systemName: arrow)
+                Image(systemName: "chevron.up.chevron.down")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize()
@@ -766,7 +754,7 @@ private func cloudASRSchemeLabel(_ scheme: String, model: String) -> String {
     }
 }
 
-/// 在线模型里要配置的那一项：服务（默认地址）或某个模型
+/// 云端模型里要配置的那一项：服务（默认地址）或某个模型
 enum CloudEdit: Identifiable, Hashable {
     case service
     case model(CloudModel)
@@ -1219,7 +1207,7 @@ struct LocalModelSheet: View {
 
 // MARK: - 模型管理的页签
 
-/// "本地模型 / 在线模型" 两个页签
+/// "本地模型 / 云端模型" 两个页签
 ///
 /// 自己画，不用系统的分段控件：
 ///   - 高度可以自己定（比系统默认高一点，好点得着）
