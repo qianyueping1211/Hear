@@ -2836,12 +2836,13 @@ final class LiveSession: ObservableObject {
         var item = old
         if old.source != src {
             item = TranslationItem(id: itemID, source: src, target: tgt, sourceText: text, translated: preview,
-                                   speakerID: old.speakerID, speakerName: old.speakerName,
+                                   speakerID: old.speakerID, speakerName: old.speakerName, speakerDetails: old.speakerDetails,
                                    speakerTracked: old.speakerTracked, speakerManuallySet: old.speakerManuallySet)
         } else {
             item.sourceText = text
         }
         item.sourceSide = src == a ? .left : .right
+        item.recognizedLanguage = Language.all.first { $0.id == detected }?.id
         let shouldIdentify = speakerTrackingEnabled && !talkMode && speakerAddress != nil
         if shouldIdentify { item.speakerTracked = true }
         guard let idx2 = items.firstIndex(where: { $0.id == itemID }) else { return }
@@ -2896,9 +2897,10 @@ final class LiveSession: ObservableObject {
                   self.items[index].speakerManuallySet != true else { return }
             let lastID = self.items.compactMap(\.speakerID).max() ?? 0
             guard let id = self.speakerTracker.assign(embedding, after: lastID) else { return }
-            let name = self.items.first { $0.speakerID == id && $0.speakerName != nil }?.speakerName
+            let speaker = self.items.first { $0.speakerID == id }
             self.items[index].speakerID = id
-            self.items[index].speakerName = name
+            self.items[index].speakerName = speaker?.speakerName
+            self.items[index].speakerDetails = speaker?.speakerDetails
             self.persist()
         } timedOut: { _ in }
     }

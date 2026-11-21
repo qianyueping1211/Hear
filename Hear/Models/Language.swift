@@ -34,6 +34,31 @@ struct Language: Identifiable, Hashable, Codable {
     }
 }
 
+struct SpeakerDetails: Codable, Equatable {
+    enum Gender: String, Codable, CaseIterable {
+        case male, female
+
+        var title: String { self == .male ? "男性" : "女性" }
+    }
+
+    enum Accent: String, Codable, CaseIterable {
+        case standard, chinese, indian, unknown
+
+        var title: String {
+            switch self {
+            case .standard: return "标准发音"
+            case .chinese: return "中国口音"
+            case .indian: return "印度口音"
+            case .unknown: return "未知口音"
+            }
+        }
+    }
+
+    var gender: Gender? = nil
+    var commonLanguage: String? = nil
+    var accent: Accent? = nil
+}
+
 /// 一条翻译记录
 struct TranslationItem: Identifiable, Equatable, Codable {
     enum SourceSide: String, Codable { case left, right }
@@ -48,10 +73,14 @@ struct TranslationItem: Identifiable, Equatable, Codable {
     var corrected: Bool? = nil    // SenseVoice 的结果被 Whisper 校正过
     var speakerID: Int? = nil
     var speakerName: String? = nil
+    var speakerDetails: SpeakerDetails? = nil
     var speakerTracked: Bool? = nil
     var speakerManuallySet: Bool? = nil
     var sourceProvisional: Bool? = nil
     var sourceSide: SourceSide? = nil
+    var recognizedLanguage: String? = nil
+
+    var defaultSpeakerLanguage: String { recognizedLanguage ?? source.id }
 
     func isLeading(left: Language, right: Language) -> Bool {
         if let sourceSide { return sourceSide == .left }
@@ -67,9 +96,8 @@ struct TranslationItem: Identifiable, Equatable, Codable {
 }
 
 enum ConversationSpeakerEdit {
-    case rename(String)
+    case saveProfile(name: String, details: SpeakerDetails, newSpeaker: Bool)
     case assign(Int?)
-    case add
 }
 
 extension Array where Element == TranslationItem {
@@ -83,26 +111,36 @@ extension Array where Element == TranslationItem {
     mutating func editSpeaker(itemID: UUID, change: ConversationSpeakerEdit, reservedThrough: Int = 0) -> Bool {
         guard let index = firstIndex(where: { $0.id == itemID }) else { return false }
         switch change {
-        case .rename(let input):
-            guard let id = self[index].speakerID else { return false }
-            let name = String(input.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(40))
+        case let .saveProfile(input, details, newSpeaker):
+            let name = Self.cleanSpeakerText(input, limit: 40)
+            let id: Int
+            if let current = self[index].speakerID, !newSpeaker {
+                id = current
+            } else {
+                id = Swift.max(compactMap(\.speakerID).max() ?? 0, reservedThrough) + 1
+                self[index].speakerID = id
+                self[index].speakerTracked = true
+                self[index].speakerManuallySet = true
+            }
+            let savedDetails = details == SpeakerDetails() ? nil : details
             for i in indices where self[i].speakerID == id {
-                self[i].speakerName = name.isEmpty ? nil : name
+                self[i].speakerName = name
+                self[i].speakerDetails = savedDetails
             }
         case .assign(let id):
-            let names = speakerLabels
-            if let id, names[id] == nil { return false }
-            let name = first(where: { $0.speakerID == id && $0.speakerName != nil })?.speakerName
+            let speaker = id.flatMap { speakerID in first { $0.speakerID == speakerID } }
+            if id != nil, speaker == nil { return false }
             self[index].speakerID = id
-            self[index].speakerName = name
-            self[index].speakerTracked = true
-            self[index].speakerManuallySet = true
-        case .add:
-            self[index].speakerID = Swift.max(compactMap(\.speakerID).max() ?? 0, reservedThrough) + 1
-            self[index].speakerName = nil
+            self[index].speakerName = speaker?.speakerName
+            self[index].speakerDetails = speaker?.speakerDetails
             self[index].speakerTracked = true
             self[index].speakerManuallySet = true
         }
         return true
+    }
+
+    private static func cleanSpeakerText(_ input: String, limit: Int) -> String? {
+        let value = String(input.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(limit))
+        return value.isEmpty ? nil : value
     }
 }

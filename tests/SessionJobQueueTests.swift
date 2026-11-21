@@ -57,12 +57,20 @@ struct SessionJobQueueTests {
             TranslationItem(source: .find("en"), target: .find("zh"), sourceText: "A", speakerID: 1),
             TranslationItem(source: .find("en"), target: .find("zh"), sourceText: "Legacy")
         ]
-        items.editSpeaker(itemID: items[0].id, change: .rename("  林\n经理  "))
-        items.editSpeaker(itemID: items[1].id, change: .rename("李经理"))
+        let profile = SpeakerDetails(gender: .female, commonLanguage: "en", accent: .indian)
+        items.editSpeaker(itemID: items[0].id,
+                          change: .saveProfile(name: "  林\n经理  ", details: profile, newSpeaker: false))
+        items.editSpeaker(itemID: items[1].id,
+                          change: .saveProfile(name: "李经理", details: SpeakerDetails(gender: .male), newSpeaker: false))
         precondition(items[2].speakerLabel == "林 经理")
+        precondition(items[2].speakerDetails == profile)
         items.editSpeaker(itemID: items[0].id, change: .assign(2))
         precondition(items[0].speakerLabel == "李经理" && items[0].speakerManuallySet == true)
+        precondition(items[0].speakerDetails?.gender == .male)
         precondition(items[3].speakerLabel == nil)
+        items.editSpeaker(itemID: items[3].id,
+                          change: .saveProfile(name: "Taylor", details: profile, newSpeaker: true))
+        precondition(items[3].speakerID == 3 && items[3].speakerDetails == profile)
         let data = try JSONEncoder().encode(items)
         let decoded = try JSONDecoder().decode([TranslationItem].self, from: data)
         precondition(decoded == items, "Speaker edits should survive persistence")
@@ -75,6 +83,10 @@ private func testConversationBubbleSides() throws {
     let legacy = try JSONDecoder().decode(TranslationItem.self, from: JSONEncoder().encode(original))
     precondition(legacy.isLeading(left: japanese, right: english))
     precondition(legacy.isLeading(left: chinese, right: english), "Old left-side bubbles must not move")
+    precondition(legacy.defaultSpeakerLanguage == "ja")
+    var detected = legacy
+    detected.recognizedLanguage = "zh"
+    precondition(detected.defaultSpeakerLanguage == "zh", "The detected language sets the profile default")
     let reply = TranslationItem(source: english, target: japanese, sourceText: "Hello", sourceSide: .right)
     let stored = try JSONDecoder().decode(TranslationItem.self, from: JSONEncoder().encode(reply))
     precondition(!stored.isLeading(left: english, right: japanese), "Stored sides must survive swaps")

@@ -382,6 +382,14 @@ struct BubbleView: View {
     var onSpeaker: (() -> Void)? = nil
     var onSpeak: () -> Void
 
+    private var speakerAvatarColor: Color {
+        switch item.speakerDetails?.gender {
+        case .male: return Color(red: 0.49, green: 0.74, blue: 0.98)
+        case .female: return Color(red: 0.97, green: 0.57, blue: 0.62)
+        case nil: return .secondary
+        }
+    }
+
     /// 左侧气泡国旗在前，右侧气泡国旗在后（靠外侧）
     private func flagged(_ flag: String, _ text: String) -> Text {
         leading ? Text("\(flag) \(text)") : Text("\(text) \(flag)")
@@ -406,10 +414,16 @@ struct BubbleView: View {
                 if let speaker = item.speakerLabel {
                     if let onSpeaker {
                         Button(action: onSpeaker) {
-                            Label(speaker, systemImage: "person.crop.circle").font(.caption.weight(.semibold))
+                            Label {
+                                Text(speaker)
+                            } icon: {
+                                Image(systemName: "person.crop.circle.fill")
+                                    .foregroundStyle(speakerAvatarColor)
+                            }
+                            .font(.caption.weight(.semibold))
                         }
                         .buttonStyle(.plain)
-                        .accessibilityHint("修改说话人")
+                        .accessibilityHint("修改说话人资料")
                     } else {
                         Text(speaker).font(.caption.weight(.semibold))
                     }
