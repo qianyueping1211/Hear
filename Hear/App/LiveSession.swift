@@ -71,20 +71,10 @@ final class LiveSession: ObservableObject {
         }
     }
     @Published var showReadingIcon: Bool { didSet { save("showReadingIcon", showReadingIcon) } }
-    @Published var liveActivityEnabled: Bool {
-        didSet {
-            save("liveActivityEnabled", liveActivityEnabled)
-            if liveActivityEnabled, isRunning {
-                HearLiveActivityController.shared.start(liveActivityState())
-            } else if !liveActivityEnabled {
-                HearLiveActivityController.shared.end(liveActivityState(isLive: false))
-            }
-        }
-    }
     @Published var liveActivityOnlyTranslation: Bool {
         didSet {
             save("liveActivityOnlyTranslation", liveActivityOnlyTranslation)
-            if liveActivityEnabled, isRunning { publishLiveActivity() }
+            if isRunning { publishLiveActivity() }
         }
     }
     @Published var useContext: Bool { didSet { save("useContext", useContext) } }
@@ -510,7 +500,6 @@ final class LiveSession: ObservableObject {
         langB = Language.find(d.string(forKey: "langB") ?? "en")
         speakOutput = d.object(forKey: "speakOutput") as? Bool ?? true
         showReadingIcon = d.object(forKey: "showReadingIcon") as? Bool ?? true
-        liveActivityEnabled = d.object(forKey: "liveActivityEnabled") as? Bool ?? true
         liveActivityOnlyTranslation =
             d.object(forKey: "liveActivityOnlyTranslation") as? Bool ?? false
         useContext = d.object(forKey: "useContext") as? Bool ?? true
@@ -830,7 +819,7 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 模型状态（设置页显示）
 
-    enum ModelKind { case translation, senseVoice, voiceClone }
+    enum ModelKind: Sendable { case translation, senseVoice, voiceClone }
 
     struct ModelStatus {
         let name: String
@@ -1686,9 +1675,7 @@ final class LiveSession: ObservableObject {
         }
         if outputMode == .headphones { AudioRoute.apply(.headphones) }
         isRunning = true
-        if liveActivityEnabled {
-            HearLiveActivityController.shared.start(liveActivityState())
-        }
+        HearLiveActivityController.shared.start(liveActivityState())
         if dualLive { startAppleASR() }
         if talkMode, let l = talkLang {
             hearLog("对话翻译：按住说\(l.displayName)")
@@ -3283,8 +3270,6 @@ final class LiveSession: ObservableObject {
         if so != speakOutput { speakOutput = so }
         let showIcon = d.object(forKey: "showReadingIcon") as? Bool ?? true
         if showIcon != showReadingIcon { showReadingIcon = showIcon }
-        let liveActivity = d.object(forKey: "liveActivityEnabled") as? Bool ?? true
-        if liveActivity != liveActivityEnabled { liveActivityEnabled = liveActivity }
         let liveActivityOnly =
             d.object(forKey: "liveActivityOnlyTranslation") as? Bool ?? false
         if liveActivityOnly != liveActivityOnlyTranslation {

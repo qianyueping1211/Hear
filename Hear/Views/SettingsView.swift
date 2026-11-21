@@ -218,9 +218,9 @@ struct SettingsView: View {
                 // MARK: 翻译与总结
                 Section {
                     Toggle("结合上文翻译（更连贯）", isOn: $session.useContext)
-                    Toggle("灵动岛与锁屏显示译文", isOn: $session.liveActivityEnabled)
-                    if session.liveActivityEnabled {
-                        Toggle("灵动岛/锁屏只展示译文", isOn: $session.liveActivityOnlyTranslation)
+                    Picker("灵动岛与锁屏显示", selection: $session.liveActivityOnlyTranslation) {
+                        Text("展示译文").tag(true)
+                        Text("展示原文和译文").tag(false)
                     }
                     NavigationLink {
                         LLMSettingsView()
