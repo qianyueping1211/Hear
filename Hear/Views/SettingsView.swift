@@ -17,9 +17,6 @@ struct SettingsView: View {
     @ObservedObject private var llm = LLMSettings.shared
     @ObservedObject private var cloud = CloudSync.shared
     @State private var showCloudPicker = false
-    @State private var showASREngines = false
-    @State private var showTranslationEngines = false
-    @State private var showVoiceCloneEngines = false
     /// 授权 iCloud 云盘的说明框（系统的授权框弹不出来时才需要）
     @State private var askCloudAuth = false
     /// 模型管理里的页签：0 = 本地模型，1 = 云端模型
@@ -239,7 +236,7 @@ struct SettingsView: View {
                     Toggle("显示声音图标", isOn: $session.showReadingIcon)
                     // 声音克隆开关：默认关。开了就用说话人的原声朗读译文
                     Toggle("声音克隆", isOn: $session.voiceClone)
-                    Picker("朗读从哪里出声", selection: outputBinding) {
+                    Picker("声音输出位置", selection: outputBinding) {
                         Text("手机扬声器").tag(AudioOutput.speaker)
                         Text("耳机").tag(AudioOutput.headphones)
                     }
@@ -387,16 +384,6 @@ struct SettingsView: View {
         // （挂在 NavigationStack 上：里面的 Form 上已经有一个 .alert 了，
         //   同一个视图挂两个 alert 会互相顶掉）
         .localNetworkHelp($showLocalNetworkHelp)
-        .centerChoice(isPresented: $showASREngines, title: "语音识别引擎",
-                      options: asrEngineOptions, selected: session.asrEngine,
-                      onSelect: applyASREngineSelection)
-        .centerChoice(isPresented: $showTranslationEngines, title: "文本翻译",
-                      options: translationEngineOptions, selected: session.translationEngine,
-                      onSelect: applyTranslationEngineSelection)
-        .centerChoice(isPresented: $showVoiceCloneEngines, title: "声音克隆",
-                      options: voiceCloneEngineOptions,
-                      selected: session.voiceCloneCloud ? "cloud" : "local",
-                      onSelect: applyVoiceCloneEngineSelection)
         // 屏幕正中的确认框：背后整页虚化
         .centerDialog(isPresented: Binding(get: { confirmKind != nil },
                                            set: { if !$0 { confirmKind = nil } }),
@@ -431,8 +418,7 @@ struct SettingsView: View {
     }
 
     private var shouldRefreshCloudModels: Bool {
-        modelTab == 1 && cloudEdit == nil && localEdit == nil && !showASREngines &&
-            !showTranslationEngines && !showVoiceCloneEngines &&
+        modelTab == 1 && cloudEdit == nil && localEdit == nil &&
             confirmKind == nil && importKind == nil
     }
 
@@ -443,64 +429,45 @@ struct SettingsView: View {
     }
 
     private var asrEngineRow: some View {
-        EngineSelectionRow(title: "语音识别", value: asrEngineName(session.asrEngine)) {
-            showASREngines = true
+        Picker("语音识别", selection: asrEngineBinding) {
+            if session.appleAvailable {
+                Text("本机：苹果自带").tag("apple")
+            }
+            Text("本机最快：SenseVoice").tag("sensevoice")
+            Text("云端：SenseVoice + Whisper").tag("cloud")
         }
     }
 
     private var translationEngineRow: some View {
-        EngineSelectionRow(title: "文本翻译",
-                           value: translationEngineName(session.translationEngine)) {
-            showTranslationEngines = true
+        Picker("文本翻译", selection: translationEngineBinding) {
+            if session.appleAvailable {
+                Text("本机：苹果自带").tag("apple")
+            }
+            Text("本机：Hy-MT2").tag("local")
+            Text("云端：Hy-MT2").tag("cloud")
         }
     }
 
     private var voiceCloneEngineRow: some View {
-        EngineSelectionRow(title: "声音克隆",
-                           value: session.voiceCloneCloud ? "云端：Qwen3-TTS" : "本机：ZipVoice") {
-            showVoiceCloneEngines = true
+        Picker("声音克隆", selection: voiceCloneEngineBinding) {
+            Text("云端：Qwen3-TTS").tag("cloud")
+            Text("本机：ZipVoice").tag("local")
         }
     }
 
-    private var asrEngineOptions: [(tag: String, title: String, detail: String)] {
-        let engines = ["sensevoice", "cloud"]
-        let options = session.appleAvailable ? ["apple"] + engines : engines
-        return options.map { ($0, asrEngineName($0), "") }
+    private var asrEngineBinding: Binding<String> {
+        Binding(get: { session.asrEngine },
+                set: { applyASREngineSelection($0) })
     }
 
-    private func asrEngineName(_ engine: String) -> String {
-        switch engine {
-        case "apple": return "本机：苹果自带"
-        case "sensevoice": return "本机最快：SenseVoice"
-        case "cloud": return "云端：SenseVoice + Whisper"
-        default: return "请选择"
-        }
+    private var translationEngineBinding: Binding<String> {
+        Binding(get: { session.translationEngine },
+                set: { applyTranslationEngineSelection($0) })
     }
 
-    private var translationEngineOptions: [(tag: String, title: String, detail: String)] {
-        var options: [(tag: String, title: String, detail: String)] = []
-        if session.appleAvailable {
-            options.append(("apple", "本机：苹果自带", ""))
-        }
-        options.append(("local", "本机：Hy-MT2", ""))
-        options.append(("cloud", "云端：Hy-MT2", ""))
-        return options
-    }
-
-    private var voiceCloneEngineOptions: [(tag: String, title: String, detail: String)] {
-        [
-            ("cloud", "云端：Qwen3-TTS", ""),
-            ("local", "本机：ZipVoice", "")
-        ]
-    }
-
-    private func translationEngineName(_ engine: String) -> String {
-        switch engine {
-        case "apple": return "本机：苹果自带"
-        case "local": return "本机：Hy-MT2"
-        case "cloud": return "云端：Hy-MT2"
-        default: return "请选择"
-        }
+    private var voiceCloneEngineBinding: Binding<String> {
+        Binding(get: { session.voiceCloneCloud ? "cloud" : "local" },
+                set: { applyVoiceCloneEngineSelection($0) })
     }
 
     private func applyASREngineSelection(_ engine: String) {
@@ -797,36 +764,6 @@ private struct DownloadProgressIcon: View {
 }
 
 
-private struct EngineSelectionRow: View {
-    let title: String
-    let value: String
-    let onTap: () -> Void
-
-    var body: some View {
-        let text = Text(value).lineLimit(1).fixedSize(horizontal: true, vertical: false)
-        Button(action: onTap) {
-            HStack(spacing: 8) {
-                Text(title).fixedSize().foregroundStyle(.primary)
-                Spacer(minLength: 0)
-                ViewThatFits(in: .horizontal) {
-                    text
-                    ScrollView(.horizontal) { text }
-                        .scrollIndicators(.hidden)
-                }
-                .foregroundStyle(.secondary)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(title)
-        .accessibilityValue(value)
-    }
-}
-
 private func cloudASRSchemeLabel(_ scheme: String, model: String) -> String {
     let suffix = model.isEmpty ? "" : "（\(model)）"
     switch scheme {
@@ -869,7 +806,6 @@ struct CloudEditSheet: View {
     @State private var useDefault = true
     /// 语音识别的方案
     @State private var asrScheme = "sensevoice+whisper"
-    @State private var showASRSchemes = false
     @State private var status: String? = nil
     @State private var busy = false
     /// 本地网络权限没开：弹提示告诉用户去哪儿开
@@ -914,8 +850,10 @@ struct CloudEditSheet: View {
                         // 选项完全照着电脑上服务报上来的清单来：
                         // 电脑上没装的方案一个都不给（比如没装 SenseVoice 就只有 Whisper）
                         if case .model(let m) = target, m == .asr {
-                            EngineSelectionRow(title: "识别方案", value: schemeLabel(asrScheme)) {
-                                showASRSchemes = true
+                            Picker("识别方案", selection: $asrScheme) {
+                                ForEach(availableSchemes, id: \.self) { scheme in
+                                    Text(schemeLabel(scheme)).tag(scheme)
+                                }
                             }
                             // 电脑上跑的是什么，一眼能看到；旁边可以随时刷新
                             HStack {
@@ -1009,9 +947,6 @@ struct CloudEditSheet: View {
             }
             .localNetworkHelp($showLocalNetworkHelp)
         }
-        .centerChoice(isPresented: $showASRSchemes, title: "云端识别方案",
-                      options: availableSchemes.map { ($0, schemeLabel($0), "") },
-                      selected: asrScheme) { asrScheme = $0 }
     }
 
     /// 电脑上能用的识别方案：照着服务报上来的清单来，一个都不多给
