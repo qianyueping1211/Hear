@@ -193,12 +193,18 @@ def console_without_quick_edit():
             set_mode(handle, mode.value | extended_flags)
 
 
-def log_text(prefix, content):
+def request_logs_content(headers):
+    """App 明确打开“记录对话内容”时，本次请求允许记录文字。"""
+    value = (headers.get("X-Hear-Log-Content") or "").strip().lower()
+    return LOG_CONTENT or value in ("1", "true", "yes", "on")
+
+
+def log_text(prefix, content, enabled=False):
     """记一条带内容的话：默认把内容藏起来。"""
-    if LOG_CONTENT:
+    if enabled:
         log("%s%s" % (prefix, content))
     else:
-        log("%s（内容没记：设 HEAR_LOG_CONTENT=1 才记）" % prefix)
+        log("%s（内容没记：在 App 的“日志”里打开“记录对话内容”才记）" % prefix)
 
 
 def primary_ip():
@@ -531,7 +537,8 @@ def deferred_whisper(samples, rate, language, fallback):
         return "", fallback
 
 
-def recognize(samples, rate, language, fallback, scheme=None, preview=False):
+def recognize(samples, rate, language, fallback, scheme=None, preview=False,
+              log_content=False):
     """按方案选识别：
        whisper              只用 Whisper
        sensevoice           只用 SenseVoice
@@ -575,7 +582,8 @@ def recognize(samples, rate, language, fallback, scheme=None, preview=False):
             return (slow_text, slow_lang or fallback)
         # 两个结果不一样就以 Whisper 为准，一样就用 SenseVoice 的（更快）
         if fast_text != slow_text:
-            log_text("Whisper 修正：「", "%s」→「%s」" % (fast_text[:30], slow_text[:30]))
+            log_text("Whisper 修正：「", "%s」→「%s」" % (fast_text[:30], slow_text[:30]),
+                     enabled=log_content)
             return (slow_text, slow_lang or fast_lang or fallback)
         return (fast_text, fast_lang or slow_lang or fallback)
 
@@ -884,6 +892,7 @@ a{color:#007aff;text-decoration:none}
     def asr(self, body):
         langs = [x.strip() for x in (self.headers.get("X-Languages") or "").split(",") if x.strip()]
         fallback = self.headers.get("X-Fallback-Language") or ""
+        log_content = request_logs_content(self.headers)
         # 手机可以临时指定用哪个方案（不带就用服务默认的）
         scheme = (self.headers.get("X-ASR-Scheme") or "").strip().lower()
         if scheme not in ("whisper", "sensevoice", "sensevoice+whisper"):
@@ -912,8 +921,10 @@ a{color:#007aff;text-decoration:none}
                 if not text:
                     text, lang = deferred_whisper(samples, rate, language, fallback)
             else:
-                text, lang = recognize(samples, rate, language, fallback, scheme, preview)
-        log_text("识别（%s）%.1fs：" % (scheme, time.time() - t0), text[:40])
+                text, lang = recognize(samples, rate, language, fallback, scheme, preview,
+                                       log_content=log_content)
+        log_text("识别（%s）%.1fs：" % (scheme, time.time() - t0), text[:40],
+                 enabled=log_content)
         self._send_json({"lang": lang or fallback, "text": text, "can_correct": can_correct,
                          "speaker_available": SPEAKER.available})
 
@@ -953,6 +964,7 @@ a{color:#007aff;text-decoration:none}
     # -- 文本翻译 --
 
     def translate(self, body):
+        log_content = request_logs_content(self.headers)
         req = json.loads(body.decode("utf-8"))
         prompt = req.get("prompt", "")
         payload = {
@@ -967,7 +979,7 @@ a{color:#007aff;text-decoration:none}
         raw = http_json(MT_URL + "/v1/chat/completions", payload, timeout=300)
         obj = json.loads(raw.decode("utf-8"))
         text = obj["choices"][0]["message"]["content"]
-        log_text("翻译 %.1fs：" % (time.time() - t0), text[:40])
+        log_text("翻译 %.1fs：" % (time.time() - t0), text[:40], enabled=log_content)
         self._send_json({"text": text})
 
     # -- 声音克隆 --
