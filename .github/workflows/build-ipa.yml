@@ -150,7 +150,7 @@ jobs:
             TAG="$TAG-build.$GITHUB_RUN_NUMBER"
           fi
           gh release create "$TAG" "Hear-$VER.ipa" --target "$GITHUB_SHA" \
-            --title "听见 $VER（构建 $GITHUB_RUN_NUMBER）" --notes-file notes.md --latest
+            --title "听见 ${TAG#v}" --notes-file notes.md --latest
 
       # 只在失败时上传编译日志，方便排查；安装包只发布到 Releases
       - uses: actions/upload-artifact@v6
