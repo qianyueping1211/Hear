@@ -321,10 +321,10 @@ final class LiveSession: ObservableObject {
     /// 换了引擎后，原来选的语言不支持了：自动换成支持的语言
     private func enforceLanguages() {
         let ok = supportedLanguages
-        var changed = false
-        if !ok.contains(langA) { langA = ok.first { $0 != langB } ?? ok[0]; changed = true }
-        if !ok.contains(langB) { langB = ok.first { $0 != langA } ?? ok[0]; changed = true }
-        if changed {
+        let left = ok.contains(langA) ? langA : (ok.first { $0 != langB } ?? ok[0])
+        let right = ok.contains(langB) && langB != left ? langB : (ok.first { $0 != left } ?? ok[0])
+        if left != langA || right != langB {
+            setLanguagePair(left: left, right: right)
             hearLog("当前识别引擎不支持原来的语言，改为 \(langA.name) ⇄ \(langB.name)", .warning)
             showToast("当前识别引擎不支持原来的语言，已改为 \(langA.name) ⇄ \(langB.name)")
         }
@@ -1862,15 +1862,7 @@ final class LiveSession: ObservableObject {
     }
 
     func swapLanguages() {
-        let previous = (left: langA, right: langB)
-        swapping = true
-        let a = langA
-        langA = langB
-        langB = a
-        swapping = false
-        save("langA", langA.id); save("langB", langB.id)
-        resetLanguagePreview()
-        updateItemSides(from: previous)
+        setLanguagePair(left: langB, right: langA)
     }
 
     func clear() {
@@ -3210,9 +3202,8 @@ final class LiveSession: ObservableObject {
         let hh = d.string(forKey: "hfHost") ?? "huggingface.co"
         if hh != hfHost { hfHost = hh }
         let a = Language.find(d.string(forKey: "langA") ?? "zh")
-        if a != langA { langA = a }
         let b = Language.find(d.string(forKey: "langB") ?? "en")
-        if b != langB { langB = b }
+        setLanguagePair(left: a, right: b)
         let so = d.object(forKey: "speakOutput") as? Bool ?? true
         if so != speakOutput { speakOutput = so }
         let uc = d.object(forKey: "useContext") as? Bool ?? true
@@ -3845,6 +3836,16 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 设置
 
+    private func setLanguagePair(left: Language, right: Language) {
+        guard left != right, left != langA || right != langB else { return }
+        let previous = (left: langA, right: langB)
+        swapping = true
+        langA = left
+        langB = right
+        swapping = false
+        languagePairChanged(from: previous)
+    }
+
     private func languageChanged(old: Language, isA: Bool) {
         guard !swapping, old != (isA ? langA : langB) else { return }
         let previous = (left: isA ? old : langA, right: isA ? langB : old)
@@ -3853,11 +3854,15 @@ final class LiveSession: ObservableObject {
             if isA { langB = old } else { langA = old }
             swapping = false
         }
+        languagePairChanged(from: previous)
+    }
+
+    private func languagePairChanged(from previous: (left: Language, right: Language)) {
         save("langA", langA.id); save("langB", langB.id)
         resetLanguagePreview()
         updateItemSides(from: previous)
         if usingAppleTranslation { prepareAppleTranslation() }
-        if isRunning && dualLive { startAppleASR() }
+        if isRunning, dualLive, previous.left != langB || previous.right != langA { startAppleASR() }
     }
 
     private func updateItemSides(from previous: (left: Language, right: Language)) {
