@@ -81,6 +81,12 @@ final class LiveSession: ObservableObject {
             }
         }
     }
+    @Published var liveActivityOnlyTranslation: Bool {
+        didSet {
+            save("liveActivityOnlyTranslation", liveActivityOnlyTranslation)
+            if liveActivityEnabled, isRunning { publishLiveActivity() }
+        }
+    }
     @Published var useContext: Bool { didSet { save("useContext", useContext) } }
     @Published var sensitivity: Double { didSet { save("sensitivity", sensitivity); pushConfig() } }
     @Published var silenceMs: Double { didSet { save("silenceMs", silenceMs); pushConfig() } }
@@ -505,6 +511,8 @@ final class LiveSession: ObservableObject {
         speakOutput = d.object(forKey: "speakOutput") as? Bool ?? true
         showReadingIcon = d.object(forKey: "showReadingIcon") as? Bool ?? true
         liveActivityEnabled = d.object(forKey: "liveActivityEnabled") as? Bool ?? true
+        liveActivityOnlyTranslation =
+            d.object(forKey: "liveActivityOnlyTranslation") as? Bool ?? false
         useContext = d.object(forKey: "useContext") as? Bool ?? true
         sensitivity = d.object(forKey: "sensitivity") as? Double ?? 12
         silenceMs = d.object(forKey: "silenceMs") as? Double ?? 700
@@ -3229,6 +3237,7 @@ final class LiveSession: ObservableObject {
             sourceLanguage: item?.source.name ?? langA.name,
             targetLanguage: item?.target.name ?? langB.name,
             speaker: item?.speakerLabel,
+            translationOnly: liveActivityOnlyTranslation,
             isLive: isLive,
             updatedAt: Date())
     }
@@ -3276,6 +3285,11 @@ final class LiveSession: ObservableObject {
         if showIcon != showReadingIcon { showReadingIcon = showIcon }
         let liveActivity = d.object(forKey: "liveActivityEnabled") as? Bool ?? true
         if liveActivity != liveActivityEnabled { liveActivityEnabled = liveActivity }
+        let liveActivityOnly =
+            d.object(forKey: "liveActivityOnlyTranslation") as? Bool ?? false
+        if liveActivityOnly != liveActivityOnlyTranslation {
+            liveActivityOnlyTranslation = liveActivityOnly
+        }
         let uc = d.object(forKey: "useContext") as? Bool ?? true
         if uc != useContext { useContext = uc }
         let sen = d.object(forKey: "sensitivity") as? Double ?? 12

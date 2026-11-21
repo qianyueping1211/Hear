@@ -8,6 +8,7 @@ struct HearLiveActivityAttributes: ActivityAttributes {
         var sourceLanguage: String
         var targetLanguage: String
         var speaker: String?
+        var translationOnly: Bool
         var isLive: Bool
         var updatedAt: Date
     }

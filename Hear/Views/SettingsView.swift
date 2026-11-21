@@ -219,6 +219,9 @@ struct SettingsView: View {
                 Section {
                     Toggle("结合上文翻译（更连贯）", isOn: $session.useContext)
                     Toggle("灵动岛与锁屏显示译文", isOn: $session.liveActivityEnabled)
+                    if session.liveActivityEnabled {
+                        Toggle("只展示译文", isOn: $session.liveActivityOnlyTranslation)
+                    }
                     NavigationLink {
                         LLMSettingsView()
                     } label: {
