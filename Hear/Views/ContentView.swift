@@ -527,6 +527,14 @@ struct SourceEditor: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(10)
                         .background(Color(.secondarySystemBackground).opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+                        .textSelection(.enabled)
+                        .contextMenu {
+                            Button {
+                                UIPasteboard.general.string = translation
+                            } label: {
+                                Label("复制译文", systemImage: "doc.on.doc")
+                            }
+                        }
                 }
                 Text("点空白处保存，并重新翻译").font(.footnote).foregroundStyle(.secondary)
             }
