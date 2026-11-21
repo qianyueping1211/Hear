@@ -30,6 +30,7 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 # 打印一行中文，自己看一眼显示正不正常（还是乱码就是这个控制台代码页的问题）
 Write-Host "  中文显示测试：听见（正常应该就是这行字）" -ForegroundColor DarkGray
+try { [Console]::Out.Flush() } catch {}
 $tempCloud = $null      # 临时服务进程（出错时要停掉）
 $cloud = $null          # 正式服务进程
 $ServerDir = $PSScriptRoot                                  # ...\Hear\server
@@ -81,7 +82,9 @@ $CloneChoices = @(
 
 function Read-Choice($prompt) {
     # 没交互（不是从窗口里跑的）就直接用默认值
-    try { $a = Read-Host $prompt } catch { return "" }
+    Write-Host $prompt -NoNewline
+    try { [Console]::Out.Flush() } catch {}
+    try { $a = [Console]::ReadLine() } catch { return "" }
     if ($null -eq $a) { return "" }
     return "$a".Trim()
 }
@@ -139,6 +142,7 @@ if ($wantMenu) {
     } else {
         Write-Host "  第一次启动：先按类型选一下要用哪些模型（选完会记住）" -ForegroundColor Cyan
     }
+    try { [Console]::Out.Flush() } catch {}
     $defAsr   = Pick-Key $AsrChoices   ($(if ($cfg) { $cfg.asr }   else { "" })) "small"
     $defMt    = Pick-Key $MtChoices    ($(if ($cfg) { $cfg.mt }    else { "" })) "1.8b"
     $defClone = Pick-Key $CloneChoices ($(if ($cfg) { $cfg.clone } else { "" })) "1.7b"
@@ -182,10 +186,10 @@ if (-not $env:HEAR_ASR_MODEL) { $AsrModel = Pick-Key $AsrChoices $cfg.asr "small
 trap {
     # 出错了就把临时服务也停掉，别留下一个占着 8000 端口的孤儿
     if ($tempCloud -and -not $tempCloud.HasExited) {
-        try { Stop-Process -Id $tempCloud.Id -Force } catch {}
+        try { Stop-HearOwnedProcess $tempCloud } catch {}
     }
     if ($cloud -and -not $cloud.HasExited) {
-        try { Stop-Process -Id $cloud.Id -Force } catch {}
+        try { Stop-HearOwnedProcess $cloud } catch {}
     }
     try { if ($OrigCodePage) { chcp $OrigCodePage > $null } } catch {}
     Write-Host ""
@@ -199,22 +203,37 @@ trap {
 $ProcessLedger = Join-Path $ServerDir ".hear-processes.json"
 $OwnedProcesses = @{}
 try {
-    foreach ($entry in @(Get-Content -LiteralPath $ProcessLedger -Raw -ErrorAction Stop | ConvertFrom-Json)) {
-        if ($entry) { $OwnedProcesses[[string]$entry.Id] = $entry }
+    foreach ($entry in @(Get-Content -LiteralPath $ProcessLedger -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json)) {
+        # v0.4.66 及更早版本偶尔会把 PowerShell 集合包装成
+        # {"value":[...],"Count":...}。读取时也接受这种旧格式。
+        $candidates = @($entry)
+        if ($entry -and $entry.PSObject.Properties['value']) {
+            $candidates += @($entry.value)
+        }
+        foreach ($candidate in $candidates) {
+            if ($candidate -and $candidate.Id) {
+                $OwnedProcesses[[string]$candidate.Id] = $candidate
+            }
+        }
     }
 } catch { }
 
 function Get-HearProcessIdentity($Process) {
+    $startTicks = $null
+    try { $startTicks = [string]$Process.StartTime.ToUniversalTime().Ticks } catch { return $null }
+    $exe = ""
+    $commandLine = ""
     try {
         $proc = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $Process.Id) -ErrorAction Stop
-        if (-not $proc.ExecutablePath -or -not $proc.CommandLine) { return $null }
-        return [pscustomobject]@{
-            Id = $Process.Id
-            StartTicks = [string]$Process.StartTime.ToUniversalTime().Ticks
-            Executable = $proc.ExecutablePath
-            CommandLine = $proc.CommandLine
-        }
-    } catch { return $null }
+        if ($proc.ExecutablePath) { $exe = $proc.ExecutablePath }
+        if ($proc.CommandLine) { $commandLine = $proc.CommandLine }
+    } catch {}
+    return [pscustomobject]@{
+        Id = $Process.Id
+        StartTicks = $startTicks
+        Executable = $exe
+        CommandLine = $commandLine
+    }
 }
 
 function Record-HearProcess($Process) {
@@ -223,7 +242,11 @@ function Record-HearProcess($Process) {
     $OwnedProcesses[[string]$identity.Id] = $identity
     $tempLedger = "$ProcessLedger.new"
     try {
-        ConvertTo-Json -InputObject @($OwnedProcesses.Values) -Compress |
+        $records = [System.Collections.Generic.List[object]]::new()
+        foreach ($record in $OwnedProcesses.Values) {
+            if ($record -and $record.Id) { $records.Add($record) }
+        }
+        ConvertTo-Json -InputObject $records.ToArray() -Depth 5 -Compress |
             Set-Content -LiteralPath $tempLedger -Encoding UTF8
         Move-Item -LiteralPath $tempLedger -Destination $ProcessLedger -Force
     } catch {
@@ -231,18 +254,151 @@ function Record-HearProcess($Process) {
     }
 }
 
-function Test-HearProcessOwnership($Process) {
-    $before = $OwnedProcesses[[string]$Process.Id]
-    if (-not $before) { return $false }
-    $current = Get-HearProcessIdentity $Process
-    return ($current -and $before.StartTicks -eq $current.StartTicks -and
-            $before.Executable -eq $current.Executable -and
-            $before.CommandLine -ceq $current.CommandLine)
+function Get-HearOwnershipRootId($Process) {
+    $current = $Process
+    for ($depth = 0; $depth -lt 12 -and $current; $depth++) {
+        $currentId = [string]$current.Id
+        $currentTicks = ""
+        try { $currentTicks = [string]$current.StartTime.ToUniversalTime().Ticks } catch {}
+
+        $before = $OwnedProcesses[$currentId]
+        if ($before -and $currentTicks -and [string]$before.StartTicks -eq $currentTicks) {
+            if ($before.Executable -and $current.Path -and $before.Executable -ne $current.Path) { return $null }
+            if ($before.CommandLine -and $current.CommandLine -and $before.CommandLine -cne $current.CommandLine) { return $null }
+            return $currentId
+        }
+
+        $parentId = $null
+        try {
+            $cim = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $current.Id) -ErrorAction Stop
+            if ($cim.ParentProcessId) { $parentId = [string]$cim.ParentProcessId }
+        } catch {}
+        if (-not $parentId -or $parentId -eq $currentId) { break }
+
+        $parentRecord = $OwnedProcesses[$parentId]
+        if ($parentRecord -and $currentTicks) {
+            # Windows 的 venv python.exe 会再启动一个解释器子进程。
+            # 即使父进程已经先退出，只要子进程创建时间晚于记录中的父进程，
+            # 仍可确认它是这次 Hear 启动产生的进程树。
+            try {
+                if ([Int64]$currentTicks -ge [Int64]$parentRecord.StartTicks) { return $parentId }
+            } catch {}
+        }
+        $current = Get-Process -Id ([int]$parentId) -ErrorAction SilentlyContinue
+    }
+    return $null
+}
+
+function Stop-HearProcessTreeById($ProcessId) {
+    if (-not $ProcessId) { return }
+    try { & taskkill.exe /PID ([string]$ProcessId) /T /F 2>&1 | Out-Null } catch {}
+    Start-Sleep -Milliseconds 300
+    if (Get-Process -Id ([int]$ProcessId) -ErrorAction SilentlyContinue) {
+        try { Stop-Process -Id ([int]$ProcessId) -Force -ErrorAction SilentlyContinue } catch {}
+    }
+}
+
+function Stop-HearOwnedProcess($Process) {
+    if (-not $Process) { return }
+    $rootId = Get-HearOwnershipRootId $Process
+    if ($rootId) { Stop-HearProcessTreeById $rootId }
+    if (Get-Process -Id $Process.Id -ErrorAction SilentlyContinue) {
+        Stop-HearProcessTreeById $Process.Id
+    }
 }
 
 function Say($t)  { Write-Host "==> $t" -ForegroundColor Cyan }
 function Step($t) { Write-Host "    $t" -ForegroundColor DarkGray }
 function Die($t)  { Write-Host "!! $t" -ForegroundColor Red; exit 1 }
+
+# 让所有服务子进程成为同一个 Windows Job 的成员。BAT 窗口被关闭、
+# PowerShell 被强制结束时，系统会关闭 Job 句柄并连带结束整棵进程树。
+if (-not ("Hear.KillJob" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace Hear {
+    public static class KillJob {
+        [StructLayout(LayoutKind.Sequential)]
+        struct IO_COUNTERS {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        static extern IntPtr CreateJobObject(IntPtr security, string name);
+
+        [DllImport("kernel32.dll")]
+        static extern bool SetInformationJobObject(
+            IntPtr job, int infoClass, IntPtr info, uint length);
+
+        [DllImport("kernel32.dll")]
+        static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        public static IntPtr CreateKillOnClose() {
+            IntPtr job = CreateJobObject(IntPtr.Zero, null);
+            if (job == IntPtr.Zero) return IntPtr.Zero;
+            var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            info.BasicLimitInformation.LimitFlags = 0x2000;
+            int length = Marshal.SizeOf(info);
+            IntPtr buffer = Marshal.AllocHGlobal(length);
+            try {
+                Marshal.StructureToPtr(info, buffer, false);
+                if (!SetInformationJobObject(job, 9, buffer, (uint)length)) return IntPtr.Zero;
+                return job;
+            } finally {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        public static bool Attach(IntPtr job, IntPtr process) {
+            return job != IntPtr.Zero && AssignProcessToJobObject(job, process);
+        }
+    }
+}
+"@
+}
+$HearJob = [Hear.KillJob]::CreateKillOnClose()
+function Add-ProcessToHearJob($Process) {
+    if (-not $Process -or -not $HearJob) { return }
+    try {
+        $Process.Refresh()
+        if ($Process.HasExited) { return }
+        if (-not [Hear.KillJob]::Attach($HearJob, $Process.Handle)) {
+            Write-Warning "Hear 进程没有加入自动清理组，退出窗口后可能需要手动结束。"
+        }
+    } catch {
+        Write-Warning "Hear 进程自动清理组设置失败：$($_.Exception.Message)"
+    }
+}
 
 # 列出网卡（WLAN / 以太网）各自的 IP，让用户挑一个填到手机里。
 # 不能随便取第一个：VPN、虚拟网卡、WSL 的地址都可能出现，手机连不上。
@@ -345,11 +501,6 @@ function Show-LanInfo($port) {
 Say "仓库目录：$RepoRoot"
 Say "模型目录：$ModelDir"
 
-# 上一次没关窗口的话，8000 端口还被占着，先提醒一下
-$busy0 = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if ($busy0) {
-    Write-Host "    （端口 $Port 已经被占着，可能是上次的服务还在跑；下面会处理）" -ForegroundColor DarkGray
-}
 New-Item -ItemType Directory -Force -Path $ModelDir, $BinDir | Out-Null
 
 # 先把手机要填的地址打印出来，不用等模型下完
@@ -452,10 +603,57 @@ $py = Find-Python
 if (-not $py) {
     Die "没找到 Python。请到 https://www.python.org/downloads/windows/ 装 Python 3.9 以上（安装时勾上 Add python.exe to PATH），装完重开 PowerShell 再跑。"
 }
+
+function Clear-HearPorts {
+    foreach ($p in @($Port, $MtPort, $ClonePort)) {
+        $busy = @(Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue)
+        if ($busy.Count -eq 0) { continue }
+
+        $owners = @($busy | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)
+        foreach ($ownerId in $owners) {
+            $owner = Get-Process -Id $ownerId -ErrorAction SilentlyContinue
+            if (-not $owner) { continue }
+
+            $rootId = Get-HearOwnershipRootId $owner
+            if ($rootId) {
+                Step "停止上次未退出的 Hear 服务（监听 PID $ownerId，进程树 PID $rootId）"
+                Stop-HearOwnedProcess $owner
+                continue
+            }
+
+            $details = $null
+            try {
+                $details = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $ownerId) -ErrorAction Stop
+            } catch {}
+            Write-Host ""
+            Write-Host "!! 端口 $p 被其他程序占着：$($owner.ProcessName)（PID $ownerId）" -ForegroundColor Yellow
+            if ($details -and $details.ExecutablePath) {
+                Write-Host "   程序：$($details.ExecutablePath)" -ForegroundColor Yellow
+            }
+            if ($details -and $details.CommandLine) {
+                Write-Host "   命令：$($details.CommandLine)" -ForegroundColor DarkGray
+            }
+            Write-Host "   这不是本工程记录的 Hear 进程，脚本不会误杀它。" -ForegroundColor Yellow
+            Write-Host "   可以关闭该程序后重试，或换端口运行：" -ForegroundColor Yellow
+            Write-Host "   set HEAR_PORT=8010 && set HEAR_MT_PORT=8091 && set HEAR_CLONE_PORT=8092" -ForegroundColor Yellow
+            throw "端口 $p 被其他程序占用"
+        }
+
+        for ($i = 0; $i -lt 30; $i++) {
+            if (-not (Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 200
+        }
+        if (Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue) {
+            throw "端口 $p 仍被占用，未能结束旧 Hear 进程"
+        }
+    }
+}
+
 # ---------------------------------------------------------------- 先起个临时服务
 # hear_cloud.py 只用标准库就能跑（识别模型是懒加载的），
 # 所以先用系统 Python 把它起起来，几秒钟后就能在手机浏览器上测网络了，
 # 不用等 llama.cpp 和几个 G 的模型下完。
+Clear-HearPorts
 $cloudScript = Join-Path $ServerDir "hear_cloud.py"
 $tempCloud = $null
 $py0 = Find-Python
@@ -470,6 +668,7 @@ $env:HEAR_SENSEVOICE_DIR = $SvDir
         $tempCloud = Start-Process -FilePath $py0 -ArgumentList "`"$cloudScript`"" `
                         -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $ServerDir "cloud.log") `
                         -RedirectStandardError (Join-Path $ServerDir "cloud.log.err")
+        Add-ProcessToHearJob $tempCloud
         Record-HearProcess $tempCloud
         Start-Sleep -Seconds 2
         Say "临时服务已启动（端口 $Port），现在就能在手机浏览器上测网络"
@@ -564,41 +763,12 @@ $env:HEAR_MT_URL = "http://127.0.0.1:$MtPort"
 $env:HEAR_CLONE_URL = "http://127.0.0.1:$ClonePort"
 $env:HEAR_ASR_MODEL = $AsrModel
 $cloudScript = Join-Path $ServerDir "hear_cloud.py"
-# 端口上可能还留着上一次跑的临时服务，先把它停掉再起正式的
-# （正式的服务用 venv 里的 Python，带 faster-whisper）
-#
-# 【重要】三个端口都要清：8000（总服务）、8081（翻译模型）、8082（克隆模型）。
-# 只清 8000 是不够的：Windows 上绑在具体地址（127.0.0.1）的套接字
-# 会优先于绑 0.0.0.0 的，所以上一个窗口没关干净、残留了一个
-# 监听 127.0.0.1:8082 的旧 llama-server 时，
-# 总服务（走 127.0.0.1）会连到那个旧实例上，
-# 而手机（走局域网地址）连到的是新实例——
-# 两边表现不一样，克隆出来的声音会是乱的，而且慢十倍。
-foreach ($p in @($Port, $MtPort, $ClonePort)) {
-    $busy = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
-    if ($busy) {
-        foreach ($c in $busy) {
-            $owner = (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue)
-            if (-not $owner) { continue }
-            $ours = Test-HearProcessOwnership $owner
-            if ($ours) {
-                Step "停掉占着端口 $p 的旧进程（$($owner.ProcessName)）"
-                try { Stop-Process -Id $c.OwningProcess -Force } catch {}
-            } else {
-                Write-Host ""
-                Write-Host "!! 端口 $p 被别的程序占着：$($owner.ProcessName)（PID $($c.OwningProcess)）" -ForegroundColor Yellow
-                Write-Host "   Instance ownership could not be verified; it was left running." -ForegroundColor Yellow
-                Write-Host "   把那个程序关掉再跑一次就行；" -ForegroundColor Yellow
-                Write-Host "   或者换三个端口跑：set HEAR_PORT=8010 && set HEAR_MT_PORT=8091 && set HEAR_CLONE_PORT=8092" -ForegroundColor Yellow
-                Write-Host ""
-                exit 1
-            }
-        }
-        Start-Sleep -Seconds 1
-    }
-}
+# 正式服务启动前再清一次：临时服务是 venv 之前的 Python，
+# 正式服务必须由 venv Python 接管 8000。三个端口都检查，
+# 避免旧翻译 / 克隆服务留在 8081 / 8082 上接通错误的实例。
+Clear-HearPorts
 if ($tempCloud -and -not $tempCloud.HasExited) {
-    try { Stop-Process -Id $tempCloud.Id -Force } catch {}
+    try { Stop-HearOwnedProcess $tempCloud } catch {}
 }
 # 自签证书：App 只走 https，没有证书手机就连不上，
 # 所以这一步要看得见，失败了要马上说清楚（私钥只留在本机，不进仓库）
@@ -627,6 +797,7 @@ if (-not (Test-Path $certFile)) {
 
 $cloud = Start-Process -FilePath $venvPy -ArgumentList "`"$cloudScript`"" `
             -PassThru -NoNewWindow
+Add-ProcessToHearJob $cloud
 Record-HearProcess $cloud
 Start-Sleep -Seconds 3
 Say "云端服务已启动（端口 $Port），模型还在准备中"
@@ -745,6 +916,7 @@ $mtLog = Join-Path $ServerDir "mt.log"
 $mt = Start-Process -FilePath $mtServer -ArgumentList $mtArgs -PassThru -NoNewWindow `
         -RedirectStandardOutput $mtLog -RedirectStandardError "$mtLog.err"
 $procs += $mt
+Add-ProcessToHearJob $mt
 Record-HearProcess $mt
 $cloneArgs = @("-m", (Join-Path $ModelDir $CloneModelFile),
                 "--mmproj", (Join-Path $ModelDir $CloneMmprojFile),
@@ -756,6 +928,7 @@ $cloneLog = Join-Path $ServerDir "clone.log"
 $clone = Start-Process -FilePath $cloneServer -ArgumentList $cloneArgs -PassThru -NoNewWindow `
             -RedirectStandardOutput $cloneLog -RedirectStandardError "$cloneLog.err"
 $procs += $clone
+Add-ProcessToHearJob $clone
 Record-HearProcess $clone
 function Wait-Health($url, $name, $logName, $proc) {
     # 模型大的时候要加载一会儿，给足 10 分钟
@@ -790,7 +963,7 @@ $mtOk = Wait-Health "http://127.0.0.1:$MtPort" "翻译模型" "mt.log" $mt
 if (-not $mtOk -and $MtDevice -ne "CPU") {
     # 核显 / NPU 起不来（驱动、OpenVINO、显存都不够），退回 CPU 也能用，只是慢一点
     Say "$MtDevice 后端没起来，改用 CPU 跑翻译模型"
-    try { Stop-Process -Id $mt.Id -Force -ErrorAction SilentlyContinue } catch {}
+    try { Stop-HearOwnedProcess $mt } catch {}
     Start-Sleep -Seconds 2
     $cpuMt = Server-For "CPU"
     if ($cpuMt) {
@@ -799,6 +972,7 @@ if (-not $mtOk -and $MtDevice -ne "CPU") {
         $mt = Start-Process -FilePath $cpuMt -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $mtLog -RedirectStandardError "$mtLog.err"
         $procs += $mt
+        Add-ProcessToHearJob $mt
         Record-HearProcess $mt
         $mtOk = Wait-Health "http://127.0.0.1:$MtPort" "翻译模型（CPU）" "mt.log" $mt
     }
@@ -806,7 +980,7 @@ if (-not $mtOk -and $MtDevice -ne "CPU") {
 $cloneOk = Wait-Health "http://127.0.0.1:$ClonePort" "声音克隆模型" "clone.log" $clone
 if (-not $cloneOk -and $CloneDevice -ne "CPU") {
     Say "$CloneDevice 后端没起来，改用 CPU 跑声音克隆模型"
-    try { Stop-Process -Id $clone.Id -Force -ErrorAction SilentlyContinue } catch {}
+    try { Stop-HearOwnedProcess $clone } catch {}
     Start-Sleep -Seconds 2
     $cpuClone = Server-For "CPU"
     if ($cpuClone) {
@@ -816,6 +990,7 @@ if (-not $cloneOk -and $CloneDevice -ne "CPU") {
         $clone = Start-Process -FilePath $cpuClone -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $cloneLog -RedirectStandardError "$cloneLog.err"
         $procs += $clone
+        Add-ProcessToHearJob $clone
         Record-HearProcess $clone
         $cloneOk = Wait-Health "http://127.0.0.1:$ClonePort" "声音克隆模型（CPU）" "clone.log" $clone
     }
