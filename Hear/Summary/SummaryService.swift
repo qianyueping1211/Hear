@@ -95,7 +95,7 @@ final class SummaryService {
             "",
         ]
         for (i, item) in c.items.enumerated() {
-            let side = item.speakerLabel ?? (item.source == c.langA ? "A方" : "B方")
+            let side = item.speakerLabel ?? (item.isLeading(left: c.langA, right: c.langB) ? "A方" : "B方")
             let provisional = item.sourceProvisional == true ? "·原文待确认" : ""
             lines.append("\(i + 1). 【\(side)·\(item.source.zhName)\(provisional)】\(item.sourceText)")
             if item.done, !item.translated.isEmpty {

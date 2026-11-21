@@ -1,10 +1,17 @@
 import Foundation
 import FluidAudio
+import CoreML
+import os
 
 /// 本地语音识别：SenseVoiceSmall（阿里 FunASR，FluidAudio 转成的 Core ML，跑在神经引擎上）。
 /// 一次把整句文字算出来（不是一个字一个字往下生成），所以很快，也不会在噪声上“复读”卡住。
 /// 擅长中文、英语、日语、韩语、粤语。
 actor SenseVoiceRecognizer {
+    struct LoadFailure: LocalizedError {
+        var errorDescription: String? {
+            "SenseVoice 无法加载。可以重试，或在「模型管理」中重新下载 SenseVoice。"
+        }
+    }
     private var models: SenseVoiceModels?
     /// 每种语言一个 manager（语言在创建时定好；创建很便宜，模型是共用的）
     private var managers: [Int32: SenseVoiceManager] = [:]
@@ -29,10 +36,50 @@ actor SenseVoiceRecognizer {
         // 下载的是 int8（约 240 MB）；导入的文件夹里只有 fp16 时就用 fp16
         let precision: SenseVoiceEncoderPrecision =
             SenseVoiceModels.modelsExist(at: folder, precision: .int8) ? .int8 : .fp16
-        hearLog("SenseVoice：开始加载（\(precision.rawValue)）")
-        models = try SenseVoiceModels.load(from: folder, precision: precision)
+        hearLog("SenseVoice：开始加载（\(precision.rawValue)），可用内存 \(os_proc_available_memory() / 1_048_576) MB")
+        do {
+            models = try SenseVoiceModels.load(from: folder, precision: precision)
+        } catch {
+            try Task.checkCancellation()
+            hearLog("SenseVoice 首次加载失败：\(error)", .warning)
+            guard (error as NSError).domain == "com.apple.CoreML" else { throw LoadFailure() }
+            hearLog("SenseVoice：尝试 CPU 兼容加载，可用内存 \(os_proc_available_memory() / 1_048_576) MB")
+            do {
+                models = try Self.loadOnCPU(folder, precision: precision)
+            } catch {
+                hearLog("SenseVoice CPU 加载失败：\(error)", .error)
+                throw LoadFailure()
+            }
+        }
         managers.removeAll()
-        hearLog("SenseVoice：加载完成，用时 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s")
+        hearLog("SenseVoice：加载完成，用时 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s，可用内存 \(os_proc_available_memory() / 1_048_576) MB")
+    }
+
+    private static func loadOnCPU(_ folder: URL, precision: SenseVoiceEncoderPrecision) throws -> SenseVoiceModels {
+        let config = MLModelConfiguration()
+        config.computeUnits = .cpuOnly
+        let encoderFile: String
+        if SenseVoiceModels.modelsExist(at: folder, precision: .fp32) {
+            encoderFile = ModelNames.SenseVoice.encoderFp32File
+        } else {
+            encoderFile = precision == .int8 ? ModelNames.SenseVoice.encoderInt8File : ModelNames.SenseVoice.encoderFile
+        }
+        let data = try Data(contentsOf: folder.appendingPathComponent(ModelNames.SenseVoice.vocabularyFile))
+        let decoder = JSONDecoder()
+        let vocabulary: [Int: String]
+        if let tokens = try? decoder.decode([String].self, from: data) {
+            vocabulary = Dictionary(uniqueKeysWithValues: tokens.enumerated().map { ($0.offset, $0.element) })
+        } else {
+            let tokens = try decoder.decode([String: String].self, from: data)
+            vocabulary = tokens.reduce(into: [:]) { result, token in
+                if let id = Int(token.key) { result[id] = token.value }
+            }
+        }
+        guard !vocabulary.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+        let preprocessor = try MLModel(contentsOf: folder.appendingPathComponent(ModelNames.SenseVoice.preprocessorFile),
+                                      configuration: config)
+        let encoder = try MLModel(contentsOf: folder.appendingPathComponent(encoderFile), configuration: config)
+        return SenseVoiceModels(preprocessor: preprocessor, encoder: encoder, vocabulary: vocabulary)
     }
 
     private func manager(for lang: String?) -> SenseVoiceManager? {

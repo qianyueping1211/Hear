@@ -36,6 +36,8 @@ struct Language: Identifiable, Hashable, Codable {
 
 /// 一条翻译记录
 struct TranslationItem: Identifiable, Equatable, Codable {
+    enum SourceSide: String, Codable { case left, right }
+
     var id = UUID()
     let source: Language
     let target: Language
@@ -49,6 +51,14 @@ struct TranslationItem: Identifiable, Equatable, Codable {
     var speakerTracked: Bool? = nil
     var speakerManuallySet: Bool? = nil
     var sourceProvisional: Bool? = nil
+    var sourceSide: SourceSide? = nil
+
+    func isLeading(left: Language, right: Language) -> Bool {
+        if let sourceSide { return sourceSide == .left }
+        if source.id == left.id { return true }
+        if source.id == right.id { return false }
+        return target.id != left.id
+    }
 
     var speakerLabel: String? {
         if let speakerID { return speakerName ?? "说话人 \(speakerID)" }

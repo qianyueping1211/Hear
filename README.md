@@ -4,7 +4,7 @@ iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话
 
 - 选两种语言（默认 中文 ⇄ English），点一下开始，之后直接说话
 - 自动判断说的是哪种语言，翻译成另一种，并可朗读出来
-- 语音识别：Whisper large-v3 turbo（WhisperKit，跑在神经网络引擎上）
+- 语音识别：本机 SenseVoice Small（Core ML）或云端服务
 - 翻译：腾讯 Hy-MT2-1.8B（llama.cpp，跑在 GPU 上）
 - 支持上下文连贯翻译、自定义术语表
 - 适配 iPhone 16 Pro / Pro Max 等 8GB 内存机型，iOS 18+
@@ -67,10 +67,9 @@ iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话
   - **实时翻译模式**：点一下中间的按钮开始，之后直接说话，自动判断语言；再点一下停止。
   - **对话翻译模式**：左右两个国旗按钮，按住说对应的语言，松开就暂停，这一段会接着翻译完再播报。
 - **识别引擎**（功能设置 → 语音识别）：
-  - **本地最准：Whisper**：标点和长句最好，说完一句后识别，稍慢。
   - **本地最快：SenseVoice**：说完马上出字（约 240 MB，只支持中、英、日、韩）。
-  - **SenseVoice + Whisper 校正**：SenseVoice 先出结果，空闲时 Whisper 再识别一遍，有明显差别就替换（句子后面显示魔法棒）。
-  - **iOS 系统听写**：说话时逐字显示，说完由 Whisper 定稿。
+  - **云端综合：SenseVoice + Whisper**：SenseVoice 先出结果，服务端再用 Whisper 校正。
+  - **iOS 系统听写**：在支持的设备上实时显示听写结果。
 - **朗读开/关**：开着时，翻译结果会读出来；朗读期间麦克风自动暂停，避免回声。
 - **上下文开**：参考前两句来翻译，代词和语气更连贯。
 - **术语表**（设置里）：每行 `原文=译文`，比如人名、公司名、专业词。
@@ -119,7 +118,7 @@ Hear/
 ├── App/LiveSession.swift        整体流程：断句 → 识别 → 翻译 → 朗读
 ├── Audio/AudioCapture.swift     麦克风采集、重采样到 16kHz
 ├── Audio/Segmenter.swift        自动断句（不用一直按着）
-├── Speech/SpeechRecognizer.swift  WhisperKit 语音识别 + 语种判断
+├── Speech/SenseVoiceRecognizer.swift  本机 SenseVoice 语音识别
 ├── Speech/Speaker.swift         系统朗读
 ├── Translate/LlamaTranslator.swift  llama.cpp 运行 Hy-MT2
 ├── Translate/PromptBuilder.swift    官方提示词格式（上下文、术语）

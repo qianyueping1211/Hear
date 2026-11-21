@@ -298,7 +298,7 @@ struct TranscriptView: View {
                         EmptyHint().padding(.top, 60)
                     }
                     ForEach(session.items) { item in
-                        BubbleView(item: item, leading: item.source == session.langA,
+                        BubbleView(item: item, leading: item.isLeading(left: session.langA, right: session.langB),
                                    reading: session.readingID == item.id,
                                    playing: session.speakingID == item.id,
                                    preparing: session.clonePreparingID == item.id

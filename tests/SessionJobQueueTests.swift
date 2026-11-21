@@ -39,6 +39,7 @@ struct SessionJobQueueTests {
         try testSpeakers()
         try testZipVoiceArchive()
         testCloudReadiness()
+        try testConversationBubbleSides()
         print("Session queue regressions passed")
     }
 
@@ -66,6 +67,17 @@ struct SessionJobQueueTests {
         let decoded = try JSONDecoder().decode([TranslationItem].self, from: data)
         precondition(decoded == items, "Speaker edits should survive persistence")
     }
+}
+
+private func testConversationBubbleSides() throws {
+    let japanese = Language.find("ja"), english = Language.find("en"), chinese = Language.find("zh")
+    let original = TranslationItem(source: japanese, target: english, sourceText: "先试一下")
+    let legacy = try JSONDecoder().decode(TranslationItem.self, from: JSONEncoder().encode(original))
+    precondition(legacy.isLeading(left: japanese, right: english))
+    precondition(legacy.isLeading(left: chinese, right: english), "Old left-side bubbles must not move")
+    let reply = TranslationItem(source: english, target: japanese, sourceText: "Hello", sourceSide: .right)
+    let stored = try JSONDecoder().decode(TranslationItem.self, from: JSONEncoder().encode(reply))
+    precondition(!stored.isLeading(left: english, right: japanese), "Stored sides must survive swaps")
 }
 
 private func testCloudReadiness() {

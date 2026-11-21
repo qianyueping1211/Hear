@@ -9,9 +9,6 @@ packages:
   SherpaOnnx:
     url: https://github.com/k2-fsa/sherpa-onnx
     exactVersion: 1.13.8
-  WhisperKit:
-    url: https://github.com/argmaxinc/WhisperKit
-    from: 1.0.0
   FluidAudio:
     url: https://github.com/FluidInference/FluidAudio
     exactVersion: 0.18.3
@@ -25,8 +22,6 @@ targets:
     dependencies:
       - package: SherpaOnnx
         product: sherpa-onnx
-      - package: WhisperKit
-        product: WhisperKit
       - package: FluidAudio
         product: FluidAudio
       - framework: Frameworks/llama.xcframework

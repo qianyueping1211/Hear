@@ -162,10 +162,6 @@ struct SettingsView: View {
                             cloudEdit = .model(.asr)
                         }
                         Toggle("实时翻译时区分说话人", isOn: $session.speakerTrackingEnabled)
-                        if session.speakerTrackingEnabled {
-                            Text("云端服务器按声音区分发言。点原文上方的说话人标签可以改名或改分组。")
-                                .font(.footnote).foregroundStyle(.secondary)
-                        }
                     }
                     if session.translationEngine == "local", !session.isInstalled(.translation) {
                         Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
@@ -189,8 +185,6 @@ struct SettingsView: View {
                         .listRowInsets(EdgeInsets(top: 24, leading: 16, bottom: 0, trailing: 16))
 
                     if modelTab == 0 {
-                        modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
-                                 status: session.speechStatus)
                         modelRow(.senseVoice, title: "语音识别（SenseVoice）", icon: "hare",
                                  status: session.senseStatus)
                         modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
@@ -242,10 +236,6 @@ struct SettingsView: View {
                         Text("停顿多久算一句：\(Int(session.silenceMs)) 毫秒")
                         Slider(value: $session.silenceMs, in: 400...1500, step: 50)
                         Text("短：出结果更快；长：句子更完整").font(.caption).foregroundStyle(.secondary)
-                    }
-                    Picker("语音识别运行在", selection: asrBinding) {
-                        Text("GPU（加载快，推荐）").tag(true)
-                        Text("神经引擎（省电）").tag(false)
                     }
                 } header: {
                     Text("语音识别")
@@ -414,7 +404,6 @@ struct SettingsView: View {
                 Task {
                     await session.prepareForModelImport(kind)
                     switch kind {
-                    case .speech: await session.importWhisper(url)
                     case .senseVoice: await session.importSenseVoice(url)
                     case .translation: await session.importModel(url)
                     case .voiceClone: await session.importVoiceClone(url)
@@ -504,7 +493,7 @@ struct SettingsView: View {
     }
 
     private var asrEngineOptions: [(tag: String, title: String, detail: String)] {
-        let engines = ["sensevoice", "whisper", "hybrid", "cloud"]
+        let engines = ["sensevoice", "cloud"]
         let options = session.appleAvailable ? ["apple"] + engines : engines
         return options.map { ($0, asrEngineName($0), "") }
     }
@@ -513,8 +502,6 @@ struct SettingsView: View {
         switch engine {
         case "apple": return "本机：苹果自带"
         case "sensevoice": return "本机最快：SenseVoice"
-        case "whisper": return "本机最准：Whisper"
-        case "hybrid": return "本机综合：SenseVoice + Whisper"
         case "cloud": return "云端服务器"
         default: return "请选择"
         }
@@ -532,7 +519,7 @@ struct SettingsView: View {
 
     private var engineDownloadMessage: String {
         let kinds = session.missingSpeechKinds(for: lastPendingEngine)
-        let names = kinds.map { $0 == .senseVoice ? "SenseVoice（约 240 MB）" : "Whisper（约 1.6 GB）" }
+        let names = kinds.map { _ in "SenseVoice（约 240 MB）" }
         return "这个识别引擎需要 \(names.joined(separator: "、")) 语音识别模型。下载期间继续用现在的引擎，下载完成后自动切换。请连接 Wi‑Fi，并保持 App 在前台。"
     }
 
@@ -552,7 +539,6 @@ struct SettingsView: View {
     static func kindTitle(_ kind: LiveSession.ModelKind) -> String {
         switch kind {
         case .translation: return "翻译模型（MT）"
-        case .speech: return "语音识别模型（Whisper）"
         case .senseVoice: return "语音识别模型（SenseVoice）"
         case .voiceClone: return "声音克隆模型（ZipVoice）"
         }
@@ -561,7 +547,6 @@ struct SettingsView: View {
     static func kindSize(_ kind: LiveSession.ModelKind) -> String {
         switch kind {
         case .translation: return "约 2 GB"
-        case .speech: return "约 1.6 GB"
         case .senseVoice: return "约 240 MB"
         case .voiceClone: return "约 163 MB"
         }
@@ -647,7 +632,6 @@ struct SettingsView: View {
         let st: LiveSession.ModelStatus
         switch kind {
         case .translation: st = session.translationStatus
-        case .speech: st = session.speechStatus
         case .senseVoice: st = session.senseStatus
         case .voiceClone: st = session.cloneStatus
         }
@@ -698,17 +682,6 @@ struct SettingsView: View {
                 }
                 inputNote = nil
                 session.inputSource = v
-            }
-        )
-    }
-
-    private var asrBinding: Binding<Bool> {
-        Binding(
-            get: { session.asrUseGPU },
-            set: { gpu in
-                guard gpu != session.asrUseGPU else { return }
-                session.asrUseGPU = gpu
-                Task { await session.reloadASR() }      // 加载进度显示在「引擎」下方
             }
         )
     }

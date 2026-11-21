@@ -46,7 +46,7 @@ final class CloudSync: ObservableObject {
     /// 用不用云端翻译/克隆）一定要在这里面，不然换了手机或者重装之后就没了。
     private static let settingKeys = [
         "langA", "langB", "speakOutput", "useContext", "sensitivity", "silenceMs", "glossary",
-        "outputMode", "leftEar", "rightEar", "voiceClone", "asrUseGPU", "asrEngine",
+        "outputMode", "leftEar", "rightEar", "voiceClone", "asrEngine",
         "voiceProcessing", "inputSource", "llmProviders", "llmActiveID",
         "logEnabled", "logMaxMB",
         // 在线模型（云端服务）

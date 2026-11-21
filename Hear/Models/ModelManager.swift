@@ -1,5 +1,4 @@
 import Foundation
-import WhisperKit
 
 /// 管理本地模型文件：下载、导入、查找
 enum ModelManager {
@@ -15,10 +14,6 @@ enum ModelManager {
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d
     }
-    static var whisperBase: URL {
-        documents.appendingPathComponent("huggingface", isDirectory: true)
-    }
-
     // MARK: 翻译模型
 
     static func installedGGUFs() -> [URL] {
@@ -166,95 +161,6 @@ enum ModelManager {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
-    // MARK: 语音模型
-
-    /// 删除语音模型（用于重新下载）
-    static func deleteWhisper() {
-        if let f = whisperFolder() { try? FileManager.default.removeItem(at: f) }
-        UserDefaults.standard.removeObject(forKey: "whisperRelPath")
-    }
-
-    /// 相对路径保存在 UserDefaults，因为重新安装后 App 沙盒的绝对路径会变
-    static func whisperFolder() -> URL? {
-        guard let rel = UserDefaults.standard.string(forKey: "whisperRelPath") else { return nil }
-        let url = documents.appendingPathComponent(rel, isDirectory: true)
-        let marker = url.appendingPathComponent("AudioEncoder.mlmodelc")
-        return FileManager.default.fileExists(atPath: marker.path) ? url : nil
-    }
-
-    /// 导入语音识别模型：选一个 WhisperKit 模型文件夹（里面有 AudioEncoder.mlmodelc 等）。
-    /// 复制到 App 里，替换掉原来的语音识别模型。
-    static func importWhisper(from src: URL) throws {
-        let access = src.startAccessingSecurityScopedResource()
-        defer { if access { src.stopAccessingSecurityScopedResource() } }
-        let fm = FileManager.default
-        let need = ["AudioEncoder.mlmodelc", "TextDecoder.mlmodelc", "MelSpectrogram.mlmodelc"]
-        let missing = need.filter { !fm.fileExists(atPath: src.appendingPathComponent($0).path) }
-        guard missing.isEmpty else {
-            throw NSError(domain: "Hear", code: 3, userInfo: [NSLocalizedDescriptionKey:
-                "这个文件夹不是 WhisperKit 语音识别模型（缺少 \(missing.joined(separator: "、"))）"])
-        }
-        let dir = whisperBase.appendingPathComponent("imported", isDirectory: true)
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        let dst = dir.appendingPathComponent(src.lastPathComponent, isDirectory: true)
-        let old = whisperFolder()
-        if src.standardizedFileURL.path != dst.standardizedFileURL.path {
-            // 先复制到临时目录，成功了再换上去：
-            // 中途失败的话，原来那个还能用的模型不会被动
-            let tmp = dir.appendingPathComponent(".\(src.lastPathComponent).importing", isDirectory: true)
-            try? fm.removeItem(at: tmp)
-            try fm.copyItem(at: src, to: tmp)
-            let oldDst = dir.appendingPathComponent(".\(src.lastPathComponent).old", isDirectory: true)
-            try? fm.removeItem(at: oldDst)
-            if fm.fileExists(atPath: dst.path) { try fm.moveItem(at: dst, to: oldDst) }
-            do {
-                try fm.moveItem(at: tmp, to: dst)
-            } catch {
-                if fm.fileExists(atPath: oldDst.path) { try? fm.moveItem(at: oldDst, to: dst) }
-                try? fm.removeItem(at: tmp)
-                throw error
-            }
-            try? fm.removeItem(at: oldDst)
-        }
-        // 原来的模型删掉，省空间（选的就是原来那个文件夹时不删）
-        if let old, old.standardizedFileURL.path != dst.standardizedFileURL.path,
-           old.standardizedFileURL.path != src.standardizedFileURL.path {
-            try? fm.removeItem(at: old)
-        }
-        UserDefaults.standard.set("huggingface/imported/" + src.lastPathComponent, forKey: "whisperRelPath")
-    }
-
-    static func downloadWhisper(host: String, force: Bool = false, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
-        if host != "huggingface.co" { setenv("HF_ENDPOINT", "https://\(host)", 1) }
-        let oldFolder = whisperFolder()
-        let staging = force ? whisperBase.appendingPathComponent("refresh-\(UUID().uuidString)") : whisperBase
-        var installed = false
-        defer {
-            if force && !installed { try? FileManager.default.removeItem(at: staging) }
-        }
-        let folder = try await WhisperKit.download(
-            variant: SpeechRecognizer.modelVariant,
-            downloadBase: staging,
-            progressCallback: { p in progress(p.fractionCompleted) }
-        )
-        try Task.checkCancellation()
-        for name in ["AudioEncoder.mlmodelc", "TextDecoder.mlmodelc", "MelSpectrogram.mlmodelc"] {
-            guard FileManager.default.fileExists(atPath: folder.appendingPathComponent(name).path) else {
-                throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: name])
-            }
-        }
-        let docPath = documents.standardizedFileURL.path
-        var rel = folder.standardizedFileURL.path
-        if rel.hasPrefix(docPath) { rel = String(rel.dropFirst(docPath.count)) }
-        rel = rel.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        UserDefaults.standard.set(rel, forKey: "whisperRelPath")
-        installed = true
-        if force, let oldFolder, oldFolder != folder,
-           oldFolder.path.hasPrefix(whisperBase.path + "/") {
-            try? FileManager.default.removeItem(at: oldFolder)
-        }
-        return folder
-    }
 }
 
 /// 带进度的大文件下载。
