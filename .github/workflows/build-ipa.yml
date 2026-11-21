@@ -150,12 +150,16 @@ jobs:
             echo "2. 用 [Sideloadly](https://sideloadly.io) + 你的 Apple ID 安装到 iPhone"
             echo "3. 已安装过的直接覆盖安装，模型不用重新下载"
           } > notes.md
-          # Keep the source tag aligned with each uploaded binary.
+          # 一个版本只保留一个发行标签，例如 v0.4.69。
+          # 同一版本重新构建时只覆盖 IPA 与说明，不再生成 -build.N 小版本。
           if gh release view "$TAG" >/dev/null 2>&1; then
-            TAG="$TAG-build.$GITHUB_RUN_NUMBER"
+            gh release edit "$TAG" \
+              --title "听见 ${VER}" --notes-file notes.md --latest
+            gh release upload "$TAG" "Hear-$VER.ipa" --clobber
+          else
+            gh release create "$TAG" "Hear-$VER.ipa" --target "$GITHUB_SHA" \
+              --title "听见 ${VER}" --notes-file notes.md --latest
           fi
-          gh release create "$TAG" "Hear-$VER.ipa" --target "$GITHUB_SHA" \
-            --title "听见 ${TAG#v}" --notes-file notes.md --latest
 
       # 只在失败时上传编译日志，方便排查；安装包只发布到 Releases
       - uses: actions/upload-artifact@v6
