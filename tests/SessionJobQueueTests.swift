@@ -38,6 +38,7 @@ struct SessionJobQueueTests {
         precondition(handled == [2, 4, 5] && timedOut == [1], "Canceled worker changed the replacement queue")
         try testSpeakers()
         try testZipVoiceArchive()
+        testCloudReadiness()
         print("Session queue regressions passed")
     }
 
@@ -65,6 +66,19 @@ struct SessionJobQueueTests {
         let decoded = try JSONDecoder().decode([TranslationItem].self, from: data)
         precondition(decoded == items, "Speaker edits should survive persistence")
     }
+}
+
+private func testCloudReadiness() {
+    let data = Data(#"{"asr":"未加载","asr_ready":true,"mt":"加载中","mt_ready":false,"clone":"外部服务连不上","clone_ready":false}"#.utf8)
+    let fields = CloudModelReadiness.fields(from: data)
+    func readiness(_ key: String) -> CloudModelReadiness {
+        CloudModelReadiness(reported: fields[key], ready: fields["\(key)_ready"])
+    }
+    precondition(readiness("asr") == .ready)
+    precondition(readiness("mt") == .loading)
+    precondition(readiness("clone") == .unavailable)
+    precondition(CloudModelReadiness(reported: nil, ready: nil) == .unknown)
+    precondition(CloudModelReadiness(reported: "就绪（small）", ready: nil) == .ready)
 }
 
 private func testZipVoiceArchive() throws {

@@ -269,8 +269,16 @@ final class LiveSession: ObservableObject {
     @Published private(set) var bgDownloadError: String?
     @Published private(set) var bgDownloadKind: ModelKind?
     @Published private(set) var bgQueue: [ModelKind] = []   // 这次要下载、还没下完的模型（排在后面的显示“等待下载”）
-    private var bgThenEngine: String?                       // 下载完后切换到这个识别引擎
-    private var bgSwitchWhenDone = true
+    private struct ModelDownloadRequest {
+        var kinds: [ModelKind]
+        let switchWhenDone: Bool
+        let thenEngine: String?
+        let force: Bool
+    }
+    @Published private var pausedModelDownloads: [ModelDownloadRequest] = []
+    private var modelDownloadRequest: ModelDownloadRequest?
+    private var modelDownloadTask: Task<Void, Never>?
+    private var modelDownloadID = UUID()
     // 让系统弹出苹果翻译语言包下载（ContentView 的 translationTask 使用）
     @Published var translationPrepConfig: TranslationSession.Configuration?
     @Published private(set) var appleNote: String?
@@ -917,6 +925,39 @@ final class LiveSession: ObservableObject {
         }
     }
 
+    func isModelDownloadPaused(_ kind: ModelKind) -> Bool {
+        pausedModelDownloads.contains { $0.kinds.contains(kind) }
+    }
+
+    func pauseModelDownload(_ kind: ModelKind) {
+        guard bgDownloading, bgDownloadKind == kind,
+              var request = modelDownloadRequest, !isModelDownloadPaused(kind) else { return }
+        request.kinds = bgQueue
+        pausedModelDownloads.append(request)
+        modelDownloadTask?.cancel()
+    }
+
+    func resumeModelDownload(_ kind: ModelKind) {
+        guard !bgDownloading,
+              let index = pausedModelDownloads.firstIndex(where: { $0.kinds.contains(kind) }) else { return }
+        let request = pausedModelDownloads.remove(at: index)
+        startBackgroundDownload(kinds: request.kinds, switchWhenDone: request.switchWhenDone,
+                                thenEngine: request.thenEngine, force: request.force)
+    }
+
+    func prepareForModelImport(_ kind: ModelKind) async {
+        if isModelDownloadPaused(kind) {
+            if bgDownloadKind == kind { await modelDownloadTask?.value }
+            clearPausedModelDownload(kind)
+        }
+    }
+
+    private func clearPausedModelDownload(_ kind: ModelKind) {
+        guard let index = pausedModelDownloads.firstIndex(where: { $0.kinds.contains(kind) }) else { return }
+        pausedModelDownloads[index].kinds.removeAll { $0 == kind }
+        if pausedModelDownloads[index].kinds.isEmpty { pausedModelDownloads.remove(at: index) }
+    }
+
     func selectGGUF(_ url: URL) async {
         if isRunning, translationEngine == "local" { stop(readAfter: false) }
         ModelManager.select(url)
@@ -1052,14 +1093,18 @@ final class LiveSession: ObservableObject {
             if translationEngine == "local", !isInstalled(.translation) { need.insert(.translation, at: 0) }
             list = need
         }
+        guard !list.isEmpty else { return }
+        let id = UUID()
+        modelDownloadID = id
+        list.forEach(clearPausedModelDownload)
+        modelDownloadRequest = ModelDownloadRequest(kinds: list, switchWhenDone: switchWhenDone,
+                                                    thenEngine: thenEngine, force: force)
         bgDownloading = true
         bgDownloadError = nil
         bgDownloadProgress = 0
-        bgSwitchWhenDone = switchWhenDone
         bgQueue = list
-        bgThenEngine = thenEngine
         hearLog("后台下载本地模型：\(list.map(Self.kindName).joined(separator: "、"))")
-        Task {
+        modelDownloadTask = Task {
             UIApplication.shared.isIdleTimerDisabled = true
             var ok = false
             let host: String
@@ -1071,11 +1116,16 @@ final class LiveSession: ObservableObject {
             }
             do {
                 for kind in list {
+                    try Task.checkCancellation()
                     bgDownloadKind = kind
                     bgDownloadName = Self.kindName(kind)
                     bgDownloadProgress = 0
                     let onProgress: @Sendable (Double) -> Void = { p in
-                        Task { @MainActor in self.bgDownloadProgress = p }
+                        Task { @MainActor in
+                            guard self.modelDownloadID == id, self.bgDownloadKind == kind,
+                                  !self.isModelDownloadPaused(kind) else { return }
+                            self.bgDownloadProgress = p
+                        }
                     }
                     switch kind {
                     case .translation: _ = try await ModelManager.downloadGGUF(host: host, progress: onProgress)
@@ -1090,24 +1140,27 @@ final class LiveSession: ObservableObject {
                     }
                     bgDownloadKind = nil              // 下载完立刻收起进度条
                     bgQueue.removeAll { $0 == kind }
+                    clearPausedModelDownload(kind)
                     modelsRevision += 1
                     if kind == .voiceClone, voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 0.3) }
                 }
                 ok = true
             } catch {
-                hearLog("后台下载失败：\(error)", .error)
-                HostPicker.reset()
-                bgDownloadError = "下载失败：\(error.localizedDescription)"
+                if !Task.isCancelled {
+                    hearLog("后台下载失败：\(error)", .error)
+                    HostPicker.reset()
+                    bgDownloadError = "下载失败：\(error.localizedDescription)"
+                }
             }
             // 先结束“下载中”的显示，再去切换或加载模型（加载要好几秒，不用一直挂着 100%）
             bgDownloading = false
             bgDownloadKind = nil
             bgQueue = []
             UIApplication.shared.isIdleTimerDisabled = isRunning
-            let then = bgThenEngine
-            bgThenEngine = nil
+            modelDownloadRequest = nil
+            defer { if modelDownloadID == id { modelDownloadTask = nil } }
             // 为了换识别引擎而下载：下载完就切过去（切换时会自动加载模型）
-            if ok, let then, then != asrEngine {
+            if ok, !Task.isCancelled, let then = thenEngine, then != asrEngine {
                 hearLog("模型下载完成，识别引擎切换为 \(then)")
                 asrEngine = then
                 return
@@ -1119,7 +1172,7 @@ final class LiveSession: ObservableObject {
             }
             hearLog("模型下载完成")
             // 只为下载声音克隆（switchWhenDone == false）就到此为止，不用加载翻译/识别模型
-            guard bgSwitchWhenDone else { return }
+            guard switchWhenDone else { return }
             if isRunning {
                 pendingLocalSwitch = true     // 正在对话：停止实时翻译后再加载
                 activity = "模型已下载，停止实时翻译后加载"
@@ -3361,12 +3414,12 @@ final class LiveSession: ObservableObject {
     /// 界面上显示的状态：未填写 / 正常 / 异常
     /// （用不用云端由"引擎管理"决定，这里只看地址通不通）
     func cloudStatusText(_ model: CloudModel) -> String {
-        cloudStatus[model.rawValue] ?? "未填写"
+        cloudStatus[model.rawValue] ?? Self.cloudStatusChecking
     }
 
     /// 共享服务地址（三个模型默认都用它）的状态
     var cloudServiceStatusText: String {
-        cloudStatus[Self.cloudServiceKey] ?? "未填写"
+        cloudStatus[Self.cloudServiceKey] ?? Self.cloudStatusChecking
     }
 
     /// 状态一共这三种
@@ -3375,18 +3428,25 @@ final class LiveSession: ObservableObject {
     static let cloudStatusBad = "异常"
     /// 模型还在加载（刚下完、刚起服务）：不是出错，显示成"加载中"
     static let cloudStatusLoading = "加载中"
+    static let cloudStatusChecking = "检测中"
+    private var cloudStatusRevision = 0
     /// 共享服务地址在状态表里的名字
     static let cloudServiceKey = "service"
 
     /// 刷新服务地址和三个模型的状态
     func refreshCloudStatus() async {
+        cloudStatusRevision += 1
+        let revision = cloudStatusRevision
         var status: [String: String] = [:]
         // 要问的地址（去重）：共享服务地址 + 三个模型实际用的地址
         var wanted: [String] = []
-        let defAddr = cloudAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        let defAddr = CloudClient.cleanURL(cloudAddress)
+        let addresses = Dictionary(uniqueKeysWithValues: CloudModel.allCases.map {
+            ($0.rawValue, CloudClient.cleanURL(cloudEffectiveAddress($0)))
+        })
         if !defAddr.isEmpty { wanted.append(defAddr) }
         for m in CloudModel.allCases {
-            let a = cloudEffectiveAddress(m)
+            let a = addresses[m.rawValue] ?? ""
             if !a.isEmpty && !wanted.contains(a) { wanted.append(a) }
         }
         // 同一个地址只问一次。kind = 上面跑的是总服务还是单独的 llama-server，
@@ -3407,6 +3467,8 @@ final class LiveSession: ObservableObject {
             }
         }
 
+        guard revision == cloudStatusRevision, !Task.isCancelled else { return }
+
         var usedAddress: [String: String] = [:]
         // 识别这边要单独记两件事：电脑上跑的是哪个 Whisper、有没有 SenseVoice
         var asrModelName = ""
@@ -3426,52 +3488,37 @@ final class LiveSession: ObservableObject {
             // （通用服务 8000 会把请求转发给真正干活的模型服务，
             //   所以就算某个模型单独配的地址不通，用它也能正常工作）
             var cands: [String] = []
-            let own = cloudEffectiveAddress(m)
+            let own = addresses[m.rawValue] ?? ""
             if !own.isEmpty { cands.append(own) }
             if !defAddr.isEmpty && !cands.contains(defAddr) { cands.append(defAddr) }
             if cands.isEmpty {
                 status[m.rawValue] = Self.cloudStatusUnset
                 continue
             }
-            var ok = false
             var used = ""
-            // 不是就绪的时候，是"还在加载"还是"真出错了"要分开：
-            // 模型刚下完还在加载，显示成"加载中"（黄色），别吓唬人
-            var state = Self.cloudStatusBad
-            // 识别这边要拿到服务报上来的能力清单（跟就绪与否无关）
+            var readiness = CloudModelReadiness.unavailable
             var asrHealth: [String: String] = [:]
             for addr in cands {
-                guard reachable.contains(addr) else { continue }
-                let health = models[addr] ?? [:]
-                if m == .asr, asrHealth.isEmpty { asrHealth = health }
-                var st = Self.cloudStatusBad
-                let good: Bool
-                if kinds[addr] == .llamaServer {
-                    // 单独的 llama-server（8081 翻译 / 8082 克隆）：
-                    // /health 回的是 {"status":"ok"}，就绪了就算正常
-                    // 但 llama-server 不做语音识别，那个接口只有 8000 的总服务有
-                    // llama-server 的 /health 返回 {"status":"ok"}；
-                    // 模型还在加载时是 {"status":"loading model"}，那不算就绪
-                    let s = health["status"] ?? ""
-                    good = m != .asr && s.hasPrefix("ok")
-                    if !good, s.lowercased().contains("loading") { st = Self.cloudStatusLoading }
+                guard reachable.contains(addr), let health = models[addr] else { continue }
+                if m == .asr, asrHealth.isEmpty, kinds[addr] == .aggregator { asrHealth = health }
+                let current: CloudModelReadiness
+                if kinds[addr] == .aggregator {
+                    current = CloudModelReadiness(reported: health[m.rawValue], ready: health["\(m.rawValue)_ready"])
                 } else {
-                    // 总服务（8000）：回的是 asr / mt / clone 各自的状态
-                    // 服务端回的是"就绪（small）"、"外部服务"、"加载中（第一次要下识别模型）"、
-                    // "未安装 faster-whisper"、"连不上（...）"这些
-                    // 只有真的就绪了才算正常：还没装、还在下载、连不上都算异常
-                    let s = health[m.rawValue] ?? ""
-                    good = s.hasPrefix("就绪") || s.hasPrefix("外部服务")
-                    // "加载中"（模型还在下/还在起）、"未加载"（后台正在准备）
-                    // 都是"还没好"，不是出错
-                    if !good, s.hasPrefix("加载中") || s.hasPrefix("未加载") {
-                        st = Self.cloudStatusLoading
-                    }
+                    current = m == .asr ? .unknown : CloudModelReadiness(reported: health["status"], ready: nil)
                 }
-                if good { ok = true; used = addr; break }
-                state = st
+                if current == .ready {
+                    readiness = .ready
+                    used = addr
+                    if m == .asr { asrHealth = health }
+                    break
+                }
+                if current == .loading || (current == .unknown && readiness != .loading) {
+                    readiness = current
+                }
             }
-            var text = ok ? Self.cloudStatusOK : state
+            let ok = readiness == .ready
+            var text = readiness.rawValue
             // 顺便把电脑上跑的是哪个模型写出来：启动时可以按类型选大模型，
             // 手机上一眼就能看到"现在用的是哪个"
             if ok, !used.isEmpty {
@@ -3492,11 +3539,11 @@ final class LiveSession: ObservableObject {
                     .filter { !$0.isEmpty }
             }
         }
-        cloudStatus = status
-        cloudStatusAddress = usedAddress
-        cloudASRModelName = asrModelName
-        cloudSenseVoiceState = senseState
-        cloudASRSchemes = asrSchemes
+        if cloudStatus != status { cloudStatus = status }
+        if cloudStatusAddress != usedAddress { cloudStatusAddress = usedAddress }
+        if cloudASRModelName != asrModelName { cloudASRModelName = asrModelName }
+        if cloudSenseVoiceState != senseState { cloudSenseVoiceState = senseState }
+        if cloudASRSchemes != asrSchemes { cloudASRSchemes = asrSchemes }
         // 云端又通了：把用户原来选的引擎换回去
         // （之前因为网络抖动自动换成了苹果自带，现在要还回去）
         if status[Self.cloudServiceKey] == Self.cloudStatusOK {

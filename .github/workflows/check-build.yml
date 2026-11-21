@@ -83,7 +83,8 @@ jobs:
         run: |
           swiftc -parse-as-library -import-objc-header Hear/Models/ModelArchive-Bridging-Header.h \
             Hear/App/SessionJobQueue.swift Hear/App/SpeakerTracker.swift Hear/Models/Language.swift \
-            Hear/Models/ZipVoiceArchive.swift tests/SessionJobQueueTests.swift -lbz2 -o "$RUNNER_TEMP/hear-session-tests"
+            Hear/Models/ZipVoiceArchive.swift Hear/Cloud/CloudModelReadiness.swift \
+            tests/SessionJobQueueTests.swift -lbz2 -o "$RUNNER_TEMP/hear-session-tests"
           "$RUNNER_TEMP/hear-session-tests"
 
       - name: Build

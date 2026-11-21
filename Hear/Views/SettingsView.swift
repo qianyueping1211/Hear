@@ -55,24 +55,38 @@ struct SettingsView: View {
     /// 在线模型里的一行：名字 + 状态图标（跟本地模型的状态按钮一样）+ 配置入口
     private func cloudRow(title: String, icon: String, status: String,
                           configured: Bool, onConfig: @escaping () -> Void) -> some View {
-        LabeledContent {
-            HStack(spacing: 8) {
-                // 状态图标：跟本地模型那一行的圆圈打勾一样
-                Image(systemName: Self.cloudStatusIcon(status, configured: configured))
-                    .font(.title3)
-                    .foregroundStyle(Self.cloudStatusColor(status, configured: configured))
-                    .frame(width: 34, height: 34)
-                // 配置：已配置 / 未配置，后面跟一个箭头
-                Button(action: onConfig) {
-                    HStack(spacing: 4) {
-                        Text(configured ? "已配置" : "未配置")
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.tertiary)
-                    }
+        let readiness: String
+        if !configured {
+            readiness = "未配置"
+        } else if status.hasPrefix(LiveSession.cloudStatusOK) {
+            readiness = LiveSession.cloudStatusOK
+        } else if status == LiveSession.cloudStatusUnset {
+            readiness = LiveSession.cloudStatusChecking
+        } else {
+            readiness = status
+        }
+        let indicator: (symbol: String, color: Color)
+        switch readiness {
+        case LiveSession.cloudStatusOK: indicator = ("checkmark.circle.fill", .green)
+        case LiveSession.cloudStatusLoading: indicator = ("hourglass", .orange)
+        case LiveSession.cloudStatusBad: indicator = ("exclamationmark.circle.fill", .secondary)
+        case LiveSession.cloudStatusChecking: indicator = ("ellipsis.circle", .secondary)
+        default: indicator = ("questionmark.circle", .secondary)
+        }
+        return LabeledContent {
+            Button(action: onConfig) {
+                HStack(spacing: 5) {
+                    Image(systemName: indicator.symbol)
+                        .font(.title3)
+                        .foregroundStyle(indicator.color)
+                    Text(readiness).lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
                 }
-                .buttonStyle(.plain)
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(title)，\(configured ? status : "未配置")")
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: icon)
@@ -82,22 +96,6 @@ struct SettingsView: View {
                 Text(title)
             }
         }
-    }
-
-    /// 状态图标：没配置是灰圆圈感叹号，配好了是灰圆圈打勾，正常是绿圆圈打勾
-    private static func cloudStatusIcon(_ status: String, configured: Bool) -> String {
-        if !configured { return "exclamationmark.circle" }
-        if status == "正常" { return "checkmark.circle.fill" }
-        if status == "加载中" { return "hourglass" }
-        if status == "异常" { return "exclamationmark.circle.fill" }
-        return "checkmark.circle"
-    }
-
-    private static func cloudStatusColor(_ status: String, configured: Bool) -> Color {
-        if !configured { return .secondary }
-        if status == "正常" { return .green }
-        if status == "加载中" { return .orange }    // 还在加载，不是出错
-        return .secondary          // 异常也是灰色，不要黄色
     }
 
     var body: some View {
@@ -160,8 +158,9 @@ struct SettingsView: View {
                         }
                     }
                     if session.usingCloudASR {
-                        Text(cloudASRDescription)
-                            .font(.footnote).foregroundStyle(.secondary)
+                        EngineSelectionRow(title: "云端识别方案", value: cloudASRDescription, arrow: "chevron.right") {
+                            cloudEdit = .model(.asr)
+                        }
                         Toggle("实时翻译时区分说话人", isOn: $session.speakerTrackingEnabled)
                         if session.speakerTrackingEnabled {
                             Text("云端服务器按声音区分发言。点原文上方的说话人标签可以改名或改分组。")
@@ -188,9 +187,6 @@ struct SettingsView: View {
                         // 顶部多留一点，离"模型管理"这个标题远一点；
                         // 下面不留，跟第一行贴紧
                         .listRowInsets(EdgeInsets(top: 24, leading: 16, bottom: 0, trailing: 16))
-                        .onChange(of: modelTab) { _, newValue in
-                            if newValue == 1 { Task { await session.refreshCloudStatus() } }
-                        }
 
                     if modelTab == 0 {
                         modelRow(.speech, title: "语音识别（Whisper）", icon: "waveform",
@@ -223,31 +219,6 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("模型管理")
-                }
-
-                // MARK: 云端证书（严格模式 / 配对）
-                Section {
-                    Toggle("严格模式（只连配对过的电脑）", isOn: $session.cloudStrictMode)
-                    // 配对按钮一直能看到：
-                    // 想先配对再开严格模式的话，得有个入口。
-                    Button("跟这台电脑配对") {
-                        Task { await session.pairWithCloudService() }
-                    }
-                    if !session.cloudRootFingerprint.isEmpty {
-                        LabeledContent("已配对的证书指纹", value: session.cloudRootFingerprint)
-                            .font(.footnote)
-                    }
-                    if session.cloudStrictMode {
-                        Text("配对以后，只有这台电脑签出来的证书才认。它换网络、换 IP 重新签证书都不用再配对；别的电脑拿别的证书来冒充会被拒绝。")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text("兼容模式：只对你自己填的内网地址放宽自签证书校验（换网络、开了 VPN 也照样能连）。公网地址一律走系统证书校验。")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                } header: {
-                    Text("云端证书")
-                } footer: {
-                    Text("电脑上第一次启动服务时会打印一份证书指纹；配对时对着它核对一下。")
                 }
 
                 // MARK: 语音识别（收音 → 断句 → 运行方式）
@@ -368,7 +339,6 @@ struct SettingsView: View {
             .onAppear {
                 session.refreshHeadset()
                 syncModelTab()
-                if modelTab == 1 { Task { await session.refreshCloudStatus() } }
             }
             // 引擎换了，模型管理的页签跟着走
             // （有本地引擎 → 本地模型；都是在线 / 在线+苹果 → 在线模型）
@@ -380,23 +350,17 @@ struct SettingsView: View {
                 checkLocalNetwork()
             }
             // 在线模型页每 2 秒自动更新一次状态，不用手动点刷新
-            .task(id: modelTab) {
-                guard modelTab == 1 else { return }
+            .task(id: shouldRefreshOnlineModels) {
+                guard shouldRefreshOnlineModels else { return }
                 while !Task.isCancelled {
                     await session.refreshCloudStatus()
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    do { try await Task.sleep(for: .seconds(2)) }
+                    catch { return }
                 }
             }
             .sheet(isPresented: $showCloudPicker) {
                 CloudFolderPicker { url in cloud.setFolder(url) }
                     .ignoresSafeArea()
-            }
-            // 配对：把这台电脑的证书指纹给用户确认一下
-            .alert("确认这台电脑的证书", isPresented: $session.showPairConfirm) {
-                Button("确认配对") { session.confirmPairing() }
-                Button("取消", role: .cancel) {}
-            } message: {
-                Text("这台电脑的证书指纹：\n\(session.pendingPairFingerprint)\n\n跟电脑上服务窗口里打印的那一串核对一致再确认。确认以后只认这台电脑。")
             }
             // 授权 iCloud 云盘：先试系统的（自己就弹「允许访问 iCloud 云盘」），
             // 没有权限才让用户在文件里挑一个文件夹。
@@ -448,6 +412,7 @@ struct SettingsView: View {
                 guard case .success(let url) = result else { return }
                 let kind = lastImportKind
                 Task {
+                    await session.prepareForModelImport(kind)
                     switch kind {
                     case .speech: await session.importWhisper(url)
                     case .senseVoice: await session.importSenseVoice(url)
@@ -504,6 +469,11 @@ struct SettingsView: View {
         }
     }
 
+    private var shouldRefreshOnlineModels: Bool {
+        modelTab == 1 && cloudEdit == nil && localEdit == nil && !showASREngines &&
+            pendingEngine == nil && confirmKind == nil && importKind == nil
+    }
+
     static func timeText(_ d: Date) -> String {
         let f = DateFormatter()
         f.dateFormat = "M月d日 HH:mm"
@@ -512,12 +482,10 @@ struct SettingsView: View {
 
     private var cloudASRDescription: String {
         let available = session.cloudASRSchemes
-        guard !available.isEmpty else { return "语音识别在云端服务器运行" }
+        guard !available.isEmpty else { return "配置" }
         let active = available.contains(session.cloudASRScheme)
             ? session.cloudASRScheme : (available.first ?? session.cloudASRScheme)
-        let model = session.cloudASRModelName
-        let suffix = model.isEmpty || active == "sensevoice" ? "" : "（\(model)）"
-        return "云端服务器 · \(LiveSession.cloudSchemeName(active))" + suffix
+        return cloudASRSchemeLabel(active, model: session.cloudASRModelName)
     }
 
     private var voiceCloneEngineBinding: Binding<String> {
@@ -530,32 +498,9 @@ struct SettingsView: View {
     @State private var lastPendingEngine = "sensevoice"
 
     private var asrEngineRow: some View {
-        let name = asrEngineName(session.asrEngine)
-        let value = Text(name).lineLimit(1).fixedSize(horizontal: true, vertical: false)
-        return Button {
+        EngineSelectionRow(title: "语音识别", value: asrEngineName(session.asrEngine)) {
             showASREngines = true
-        } label: {
-            HStack(spacing: 8) {
-                Text("语音识别")
-                    .fixedSize()
-                    .foregroundStyle(.primary)
-                Spacer(minLength: 0)
-                ViewThatFits(in: .horizontal) {
-                    value
-                    ScrollView(.horizontal) { value }
-                        .scrollIndicators(.hidden)
-                }
-                .foregroundStyle(.secondary)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-            }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("语音识别")
-        .accessibilityValue(name)
     }
 
     private var asrEngineOptions: [(tag: String, title: String, detail: String)] {
@@ -633,22 +578,43 @@ struct SettingsView: View {
     private func modelRow(_ kind: LiveSession.ModelKind, title: String, icon: String,
                           status: LiveSession.ModelStatus) -> some View {
         let downloading = session.bgDownloadKind == kind
+        let paused = session.isModelDownloadPaused(kind)
         let waiting = !downloading && session.bgDownloading && session.bgQueue.contains(kind)
         // 跟在线模型那一行一模一样的结构，两个页签高度才一样
         LabeledContent {
             HStack(spacing: 8) {
                 // 状态：已下载是绿色对勾；没配置是灰色圆圈感叹号；下载中转圈
-                ZStack {
-                    if status.installed && !downloading {
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                Group {
+                    if paused {
+                        Button {
+                            session.resumeModelDownload(kind)
+                        } label: {
+                            Image(systemName: "play.circle")
+                        }
+                        .disabled(session.bgDownloading)
+                        .accessibilityLabel("继续下载")
+                    } else if downloading {
+                        Button {
+                            session.pauseModelDownload(kind)
+                        } label: {
+                            Image(systemName: "pause.circle")
+                        }
+                        .accessibilityLabel("暂停下载")
+                    } else if status.installed {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .accessibilityLabel("已下载")
+                    } else if waiting {
+                        ProcessingDots().accessibilityLabel("等待下载")
                     } else {
-                        Image(systemName: "exclamationmark.circle").foregroundStyle(.secondary)
-                        if downloading || waiting { ProcessingDots() }
+                        Image(systemName: "exclamationmark.circle")
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("未下载")
                     }
                 }
+                .buttonStyle(.plain)
                 .font(.title3)
                 .frame(width: 34, height: 34)
-                .accessibilityLabel(downloading ? "正在下载" : (waiting ? "等待下载" : (status.installed ? "已下载" : "未下载")))
                 // 配置入口：跟"大模型 API"那一行一样，后面是"已配置 / 未配置"加一个箭头
                 Button {
                     localEdit = .model(kind, title)
@@ -661,7 +627,7 @@ struct SettingsView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(session.isBusyWithModels)
+                .disabled(session.isBusyWithModels && !paused)
             }
         } label: {
             HStack(spacing: 10) {
@@ -694,6 +660,10 @@ struct SettingsView: View {
         localEditAction = nil
         switch a {
         case .download(let k):
+            if session.isModelDownloadPaused(k) {
+                session.resumeModelDownload(k)
+                return
+            }
             lastKind = k
             confirmKind = k
         case .importFile(let k):
@@ -782,6 +752,47 @@ private struct ProcessingDots: View {
 }
 
 
+private struct EngineSelectionRow: View {
+    let title: String
+    let value: String
+    var arrow = "chevron.up.chevron.down"
+    let onTap: () -> Void
+
+    var body: some View {
+        let text = Text(value).lineLimit(1).fixedSize(horizontal: true, vertical: false)
+        Button(action: onTap) {
+            HStack(spacing: 8) {
+                Text(title).fixedSize().foregroundStyle(.primary)
+                Spacer(minLength: 0)
+                ViewThatFits(in: .horizontal) {
+                    text
+                    ScrollView(.horizontal) { text }
+                        .scrollIndicators(.hidden)
+                }
+                .foregroundStyle(.secondary)
+                Image(systemName: arrow)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(value)
+    }
+}
+
+private func cloudASRSchemeLabel(_ scheme: String, model: String) -> String {
+    let suffix = model.isEmpty ? "" : "（\(model)）"
+    switch scheme {
+    case "sensevoice": return "云端最快：SenseVoice"
+    case "whisper": return "云端最准：Whisper" + suffix
+    case "sensevoice+whisper": return "云端综合：SenseVoice + Whisper" + suffix
+    default: return scheme
+    }
+}
+
 /// 在线模型里要配置的那一项：服务（默认地址）或某个模型
 enum CloudEdit: Identifiable, Hashable {
     case service
@@ -814,6 +825,7 @@ struct CloudEditSheet: View {
     @State private var useDefault = true
     /// 语音识别的方案
     @State private var asrScheme = "sensevoice+whisper"
+    @State private var showASRSchemes = false
     @State private var status: String? = nil
     @State private var busy = false
     /// 本地网络权限没开：弹提示告诉用户去哪儿开
@@ -854,30 +866,12 @@ struct CloudEditSheet: View {
                                 // 选了"默认"就不能改这一行，要单独填地址先把它关掉
                                 .disabled(useDefault)
                         }
-                        // 信任边界：这个地址上的自签证书，App 才会放宽校验
-                        Text("这个地址是你自己填的自建服务：App 只对它放宽自签证书的校验（公网地址照常走系统校验）。别人要是也在同一个网络里冒充它，证书校验是拦不住的——介意的话开「云端证书 → 严格模式」配对一次。")
-                            .font(.caption).foregroundStyle(.secondary)
-                        // 访问口令：电脑上的服务开了「要求口令」才填
-                        if case .service = target {
-                            HStack {
-                                Text("访问口令")
-                                Spacer(minLength: 8)
-                                SecureField("电脑窗口里打印的那一串", text: accessTokenBinding)
-                                    .multilineTextAlignment(.trailing)
-                                    .textInputAutocapitalization(.never)
-                                    .autocorrectionDisabled()
-                            }
-                            Text("电脑上开了「要求口令」时才填：填了以后，同一个网络里的别的设备就不能用你的电脑跑模型了。")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
                         // 语音识别：在"自定义"下面选识别方案
                         // 选项完全照着电脑上服务报上来的清单来：
                         // 电脑上没装的方案一个都不给（比如没装 SenseVoice 就只有 Whisper）
                         if case .model(let m) = target, m == .asr {
-                            Picker("电脑端识别方案", selection: $asrScheme) {
-                                ForEach(availableSchemes, id: \.self) { s in
-                                    Text(schemeLabel(s)).tag(s)
-                                }
+                            EngineSelectionRow(title: "识别方案", value: schemeLabel(asrScheme)) {
+                                showASRSchemes = true
                             }
                             // 电脑上跑的是什么，一眼能看到；旁边可以随时刷新
                             HStack {
@@ -911,6 +905,9 @@ struct CloudEditSheet: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .keyboardType(.URL)
+                        SecureField("访问口令（可选）", text: accessTokenBinding)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
                     }
                 } header: {
                     Text(target.title)
@@ -968,6 +965,9 @@ struct CloudEditSheet: View {
             }
             .localNetworkHelp($showLocalNetworkHelp)
         }
+        .centerChoice(isPresented: $showASRSchemes, title: "云端识别方案",
+                      options: availableSchemes.map { ($0, schemeLabel($0), "") },
+                      selected: asrScheme) { asrScheme = $0 }
     }
 
     /// 电脑上能用的识别方案：照着服务报上来的清单来，一个都不多给
@@ -979,18 +979,8 @@ struct CloudEditSheet: View {
     }
 
     /// 方案的名字：Whisper 那一项带上电脑上跑的型号
-    private func schemeLabel(_ s: String) -> String {
-        switch s {
-        case "sensevoice": return "仅 SenseVoice"
-        case "whisper": return "仅 Whisper" + whisperModelSuffix
-        case "sensevoice+whisper": return "SenseVoice 先出字 + Whisper 校正" + whisperModelSuffix
-        default: return s
-        }
-    }
-
-    private var whisperModelSuffix: String {
-        let n = session.cloudASRModelName
-        return n.isEmpty ? "" : "（\(n)）"
+    private func schemeLabel(_ scheme: String) -> String {
+        cloudASRSchemeLabel(scheme, model: session.cloudASRModelName)
     }
 
     /// 电脑上现在跑着什么（一行小字）
@@ -1104,19 +1094,25 @@ struct CloudEditSheet: View {
                 if d.localNetworkDenied { denied = true }
                 if text.isEmpty { text = t }
             }
-            // 连上了的话，把这个模型自己的状态也带出来
-            if !okAddr.isEmpty, case .model(let m) = target,
-               let info = await CloudClient.probe(address: okAddr) {
-                switch info.kind {
-                case .llamaServer:
-                    // 单独的模型服务（8081 / 8082）：就绪就是就绪
-                    text += "，\(m.title)：\(info.health["status"] ?? "就绪")"
-                case .aggregator:
-                    text += "，\(m.title)：\(info.health[m.rawValue] ?? "就绪")"
+            if !okAddr.isEmpty, let info = await CloudClient.probe(address: okAddr) {
+                func modelStatus(_ model: CloudModel) -> String {
+                    let readiness: CloudModelReadiness
+                    if info.kind == .aggregator {
+                        readiness = CloudModelReadiness(reported: info.health[model.rawValue],
+                                                        ready: info.health["\(model.rawValue)_ready"])
+                    } else {
+                        readiness = model == .asr ? .unknown
+                            : CloudModelReadiness(reported: info.health["status"], ready: nil)
+                    }
+                    return "\(model.title) \(readiness.rawValue)"
                 }
-                // 不是用的自己填的那个地址，而是通用服务地址顶上的，说清楚
-                if okAddr != self.effectiveAddressText {
-                    text += "（现在走的是通用服务地址）"
+                switch target {
+                case .service where info.kind == .aggregator:
+                    text += "\n" + CloudModel.allCases.map(modelStatus).joined(separator: " · ")
+                case .model(let model):
+                    text += "\n" + modelStatus(model)
+                    if okAddr != effectiveAddressText { text += "（通用服务地址）" }
+                default: break
                 }
             }
             busy = false
@@ -1187,7 +1183,9 @@ struct LocalModelSheet: View {
                                 .truncationMode(.middle)
                         }
                     }
-                    if downloading {
+                    if session.isModelDownloadPaused(kind) {
+                        Text("已暂停").foregroundStyle(.secondary)
+                    } else if downloading {
                         HStack(spacing: 8) {
                             ProgressView(value: progress)
                             Text(String(format: "%.0f%%", progress * 100))
@@ -1216,9 +1214,10 @@ struct LocalModelSheet: View {
                         onPick(true)
                         dismiss()
                     } label: {
-                        Label(installed ? "重新下载" : "下载",
+                        Label(session.isModelDownloadPaused(kind) ? "继续下载" : (installed ? "重新下载" : "下载"),
                               systemImage: installed ? "arrow.clockwise" : "arrow.down.circle")
                     }
+                    .disabled(session.bgDownloading)
                     Button {
                         onPick(false)
                         dismiss()

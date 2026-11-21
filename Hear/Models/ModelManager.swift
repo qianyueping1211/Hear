@@ -260,6 +260,28 @@ enum ModelManager {
 /// 带进度的大文件下载。
 /// 网络断了会自动重试，并且能断点续传（HF 的 CDN 传输大文件时很容易中途断）。
 final class FileDownloader: NSObject, URLSessionDownloadDelegate {
+    private final class DownloadCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: URLSessionDownloadTask?
+        private var cancelled = false
+
+        func start(_ running: URLSessionDownloadTask) {
+            lock.lock()
+            task = running
+            let alreadyCancelled = cancelled
+            lock.unlock()
+            if alreadyCancelled { running.cancel() } else { running.resume() }
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            let running = task
+            lock.unlock()
+            running?.cancel()
+        }
+    }
+
     private var continuation: CheckedContinuation<Void, Error>?
     private var destination: URL!
     private var progress: ((Double) -> Void)?
@@ -283,10 +305,12 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
         // 网络中断（-1005）、超时（-1001）这类错误会自动重试，能续传就从断点继续
         var lastError: Error?
         while retryCount <= maxRetries {
+            try Task.checkCancellation()
             do {
                 try await run()
                 return
             } catch {
+                try Task.checkCancellation()
                 lastError = error
                 // 这个错误重试也没用（比如 404、没权限）
                 let code = (error as NSError).code
@@ -296,7 +320,7 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
                     // 退避等待：网络抖一下的话过几秒就好了
                     let wait = min(pow(2.0, Double(retryCount)), 30)
                     hearLog("下载中断，第 \(retryCount) 次重试（\(wait) 秒后）", .warning)
-                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
                     continue
                 }
                 throw error
@@ -314,16 +338,16 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
         cfg.timeoutIntervalForResource = 60 * 60 * 2      // 整个下载最多 2 小时
         let session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
-        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-            continuation = c
-            let task: URLSessionDownloadTask
-            if let rd = resumeData {
-                // 从断点继续
-                task = session.downloadTask(withResumeData: rd)
-            } else {
-                task = session.downloadTask(with: sourceURL)
+        let cancellation = DownloadCancellation()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                continuation = c
+                let task = resumeData.map { session.downloadTask(withResumeData: $0) }
+                    ?? session.downloadTask(with: sourceURL)
+                cancellation.start(task)
             }
-            task.resume()
+        } onCancel: {
+            cancellation.cancel()
         }
     }
 

@@ -614,12 +614,10 @@ actor CloudClient {
         req.timeoutInterval = timeout
         guard let (data, resp) = try? await CloudClient.session.data(for: req),
               let code = (resp as? HTTPURLResponse)?.statusCode else { return nil }
-        var out: [String: String] = [:]
-        if let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-            for (k, v) in obj { if let t = v as? String { out[k] = t } }
-        }
+        let out = CloudModelReadiness.fields(from: data)
         // 总服务回的是 asr / mt / clone；llama-server 回的是 status
-        if out["asr"] != nil || out["mt"] != nil || out["clone"] != nil {
+        if out["asr"] != nil || out["mt"] != nil || out["clone"] != nil ||
+            out["asr_ready"] != nil || out["mt_ready"] != nil || out["clone_ready"] != nil {
             return (.aggregator, out)
         }
         if out["status"] != nil {
