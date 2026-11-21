@@ -100,7 +100,7 @@ class StubASR(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def start_service(tmp, port, asr_url=""):
+def start_service(tmp, port, asr_url="", require_token=False):
     env = dict(os.environ)
     env["HEAR_PORT"] = str(port)
     env["HEAR_TLS_CERT"] = os.path.join(tmp, "cert.pem")
@@ -108,11 +108,16 @@ def start_service(tmp, port, asr_url=""):
     env["HEAR_ROOT_CERT"] = os.path.join(tmp, "root.pem")
     env["HEAR_ROOT_KEY"] = os.path.join(tmp, "root.key")
     env["HEAR_SENSEVOICE_DIR"] = os.path.join(tmp, "sensevoice")
+    env["HEAR_TOKEN_FILE"] = os.path.join(tmp, "access-token.txt")
     env["PYTHONUTF8"] = "1"
     if asr_url:
         env["HEAR_ASR_URL"] = asr_url
     else:
         env.pop("HEAR_ASR_URL", None)
+    if require_token:
+        env["HEAR_REQUIRE_TOKEN"] = "1"
+    else:
+        env.pop("HEAR_REQUIRE_TOKEN", None)
     proc = subprocess.Popen([sys.executable, os.path.join(HERE, "hear_cloud.py")],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     for _ in range(60):
@@ -276,6 +281,55 @@ def main():
         except Exception:
             pass
         shutil.rmtree(tmp2, ignore_errors=True)
+
+    # ============================================================ 第三轮：访问口令
+    print("\n== round 3: service that requires an access token ==")
+    tmp3 = tempfile.mkdtemp(prefix="hear-contract-token-")
+    # 第二轮结束时替身已经关掉了，这里再起一个
+    stub3_port = STUB_PORT + 1
+    stub3 = ThreadingHTTPServer(("127.0.0.1", stub3_port), StubASR)
+    threading.Thread(target=stub3.serve_forever, daemon=True).start()
+    proc3 = start_service(tmp3, PORT, asr_url="http://127.0.0.1:%d" % stub3_port,
+                          require_token=True)
+    try:
+        ready = False
+        for _ in range(60):
+            code, _ = req("/health", timeout=3)
+            if code == 200:
+                ready = True
+                break
+            time.sleep(0.5)
+        if not ready:
+            print("service (token) did not start")
+            return 1
+
+        code, data = req("/v1/asr", method="POST", body=wav, ctype="audio/wav")
+        check("without a token the service refuses (401)", code == 401, "got %d" % code)
+
+        # 口令文件是服务自己生成的：读出来带上再试
+        token = ""
+        try:
+            with open(os.path.join(tmp3, "access-token.txt"), "r", encoding="utf-8") as f:
+                token = f.read().strip()
+        except Exception:
+            pass
+        check("the service generated an access token", bool(token))
+
+        code, data = req("/v1/asr", method="POST", body=wav, ctype="audio/wav",
+                         headers={"X-Hear-Token": token})
+        check("with the right token it works (200)", code == 200,
+              "got %d: %s" % (code, data[:120]))
+
+        code, data = req("/v1/asr", method="POST", body=wav, ctype="audio/wav",
+                         headers={"X-Hear-Token": "wrong-token"})
+        check("with a wrong token it refuses (401)", code == 401, "got %d" % code)
+    finally:
+        stop_service(proc3)
+        try:
+            stub3.shutdown()
+        except Exception:
+            pass
+        shutil.rmtree(tmp3, ignore_errors=True)
 
     shutil.rmtree(tmp, ignore_errors=True)
 
