@@ -473,6 +473,15 @@ actor CloudClient {
         for attempt in 0..<tries {
             do {
                 let (data, resp) = try await CloudClient.session.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                // 服务端说"现在太忙"（并发上限挡住了）：等一下再试。
+                // 不重试的话，这一句就白白丢了。
+                if (code == 503 || code == 429), attempt < tries - 1 {
+                    let wait = attempt == 0 ? 1.0 : 2.5
+                    hearLog("云端忙（HTTP \(code)），等 \(wait) 秒重试：\(path)", .warning)
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    continue
+                }
                 return (data, resp as? HTTPURLResponse)
             } catch let e as URLError {
                 lastError = e

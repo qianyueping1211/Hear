@@ -122,7 +122,7 @@ def access_token():
 # 推理并发上限：同时在跑的识别/翻译/克隆请求最多几个。
 # 多了的话手机会互相拖慢（模型是同一个），也可能把内存撑爆。
 # 0 = 不限制（自己知道机器扛得住再说）。
-MAX_INFLIGHT = int(os.environ.get("HEAR_MAX_INFLIGHT", "2"))
+MAX_INFLIGHT = int(os.environ.get("HEAR_MAX_INFLIGHT", "3"))
 _inflight = 0
 _inflight_lock = threading.Lock()
 
