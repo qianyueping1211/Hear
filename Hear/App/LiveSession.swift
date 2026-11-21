@@ -2496,7 +2496,8 @@ final class LiveSession: ObservableObject {
             }
             guard SpeechRecognizer.isMeaningful(r.1) else { return nil }
             var lang = fallbackLang
-            if let l = Language.find(r.0), l == langA || l == langB { lang = l }
+            let l = Language.find(r.0)
+            if l == langA || l == langB { lang = l }
             hearLog("系统听写没出字，本地补认成功：\(r.1.prefix(30))")
             return (r.1, lang)
         } catch {
