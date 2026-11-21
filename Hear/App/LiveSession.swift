@@ -70,6 +70,7 @@ final class LiveSession: ObservableObject {
             else { stopReading() }
         }
     }
+    @Published var showReadingIcon: Bool { didSet { save("showReadingIcon", showReadingIcon) } }
     @Published var useContext: Bool { didSet { save("useContext", useContext) } }
     @Published var sensitivity: Double { didSet { save("sensitivity", sensitivity); pushConfig() } }
     @Published var silenceMs: Double { didSet { save("silenceMs", silenceMs); pushConfig() } }
@@ -483,6 +484,7 @@ final class LiveSession: ObservableObject {
         langA = Language.find(d.string(forKey: "langA") ?? "zh")
         langB = Language.find(d.string(forKey: "langB") ?? "en")
         speakOutput = d.object(forKey: "speakOutput") as? Bool ?? true
+        showReadingIcon = d.object(forKey: "showReadingIcon") as? Bool ?? true
         useContext = d.object(forKey: "useContext") as? Bool ?? true
         sensitivity = d.object(forKey: "sensitivity") as? Double ?? 12
         silenceMs = d.object(forKey: "silenceMs") as? Double ?? 700
@@ -3197,6 +3199,8 @@ final class LiveSession: ObservableObject {
         setLanguagePair(left: a, right: b)
         let so = d.object(forKey: "speakOutput") as? Bool ?? true
         if so != speakOutput { speakOutput = so }
+        let showIcon = d.object(forKey: "showReadingIcon") as? Bool ?? true
+        if showIcon != showReadingIcon { showReadingIcon = showIcon }
         let uc = d.object(forKey: "useContext") as? Bool ?? true
         if uc != useContext { useContext = uc }
         let sen = d.object(forKey: "sensitivity") as? Double ?? 12

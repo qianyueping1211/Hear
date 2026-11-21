@@ -90,6 +90,7 @@ struct ConversationDetailView: View {
                                reading: session.readingID == item.id,
                                playing: session.speakingID == item.id,
                                preparing: session.cloneWorking[item.id] != nil,
+                               showIdleReadingIcon: session.showReadingIcon,
                                onSpeaker: item.speakerLabel == nil ? nil : { editingSpeaker = item }) {
                         session.replay(item)
                     }

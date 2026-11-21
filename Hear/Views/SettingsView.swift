@@ -271,6 +271,7 @@ struct SettingsView: View {
                 // MARK: 朗读（出声 → 音色 → 耳机左右耳）
                 Section {
                     Toggle("朗读译文", isOn: $session.speakOutput)
+                    Toggle("显示朗读图标", isOn: $session.showReadingIcon)
                     // 声音克隆开关：默认关。开了就用说话人的原声朗读译文
                     Toggle("声音克隆", isOn: $session.voiceClone)
                     Picker("朗读从哪里出声", selection: outputBinding) {

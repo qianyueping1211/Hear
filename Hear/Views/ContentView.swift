@@ -302,6 +302,7 @@ struct TranscriptView: View {
                                    reading: session.readingID == item.id,
                                    playing: session.speakingID == item.id,
                                    preparing: session.cloneWorking[item.id] != nil,
+                                   showIdleReadingIcon: session.showReadingIcon,
                                    onEdit: { if item.done { onEdit(item) } },
                                    onSpeaker: item.speakerLabel == nil ? nil : { onSpeaker(item) }) {
                             session.tapRead(item)
@@ -377,6 +378,7 @@ struct BubbleView: View {
     var playing: Bool = false
     /// 声音（克隆原声）还在生成：喇叭显示成灰色，表示"马上就好"
     var preparing: Bool = false
+    var showIdleReadingIcon: Bool = true
     var onEdit: (() -> Void)? = nil      // 有值时：长按修改原文（对话页）；没有时：长按弹出复制菜单（历史页）
     var onSpeaker: (() -> Void)? = nil
     var onSpeak: () -> Void
@@ -405,6 +407,10 @@ struct BubbleView: View {
                 .foregroundStyle(playing ? Color.green : Color.secondary)
                 .accessibilityLabel(playing ? "正在播放" : "可朗读")
         }
+    }
+
+    private var showsReadingIcon: Bool {
+        item.canReadAloud && (playing || (item.done && (preparing || showIdleReadingIcon)))
     }
 
     var body: some View {
@@ -442,10 +448,10 @@ struct BubbleView: View {
                     if !item.done { ProgressView().controlSize(.small) }
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        if item.canReadAloud && (item.done || playing) && !leading { readingIcon }
+                        if showsReadingIcon && !leading { readingIcon }
                         flagged(item.target.flag, item.translated)
                             .font(.title3.weight(.medium))
-                        if item.canReadAloud && (item.done || playing) && leading { readingIcon }
+                        if showsReadingIcon && leading { readingIcon }
                     }
                 }
             }
