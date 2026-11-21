@@ -126,17 +126,31 @@ final class LiveSession: ObservableObject {
 
     /// 模型管理默认显示哪一边：0 = 本地模型，1 = 在线模型
     ///
-    /// 看三个引擎（语音识别 / 文本翻译 / 声音克隆）：
-    ///   · 只要有一个是本地引擎 → 本地模型
-    ///   · 都是在线引擎，或者在线 + 苹果自带混着用 → 在线模型
-    ///   · 全是苹果自带 → 本地模型
+    /// 每次打开设置都按现在的实际情况重新判断一次，省得用户自己再点一下：
+    ///   · 引擎里有本地引擎（Whisper / SenseVoice / 本地 MT / 本地克隆）→ 本地模型
+    ///   · 没有本地引擎，但有在线引擎 → 在线模型
+    ///   · 没有本地引擎，在线模型那边也已经填好地址了 → 在线模型
+    ///   · 都没有（全是苹果自带、在线那边也是空的）→ 本地模型
+    ///     （得让用户看到下载入口，不然模型没法下）
     var preferredModelTab: Int {
         // 声音克隆的开关关着的时候不算一个引擎
         var engines = [asrEngine, translationEngine]
         if voiceClone { engines.append(voiceCloneCloud ? "cloud" : "local") }
         if engines.contains(where: { Self.isLocalEngine($0) }) { return 0 }
         if engines.contains("cloud") { return 1 }
+        // 没有本地引擎，但在线模型已经配好了（填过地址）→ 直接进在线模型
+        if hasOnlineModel { return 1 }
         return 0
+    }
+
+    /// 在线模型那边是不是已经有东西了（填过服务地址）
+    var hasOnlineModel: Bool {
+        if !cloudAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+        for m in CloudModel.allCases {
+            let a = cloudEffectiveAddress(m).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !a.isEmpty { return true }
+        }
+        return false
     }
 
     // 朗读输出：扬声器 / 耳机；耳机时左右耳各播哪种语言（"A" / "B" / "off"）

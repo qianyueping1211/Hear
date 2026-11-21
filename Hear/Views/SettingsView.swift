@@ -462,10 +462,14 @@ struct SettingsView: View {
         )
     }
 
-    /// 引擎换了以后，模型管理的页签跟着引擎走
+    /// 每次打开设置都重新判断一次：模型管理该显示哪一边
+    /// （引擎换了、在线模型配没配，都要跟着变，省得用户自己再点一下）
     private func syncModelTab() {
         let want = session.preferredModelTab
-        if modelTab != want { modelTab = want }
+        if modelTab != want {
+            modelTab = want
+            hearLog("模型管理：默认选中\(want == 1 ? "在线模型" : "本地模型")")
+        }
     }
 
     static func timeText(_ d: Date) -> String {
