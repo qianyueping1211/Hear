@@ -2945,7 +2945,7 @@ final class LiveSession: ObservableObject {
             self.items[index].speakerName = speaker?.speakerName
             self.items[index].speakerDetails = speaker?.speakerDetails
             self.persist()
-            self.publishLiveActivity()
+            self.publishLiveActivity(itemID: job.itemID)
         } timedOut: { _ in }
     }
 
@@ -3210,7 +3210,7 @@ final class LiveSession: ObservableObject {
         let changed = items[i].translated != text
         items[i].translated = text
         items[i].done = done
-        publishLiveActivity()
+        publishLiveActivity(itemID: id)
         // 播报开关只决定自动播放。译文定稿后仍准备克隆声音，供用户点按播放。
         if done, voiceClone {
             if changed { discardCloneTask(id) }
@@ -3218,8 +3218,11 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    private func liveActivityState(isLive: Bool = true) -> HearLiveActivityAttributes.ContentState {
-        let item = items.last
+    private func liveActivityState(itemID: UUID? = nil,
+                                   isLive: Bool = true) -> HearLiveActivityAttributes.ContentState {
+        let item = itemID.flatMap { id in items.first(where: { $0.id == id }) }
+            ?? items.last(where: { !$0.translated.isEmpty })
+            ?? items.last
         return HearLiveActivityAttributes.ContentState(
             sourceText: item?.sourceText ?? "",
             translatedText: item?.translated ?? "",
@@ -3230,9 +3233,9 @@ final class LiveSession: ObservableObject {
             updatedAt: Date())
     }
 
-    private func publishLiveActivity() {
+    private func publishLiveActivity(itemID: UUID? = nil) {
         guard isRunning else { return }
-        HearLiveActivityController.shared.update(liveActivityState())
+        HearLiveActivityController.shared.update(liveActivityState(itemID: itemID))
     }
 
     // MARK: - 声音克隆
