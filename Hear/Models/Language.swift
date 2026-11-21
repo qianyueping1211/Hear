@@ -76,7 +76,6 @@ struct TranslationItem: Identifiable, Equatable, Codable {
     var speakerDetails: SpeakerDetails? = nil
     var speakerTracked: Bool? = nil
     var speakerManuallySet: Bool? = nil
-    var sourceProvisional: Bool? = nil
     var sourceSide: SourceSide? = nil
     var recognizedLanguage: String? = nil
 

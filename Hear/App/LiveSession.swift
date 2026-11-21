@@ -2552,7 +2552,6 @@ final class LiveSession: ObservableObject {
         // 听写这一段有没有出字
         let dict = bestApple(segID, requireFinal: true, languages: languages)
         var spoken = dict?.text ?? ""
-        var provisional = false
         var src = job.forced ?? dict?.lang ?? job.fallback
         if !SpeechTextFilter.isMeaningful(spoken) {
             // 听写最后那几百毫秒没出字：不能把这句话删掉！
@@ -2564,7 +2563,6 @@ final class LiveSession: ObservableObject {
             if let r = recovered ?? bestApple(segID, languages: languages) {
                 spoken = r.text
                 src = r.lang
-                provisional = recovered == nil
             } else {
                 hearLog("系统听写：这一段没听清，留着让用户改", .warning)
                 if let i = items.firstIndex(where: { $0.id == itemID }) {
@@ -2587,9 +2585,14 @@ final class LiveSession: ObservableObject {
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
         let old = items[idx]
         let preview = old.source == src ? old.translated : ""
-        let item = TranslationItem(id: itemID, source: src, target: tgt, sourceText: spoken,
-                                   translated: preview, sourceProvisional: provisional ? true : nil,
-                                   sourceSide: leading ? .left : .right)
+        var item = TranslationItem(
+            id: itemID, source: src, target: tgt, sourceText: spoken, translated: preview,
+            speakerID: old.speakerID, speakerName: old.speakerName,
+            speakerDetails: old.speakerDetails, speakerTracked: old.speakerTracked,
+            speakerManuallySet: old.speakerManuallySet,
+            sourceSide: leading ? .left : .right, recognizedLanguage: src.id)
+        let shouldIdentify = speakerTrackingEnabled && !talkMode && speakerAddress != nil
+        if shouldIdentify { item.speakerTracked = true }
         guard let idx2 = items.firstIndex(where: { $0.id == itemID }) else { return }
         items[idx2] = item
         rememberReference(itemID, samples: samples, text: spoken, lang: src.id)
@@ -2597,6 +2600,9 @@ final class LiveSession: ObservableObject {
         enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: spoken,
                                   src: src, tgt: tgt, context: [], samples: samples,
                                   isApple: true))
+        if shouldIdentify, let speakerAddress {
+            enqueueSpeaker(samples, for: itemID, address: speakerAddress)
+        }
         _ = preview
     }
 
@@ -3107,7 +3113,6 @@ final class LiveSession: ObservableObject {
         // 译完要写回原来那一页，不能因为切页就把这次修改弄丢
         let convID = conversationID
         items[i].sourceText = text
-        items[i].sourceProvisional = nil
         items[i].translated = ""          // 译文清空，界面显示转圈；保持 done，停止实时翻译时不会被当成未完成删掉
         // 版本号 +1：前一次翻译回来的时候版本对不上，就不要了
         itemVersions[id] = (itemVersions[id] ?? 0) + 1

@@ -441,9 +441,6 @@ struct BubbleView: View {
                     : Text("")))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                if item.sourceProvisional == true {
-                    Text("原文待确认").font(.caption).foregroundStyle(.secondary)
-                }
                 if item.translated.isEmpty {
                     if !item.done { ProgressView().controlSize(.small) }
                 } else {
