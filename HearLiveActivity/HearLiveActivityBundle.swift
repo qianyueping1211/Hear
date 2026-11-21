@@ -49,12 +49,12 @@ struct HearLiveActivityWidget: Widget {
             }
             if !state.translationOnly, !state.sourceText.isEmpty {
                 (speakerPrefix(state.speaker) + Text(state.sourceText))
-                    .font(.body)
+                    .font(.title3.weight(.medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
             }
             Text(state.translatedText.isEmpty ? "正在等待译文…" : state.translatedText)
-                .font(.title3.weight(.semibold))
+                .font(.title2.weight(.semibold))
                 .lineLimit(4)
         }
         .padding(14)
@@ -64,12 +64,12 @@ struct HearLiveActivityWidget: Widget {
         VStack(alignment: .leading, spacing: 4) {
             if !state.translationOnly, !state.sourceText.isEmpty {
                 (speakerPrefix(state.speaker) + Text(state.sourceText))
-                    .font(.footnote)
+                    .font(.body.weight(.medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
             Text(state.translatedText.isEmpty ? "正在等待译文…" : state.translatedText)
-                .font(.title3.weight(.semibold))
+                .font(.title2.weight(.semibold))
                 .lineLimit(3)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
