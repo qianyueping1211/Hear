@@ -792,6 +792,14 @@ struct CloudEditSheet: View {
     /// 本地网络权限没开：弹提示告诉用户去哪儿开
     @State private var showLocalNetworkHelp = false
 
+    /// 访问口令（电脑上开了"要求口令"才填）
+    private var accessTokenBinding: Binding<String> {
+        Binding(
+            get: { session.cloudAccessToken },
+            set: { session.setCloudAccessToken($0) }
+        )
+    }
+
     /// 配的是某个模型（才有"默认 / 自定义"）
     private var isModel: Bool {
         if case .model = target { return true }
