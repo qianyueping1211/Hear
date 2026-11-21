@@ -240,6 +240,15 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
 }
 
 actor CloudClient {
+    /// 访问口令（电脑上的服务要求时才填）。
+    /// 填了以后，每个请求都带上它：局域网里别的设备就用不了你的电脑。
+    private static let tokenLock = NSLock()
+    private static var _accessToken = ""
+    static var accessToken: String {
+        get { tokenLock.lock(); defer { tokenLock.unlock() }; return _accessToken }
+        set { tokenLock.lock(); _accessToken = newValue; tokenLock.unlock() }
+    }
+
     /// 自己的会话：带自签证书放行 + 超时放宽
     /// （不用系统那个共享会话：它没法加证书处理程序）
     static let session: URLSession = {
@@ -437,6 +446,11 @@ actor CloudClient {
         if let body {
             req.httpBody = body
             req.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        }
+        // 访问口令（服务要求时才发）
+        let token = CloudClient.accessToken
+        if !token.isEmpty {
+            req.setValue(token, forHTTPHeaderField: "X-Hear-Token")
         }
         return req
     }

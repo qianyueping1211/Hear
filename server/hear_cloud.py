@@ -32,6 +32,7 @@ import io
 import ipaddress
 import json
 import os
+import secrets
 import socket
 import ssl
 import sys
@@ -87,6 +88,35 @@ _whisper_state = {"status": "未加载", "detail": ""}
 # 默认不记：日志会留在电脑上，也容易被复制走。
 # 要看得设环境变量 HEAR_LOG_CONTENT=1。
 LOG_CONTENT = os.environ.get("HEAR_LOG_CONTENT", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# 访问口令：开了以后，客户端必须带上 X-Hear-Token 才能用推理接口。
+# 默认不开（自己家里用不影响）；想挡住局域网里别的设备就设 HEAR_REQUIRE_TOKEN=1。
+ACCESS_TOKEN_FILE = os.environ.get("HEAR_TOKEN_FILE",
+                                   os.path.join(_HERE, "certs", "access-token.txt"))
+REQUIRE_TOKEN = os.environ.get("HEAR_REQUIRE_TOKEN", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def access_token():
+    """这个服务的访问口令（第一次用的时候生成一个，存下来）。"""
+    try:
+        os.makedirs(os.path.dirname(ACCESS_TOKEN_FILE), exist_ok=True)
+        if os.path.exists(ACCESS_TOKEN_FILE):
+            with open(ACCESS_TOKEN_FILE, "r", encoding="utf-8") as f:
+                t = f.read().strip()
+            if t:
+                return t
+        t = secrets.token_hex(16)
+        with open(ACCESS_TOKEN_FILE, "w", encoding="utf-8") as f:
+            f.write(t)
+        try:
+            os.chmod(ACCESS_TOKEN_FILE, 0o600)
+        except Exception:
+            pass
+        return t
+    except Exception as e:
+        log("访问口令生成不了：%s" % e)
+        return ""
 
 
 # 推理并发上限：同时在跑的识别/翻译/克隆请求最多几个。
@@ -416,6 +446,24 @@ def decode_wav(data):
     return samples, rate
 
 
+# Whisper 修正最多等这么久（秒）。
+# 慢引擎卡住不能把整句话拖死：超时就先用 SenseVoice 的快结果。
+CORRECT_TIMEOUT = float(os.environ.get("HEAR_CORRECT_TIMEOUT", "8"))
+
+
+def run_with_timeout(fn, seconds):
+    """在别的线程里跑 fn，最多等这么久；超时就放弃。"""
+    import concurrent.futures
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(fn)
+    try:
+        return fut.result(timeout=seconds)
+    except concurrent.futures.TimeoutError:
+        raise TimeoutError("超过 %.0f 秒" % seconds)
+    finally:
+        ex.shutdown(wait=False)
+
+
 def recognize(samples, rate, language, fallback, scheme=None, preview=False):
     """按方案选识别：
        whisper              只用 Whisper
@@ -427,15 +475,13 @@ def recognize(samples, rate, language, fallback, scheme=None, preview=False):
     # 注意：这里统一返回 (文字, 语言)
 
     if scheme == "sensevoice":
+        # 用户选的就是"只用 SenseVoice"：不要偷偷去调 Whisper。
+        # （要两个都用是另一个选项：sensevoice+whisper）
+        # 以前这里"没听出来就退回去试 Whisper"，
+        # 结果是：用户明明选了只用 SenseVoice，机器上却还在跑 Whisper——
+        # 既慢，又让人以为选项没生效。
         sv_lang, sv_text = sensevoice_transcribe(samples, rate)
-        if sv_text:
-            return (sv_text, sv_lang or fallback)
-        # 没听出来：只有电脑上有 Whisper 才退回去试它
-        # （用户选了"只用 SenseVoice"、或者电脑上没装 Whisper 时，
-        #   硬去调 Whisper 只会报错，白白把这一句弄失败）
-        if whisper_available():
-            return whisper_transcribe(samples, rate, language, fallback)
-        return ("", sv_lang or fallback)
+        return (sv_text, sv_lang or fallback)
 
     if scheme == "sensevoice+whisper":
         # 先用 SenseVoice 快速出结果（快）
@@ -446,7 +492,13 @@ def recognize(samples, rate, language, fallback, scheme=None, preview=False):
         # 再用 Whisper 修正（准）
         # 修正失败也要保住已经有的结果：慢引擎出错不能把整句话弄丢
         try:
-            slow_text, slow_lang = whisper_transcribe(samples, rate, language, fallback)
+            slow_text, slow_lang = run_with_timeout(
+                lambda: whisper_transcribe(samples, rate, language, fallback),
+                CORRECT_TIMEOUT)
+        except TimeoutError:
+            # 修正太慢：先用快结果，别把这一句拖死
+            log("Whisper 修正超过 %.0f 秒，先用 SenseVoice 的结果" % CORRECT_TIMEOUT)
+            return (fast_text, fast_lang or fallback)
         except Exception as e:
             log("Whisper 修正失败，先用 SenseVoice 的结果：%s" % e)
             return (fast_text, fast_lang or fallback)
@@ -790,6 +842,13 @@ a{color:#007aff;text-decoration:none}
             body = self._body()
         except BodyTooLarge:
             return
+        # 访问口令（开了才检查）：没口令或者口令不对，一律不给推理
+        if REQUIRE_TOKEN:
+            want = access_token()
+            got = (self.headers.get("X-Hear-Token") or "").strip()
+            if want and got != want:
+                self._error("访问口令不对（服务要求带 X-Hear-Token）", 401)
+                return
         try:
             if self.path.startswith("/v1/asr"):
                 if not inflight_enter():
@@ -1320,6 +1379,9 @@ def main():
     _pair = pair_info()
     if _pair.get("root_fingerprint"):
         log("证书指纹（配对时核对这一串）：%s" % _pair["root_fingerprint"])
+    if REQUIRE_TOKEN:
+        log("访问口令：%s" % access_token())
+        log("   手机上要填这个：设置 → 在线模型 → 通用服务地址 → 访问口令")
     log("本机测试：https://127.0.0.1:%d/" % PORT)
     for ip in local_ips():
         if ctx is not None:

@@ -545,6 +545,11 @@ final class LiveSession: ObservableObject {
         speaker.onPlaybackFinished = { [weak self] in
             Task { @MainActor in self?.releaseMicrophoneIfIdle() }
         }
+        // 采集层要停音频会话的时候，问一下"现在有没有在出声"
+        // （判断完到真正停掉之间，可能刚好开始播下一句）
+        capture.isSpeakingNow = { [weak self] in
+            self?.speaker.isPlaying ?? false
+        }
         capture.voiceProcessing = voiceProcessing
         AudioRoute.useHeadsetMic = inputSource == "headset"
 
@@ -2984,12 +2989,23 @@ final class LiveSession: ObservableObject {
             return
         }
         guard let i = items.firstIndex(where: { $0.id == id }) else { return }
+        // 用户手改过这一句的话，就别再自动改写了：
+        // 手改的版本才是用户要的（"我改的" 优先于 "机器觉得更准"）。
+        let version = itemVersions[id] ?? 0
+        guard (itemVersions[id] ?? 0) == version else { return }
+        if items[i].sourceText != oldText {
+            hearLog("Whisper 校正：这一句已经改过了，不动它", .info)
+            return
+        }
         hearLogText("Whisper 校正 \(secs)s：「", String(oldText.prefix(30)) + "」→「" + String(text.prefix(30)) + "」")
         let tgt = items[i].target
         let wasReading = readingID == id
         if wasReading { stopReading() }
         items[i].sourceText = text
         items[i].corrected = true
+        // 改动了原文就 +1：跟手改共用同一个修订号，
+        // 谁在改都能看出来，不会互相盖掉
+        itemVersions[id] = version + 1
         rememberReference(id, samples: samples, text: text, lang: src.id)
         let context: [String] = useContext
             ? Array(items[..<i].filter { $0.done }.suffix(2).map(\.sourceText))
@@ -2998,6 +3014,8 @@ final class LiveSession: ObservableObject {
         do {
             let out = try await translateFinal(text, from: src, to: tgt, context: context) { _ in }
             guard gen == runGen else { return }
+            // 期间又被人改过（手改或者又校正了一次）：这次的结果是旧的，丢掉
+            guard (itemVersions[id] ?? 0) == version + 1 else { return }
             update(id, out, done: true)
         } catch {
             hearLog("校正后重新翻译失败：\(error)", .error)
@@ -3168,6 +3186,9 @@ final class LiveSession: ObservableObject {
               text != items[i].sourceText else { return }
         if readingID == id { stopReading() }
         let src = items[i].source, tgt = items[i].target
+        // 记下是哪一页：用户可能已经切到别的对话去了，
+        // 译完要写回原来那一页，不能因为切页就把这次修改弄丢
+        let convID = conversationID
         items[i].sourceText = text
         items[i].translated = ""          // 译文清空，界面显示转圈；保持 done，停止实时翻译时不会被当成未完成删掉
         // 版本号 +1：前一次翻译回来的时候版本对不上，就不要了
@@ -3190,11 +3211,13 @@ final class LiveSession: ObservableObject {
                     hearLog("重新翻译：这一句已经改过了，这次的结果不用", .info)
                     return
                 }
-                update(id, result, done: true)
+                // 写回原来那一页（用户可能已经切页了）
+                applyTranslation(id, result, done: true, conversation: convID)
             } catch {
                 guard itemVersions[id] == version else { return }
                 hearLog("重新翻译失败：\(error)", .error)
-                update(id, "（翻译失败：\(error.localizedDescription)）", done: true)
+                applyTranslation(id, "（翻译失败：\(error.localizedDescription)）", done: true,
+                                 conversation: convID)
             }
             persist()
             kickReader()
@@ -3524,6 +3547,13 @@ final class LiveSession: ObservableObject {
         if status[Self.cloudServiceKey] == Self.cloudStatusOK {
             restorePreferredEngines()
         }
+    }
+
+    /// 设置访问口令（填了以后每个请求都带上它）
+    func setCloudAccessToken(_ t: String) {
+        let v = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        cloudAccessToken = v
+        CloudClient.accessToken = v
     }
 
     // MARK: - 云端证书：配对

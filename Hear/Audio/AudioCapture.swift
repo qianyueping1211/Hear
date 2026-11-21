@@ -189,10 +189,18 @@ final class AudioCapture {
     /// 排在 engineQueue 后面执行，保证引擎已经停了才停会话
     /// （引擎还在跑的时候停会话，麦克风会被系统打断）。
     func releaseSession() {
-        engineQueue.async {
+        engineQueue.async { [weak self] in
+            // 真正要停会话这一刻再核对一遍：
+            // 判断"没在出声"到现在，可能刚好开始播下一句——
+            // 那就不能停（会把声音切断）。
+            if self?.isRunning == true { return }
+            if self?.isSpeakingNow?() == true { return }
             AudioRoute.deactivate()
         }
     }
+
+    /// 现在有没有在出声（真正停会话之前问一次，别把声音切断）
+    var isSpeakingNow: (() -> Bool)?
 
     // MARK: - 打开麦克风（一定在 engineQueue 上跑）
 
