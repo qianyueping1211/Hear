@@ -1811,6 +1811,7 @@ final class LiveSession: ObservableObject {
         // 停止收音 = 立刻停止所有识别和翻译：清空排队的句子，打断正在生成的译文
         runGen += 1
         recognitionQueue.cancel()
+        correctionTask?.cancel()
         translationQueue.cancel()
         jobTokens.removeAll()
         translator.cancelCurrent()
@@ -2248,7 +2249,7 @@ final class LiveSession: ObservableObject {
             let clipped = job.samples.count > maxN
             let clip = clipped ? Array(job.samples.suffix(maxN)) : job.samples
             let t0 = Date()
-            let r: (String, String)
+            let r: (lang: String, text: String, correctionAddress: String?)
             do {
                 r = try await sentenceRecognizer.recognize(clip, candidates: cands, fallback: fallback, preview: true)
             } catch {
@@ -2585,7 +2586,7 @@ final class LiveSession: ObservableObject {
         activity = "识别中…"
         // 等系统听写把这句话定稿（最多 2.5 秒）
         await waitAppleFinal(segID)
-        guard gen == runGen else { return }
+        guard !Task.isCancelled, gen == runGen else { return }
         // 这一句已经被放弃/顶掉了：结果不要了
         guard isCurrentJob(itemID, token: token) else { return }
         // 听写这一段有没有出字
@@ -2605,6 +2606,7 @@ final class LiveSession: ObservableObject {
             } else {
                 hearLog("系统听写：这一段没听清，留着让用户改", .warning)
                 if let i = items.firstIndex(where: { $0.id == itemID }) {
+                    jobTokens[itemID] = nil
                     items[i].sourceText = "（没听清）"
                     items[i].translated = ""
                     items[i].done = true
@@ -2659,6 +2661,8 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 整句识别和翻译
 
+    private var correctionTask: Task<Void, Never>?
+
     private struct MTJob {
         let itemID: UUID
         let token: UUID
@@ -2670,6 +2674,7 @@ final class LiveSession: ObservableObject {
         let samples: [Float]
         /// 这一句是不是系统听写来的（翻译失败时的处理不一样）
         let isApple: Bool
+        var correctionAddress: String? = nil
     }
 
     private func enqueueTranslation(_ job: MTJob) {
@@ -2718,11 +2723,15 @@ final class LiveSession: ObservableObject {
         kickReader()
         // SenseVoice + Whisper 校正：后面没有排队的句子时，用 Whisper 再识别一遍，有明显差别就替换。
         // 放在后台跑：校正很慢，不能挡住用户刚说的下一句。
-        if asrEngine == "hybrid", !recognitionQueue.hasPendingJobs {
-            let cSamples = job.samples, cSrc = job.src, cText = job.text, cID = id
-            Task { [weak self] in
-                await self?.whisperCorrect(id: cID, samples: cSamples, src: cSrc,
-                                           oldText: cText, gen: job.gen)
+        if correctionTask == nil, !recognitionQueue.hasPendingJobs,
+           job.correctionAddress != nil || asrEngine == "hybrid" {
+            let revision = itemVersions[id] ?? 0
+            correctionTask = Task { [weak self] in
+                guard let self else { return }
+                defer { self.correctionTask = nil }
+                await self.whisperCorrect(id: id, samples: job.samples, src: job.src,
+                                          oldText: job.text, gen: job.gen, revision: revision,
+                                          cloudAddress: job.correctionAddress)
             }
         }
     }
@@ -2773,28 +2782,34 @@ final class LiveSession: ObservableObject {
             // 上面已经有"正在准备模型 · N 秒"的提示了，这里不再重复
             activity = ""
             while isLoadingPhase, gen == runGen {
-                try? await Task.sleep(nanoseconds: 200_000_000)
+                do { try await Task.sleep(for: .milliseconds(200)) }
+                catch { return }
             }
         }
-        guard gen == runGen, phase == .ready else { return }
+        guard !Task.isCancelled, gen == runGen, isCurrentJob(itemID, token: token) else { return }
+        guard phase == .ready else {
+            markJobFailed(itemID, token: token)
+            return
+        }
         let a = langA, b = langB
         activity = usingCloudASR ? "云端识别中…" : (useSense ? "SenseVoice 识别中…" : "Whisper 识别中…")
         let forced = forcedItemLang(itemID)
         let fallback = forced?.id ?? ((lastLangID == b.id) ? b.id : a.id)
         let cands = forced.map { [$0.id] } ?? [a.id, b.id]
+        let correctionAddress: String?
         let detected: String
         let text: String
         let t0 = Date()
         do {
             let sv = useSense
-            let r: (String, String)
             // 识别中：这一小段时间里实时预览先让路（GPU/神经引擎给整句用）
             asrBusyCount += 1
             defer { asrBusyCount = max(0, asrBusyCount - 1) }
             let engine = sentenceRecognizer
-            r = try await engine.recognize(samples, candidates: cands, fallback: fallback)
-            detected = r.0
-            text = r.1
+            let result = try await engine.recognize(samples, candidates: cands, fallback: fallback)
+            detected = result.lang
+            text = result.text
+            correctionAddress = result.correctionAddress
             // 日志里写清楚这次用的是哪个引擎（云端就写"云端"和用的哪个方案）
             let engineName: String
             if usingCloudASR {
@@ -2866,21 +2881,27 @@ final class LiveSession: ObservableObject {
         persist()
         enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: text,
                                   src: src, tgt: tgt, context: context, samples: samples,
-                                  isApple: false))
+                                  isApple: false, correctionAddress: correctionAddress))
         _ = preview
     }
 
     /// 用 Whisper 再识别一遍这句（按 SenseVoice 判断出的语言），明显不同就替换原文并重新翻译
-    private func whisperCorrect(id: UUID, samples: [Float], src: Language, oldText: String, gen: Int) async {
-        guard await asr.isLoaded else { return }
-        activity = "Whisper 校正中…"
-        defer { if activity == "Whisper 校正中…" { activity = isRunning ? "正在聆听" : "" } }
+    private func whisperCorrect(id: UUID, samples: [Float], src: Language, oldText: String,
+                                gen: Int, revision: Int, cloudAddress: String?) async {
+        guard gen == runGen, !Task.isCancelled else { return }
         let t0 = Date()
-        // 校正优先级最低：整句和实时预览都排在它前面
-        guard let r = try? await asr.recognize(samples, candidates: [src.id], fallback: src.id,
-                                               correction: true),
-              gen == runGen else { return }
-        let text = r.1
+        let text: String
+        if let cloudAddress {
+            guard let result = try? await cloud.correctTranscription(samples: samples, language: src.id,
+                                                                    address: cloudAddress) else { return }
+            text = result
+        } else {
+            guard await asr.isLoaded,
+                  let result = try? await asr.recognize(samples, candidates: [src.id], fallback: src.id,
+                                                        correction: true) else { return }
+            text = result.1
+        }
+        guard gen == runGen, !Task.isCancelled, (itemVersions[id] ?? 0) == revision else { return }
         let secs = String(format: "%.1f", Date().timeIntervalSince(t0))
         guard SpeechRecognizer.isMeaningful(text), SpeechRecognizer.matchesLanguage(text, src.id) else {
             hearLog("Whisper 校正 \(secs)s：没把握，保留 SenseVoice 结果")
@@ -2893,7 +2914,6 @@ final class LiveSession: ObservableObject {
         guard let i = items.firstIndex(where: { $0.id == id }) else { return }
         // 用户手改过这一句的话，就别再自动改写了：
         // 手改的版本才是用户要的（"我改的" 优先于 "机器觉得更准"）。
-        let version = itemVersions[id] ?? 0
         if items[i].sourceText != oldText {
             hearLog("Whisper 校正：这一句已经改过了，不动它", .info)
             return
@@ -2908,14 +2928,14 @@ final class LiveSession: ObservableObject {
             let out = try await translateFinal(text, from: src, to: tgt, context: context) { _ in }
             guard gen == runGen else { return }
             // 期间又被人改过（手改或者又校正了一次）：这次的结果是旧的，丢掉
-            guard (itemVersions[id] ?? 0) == version,
+            guard (itemVersions[id] ?? 0) == revision,
                   let current = items.firstIndex(where: { $0.id == id }),
                   items[current].sourceText == oldText else { return }
             let wasReading = readingID == id
             if wasReading { stopReading() }
             items[current].sourceText = text
             items[current].corrected = true
-            itemVersions[id] = version + 1
+            itemVersions[id] = revision + 1
             rememberReference(id, samples: samples, text: text, lang: src.id)
             update(id, out, done: true)
             persist()

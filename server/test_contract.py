@@ -23,6 +23,8 @@ import urllib.error
 import urllib.request
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get("HEAR_CONTRACT_PORT", "8199"))
@@ -144,6 +146,57 @@ def stop_service(proc):
             proc.kill()
         except Exception:
             pass
+
+
+
+def check_hybrid_asr(wav):
+    import hear_cloud
+
+    calls = []
+    replies = []
+
+    def whisper(*args):
+        calls.append(args)
+        return "corrected", "en"
+
+    request = SimpleNamespace(
+        headers={"X-ASR-Scheme": "sensevoice+whisper", "X-ASR-Stage": "first",
+                 "X-Fallback-Language": "en"},
+        _send_json=replies.append,
+    )
+    with patch.multiple(hear_cloud, ASR_URL="", whisper_transcribe=whisper,
+                        sensevoice_transcribe=lambda *args: ("en", "first")):
+        hear_cloud.Handler.asr(request, wav)
+        check("staged hybrid ASR delivers SenseVoice before invoking Whisper",
+              replies[-1]["text"] == "first" and replies[-1]["can_correct"] and not calls)
+        request.headers["X-ASR-Stage"] = "correct"
+        hear_cloud.Handler.asr(request, wav)
+        check("deferred Whisper sends the corrected result",
+              replies[-1]["text"] == "corrected" and not replies[-1]["can_correct"] and len(calls) == 1)
+
+    unblock = threading.Event()
+    finished = threading.Event()
+
+    def blocked():
+        try:
+            unblock.wait(2)
+        finally:
+            finished.set()
+
+    try:
+        try:
+            hear_cloud.run_with_timeout(blocked, 0.01)
+        except TimeoutError:
+            pass
+        try:
+            hear_cloud.run_with_timeout(lambda: "unexpected", 0.1)
+        except TimeoutError:
+            check("timed-out correction keeps the single worker slot", True)
+        else:
+            check("timed-out correction keeps the single worker slot", False)
+    finally:
+        unblock.set()
+        finished.wait(2)
 
 
 def main():
@@ -332,6 +385,8 @@ def main():
         shutil.rmtree(tmp3, ignore_errors=True)
 
     shutil.rmtree(tmp, ignore_errors=True)
+
+    check_hybrid_asr(wav)
 
     print("\npassed %d, failed %d" % (len(PASSED), len(FAILED)))
     if FAILED:

@@ -812,15 +812,34 @@ actor CloudClient {
 
     /// 实时预览用的识别（要快，后端在组合方案下只用 SenseVoice）
     func transcribePreview(samples: [Float], candidates: [String], fallback: String) async throws -> (lang: String, text: String) {
-        try await transcribe(samples: samples, candidates: candidates, fallback: fallback, preview: true)
+        let result = try await transcribe(samples: samples, candidates: candidates, fallback: fallback, preview: true)
+        return (result.lang, result.text)
     }
 
-    func transcribe(samples: [Float], candidates: [String], fallback: String) async throws -> (lang: String, text: String) {
+    func transcribe(samples: [Float], candidates: [String], fallback: String)
+        async throws -> (lang: String, text: String, correctionAddress: String?) {
         try await transcribe(samples: samples, candidates: candidates, fallback: fallback, preview: false)
     }
 
+    func correctTranscription(samples: [Float], language: String, address: String) async throws -> String {
+        try Task.checkCancellation()
+        guard candidateAddresses(asrAddress).contains(address) else { throw CloudError.notConfigured }
+        let wav = Wav.encode(samples: samples, sampleRate: 16_000)
+        var request = try makeRequest("/v1/asr", address: address, method: "POST", body: wav,
+                                      contentType: "audio/wav", timeout: 12)
+        request.setValue(language, forHTTPHeaderField: "X-Languages")
+        request.setValue(language, forHTTPHeaderField: "X-Fallback-Language")
+        request.setValue("sensevoice+whisper", forHTTPHeaderField: "X-ASR-Scheme")
+        request.setValue("correct", forHTTPHeaderField: "X-ASR-Stage")
+        let (data, response) = try await sendWithRetry(request, path: "/v1/asr", retries: 1)
+        try Task.checkCancellation()
+        let code = response?.statusCode ?? 0
+        guard (200..<300).contains(code) else { throw CloudError.http(code, "") }
+        return (try JSONSerialization.jsonObject(with: data) as? [String: Any])?["text"] as? String ?? ""
+    }
+
     private func transcribe(samples: [Float], candidates: [String], fallback: String,
-                            preview: Bool) async throws -> (lang: String, text: String) {
+                            preview: Bool) async throws -> (lang: String, text: String, correctionAddress: String?) {
         // 先试这个模型自己的地址，不行就退回通用服务地址（8000 会转发给识别后端）
         var lastError: Error = CloudError.notConfigured
         var sawOnlyModelService = false
@@ -855,6 +874,7 @@ actor CloudClient {
                 req.setValue(asrScheme, forHTTPHeaderField: "X-ASR-Scheme")
                 // 预览只要快，不要修正
                 if preview { req.setValue("1", forHTTPHeaderField: "X-ASR-Preview") }
+                else { req.setValue("first", forHTTPHeaderField: "X-ASR-Stage") }
                 let (data, resp) = try await sendWithRetry(req, path: "/v1/asr", retries: preview ? 1 : 3)
                 let code = resp?.statusCode ?? 0
                 guard (200..<300).contains(code) else {
@@ -865,8 +885,10 @@ actor CloudClient {
                     throw CloudError.badResponse(String(data: data.prefix(200), encoding: .utf8) ?? "")
                 }
                 let lang = (obj["lang"] as? String) ?? fallback
-                return (lang, text)
+                let correctionAddress = !preview && (obj["can_correct"] as? Bool == true) ? addr : nil
+                return (lang, text, correctionAddress)
             } catch {
+                try Task.checkCancellation()
                 lastError = error
             }
         }

@@ -438,11 +438,13 @@ def run_with_timeout(fn, seconds):
 
     def correct():
         try:
-            result.set_result(fn())
+            value = fn()
         except BaseException as error:
-            result.set_exception(error)
-        finally:
             _correction_slot.release()
+            result.set_exception(error)
+        else:
+            _correction_slot.release()
+            result.set_result(value)
 
     worker = threading.Thread(target=correct, daemon=True, name="hear-asr-correction")
     try:
@@ -451,6 +453,14 @@ def run_with_timeout(fn, seconds):
         _correction_slot.release()
         raise
     return result.result(timeout=max(0, seconds))
+
+
+def deferred_whisper(samples, rate, language, fallback):
+    try:
+        return run_with_timeout(
+            lambda: whisper_transcribe(samples, rate, language, fallback), CORRECT_TIMEOUT)
+    except TimeoutError:
+        return "", fallback
 
 
 def recognize(samples, rate, language, fallback, scheme=None, preview=False):
@@ -810,6 +820,7 @@ a{color:#007aff;text-decoration:none}
         if scheme not in ("whisper", "sensevoice", "sensevoice+whisper"):
             scheme = ASR_SCHEME
         t0 = time.time()
+        can_correct = False
         if ASR_URL:
             text, lang = self.asr_proxy(body, langs, fallback)
         else:
@@ -823,9 +834,18 @@ a{color:#007aff;text-decoration:none}
             language = langs[0] if len(langs) == 1 else None
             # 预览只要快：组合方案下只用 SenseVoice，不跑 Whisper 修正
             preview = (self.headers.get("X-ASR-Preview") or "").strip() == "1"
-            text, lang = recognize(samples, rate, language, fallback, scheme, preview)
+            stage = self.headers.get("X-ASR-Stage", "")
+            if not preview and scheme == "sensevoice+whisper" and stage == "correct":
+                text, lang = deferred_whisper(samples, rate, language, fallback)
+            elif not preview and scheme == "sensevoice+whisper" and stage == "first":
+                lang, text = sensevoice_transcribe(samples, rate)
+                can_correct = bool(text)
+                if not text:
+                    text, lang = deferred_whisper(samples, rate, language, fallback)
+            else:
+                text, lang = recognize(samples, rate, language, fallback, scheme, preview)
         log_text("识别（%s）%.1fs：" % (scheme, time.time() - t0), text[:40])
-        self._send_json({"lang": lang or fallback, "text": text})
+        self._send_json({"lang": lang or fallback, "text": text, "can_correct": can_correct})
 
     def asr_proxy(self, body, langs, fallback):
         """转发给 OpenAI 兼容的转写接口（multipart/form-data）"""
