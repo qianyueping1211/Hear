@@ -83,10 +83,24 @@ struct TranslationItem: Identifiable, Equatable, Codable {
     var defaultSpeakerLanguage: String { recognizedLanguage ?? source.id }
 
     func isLeading(left: Language, right: Language) -> Bool {
-        if let sourceSide { return sourceSide == .left }
-        if source.id == left.id { return true }
-        if source.id == right.id { return false }
-        return target.id != left.id
+        displayedSide(left: left, right: right) == .left
+    }
+
+    mutating func updateSide(from previous: (left: Language, right: Language),
+                             to current: (left: Language, right: Language)) {
+        sourceSide = matchingSide(left: current.left, right: current.right)
+            ?? displayedSide(left: previous.left, right: previous.right)
+    }
+
+    private func displayedSide(left: Language, right: Language) -> SourceSide {
+        matchingSide(left: left, right: right) ?? sourceSide ?? (target.id == left.id ? .right : .left)
+    }
+
+    private func matchingSide(left: Language, right: Language) -> SourceSide? {
+        let language = recognizedLanguage ?? source.id
+        if language == left.id { return .left }
+        if language == right.id { return .right }
+        return nil
     }
 
     var speakerLabel: String? {

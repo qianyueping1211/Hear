@@ -82,14 +82,20 @@ private func testConversationBubbleSides() throws {
     let original = TranslationItem(source: japanese, target: english, sourceText: "先试一下")
     let legacy = try JSONDecoder().decode(TranslationItem.self, from: JSONEncoder().encode(original))
     precondition(legacy.isLeading(left: japanese, right: english))
-    precondition(legacy.isLeading(left: chinese, right: english), "Old left-side bubbles must not move")
+    precondition(legacy.isLeading(left: chinese, right: english), "Legacy rows without a matching language keep their inferred side")
     precondition(legacy.defaultSpeakerLanguage == "ja")
     var detected = legacy
     detected.recognizedLanguage = "zh"
     precondition(detected.defaultSpeakerLanguage == "zh", "The detected language sets the profile default")
+    detected.updateSide(from: (japanese, english), to: (english, chinese))
+    precondition(!detected.isLeading(left: english, right: chinese), "The recognized language moves to the matching right side")
+    detected.updateSide(from: (english, chinese), to: (japanese, english))
+    precondition(!detected.isLeading(left: japanese, right: english), "When neither side matches, keep the last displayed side")
+    detected.updateSide(from: (japanese, english), to: (chinese, english))
+    precondition(detected.isLeading(left: chinese, right: english))
     let reply = TranslationItem(source: english, target: japanese, sourceText: "Hello", sourceSide: .right)
     let stored = try JSONDecoder().decode(TranslationItem.self, from: JSONEncoder().encode(reply))
-    precondition(!stored.isLeading(left: english, right: japanese), "Stored sides must survive swaps")
+    precondition(stored.isLeading(left: english, right: japanese), "A matching language takes priority over the stored side")
 }
 
 private func testCloudReadiness() {

@@ -1862,7 +1862,7 @@ final class LiveSession: ObservableObject {
     }
 
     func swapLanguages() {
-        let stored = storeMissingItemSides(left: langA, right: langB)
+        let previous = (left: langA, right: langB)
         swapping = true
         let a = langA
         langA = langB
@@ -1870,7 +1870,7 @@ final class LiveSession: ObservableObject {
         swapping = false
         save("langA", langA.id); save("langB", langB.id)
         resetLanguagePreview()
-        if stored { persist() }
+        updateItemSides(from: previous)
     }
 
     func clear() {
@@ -3846,8 +3846,8 @@ final class LiveSession: ObservableObject {
     // MARK: - 设置
 
     private func languageChanged(old: Language, isA: Bool) {
-        guard !swapping else { return }
-        let stored = storeMissingItemSides(left: isA ? old : langA, right: isA ? langB : old)
+        guard !swapping, old != (isA ? langA : langB) else { return }
+        let previous = (left: isA ? old : langA, right: isA ? langB : old)
         if langA == langB {               // 两边选成一样时自动对调
             swapping = true
             if isA { langB = old } else { langA = old }
@@ -3855,20 +3855,21 @@ final class LiveSession: ObservableObject {
         }
         save("langA", langA.id); save("langB", langB.id)
         resetLanguagePreview()
-        if stored { persist() }
+        updateItemSides(from: previous)
         if usingAppleTranslation { prepareAppleTranslation() }
         if isRunning && dualLive { startAppleASR() }
     }
 
-    private func storeMissingItemSides(left: Language, right: Language) -> Bool {
-        guard items.contains(where: { $0.sourceSide == nil }) else { return false }
-        items = items.map { original in
-            guard original.sourceSide == nil else { return original }
+    private func updateItemSides(from previous: (left: Language, right: Language)) {
+        guard !items.isEmpty else { return }
+        let current = (left: langA, right: langB)
+        let updated = items.map { original in
             var item = original
-            item.sourceSide = original.isLeading(left: left, right: right) ? .left : .right
+            item.updateSide(from: previous, to: current)
             return item
         }
-        return true
+        if updated != items { items = updated }
+        persist()
     }
 
     private func resetLanguagePreview() {
