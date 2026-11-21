@@ -211,6 +211,32 @@ final class LiveSession: ObservableObject {
     }
     @Published private(set) var cloneLoading = false
     /// 声音克隆模型这次是放在 CPU 上跑的（内存紧张时的保底，速度较慢）
+    @Published var cloneLowMemory = UserDefaults.standard.bool(forKey: "cloneLowMemory") {
+        didSet {
+            guard cloneLowMemory != oldValue else { return }
+            save("cloneLowMemory", cloneLowMemory)
+            restartCloneBackend()
+        }
+    }
+    @Published var useZipVoice = UserDefaults.standard.bool(forKey: "useZipVoice") {
+        didSet {
+            guard useZipVoice != oldValue else { return }
+            save("useZipVoice", useZipVoice)
+            restartCloneBackend()
+        }
+    }
+
+    private func restartCloneBackend() {
+        cloneLoadTask?.cancel()
+        cloneTasks.values.forEach { $0.cancel() }
+        cloneTasks.removeAll()
+        modelsRevision += 1
+        Task {
+            await cloner.unload()
+            if voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 0.3) }
+        }
+    }
+
     @Published private(set) var cloneOnCPU = false
     /// 本地模型刚加载好（用来提示用户，过几秒自动消失）
     @Published private(set) var modelsJustLoaded = false
@@ -378,7 +404,7 @@ final class LiveSession: ObservableObject {
     private let translator = LlamaTranslator()
     private let speaker = Speaker()
     private let systemTranslator = SystemTranslator()
-    private let cloner = GGUFVoiceCloner()
+    private let cloner = LocalVoiceCloner()
     /// 云端模型服务（自己电脑上跑的那台）
     private let cloud = CloudClient()
     // 声音克隆：每句话的样本（声音 + 文字），以及提前生成好的克隆朗读
@@ -392,11 +418,19 @@ final class LiveSession: ObservableObject {
     /// 排队等着处理的句子。
     /// token 是这一句"当前有效任务"的身份：
     /// 超时被放弃的、或者被后来的任务顶掉的旧任务，结果一律不写回（不然会串）。
-    private var queue: [(itemID: UUID, segID: Int, samples: [Float], token: UUID)] = []
+    private struct ASRJob {
+        let itemID: UUID
+        let segID: Int
+        let samples: [Float]
+        let token: UUID
+        let generation: Int
+    }
+    private let recognitionQueue = SessionJobQueue<ASRJob>()
+    private let translationQueue = SessionJobQueue<MTJob>()
     /// itemID → 当前有效的任务令牌
     private var jobTokens: [UUID: UUID] = [:]
     private var runGen = 0                // 每次停止 +1：停止前排队/进行中的识别和翻译全部作废
-    private var working = false
+    private var working: Bool { !recognitionQueue.isIdle }
     private var currentSeg = 0
     private var partialSeg = 0            // 实时气泡（partial）属于第几句
     /// 刚停下来时保留下来的那一条：断句的最后一段声音要挂到它身上（声音克隆用）
@@ -411,7 +445,8 @@ final class LiveSession: ObservableObject {
     /// 预览只认最近 10 秒，长句的开头会被切掉——
     /// 已经认出来的开头别让它消失。
     private var previewText: [Int: String] = [:]
-    private var asrPreviewBusy = false
+    private var asrPreviewTask: Task<Void, Never>?
+    private var asrPreviewGeneration = 0
     private var mtPending: (id: Int, text: String, src: Language, tgt: Language)?
     /// 实时译文是对着哪一句原文翻的。
     /// 说话过程中原文一直在变，译文可能对应的是"上一版"原文——
@@ -563,7 +598,7 @@ final class LiveSession: ObservableObject {
         AudioRoute.useHeadsetMic = inputSource == "headset"
 
         capture.segmenter.onEvent = { [weak self] e in
-            Task { @MainActor in self?.handle(e) }
+            DispatchQueue.main.async { self?.handle(e) }
         }
         pushConfig()
 
@@ -611,27 +646,23 @@ final class LiveSession: ObservableObject {
                 guard let self else { return }
                 hearLog("收到内存不足警告：可用内存 \(Self.freeMB()) MB，先卸掉本地模型", .warning)
                 CrashGuard.shared.updateMarker(memoryWarning: true)
+                let usesLocal = Self.isLocalEngine(self.asrEngine) || self.translationEngine == "local"
+                self.cloneLoadTask?.cancel()
+                self.cloneTasks.values.forEach { $0.cancel() }
+                self.cloneTasks.removeAll()
+                if usesLocal {
+                    self.stop(readAfter: false)
+                    self.phase = .checking
+                    self.showToast("内存不足，已暂停本地识别和翻译", seconds: 6)
+                }
                 await self.asr.unload()
                 await self.sense.unload()
                 await self.translator.unload()
                 await self.cloner.unload()
                 hearLog("已卸载本地模型，可用内存 \(Self.freeMB()) MB")
-                // 本地模型没了，正在用的本地引擎就没了：
-                // 还继续收音的话，识别只会返回空字符串，
-                // 用户说的话会被当成噪声全丢掉——界面还显示"正在聆听"，更让人困惑。
-                // 所以停下来，把话说清楚（重新开始一次就会重新加载模型）。
-                let usesLocal = Self.isLocalEngine(self.asrEngine) || self.translationEngine == "local"
-                // 就绪状态也要跟着变：
-                // 不然界面还显示"可以开始了"，一按就用到一个根本没加载的模型
-                self.phase = .checking
                 if usesLocal {
-                    if self.isRunning {
-                        self.stop()
-                        self.showToast("内存不足：已卸载本地模型并停止收音，正在重新加载", seconds: 6)
-                    }
-                    // 把模型重新加载上（不重新加载的话，
-                    // 用户下一次按开始会直接用到一个没加载的模型）
-                    await self.loadModels()
+                    self.needsMemoryRecovery = true
+                    self.phase = .ready
                 }
             }
         }
@@ -823,13 +854,15 @@ final class LiveSession: ObservableObject {
 
     var cloneStatus: ModelStatus {
         _ = modelFiles()            // 模型变动后让大小缓存重新计算
+        let name = useZipVoice ? "ZipVoice-Distill INT8" : "Qwen3-TTS 0.6B"
         if cloneInstalled {
-            var detail = ModelManager.format(cachedSize(VoiceCloneGGUF.base, folder: true))
+            let folder = useZipVoice ? ZipVoiceModel.directory : VoiceCloneGGUF.base
+            var detail = ModelManager.format(cachedSize(folder, folder: true))
             if cloneLoading { detail += " · 加载中" }
             else if cloneOnCPU { detail += " · CPU 运行（内存紧张，较慢）" }
-            return .init(name: "Qwen3-TTS 0.6B", detail: detail, installed: true)
+            return .init(name: name, detail: detail, installed: true)
         }
-        return .init(name: "Qwen3-TTS 0.6B", detail: "未下载", installed: false)
+        return .init(name: name, detail: useZipVoice ? "等待导入模型文件夹" : "未下载", installed: false)
     }
 
     func isInstalled(_ kind: ModelKind) -> Bool {
@@ -854,7 +887,7 @@ final class LiveSession: ObservableObject {
 
     private var cloneInstalled: Bool {
         if let c = cloneCache, c.rev == modelsRevision { return c.ok }
-        let ok = VoiceCloneGGUF.installed
+        let ok = useZipVoice ? ZipVoiceModel.installed : VoiceCloneGGUF.installed
         cloneCache = (modelsRevision, ok)
         return ok
     }
@@ -906,6 +939,10 @@ final class LiveSession: ObservableObject {
     /// 设置 → 下载与导入：下载（或删除后重新下载）某个模型，进度显示在设置里
     func redownload(_ kind: ModelKind) async {
         guard !bgDownloading else { return }
+        if kind == .voiceClone, useZipVoice {
+            showToast("请重新导入 ZipVoice 模型文件夹")
+            return
+        }
         if isInstalled(kind) {
             if isRunning, isKindInUse(kind) { stop(readAfter: false) }
             switch kind {
@@ -916,20 +953,20 @@ final class LiveSession: ObservableObject {
                 // 先删了的话，一下失败就变成"没模型可用"了。
             case .speech:
                 await asr.unload()
-                ModelManager.deleteWhisper()
+
             case .senseVoice:
                 await sense.unload()
-                SenseVoiceRecognizer.delete()
+
             case .voiceClone:
                 cloneTasks.removeAll()
                 await cloner.unload()
-                VoiceCloneGGUF.delete()
+
             }
             modelsRevision += 1
             // 当前引擎用得到这个模型才需要等它下载完再用
             if isKindInUse(kind) { phase = .loading("正在重新下载模型，完成后自动加载") }
         }
-        startBackgroundDownload(kinds: [kind], switchWhenDone: false)
+        startBackgroundDownload(kinds: [kind], switchWhenDone: isKindInUse(kind), force: true)
     }
 
     /// 设置里选了还缺模型的识别引擎：下载缺的模型，下载完再切换过去
@@ -963,7 +1000,7 @@ final class LiveSession: ObservableObject {
             }
         }
         // 本地声音克隆和别的本地引擎互斥（老版本存下来的设置可能同时开着），先解开
-        if localCloneOn, (Self.isLocalEngine(asrEngine) || translationEngine == "local") {
+        if localCloneOn, !useZipVoice, (Self.isLocalEngine(asrEngine) || translationEngine == "local") {
             hearLog("本地声音克隆和其他本地引擎同时开着，已自动关闭声音克隆", .warning)
             voiceClone = false
             showToast("本地声音克隆不能和其他本地引擎同时用，已自动关闭声音克隆")
@@ -1022,11 +1059,11 @@ final class LiveSession: ObservableObject {
     /// kinds：要下载哪些模型；不指定就下载当前识别引擎缺的全部模型
     /// thenEngine：下载完后切换到这个识别引擎
     func startBackgroundDownload(kinds: [ModelKind]? = nil, switchWhenDone: Bool = true,
-                                 thenEngine: String? = nil) {
+                                 thenEngine: String? = nil, force: Bool = false) {
         guard !bgDownloading else { return }
         let list: [ModelKind]
         if let kinds {
-            list = kinds.filter { !isInstalled($0) }
+            list = force ? kinds : kinds.filter { !isInstalled($0) }
         } else {
             var need = missingSpeechKinds(for: asrEngine)
             if translationEngine == "local", !isInstalled(.translation) { need.insert(.translation, at: 0) }
@@ -1054,10 +1091,13 @@ final class LiveSession: ObservableObject {
                     }
                     switch kind {
                     case .translation: _ = try await ModelManager.downloadGGUF(host: host, progress: onProgress)
-                    case .speech: _ = try await ModelManager.downloadWhisper(host: host, progress: onProgress)
-                    case .senseVoice: try await SenseVoiceRecognizer.download(host: host, progress: onProgress)
+                    case .speech: _ = try await ModelManager.downloadWhisper(host: host, force: force, progress: onProgress)
+                    case .senseVoice: try await SenseVoiceRecognizer.download(host: host, force: force, progress: onProgress)
                     case .voiceClone:
-                        try await VoiceCloneGGUF.download(host: host, progress: onProgress)
+                        guard !useZipVoice else {
+                            throw VoiceCloneGGUFError.modelMissing("请从模型管理导入 ZipVoice INT8 和 Vocos 模型文件夹")
+                        }
+                        try await VoiceCloneGGUF.download(host: host, force: force, progress: onProgress)
                     }
                     bgDownloadKind = nil              // 下载完立刻收起进度条
                     bgQueue.removeAll { $0 == kind }
@@ -1083,7 +1123,8 @@ final class LiveSession: ObservableObject {
                 return
             }
             guard ok, modelsInstalled else {
-                if case .loading = phase { phase = .needsModels }
+                if force, modelsInstalled { await loadModels() }
+                else if case .loading = phase { phase = .needsModels }
                 return
             }
             hearLog("模型下载完成")
@@ -1210,9 +1251,9 @@ final class LiveSession: ObservableObject {
                     Task { @MainActor in self.setProgress(name, p) }
                 }
                 if kind == .senseVoice {
-                    try await SenseVoiceRecognizer.download(host: host, progress: onProgress)
+                    try await SenseVoiceRecognizer.download(host: host, force: force, progress: onProgress)
                 } else {
-                    _ = try await ModelManager.downloadWhisper(host: host, progress: onProgress)
+                    _ = try await ModelManager.downloadWhisper(host: host, force: force, progress: onProgress)
                 }
                 modelsRevision += 1
             }
@@ -1436,10 +1477,11 @@ final class LiveSession: ObservableObject {
         do {
             cloneTasks.removeAll()
             await cloner.unload()
-            try VoiceCloneGGUF.importFolder(at: url)
+            if useZipVoice { try ZipVoiceModel.importFolder(url) }
+            else { try VoiceCloneGGUF.importFolder(at: url) }
             modelsRevision += 1
             bgDownloadError = nil
-            hearLog("已导入声音克隆模型（GGUF）")
+            hearLog("已导入声音克隆模型")
             if voiceClone, !voiceCloneCloud { scheduleCloneLoad(delay: 0.5) }
         } catch {
             hearLog("导入声音克隆模型失败：\(error)", .error)
@@ -1459,7 +1501,7 @@ final class LiveSession: ObservableObject {
         // 用户动手了就不用再提示"加载完成"
         dismissToast()
         modelsJustLoaded = false
-        if isRunning { stop(); return }
+        if isRunning { await finishRecording(); return }
         _ = await beginListening()
     }
 
@@ -1470,6 +1512,8 @@ final class LiveSession: ObservableObject {
         dismissToast()
         modelsJustLoaded = false
         if isRunning { stop(readAfter: false) }
+        let token = UUID()
+        startToken = token
         holding = lang
         talkLang = lang
         holdGen += 1
@@ -1483,14 +1527,13 @@ final class LiveSession: ObservableObject {
         }
         // 苹果听写：上一段最后一句还在定稿，稍等一下再换听写（否则那句会丢）
         var w = 0
-        while !appleEngines.isEmpty, working || !queue.isEmpty || !mtQueue.isEmpty, w < 8 {
+        while !appleEngines.isEmpty, working, w < 8 {
             try? await Task.sleep(nanoseconds: 100_000_000)
             w += 1
         }
-        let ok = await beginListening()
-        guard ok else { holding = nil; return }
-        // 等麦克风权限的时候已经松开了
-        if holding != lang { releaseHold() }
+        guard startToken == token, holding == lang else { return }
+        let ok = await beginListening(intent: token)
+        if !ok, startToken == token { holding = nil }
     }
 
     /// 对话翻译模式：松开按钮 = 暂停收音，这一段说的话继续识别、翻译完
@@ -1521,7 +1564,7 @@ final class LiveSession: ObservableObject {
         // 松手了就把麦克风放开（别的 App 才录得到声音）
         scheduleMicrophoneRelease()
         translator.cancelPreview()
-        previewSamples = nil
+        cancelASRPreview()
         mtPending = nil
         Task {
             // 等采集层把最后一句交出来（引擎停了以后才 flush，有时要一秒多）。
@@ -1537,7 +1580,7 @@ final class LiveSession: ObservableObject {
             partial = ""; partialTranslation = ""; partialTranslationFor = ""; partialSource = nil
             // 等这一段的识别和翻译做完，再关掉系统听写、开始朗读
             var waited = 0
-            while working || !queue.isEmpty, waited < 150 {
+            while working, waited < 150 {
                 try? await Task.sleep(nanoseconds: 100_000_000)
                 waited += 1
             }
@@ -1559,9 +1602,20 @@ final class LiveSession: ObservableObject {
     private var startToken = UUID()
 
     /// 打开麦克风开始收音（实时翻译和对话翻译共用）
-    private func beginListening() async -> Bool {
-        let token = UUID()
-        startToken = token
+    private var needsMemoryRecovery = false
+    private var inputFinishToken: UUID?
+    private var switchingConversation = false
+
+    private func beginListening(intent: UUID? = nil) async -> Bool {
+        guard inputFinishToken == nil, !switchingConversation else { return false }
+        let token = intent ?? UUID()
+        if intent == nil { startToken = token }
+        guard token == startToken else { return false }
+        if needsMemoryRecovery {
+            needsMemoryRecovery = false
+            await loadModels()
+            guard token == startToken else { return false }
+        }
         // 还没选引擎：提示去设置里选
         if asrEngine.isEmpty || translationEngine.isEmpty {
             showToast("请先到 功能设置 → 引擎 里选择语音识别和翻译引擎")
@@ -1624,6 +1678,7 @@ final class LiveSession: ObservableObject {
             if await cloner.isLoaded {
                 hearLog("麦克风启动失败，先卸载声音克隆模型再试一次", .warning)
                 await cloner.unload()
+                guard token == startToken else { return false }
                 do {
                     try capture.start()
                 } catch {
@@ -1706,8 +1761,39 @@ final class LiveSession: ObservableObject {
         }
     }
 
+    /// Stop accepting input, then give the VAD tail and already queued audio
+    /// a chance to produce original text before archiving or ending the session.
+    private func finishRecording(readAfter: Bool = true) async {
+        guard inputFinishToken == nil else { return }
+        let token = UUID()
+        inputFinishToken = token
+        defer { if inputFinishToken == token { inputFinishToken = nil } }
+        startToken = UUID()
+        holdReleasing = true
+        isRunning = false
+        meter.level = 0
+        UIApplication.shared.isIdleTimerDisabled = false
+        await withCheckedContinuation { (completion: CheckedContinuation<Void, Never>) in
+            capture.stop { completion.resume() }
+        }
+        guard inputFinishToken == token else { return }
+        holdReleasing = false
+        scheduleMicrophoneRelease()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(12))
+        while !recognitionQueue.isIdle, clock.now < deadline,
+              inputFinishToken == token {
+            do { try await Task.sleep(for: .milliseconds(50)) }
+            catch { break }
+        }
+        guard inputFinishToken == token else { return }
+        stop(readAfter: false)
+        if readAfter { kickReader() }
+    }
+
     /// readAfter：停止后是否接着朗读没读的句子（只有用户自己点停止时才读）
     func stop(readAfter: Bool = true) {
+        inputFinishToken = nil
         let wasRunning = isRunning
         if wasRunning { hearLog("停止实时翻译") }
         restartTask?.cancel()
@@ -1724,20 +1810,12 @@ final class LiveSession: ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = false
         // 停止收音 = 立刻停止所有识别和翻译：清空排队的句子，打断正在生成的译文
         runGen += 1
-        queue.removeAll()
-        // 流水线也要收干净：不收的话 working 一直挂在 true，
-        // 下一次开始以后新句子进不了队列（表现就是"重新开始也只能说一两句"）
-        drainGen += 1
-        drainTask?.cancel()
-        drainTask = nil
-        working = false
-        // 翻译队列也收掉：停了以后不要再翻，也不要写回
-        mtQueue.removeAll()
-        mtTask?.cancel()
-        mtTask = nil
+        recognitionQueue.cancel()
+        translationQueue.cancel()
+        jobTokens.removeAll()
         translator.cancelCurrent()
         translator.cancelPreview()
-        previewSamples = nil
+        cancelASRPreview()
         mtPending = nil
         stopLiveEngine()
         stopAppleASR()
@@ -1769,7 +1847,7 @@ final class LiveSession: ObservableObject {
         // 说话过程中原文一直在变，旧原文的译文配新原文是错的
         let previewOK = !partialTranslation.isEmpty && partialTranslationFor == text
         item.translated = previewOK ? partialTranslation : ""
-        item.done = previewOK
+        item.done = false
         items.append(item)
         stopFlushItemID = item.id      // 断句器最后一段声音会挂到这条上
         hearLogText("暂停：保留了一句还没说完的（", String(text.prefix(40)) + "）")
@@ -1783,13 +1861,12 @@ final class LiveSession: ObservableObject {
         var pending: [(UUID, String, Language, Language)] = []
         for i in items.indices.reversed() where !items[i].done {
             let text = items[i].sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if items[i].translated.isEmpty && (text.isEmpty || text == "…") {
+            if text.isEmpty || text == "…" {
                 items.remove(at: i)
                 if i < readIndex { readIndex -= 1 }
-            } else if items[i].translated.isEmpty {
-                pending.append((items[i].id, items[i].sourceText, items[i].source, items[i].target))
             } else {
-                items[i].done = true
+                items[i].translated = ""
+                pending.append((items[i].id, items[i].sourceText, items[i].source, items[i].target))
             }
             changed = true
         }
@@ -1803,11 +1880,11 @@ final class LiveSession: ObservableObject {
                 guard let self else { return }
                 do {
                     let out = try await self.translateFinal(text, from: src, to: tgt, context: []) { _ in }
-                    self.applyTranslation(id, out, done: true, conversation: convID)
+                    self.applyTranslation(id, out, done: true, conversation: convID, expectedSource: text)
                     self.kickReader()          // 译完了，朗读那边等着这句呢
                 } catch {
                     hearLog("补翻译失败：\(error)", .error)
-                    self.applyTranslation(id, "（翻译失败）", done: true, conversation: convID)
+                    self.applyTranslation(id, "（翻译失败）", done: true, conversation: convID, expectedSource: text)
                     self.kickReader()
                 }
             }
@@ -1848,15 +1925,8 @@ final class LiveSession: ObservableObject {
     /// 原文要是没存下来，那句话就彻底没了。
     func persist() {
         let saved = items.filter { $0.done || Self.hasRealText($0.sourceText) }
-        guard !saved.isEmpty else { return }
-        let store = ConversationStore.shared
-        var c = store.load(conversationID)
-            ?? Conversation(id: conversationID, title: Conversation.defaultTitle(conversationCreated),
-                            createdAt: conversationCreated, langA: langA, langB: langB)
-        c.items = saved
-        c.langA = langA
-        c.langB = langB
-        store.save(c)
+        ConversationStore.shared.saveTranscript(id: conversationID, createdAt: conversationCreated,
+                                                 langA: langA, langB: langB, items: saved)
     }
 
     /// 这句原文是真的有内容（不是"…"这种占位）
@@ -1869,20 +1939,16 @@ final class LiveSession: ObservableObject {
     ///
     /// 用户可能已经新建对话了（当前页已经不是刚才那页了），
     /// 那就写回存档里的那一条——不能因为切页就把这句话弄丢。
-    private func applyTranslation(_ id: UUID, _ text: String, done: Bool, conversation: UUID) {
-        if items.contains(where: { $0.id == id }) {
+    private func applyTranslation(_ id: UUID, _ text: String, done: Bool,
+                                  conversation: UUID, expectedSource: String) {
+        if conversation == conversationID, let item = items.first(where: { $0.id == id }) {
+            guard item.sourceText == expectedSource else { return }
             update(id, text, done: done)
             persist()
-            return
+        } else {
+            ConversationStore.shared.commitTranslation(conversationID: conversation, itemID: id,
+                                                      expectedSource: expectedSource, translation: text, done: done)
         }
-        // 当前页已经切走了：写回存档里的那一句
-        let store = ConversationStore.shared
-        guard var c = store.load(conversation) else { return }
-        guard let i = c.items.firstIndex(where: { $0.id == id }) else { return }
-        c.items[i].translated = text
-        c.items[i].done = done
-        store.save(c)
-        hearLogText("补翻译写回上一页：", String(text.prefix(30)))
     }
 
     /// 等这一页的译文补完（最多等这么久）。
@@ -1899,7 +1965,18 @@ final class LiveSession: ObservableObject {
 
     /// 新建一页。summarize = true 时在后台用默认模板总结刚才那一页
     func newConversation(summarize: Bool) {
-        if isRunning { stop(readAfter: false) }
+        guard !switchingConversation, inputFinishToken == nil else { return }
+        switchingConversation = true
+        startToken = UUID()
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.switchingConversation = false }
+            if self.isRunning || self.holdReleasing { await self.finishRecording(readAfter: false) }
+            self.archiveConversation(summarize: summarize)
+        }
+    }
+
+    private func archiveConversation(summarize: Bool) {
         persist()
         let oldID = conversationID
         // 有内容就算：原文已经认出来了、译文还在补，也值得总结
@@ -2026,7 +2103,7 @@ final class LiveSession: ObservableObject {
     private func handle(_ e: Segmenter.Event) {
         // 已经停止：停止前还没送到的断句事件一律丢弃
         // （最后那句的"结束"要接住：它带着这段声音，声音克隆要用）
-        if !isRunning && !holdReleasing {
+        if !isRunning && !holdReleasing && inputFinishToken == nil {
             switch e {
             case .started, .partial: return
             case .ended: break
@@ -2047,19 +2124,19 @@ final class LiveSession: ObservableObject {
             // 系统听写在工作时由它出原文；否则用 Whisper 不停地识别最新的声音
             guard !liveActive, appleEngines.isEmpty else { return }
             previewSamples = (id, samples)
-            if !asrPreviewBusy {
-                asrPreviewBusy = true
-                Task { await previewLoop() }
+            if asrPreviewTask == nil {
+                let generation = asrPreviewGeneration
+                asrPreviewTask = Task { await previewLoop(generation) }
             }
         case .ended(let id, let samples):
             let alreadyDone = id <= finishedSeg
-            finishedSeg = id
+            finishedSeg = max(finishedSeg, id)
             live?.markSegmentEnd(id)
             for eng in appleEngines { eng.markSegmentEnd(id) }
             hearLog("断句：一句话结束，时长 \(String(format: "%.1f", Double(samples.count) / 16000)) 秒")
             // 立刻打断这句的实时预览，让整句识别和翻译马上开始
             translator.cancelPreview()
-            previewSamples = nil
+            cancelASRPreview()
             mtPending = nil
             // 先把这句（实时预览的文字）放进对话，整句识别完再替换，屏幕上不会空一下
             let mine = partialSeg == id
@@ -2072,7 +2149,7 @@ final class LiveSession: ObservableObject {
             // 但这段声音要留下来（声音克隆的样本），译文等下接着补。
             // 松手收尾（对话模式）不算"已经停下来了"：
             // 那最后一句要照常处理，不然松手时说的最后一句就丢了
-            if !isRunning && !holdReleasing {
+            if !isRunning && !holdReleasing && inputFinishToken == nil {
                 if id == stopFlushSegID, let fid = stopFlushItemID {
                     stopFlushItemID = nil
                     if let idx = items.firstIndex(where: { $0.id == fid }) {
@@ -2114,8 +2191,18 @@ final class LiveSession: ObservableObject {
             rememberReference(item.id, samples: samples, text: item.sourceText, lang: src.id)
             let token = UUID()
             jobTokens[item.id] = token
-            queue.append((item.id, id, samples, token))
-            enqueueDrain()
+            let job = ASRJob(itemID: item.id, segID: id, samples: samples, token: token, generation: runGen)
+            recognitionQueue.submit(job) { [weak self] job in
+                guard let self, self.runGen == job.generation else { return }
+                if self.usingAppleASR {
+                    await self.processApple(job.samples, itemID: job.itemID, segID: job.segID,
+                                            gen: job.generation, token: job.token)
+                } else {
+                    await self.process(job.samples, itemID: job.itemID, gen: job.generation, token: job.token)
+                }
+            } timedOut: { [weak self] job in
+                self?.markJobFailed(job.itemID, token: job.token)
+            }
         case .discarded(let id):
             finishedSeg = max(finishedSeg, id)
             if partialSeg == id { partial = ""; partialTranslation = ""; partialTranslationFor = ""; partialSource = nil }
@@ -2128,9 +2215,16 @@ final class LiveSession: ObservableObject {
     // MARK: - 实时预览（说话过程中）
 
     /// 识别线：上一次识别一结束就拿最新的声音再识别，不等翻译
-    private func previewLoop() async {
-        defer { asrPreviewBusy = false }
-        while let job = previewSamples {
+    private func cancelASRPreview() {
+        asrPreviewGeneration += 1
+        asrPreviewTask?.cancel()
+        asrPreviewTask = nil
+        previewSamples = nil
+    }
+
+    private func previewLoop(_ generation: Int) async {
+        defer { if generation == asrPreviewGeneration { asrPreviewTask = nil } }
+        while !Task.isCancelled, generation == asrPreviewGeneration, let job = previewSamples {
             previewSamples = nil
             let id = job.id
             // Whisper：整句识别在进行时不做预览，GPU 先让给整句（否则整句会一直“识别中”）
@@ -2153,13 +2247,7 @@ final class LiveSession: ObservableObject {
             let t0 = Date()
             let r: (String, String)
             do {
-                if usingCloudASR {
-                    r = try await cloud.transcribePreview(samples: clip, candidates: cands, fallback: fallback)
-                } else if sv {
-                    r = try await sense.recognize(clip, candidates: cands, fallback: fallback)
-                } else {
-                    r = try await asr.recognize(clip, candidates: cands, fallback: fallback, preview: true)
-                }
+                r = try await sentenceRecognizer.recognize(clip, candidates: cands, fallback: fallback, preview: true)
             } catch {
                 // 预览失败只影响这一次预览，不改引擎：
                 // 整句识别要是也失败，那边自然会回退（见 process）。
@@ -2175,7 +2263,8 @@ final class LiveSession: ObservableObject {
                 let other = src == a ? b : a
                 if SpeechRecognizer.matchesLanguage(r.1, other.id) { src = other }
             }
-            guard gen == runGen, isRunning, id == currentSeg, id > finishedSeg, partialSeg == id,
+            guard !Task.isCancelled, generation == asrPreviewGeneration, gen == runGen,
+                  isRunning, id == currentSeg, id > finishedSeg, partialSeg == id,
                   SpeechRecognizer.isMeaningful(r.1),
                   forced != nil || SpeechRecognizer.matchesLanguage(r.1, src.id) else { continue }
             partialSource = src
@@ -2184,7 +2273,7 @@ final class LiveSession: ObservableObject {
             // 把新快照接到"已经稳定的那一段"后面（滑窗时新快照会丢掉开头、
             // 尾巴又变长了，前后都对不上的时候用重叠部分接上）。
             let stable = previewText[id] ?? ""
-            let merged = Self.mergePreview(stable, r.1)
+            let merged = clipped ? Self.mergePreview(stable, r.1) : r.1
             previewText[id] = merged      // 记下稳定下来的那段（下次好接）
             partial = (clipped ? "…" : "") + merged
             requestPreviewTranslation(id: id, text: partial, src: src, tgt: src == a ? b : a)
@@ -2266,35 +2355,38 @@ final class LiveSession: ObservableObject {
 
     /// 按当前翻译引擎翻译一句定稿的原文。
     /// 苹果翻译不带上下文和术语表；本地翻译带上，并用部分译文回调做实时显示。
+    private var sentenceRecognizer: SessionSpeechEngine {
+        if usingCloudASR { return .cloud(cloud) }
+        if useSense { return .senseVoice(sense) }
+        return .whisper(asr)
+    }
+
     private func translateFinal(_ text: String, from src: Language, to tgt: Language,
-                                context: [String], onPartial: @escaping (String) -> Void) async throws -> String {
-        if usingAppleTranslation {
-            do {
-                return try await systemTranslator.translate(text, from: src, to: tgt)
-            } catch {
+                                context: [String], onPartial: @escaping @Sendable (String) -> Void) async throws -> String {
+        let engine: SessionTextEngine = usingAppleTranslation ? .system(systemTranslator)
+            : (usingCloudMT ? .cloud(cloud) : .local(translator))
+        do {
+            return try await engine.translate(text: text, source: src, target: tgt, context: context,
+                                              glossary: glossary, onPartial: onPartial)
+        } catch {
+            try Task.checkCancellation()
+            switch engine {
+            case .system:
                 hearLog("苹果翻译失败：\(error)", .error)
                 appleTranslationFailed(error)
-                // 苹果翻译不行就换个引擎把这句译出来，别让用户干等着
                 if let out = try? await fallbackTranslate(text, from: src, to: tgt) { return out }
-                throw error
-            }
-        }
-        let prompt = PromptBuilder.build(text: text, from: src, to: tgt, context: context,
-                                         glossary: PromptBuilder.parseGlossary(glossary))
-        if usingCloudMT {
-            let t0 = Date()
-            hearLogNow("云端翻译：开始（\(src.id) → \(tgt.id)）")
-            do {
-                let out = try await cloud.translate(prompt: prompt, src: src.id, dst: tgt.id)
-                hearLogNow("云端翻译：\(out.prefix(40))（用时 \(CloudClient.secs(t0))s）")
-                return out
-            } catch {
+            case .cloud:
                 hearLog("云端翻译失败：\(error)", .error)
-                cloudFallbackToApple(.mt, reason: error.localizedDescription)
-                throw error
+                if cloudFallbackToApple(.mt, reason: error.localizedDescription) {
+                    let alternate: SessionTextEngine = usingAppleTranslation ? .system(systemTranslator) : .local(translator)
+                    return try await alternate.translate(text: text, source: src, target: tgt, context: context,
+                                                         glossary: glossary, onPartial: onPartial)
+                }
+            case .local:
+                break
             }
+            throw error
         }
-        return try await translator.translate(prompt: prompt) { partial in onPartial(partial) }
     }
 
     /// 苹果翻译用不了时的替补：云端优先，其次本地（模型装好而且正在跑才行）
@@ -2377,11 +2469,13 @@ final class LiveSession: ObservableObject {
                 Task { @MainActor in self?.appleUpdated() }
             }
             // 听写自己坏了：告诉用户，并且退回 Whisper 实时预览
-            e.onFailure = { [weak self] msg in
+            e.onFailure = { [weak self, weak e] msg in
                 Task { @MainActor in
-                    guard let self else { return }
-                    self.liveActive = false
-                    self.showToast("系统听写出错了（\(msg)），改用 Whisper 实时预览", seconds: 4)
+                    guard let self, let e, self.runGen == gen else { return }
+                    self.appleEngines.removeAll { $0 === e }
+                    self.refreshAppleFeed()
+                    await e.stop()
+                    self.showToast("系统听写出错了（\(msg)）", seconds: 4)
                 }
             }
             engines.append(e)
@@ -2398,14 +2492,20 @@ final class LiveSession: ObservableObject {
                     // Whisper 的实时预览也就不做了，屏幕上一直是省略号
                     if gen == runGen {
                         self.appleEngines.removeAll { $0 === e }
-                        if self.appleEngines.isEmpty { self.liveActive = false }
+                        self.refreshAppleFeed()
                     }
                 }
             }
         }
         appleEngines = engines
-        let list = engines
-        capture.onSamples = { s in for e in list { e.feed(s) } }
+        refreshAppleFeed()
+    }
+
+    private func refreshAppleFeed() {
+        let engines = appleEngines
+        capture.onSamples = engines.isEmpty ? nil : { samples in
+            for engine in engines { engine.feed(samples) }
+        }
     }
 
     private func stopAppleASR() {
@@ -2417,9 +2517,10 @@ final class LiveSession: ObservableObject {
     }
 
     /// 第 id 句：两个听写里置信度更高的结果
-    private func bestApple(_ id: Int) -> (text: String, lang: Language)? {
+    private func bestApple(_ id: Int, requireFinal: Bool = false) -> (text: String, lang: Language)? {
         var best: (text: String, lang: Language, conf: Double)?
         for e in appleEngines {
+            if requireFinal, !e.hasFinalText(id) { continue }
             let r = e.segmentText(id)
             guard !r.text.isEmpty, let lid = e.languageID else { continue }
             let lang = lid == langB.id ? langB : langA
@@ -2493,14 +2594,14 @@ final class LiveSession: ObservableObject {
         if old.hasPrefix(new) { return old }          // 新的更短（截断）
         let maxOverlap = min(old.count, new.count)
         if maxOverlap > 0 {
-            for n in stride(from: maxOverlap, through: 1, by: -1) {
+            for n in stride(from: maxOverlap, through: 2, by: -1) {
                 if old.hasSuffix(String(new.prefix(n))) {
                     return old + String(new.dropFirst(n))
                 }
             }
         }
         // 实在对不上：标出来，别装作是一句完整的话
-        return "…" + new
+        return old + " … " + new
     }
 
     /// 两段声音在时间上挨不挨着（拿不到范围就返回 nil，表示不知道）
@@ -2511,37 +2612,9 @@ final class LiveSession: ObservableObject {
             // 系统听写"更正"上一句的时候，两段是挨着的（重叠或者只隔一点点）；
             // 用户重新说一遍的话，中间会有一段停顿——那个不能合并。
             let gap = b.start - a.end
-            return gap <= 0.4
+            return gap < 0 && b.start >= a.start
         }
         return nil
-    }
-
-    /// 把这句并进上一句：上一条换成完整的原文并重新翻译，这条占位删掉
-    private func mergeIntoPrevious(_ prevID: UUID, fullText: String, src: Language,
-                                   placeholder: UUID, segID: Int, gen: Int) async {
-        guard let i = items.firstIndex(where: { $0.id == prevID }) else { removeItem(placeholder); return }
-        let tgt = items[i].target
-        hearLogText("系统听写：和上一句是同一句话，合并为「", String(fullText.prefix(40)) + "」")
-        // 正在读或已经读过：译文变了，换成新译文从这句重新读
-        if readingID == prevID { stopReading() }
-        if readIndex > i { readIndex = i }
-        items[i].sourceText = fullText
-        items[i].done = false          // 译文先保留旧的；停止时不会被删掉
-        removeItem(placeholder)
-        lastCommit = (prevID, segID, fullText, src, Date())
-        activity = "翻译中…"
-        do {
-            let out = try await translateFinal(fullText, from: src, to: tgt, context: []) { _ in }
-            guard gen == runGen else { return }
-            update(prevID, out, done: true)
-        } catch {
-            hearLog("翻译失败：\(error)", .error)
-            if let j = items.firstIndex(where: { $0.id == prevID }) { items[j].done = true }
-            if usingAppleTranslation { appleTranslationFailed() } else { prepareAppleTranslation() }
-        }
-        persist()
-        activity = isRunning ? "正在聆听" : ""
-        kickReader()
     }
 
     /// 等系统听写把这一段定稿（最多等这么久）。
@@ -2549,36 +2622,25 @@ final class LiveSession: ObservableObject {
     /// 以前是固定等 700 毫秒：话短的话定稿早，话长的话 700 毫秒还在半路上，
     /// 拿到的就是半截（甚至空）文本，然后就被当成"没听清"了。
     /// 现在等到"这段结束了而且有字"为止。
-    private func waitAppleFinal(_ segID: Int, seconds: Double) async {
-        let deadline = Date().addingTimeInterval(seconds)
-        var endedAt: Date?
-        while Date() < deadline {
-            var ended = false
-            var hasText = false
-            for e in appleEngines {
-                if let r = e.segmentRange(segID), r.end < .greatestFiniteMagnitude { ended = true }
-                if !e.segmentText(segID).text.isEmpty { hasText = true }
-            }
-            if ended {
-                if hasText { return }               // 定稿了
-                // 结束了但字还没到：再给它一点时间（最多 0.5 秒）
-                let t = endedAt ?? Date()
-                endedAt = t
-                if Date().timeIntervalSince(t) > 0.5 { return }
-            }
-            try? await Task.sleep(nanoseconds: 100_000_000)
+    private func waitAppleFinal(_ segID: Int) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .milliseconds(2500))
+        while !appleEngines.isEmpty, clock.now < deadline, !Task.isCancelled {
+            if appleEngines.contains(where: { $0.hasFinalText(segID) }) { return }
+            do { try await Task.sleep(for: .milliseconds(100)) }
+            catch { return }
         }
     }
 
     private func processApple(_ samples: [Float], itemID: UUID, segID: Int, gen: Int, token: UUID) async {
         activity = "识别中…"
         // 等系统听写把这句话定稿（最多 2.5 秒）
-        await waitAppleFinal(segID, seconds: 2.5)
+        await waitAppleFinal(segID)
         guard gen == runGen else { return }
         // 这一句已经被放弃/顶掉了：结果不要了
         guard isCurrentJob(itemID, token: token) else { return }
         // 听写这一段有没有出字
-        let dict = bestApple(segID)
+        let dict = bestApple(segID, requireFinal: true)
         var spoken = dict?.text ?? ""
         var src = forcedItemLang(itemID) ?? dict?.lang ?? (lastLangID == langB.id ? langB : langA)
         if !SpeechRecognizer.isMeaningful(spoken) {
@@ -2586,7 +2648,9 @@ final class LiveSession: ObservableObject {
             // 先用本地识别再认一遍这段声音；还是没有就标成"没听清"留着，
             // 至少用户还能长按改，不至于白说了。
             guard isCurrentJob(itemID, token: token) else { return }
-            if let r = await localRecover(samples: samples, fallbackLang: src) {
+            let recovered = await localRecover(samples: samples, fallbackLang: src)
+            guard !Task.isCancelled, gen == runGen, isCurrentJob(itemID, token: token) else { return }
+            if let r = recovered ?? bestApple(segID) {
                 spoken = r.text
                 src = r.lang
             } else {
@@ -2605,11 +2669,7 @@ final class LiveSession: ObservableObject {
         let tgt = src == langA ? langB : langA
         lastLangID = src.id
         hearLogText("系统听写（\(src.name)）：", String(spoken.prefix(40)))
-        if let c = continuation(of: spoken, lang: src, segID: segID) {
-            await mergeIntoPrevious(c.prevID, fullText: spoken, src: src, placeholder: itemID,
-                                    segID: segID, gen: gen)
-            return
-        }
+
         lastCommit = (itemID, segID, spoken, src, Date())
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
         let old = items[idx]
@@ -2651,25 +2711,6 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 整句识别和翻译
 
-    /// 整句识别 + 翻译的流水线。一次只跑一个，别让两句话抢引擎。
-    ///
-    /// 以前是"没在忙就起一个 drain"，有三个坑：
-    /// 一是两个"没在忙"之间可能塞进两句话，起两个 drain 抢着干；
-    /// 二是 working 只有全部干完才置回 false，哪一句卡住（网络、模型、语音增强），
-    /// 整条流水线就永远停在那儿——后面的话一句也不会再被识别，
-    /// 表现就是"上一句翻译完了，下一句就不动了"；
-    /// 三是停止的时候 working 没复位，重新开始以后队列再也不动。
-    /// 现在：单独一个任务负责收尾、收尾一定复位、每句都加上限。
-    private var drainTask: Task<Void, Never>?
-    private var drainGen = 0
-
-    /// 一句的识别+翻译跑完没有（用来判断是不是卡住了）。
-    /// 只有主线程碰它，所以不用加锁。
-    private final class JobState: @unchecked Sendable {
-        var finished = false
-    }
-
-    /// 翻译队列里的一项：识别完了，原文已经显示出来，译文慢慢补
     private struct MTJob {
         let itemID: UUID
         let token: UUID
@@ -2683,120 +2724,11 @@ final class LiveSession: ObservableObject {
         let isApple: Bool
     }
 
-    /// 待翻译的句子。
-    /// 跟识别队列分开：识别完就把原文显示出来，
-    /// 不用等上一句翻完（上一句翻得慢也不挡着下一句的原文）。
-    private var mtQueue: [MTJob] = []
-    private var mtTask: Task<Void, Never>?
-
-    private func enqueueDrain() {
-        guard drainTask == nil else { return }
-        drainGen += 1
-        let g = drainGen
-        drainTask = Task { [weak self] in
-            guard let self else { return }
-            await self.drain(g)
-            // 已经被新一轮接管了，就别去动新任务的状态
-            guard self.drainGen == g else { return }
-            self.drainTask = nil
-            // 收尾这一小会儿里要是又来了新句子，接着处理，别把它落下
-            if !self.queue.isEmpty { self.enqueueDrain() }
-        }
-    }
-
-    private func drain(_ g: Int) async {
-        working = true
-        // 只有"还是这一轮"才复位 working：
-        // 旧的一轮收尾时把 working 清了，新的一轮就再也进不了句子
-        defer { if drainGen == g { working = false } }
-        while !queue.isEmpty {
-            // 已经被停掉了、或者已经有新一轮接管：别再消费队列
-            if Task.isCancelled || drainGen != g { break }
-            let job = queue.removeFirst()
-            let gen = runGen
-            let state = JobState()
-            let jobTask = Task { [weak self] in
-                defer { state.finished = true }
-                guard let self else { return }
-                if self.usingAppleASR {
-                    await self.processApple(job.samples, itemID: job.itemID, segID: job.segID,
-                                            gen: gen, token: job.token)
-                } else {
-                    await self.process(job.samples, itemID: job.itemID, gen: gen, token: job.token)
-                }
-            }
-            // 一句最多等 150 秒：这一句卡住了，也不能把后面的句子全堵死
-            var waited = 0
-            while !state.finished {
-                if waited >= 1500 { break }
-                do {
-                    try await Task.sleep(nanoseconds: 100_000_000)
-                } catch {
-                    break           // 被取消了：别在这儿空转
-                }
-                waited += 1
-            }
-            if !state.finished {
-                jobTask.cancel()
-                // 整个会话都停了：不用再给这句标失败（下一轮重新来过）
-                if Task.isCancelled || drainGen != g { break }
-                hearLog("这句卡住太久了，先跳过，后面的句子继续处理", .warning)
-                // 这句标成失败：不然它一直"翻译中"，
-                // 朗读队列碰到第一句没做完的就停了（后面的话都读不出来）
-                markJobFailed(job.itemID, token: job.token)
-            } else {
-                _ = await jobTask.value
-            }
-        }
-    }
-
-    /// 把这一句排进翻译队列
     private func enqueueTranslation(_ job: MTJob) {
-        mtQueue.append(job)
-        startTranslationDrain()
-    }
-
-    /// 翻译队列的任务（同时只跑一个）
-    private func startTranslationDrain() {
-        guard mtTask == nil else { return }
-        mtTask = Task { [weak self] in
-            guard let self else { return }
-            await self.drainTranslations()
-            self.mtTask = nil
-            // 收尾这一小会儿要是又来了新句子，接着处理
-            if !self.mtQueue.isEmpty { self.startTranslationDrain() }
-        }
-    }
-
-    /// 翻译队列：一句一句来，每句都有上限，卡住了不挡着后面
-    private func drainTranslations() async {
-        while !mtQueue.isEmpty {
-            if Task.isCancelled { break }
-            let job = mtQueue.removeFirst()
-            let state = JobState()
-            let t = Task { [weak self] in
-                defer { state.finished = true }
-                guard let self else { return }
-                await self.translateItem(job)
-            }
-            var waited = 0
-            while !state.finished {
-                if waited >= 1500 { break }        // 最多 150 秒
-                do {
-                    try await Task.sleep(nanoseconds: 100_000_000)
-                } catch {
-                    break
-                }
-                waited += 1
-            }
-            if !state.finished {
-                t.cancel()
-                if Task.isCancelled { break }
-                hearLog("这句翻译太久了，先跳过，后面的继续", .warning)
-                markJobFailed(job.itemID, token: job.token)
-            } else {
-                _ = await t.value
-            }
+        translationQueue.submit(job) { [weak self] job in
+            await self?.translateItem(job)
+        } timedOut: { [weak self] job in
+            self?.markJobFailed(job.itemID, token: job.token)
         }
     }
 
@@ -2804,6 +2736,7 @@ final class LiveSession: ObservableObject {
     private func translateItem(_ job: MTJob) async {
         let id = job.itemID
         let token = job.token
+        guard !Task.isCancelled, job.gen == runGen, isCurrentJob(id, token: token) else { return }
         guard let idx = items.firstIndex(where: { $0.id == id }) else { return }
         // 语言和预览一致时先保留预览译文，最终译文出来后再替换，避免闪烁
         let preview = items[idx].source == job.src ? items[idx].translated : ""
@@ -2818,6 +2751,7 @@ final class LiveSession: ObservableObject {
                 Task { @MainActor in self.update(id, partialText, done: false, token: token) }
             }
         } catch {
+            guard !Task.isCancelled, job.gen == runGen, isCurrentJob(id, token: token) else { return }
             hearLog("翻译失败：\(error)", .error)
             update(id, "（翻译失败：\(error.localizedDescription)）", done: true, token: token)
             // 系统听写这条线：翻译失败要另外处理（可能是语言包没下）
@@ -2836,7 +2770,7 @@ final class LiveSession: ObservableObject {
         kickReader()
         // SenseVoice + Whisper 校正：后面没有排队的句子时，用 Whisper 再识别一遍，有明显差别就替换。
         // 放在后台跑：校正很慢，不能挡住用户刚说的下一句。
-        if asrEngine == "hybrid", queue.isEmpty {
+        if asrEngine == "hybrid", !recognitionQueue.hasPendingJobs {
             let cSamples = job.samples, cSrc = job.src, cText = job.text, cID = id
             Task { [weak self] in
                 await self?.whisperCorrect(id: cID, samples: cSamples, src: cSrc,
@@ -2871,10 +2805,7 @@ final class LiveSession: ObservableObject {
         // 一定要有终态：
         // 不然这条一直"翻译中"，朗读队列碰到第一句没做完的就停了
         // （后面的话一句都读不出来）。
-        // 已经有译文（多半是实时预览的半截）就留着它，只是标成完成。
-        if items[i].translated.isEmpty {
-            items[i].translated = "（翻译失败：这一句等太久了）"
-        }
+        items[i].translated = "（翻译失败：这一句等太久了）"
         items[i].done = true
         persist()
         kickReader()
@@ -2912,15 +2843,8 @@ final class LiveSession: ObservableObject {
             // 识别中：这一小段时间里实时预览先让路（GPU/神经引擎给整句用）
             asrBusyCount += 1
             defer { asrBusyCount = max(0, asrBusyCount - 1) }
-            if usingCloudASR {
-                // 识别方案由后端决定（SenseVoice / Whisper / 两者组合），
-                // App 只把选的方案传过去（X-ASR-Scheme 头）
-                r = try await cloud.transcribe(samples: samples, candidates: cands, fallback: fallback)
-            } else if sv {
-                r = try await sense.recognize(samples, candidates: cands, fallback: fallback)
-            } else {
-                r = try await asr.recognize(samples, candidates: cands, fallback: fallback)
-            }
+            let engine = sentenceRecognizer
+            r = try await engine.recognize(samples, candidates: cands, fallback: fallback)
             detected = r.0
             text = r.1
             // 日志里写清楚这次用的是哪个引擎（云端就写"云端"和用的哪个方案）
@@ -2933,12 +2857,23 @@ final class LiveSession: ObservableObject {
             hearLogText("整句识别（\(engineName)）\(String(format: "%.1f", Date().timeIntervalSince(t0)))s：",
                     String(text.prefix(40)))
         } catch {
+            guard !Task.isCancelled, gen == runGen, isCurrentJob(itemID, token: token) else { return }
             hearLog("识别失败：\(error)", .error)
             if usingCloudASR {
                 cloudFallbackToApple(.asr, reason: error.localizedDescription)
             }
             if gen == runGen, isCurrentJob(itemID, token: token) {
-                activity = "识别失败"; removeItem(itemID)
+                activity = "识别失败"
+                if let index = items.firstIndex(where: { $0.id == itemID }) {
+                    if !Self.hasRealText(items[index].sourceText) {
+                        items[index].sourceText = "（识别失败，可长按修改）"
+                    }
+                    items[index].translated = ""
+                    items[index].done = true
+                    jobTokens[itemID] = nil
+                    persist()
+                    kickReader()
+                }
             }
             return
         }
@@ -2975,10 +2910,11 @@ final class LiveSession: ObservableObject {
         rememberReference(id, samples: samples, text: text, lang: src.id)
 
         let context: [String] = useContext
-            ? Array(items[..<idx2].filter { $0.done }.suffix(2).map(\.sourceText))
+            ? Array(items[..<idx2].filter { Self.hasRealText($0.sourceText) }.suffix(2).map(\.sourceText))
             : []
         // 原文已经显示出来了，翻译排到另一条队列：
         // 上一句翻得慢也不挡着下一句的原文。
+        persist()
         enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: text,
                                   src: src, tgt: tgt, context: context, samples: samples,
                                   isApple: false))
@@ -3009,21 +2945,12 @@ final class LiveSession: ObservableObject {
         // 用户手改过这一句的话，就别再自动改写了：
         // 手改的版本才是用户要的（"我改的" 优先于 "机器觉得更准"）。
         let version = itemVersions[id] ?? 0
-        guard (itemVersions[id] ?? 0) == version else { return }
         if items[i].sourceText != oldText {
             hearLog("Whisper 校正：这一句已经改过了，不动它", .info)
             return
         }
         hearLogText("Whisper 校正 \(secs)s：「", String(oldText.prefix(30)) + "」→「" + String(text.prefix(30)) + "」")
         let tgt = items[i].target
-        let wasReading = readingID == id
-        if wasReading { stopReading() }
-        items[i].sourceText = text
-        items[i].corrected = true
-        // 改动了原文就 +1：跟手改共用同一个修订号，
-        // 谁在改都能看出来，不会互相盖掉
-        itemVersions[id] = version + 1
-        rememberReference(id, samples: samples, text: text, lang: src.id)
         let context: [String] = useContext
             ? Array(items[..<i].filter { $0.done }.suffix(2).map(\.sourceText))
             : []
@@ -3032,16 +2959,23 @@ final class LiveSession: ObservableObject {
             let out = try await translateFinal(text, from: src, to: tgt, context: context) { _ in }
             guard gen == runGen else { return }
             // 期间又被人改过（手改或者又校正了一次）：这次的结果是旧的，丢掉
-            guard (itemVersions[id] ?? 0) == version + 1 else { return }
+            guard (itemVersions[id] ?? 0) == version,
+                  let current = items.firstIndex(where: { $0.id == id }),
+                  items[current].sourceText == oldText else { return }
+            let wasReading = readingID == id
+            if wasReading { stopReading() }
+            items[current].sourceText = text
+            items[current].corrected = true
+            itemVersions[id] = version + 1
+            rememberReference(id, samples: samples, text: text, lang: src.id)
             update(id, out, done: true)
+            persist()
+            if wasReading {
+                readIndex = min(readIndex, current)
+                kickReader()
+            }
         } catch {
             hearLog("校正后重新翻译失败：\(error)", .error)
-        }
-        persist()
-        // 正在读这句时被打断：换成新译文重新读
-        if wasReading, let j = items.firstIndex(where: { $0.id == id }) {
-            readIndex = min(readIndex, j)
-            kickReader()
         }
     }
 
@@ -3211,6 +3145,7 @@ final class LiveSession: ObservableObject {
         // 版本号 +1：前一次翻译回来的时候版本对不上，就不要了
         itemVersions[id] = (itemVersions[id] ?? 0) + 1
         let version = itemVersions[id] ?? 0
+        persist()
         hearLogText("修改原文并重新翻译：", String(text.prefix(40)))
         let context: [String] = useContext
             ? Array(items[..<i].filter { $0.done }.suffix(2).map(\.sourceText))
@@ -3229,12 +3164,12 @@ final class LiveSession: ObservableObject {
                     return
                 }
                 // 写回原来那一页（用户可能已经切页了）
-                applyTranslation(id, result, done: true, conversation: convID)
+                applyTranslation(id, result, done: true, conversation: convID, expectedSource: text)
             } catch {
                 guard itemVersions[id] == version else { return }
                 hearLog("重新翻译失败：\(error)", .error)
                 applyTranslation(id, "（翻译失败：\(error.localizedDescription)）", done: true,
-                                 conversation: convID)
+                                 conversation: convID, expectedSource: text)
             }
             persist()
             kickReader()
@@ -3351,13 +3286,13 @@ final class LiveSession: ObservableObject {
 
     /// 要切到别的本地引擎，但本地声音克隆开着：会互相抢内存导致崩溃，拦住
     func conflictWithClone(_ newEngine: String) -> String? {
-        guard localCloneOn, Self.isLocalEngine(newEngine) else { return nil }
+        guard localCloneOn, !useZipVoice, Self.isLocalEngine(newEngine) else { return nil }
         return "已经打开本地声音克隆引擎，同时选择当前引擎会导致软件崩溃，请修改！"
     }
 
     /// 要打开本地声音克隆，但别的本地引擎开着：拦住
-    func conflictWithOtherLocals() -> String? {
-        guard !voiceCloneCloud else { return nil }
+    func conflictWithOtherLocals(allowZipVoice: Bool = true) -> String? {
+        guard !voiceCloneCloud, !(allowZipVoice && useZipVoice) else { return nil }
         if Self.isLocalEngine(asrEngine) || translationEngine == "local" {
             return "已经打开其他本地引擎，同时选择本地声音克隆引擎会导致软件崩溃，请修改！"
         }
@@ -3693,6 +3628,7 @@ final class LiveSession: ObservableObject {
             inEngineFallback = true
             asrEngine = fb
             inEngineFallback = false
+            if wasRunning, fb == "apple" { startAppleASR() }
         case .mt:
             guard translationEngine == "cloud" else { return false }
             let fb: String? = appleAvailable ? "apple"
@@ -3762,15 +3698,18 @@ final class LiveSession: ObservableObject {
     }
 
     private func loadClonerIfNeeded() async {
-        guard voiceClone, !voiceCloneCloud, VoiceCloneGGUF.installed, !cloneLoading else { return }
+        guard voiceClone, !voiceCloneCloud, cloneInstalled, !cloneLoading else { return }
+        if !useZipVoice, conflictWithOtherLocals() != nil { return }
+        let zip = useZipVoice
+        let lowMemory = cloneLowMemory
         if case .loading = phase { return }                 // 识别、翻译模型还在加载，等它们好了会再叫
         // GGUF 版模型走 mmap 映射，磁盘上约 760 MB。
         // 但放 GPU 时 Metal 里会再存一份（常驻、不可回收），mmap 的文件页也要占一份（可回收）。
         // 翻译模型已经占了 GPU，内存不够就整个放 CPU：慢一点，
         // 但系统压力大的时候文件页还能被回收，不会被系统直接杀掉。
         let free = Self.freeMB()
-        let need = VoiceCloneGGUF.totalMB
-        let useGPU = free >= need * 2 + 300
+        let need = zip ? Int(ModelManager.folderSize(ZipVoiceModel.directory) / 1_048_576) : VoiceCloneGGUF.totalMB
+        var useGPU = !zip && !lowMemory && free >= need * 2 + 300
         hearLog("声音克隆：准备加载，可用内存 \(free) MB，模型约 \(need) MB\(useGPU ? "，放 GPU" : "，放 CPU")")
         guard free >= need + 300 else {
             hearLog("声音克隆：可用内存不够（\(free) MB，需要约 \(need + 300) MB），先用系统声音朗读", .warning)
@@ -3786,7 +3725,15 @@ final class LiveSession: ObservableObject {
         d.set(true, forKey: Self.clonePendingKey)
         d.synchronize()
         do {
-            try await cloner.load(useGPU: useGPU)
+            do {
+                try await cloner.load(zipVoice: zip, useGPU: useGPU, lowMemory: lowMemory)
+            } catch {
+                guard useGPU, !Task.isCancelled else { throw error }
+                hearLog("克隆 GPU 初始化失败，改用 CPU 低内存模式", .warning)
+                await cloner.unload()
+                useGPU = false
+                try await cloner.load(zipVoice: false, useGPU: false, lowMemory: true)
+            }
             cloneOnCPU = !useGPU
             modelsRevision += 1
             hearLog("声音克隆：加载后可用内存 \(Self.freeMB()) MB")
@@ -3894,7 +3841,10 @@ final class LiveSession: ObservableObject {
         // 克隆会把参考音频里的环境音一起学过去，
         // 不降噪的话环境音就跟着念出来，听着是"有杂的声音"
         let refSamples = usingCloudClone ? GGUFVoiceCloner.denoise(ref.samples) : ref.samples
-        let key = cloneCacheKey(lang: lang, text: text, ref: ref.samples)
+        let localZip = useZipVoice && !usingCloudClone
+        if localZip, (lang != "zh" && lang != "en" || refText.isEmpty) { return nil }
+        let backend = usingCloudClone ? "cloud" : (localZip ? "zipvoice" : "qwen")
+        let key = backend + "-" + cloneCacheKey(lang: lang, text: text + "\n" + refText, ref: ref.samples)
         let cloner = self.cloner
         let cloud = self.cloud
         let useCloud = usingCloudClone

@@ -75,9 +75,14 @@ final class AudioCapture {
     /// 这跟"麦克风断了"是两回事，不能混在一起说。
     private var _pendingBlocks = 0
     /// 还没被识别那边消费掉的声音块数
-    var pendingBlocks: Int {
-        get { lock.lock(); defer { lock.unlock() }; return _pendingBlocks }
-        set { lock.lock(); _pendingBlocks = newValue; lock.unlock() }
+    private var pendingBlocks: Int {
+        lock.lock(); defer { lock.unlock() }; return _pendingBlocks
+    }
+
+    private func changePendingBlocks(by delta: Int) {
+        lock.lock()
+        _pendingBlocks += delta
+        lock.unlock()
     }
 
     /// 最近一次"真的把声音送到识别那里"的时间。
@@ -139,10 +144,11 @@ final class AudioCapture {
         // 先把断句器清干净（连环境噪声的估计一起清）。
         // 必须在起引擎之前清：引擎一起来就会往里灌声音，
         // 晚一步清的话，头一小段声音会被 reset 抹掉。
-        queue.sync { [segmenter] in segmenter.reset() }
         var lastError: Error?
         // 所有动引擎的活儿都在 engineQueue 上做，和 stop()/重新接麦克风串行
         engineQueue.sync {
+            // The preceding stop flushes on this queue before the new capture can reset VAD.
+            queue.sync { [segmenter] in segmenter.reset() }
             do {
                 try prepareAndStart()
                 lastError = nil
@@ -162,8 +168,13 @@ final class AudioCapture {
         hearLog("麦克风已启动：\(Int(f.sampleRate)) Hz，\(f.channelCount) 声道，语音增强\(engine.inputNode.isVoiceProcessingEnabled ? "开" : "关")")
     }
 
-    func stop() {
-        guard isRunning else { return }
+    func stop(onFlushed: (() -> Void)? = nil) {
+        guard isRunning else {
+            if let onFlushed {
+                engineQueue.async { DispatchQueue.main.async { onFlushed() } }
+            }
+            return
+        }
         isRunning = false
         stopWatchdog()
         let g = gen
@@ -173,7 +184,8 @@ final class AudioCapture {
             self.removeTap()
             engine.stop()
             // 引擎停了再把最后一句交出去，后面不会再有声音进来
-            self.queue.async { self.segmenter.flush() }
+            self.queue.sync { self.segmenter.flush() }
+            if let onFlushed { DispatchQueue.main.async { onFlushed() } }
             // 引擎真的停了，才告诉音频会话"不收音了"。
             // 早一步改类别（.playAndRecord → .playback）会把还在跑的引擎的输入抽走，
             // 系统重新配置引擎，麦克风就断在半路上（以后再也没有声音进来）。
@@ -452,14 +464,16 @@ final class AudioCapture {
         // 喂系统听写，哪一下没赶上就会漏音，听起来是「刺刺」的杂音。
         if let feed = onSamples {
             let input = isMuted ? [Float](repeating: 0, count: samples.count) : samples
-            pendingBlocks += 1
+            changePendingBlocks(by: 1)
             feedQueue.async { [weak self] in
                 feed(input)
                 guard let self else { return }
-                self.pendingBlocks -= 1
+                self.changePendingBlocks(by: -1)
             }
         }
-        queue.async { [segmenter] in
+        changePendingBlocks(by: 1)
+        queue.async { [weak self, segmenter] in
+            defer { self?.changePendingBlocks(by: -1) }
             // 正在朗读：这一段声音不要（免得把喇叭的声音又识别一遍），
             // 但环境噪声的估计要留着，别让门限乱跳
             if isMuted { segmenter.discardCurrent() } else { segmenter.feed(samples) }

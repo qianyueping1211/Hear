@@ -42,7 +42,9 @@ import traceback
 import urllib.error
 import urllib.request
 import wave
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
+
+from hear_http import RequestHandler, RequestPolicy
 
 HOST = os.environ.get("HEAR_HOST", "0.0.0.0")
 PORT = int(os.environ.get("HEAR_PORT", "8000"))
@@ -117,33 +119,6 @@ def access_token():
     except Exception as e:
         log("访问口令生成不了：%s" % e)
         return ""
-
-
-# 推理并发上限：同时在跑的识别/翻译/克隆请求最多几个。
-# 多了的话手机会互相拖慢（模型是同一个），也可能把内存撑爆。
-# 0 = 不限制（自己知道机器扛得住再说）。
-MAX_INFLIGHT = int(os.environ.get("HEAR_MAX_INFLIGHT", "3"))
-_inflight = 0
-_inflight_lock = threading.Lock()
-
-
-def inflight_enter():
-    """占一个并发名额；返回 False 表示太满了（这次不接）。"""
-    global _inflight
-    if MAX_INFLIGHT <= 0:
-        return True
-    with _inflight_lock:
-        if _inflight >= MAX_INFLIGHT:
-            return False
-        _inflight += 1
-        return True
-
-
-def inflight_leave():
-    global _inflight
-    with _inflight_lock:
-        if _inflight > 0:
-            _inflight -= 1
 
 
 def log(*args):
@@ -451,17 +426,31 @@ def decode_wav(data):
 CORRECT_TIMEOUT = float(os.environ.get("HEAR_CORRECT_TIMEOUT", "8"))
 
 
+# A timed-out correction still owns the slot until the underlying model returns.
+_correction_slot = threading.Lock()
+
+
 def run_with_timeout(fn, seconds):
-    """在别的线程里跑 fn，最多等这么久；超时就放弃。"""
-    import concurrent.futures
-    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    fut = ex.submit(fn)
+    from concurrent.futures import Future
+    if not _correction_slot.acquire(blocking=False):
+        raise TimeoutError("已有校正正在运行")
+    result = Future()
+
+    def correct():
+        try:
+            result.set_result(fn())
+        except BaseException as error:
+            result.set_exception(error)
+        finally:
+            _correction_slot.release()
+
+    worker = threading.Thread(target=correct, daemon=True, name="hear-asr-correction")
     try:
-        return fut.result(timeout=seconds)
-    except concurrent.futures.TimeoutError:
-        raise TimeoutError("超过 %.0f 秒" % seconds)
-    finally:
-        ex.shutdown(wait=False)
+        worker.start()
+    except RuntimeError:
+        _correction_slot.release()
+        raise
+    return result.result(timeout=max(0, seconds))
 
 
 def recognize(samples, rate, language, fallback, scheme=None, preview=False):
@@ -667,12 +656,9 @@ def ref_get(rid):
         return _REF_CACHE.get(rid)
 
 
-class BodyTooLarge(Exception):
-    """请求体太大了（超过 MAX_BODY），后面直接断开这个连接"""
-    pass
+class Handler(RequestHandler):
+    pairing_info = staticmethod(lambda: pair_info())
 
-
-class Handler(BaseHTTPRequestHandler):
     server_version = "HearCloud/1.0"
     # 用 HTTP/1.1：手机那边能复用同一个连接，
     # 不用每发一个请求就重新做一次 TLS 握手（握手多最容易出"卡住"）
@@ -717,33 +703,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def _error(self, msg, code=400):
         self._send_json({"error": str(msg)}, code)
-
-    def _body(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        # 别让一个 Content-Length 就把内存吃光：正常的请求最多几十 MB
-        if length > MAX_BODY:
-            self._error("请求太大（%d MB），最多 %d MB" % (length // (1024 * 1024), MAX_BODY // (1024 * 1024)), 413)
-            raise BodyTooLarge()
-        return self.rfile.read(length) if length else b""
-
-    # -- GET --
-
-    def do_GET(self):
-        try:
-            if self.path.startswith("/health"):
-                self._send_json(self.health())
-            elif self.path.startswith("/v1/pair"):
-                self._send_json(pair_info())
-            elif self.path.startswith("/ping"):
-                self._send_json({"pong": True, "time": time.time()})
-            elif self.path.startswith("/v1/"):
-                self._error("没有这个接口", 404)
-            elif self.path.startswith("/"):
-                self._send_html(self.test_page())
-            else:
-                self._error("没有这个接口", 404)
-        except (BrokenPipeError, ConnectionResetError):
-            pass          # 手机那边超时断开了，不用刷报错
 
     def _send_html(self, html):
         data = html.encode("utf-8")
@@ -821,7 +780,13 @@ a{color:#007aff;text-decoration:none}
         if ASR_URL:
             out["asr_ready"] = backend_alive(ASR_URL)
         else:
-            out["asr_ready"] = (_whisper_state.get("status", "") == "就绪")
+            whisper_ready = _whisper_state.get("status", "") == "就绪"
+            if ASR_SCHEME == "sensevoice":
+                out["asr_ready"] = sensevoice_available()
+            elif ASR_SCHEME == "sensevoice+whisper":
+                out["asr_ready"] = sensevoice_available() or whisper_ready
+            else:
+                out["asr_ready"] = whisper_ready
         out["mt_ready"] = (backend_state(MT_URL) == "就绪")
         out["clone_ready"] = (backend_state(CLONE_URL) == "就绪")
         return out
@@ -834,59 +799,6 @@ a{color:#007aff;text-decoration:none}
                        "服务没有证书（server/certs/cert.pem），"
                        "跑一次 python server/make_cert.py 生成，再重启服务")
         super().send_error(code, message, explain)
-
-    # -- POST --
-
-    def do_POST(self):
-        try:
-            body = self._body()
-        except BodyTooLarge:
-            return
-        # 访问口令（开了才检查）：没口令或者口令不对，一律不给推理
-        if REQUIRE_TOKEN:
-            want = access_token()
-            got = (self.headers.get("X-Hear-Token") or "").strip()
-            if want and got != want:
-                self._error("访问口令不对（服务要求带 X-Hear-Token）", 401)
-                return
-        try:
-            if self.path.startswith("/v1/asr"):
-                if not inflight_enter():
-                    self._error("同时在跑的识别太多了，等一下再试", 503)
-                    return
-                try:
-                    self.asr(body)
-                finally:
-                    inflight_leave()
-            elif self.path.startswith("/v1/translate"):
-                if not inflight_enter():
-                    self._error("同时在跑的翻译太多了，等一下再试", 503)
-                    return
-                try:
-                    self.translate(body)
-                finally:
-                    inflight_leave()
-            elif self.path.startswith("/v1/clone/reference"):
-                # 注意：必须排在 /v1/clone 前面（这个路径也是 /v1/clone 开头）
-                self.clone_reference(body)
-            elif self.path.startswith("/v1/clone"):
-                if not inflight_enter():
-                    self._error("同时在跑的克隆太多了，等一下再试", 503)
-                    return
-                try:
-                    self.clone(body)
-                finally:
-                    inflight_leave()
-            else:
-                self._error("没有这个接口", 404)
-        except (BrokenPipeError, ConnectionResetError):
-            pass          # 手机那边超时断开了，不用刷报错
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")[:500]
-            self._error("后端返回 %s：%s" % (e.code, detail), 502)
-        except Exception as e:
-            traceback.print_exc()
-            self._error(str(e), 500)
 
     # -- 语音识别 --
 
@@ -1373,14 +1285,18 @@ class MixedServer(ThreadingHTTPServer):
 def main():
     # 先把端口占上（这样别人连过来不会报"拒绝连接"），再开始处理请求
     ctx = make_ssl_context()
+    token = access_token() if REQUIRE_TOKEN else None
+    if REQUIRE_TOKEN and (not token or ctx is None):
+        raise SystemExit("访问口令已启用，需要可用的口令文件和 HTTPS 证书")
     srv = MixedServer((HOST, PORT), Handler, ctx)
+    srv.request_policy = RequestPolicy(MAX_BODY, int(os.environ.get("HEAR_MAX_INFLIGHT", "3")), token)
     log("服务起来了，监听 %s:%d" % (HOST, PORT))
     # 签发根指纹：手机上开"严格模式"配对的时候，要对着这一串核对
     _pair = pair_info()
     if _pair.get("root_fingerprint"):
         log("证书指纹（配对时核对这一串）：%s" % _pair["root_fingerprint"])
     if REQUIRE_TOKEN:
-        log("访问口令：%s" % access_token())
+        log("访问口令：%s" % token)
         log("   手机上要填这个：设置 → 在线模型 → 通用服务地址 → 访问口令")
     log("本机测试：https://127.0.0.1:%d/" % PORT)
     for ip in local_ips():

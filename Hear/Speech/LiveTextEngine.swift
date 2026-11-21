@@ -23,6 +23,7 @@ protocol LiveTextEngine: AnyObject {
     func markSegmentEnd(_ id: Int)
     /// 第 id 句目前识别到的文字，以及平均置信度（0~1）
     func segmentText(_ id: Int) -> (text: String, confidence: Double)
+    func hasFinalText(_ id: Int) -> Bool
     /// 第 id 句覆盖的时间范围（秒）
     /// 用来判断两句话是不是同一段声音：
     /// 范围不重叠 = 用户真的说了两遍，要分开记，不能合并
@@ -99,7 +100,10 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
     private var generation = 0
     /// 还没启动好的时候收到的声音（先存着，等启动了补给它）
     /// 用户一开口就说的话，听写要下语言包、起引擎，那一下没收到就丢了
+    private let inputQueue = DispatchQueue(label: "hear.apple-input")
     private var pendingFeed: [Float] = []
+    private var discardedFrames: Int64 = 0
+    private var analyzerOffset: Double = 0
     private static let pendingFeedMax = 48_000      // 最多留 3 秒
 
     private let srcFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
@@ -136,22 +140,29 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         let analyzer = SpeechAnalyzer(modules: [transcriber], options: nil)
         try await analyzer.start(inputSequence: stream)
 
-        lock.lock()
-        generation += 1
-        let gen = generation
-        self.analyzer = analyzer
-        self.input = continuation
-        self.format = fmt
-        self.converter = nil
-        self.fedFrames = 0
-        self.finals.removeAll()
-        self.volatilePiece = nil
-        self.segs.removeAll()
-        self._languageID = languageID
-        // 把启动前收到的声音取出来（用户可能一开口就在说话）
-        let preRoll = pendingFeed
-        pendingFeed = []
-        lock.unlock()
+        let gen: Int = inputQueue.sync {
+            lock.lock()
+            generation += 1
+            let current = generation
+            self.analyzer = analyzer
+            input = continuation
+            format = fmt
+            converter = nil
+            fedFrames = discardedFrames
+            analyzerOffset = Double(discardedFrames) / 16_000
+            finals.removeAll()
+            volatilePiece = nil
+            _languageID = languageID
+            let preRoll = pendingFeed
+            pendingFeed = []
+            discardedFrames = 0
+            lock.unlock()
+
+            for start in stride(from: 0, to: preRoll.count, by: 4096) {
+                deliver(Array(preRoll[start..<min(start + 4096, preRoll.count)]))
+            }
+            return current
+        }
 
         resultsTask = Task { [weak self] in
             do {
@@ -188,16 +199,7 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
             }
         }
         hearLog("系统听写：开始（\(loc.identifier)，\(Int(fmt.sampleRate)) Hz）")
-        // 补上启动前收到的那一段（分块送，块太大引擎会卡）
-        if !preRoll.isEmpty {
-            hearLog("系统听写：补送启动前的 \(Double(preRoll.count) / 16000) 秒声音", .info)
-            var i = 0
-            while i < preRoll.count {
-                let end = min(i + 4096, preRoll.count)
-                self.feed(Array(preRoll[i..<end]))
-                i = end
-            }
-        }
+
     }
 
     func stop() async {
@@ -211,7 +213,9 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         t?.cancel()
     }
 
-    private var now: Double { Double(fedFrames) / 16_000 }
+    private var now: Double {
+        Double(input == nil ? discardedFrames + Int64(pendingFeed.count) : fedFrames) / 16_000
+    }
 
     func markSegmentStart(_ id: Int) {
         lock.lock()
@@ -256,7 +260,21 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         return (text, weight > 0 ? sum / weight : 0.5)
     }
 
+    func hasFinalText(_ id: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let segment = segs[id], let end = segment.end else { return false }
+        if let volatilePiece, volatilePiece.end > segment.start, volatilePiece.start < end {
+            return false
+        }
+        // VAD marks the end after its silence window, which is not part of the transcribed range.
+        return finals.contains { $0.end > segment.start && $0.start < end && $0.end >= end - 0.8 }
+    }
+
     func feed(_ samples: [Float]) {
+        inputQueue.sync { deliver(samples) }
+    }
+
+    private func deliver(_ samples: [Float]) {
         lock.lock()
         guard let cont = input, let fmt = format, !samples.isEmpty else {
             // 还没准备好（语言包在下载、引擎在起）：先存着，
@@ -264,7 +282,9 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
             if !samples.isEmpty {
                 pendingFeed.append(contentsOf: samples)
                 if pendingFeed.count > Self.pendingFeedMax {
-                    pendingFeed.removeFirst(pendingFeed.count - Self.pendingFeedMax)
+                    let excess = pendingFeed.count - Self.pendingFeedMax
+                    pendingFeed.removeFirst(excess)
+                    discardedFrames += Int64(excess)
                 }
             }
             lock.unlock()
@@ -305,12 +325,14 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
     private func ingest(_ piece: Piece, isFinal: Bool, gen: Int) {
         lock.lock()
         guard gen == generation else { lock.unlock(); return }
+        let timedPiece = Piece(start: piece.start + analyzerOffset, end: piece.end + analyzerOffset,
+                               text: piece.text, conf: piece.conf)
         if isFinal {
-            finals.append(piece)
+            finals.append(timedPiece)
             if finals.count > 120 { finals.removeFirst(finals.count - 120) }
             volatilePiece = nil
         } else {
-            volatilePiece = piece.text.isEmpty ? nil : piece
+            volatilePiece = piece.text.isEmpty ? nil : timedPiece
         }
         let cb = onUpdate
         lock.unlock()

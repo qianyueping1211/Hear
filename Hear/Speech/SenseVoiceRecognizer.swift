@@ -123,23 +123,26 @@ actor SenseVoiceRecognizer {
         return nil
     }
 
-    static func download(host: String, progress: @escaping @Sendable (Double) -> Void) async throws {
+    static func download(host: String, force: Bool = false, progress: @escaping @Sendable (Double) -> Void) async throws {
         ModelRegistry.baseURL = "https://\(host)"
-        let r = try await SenseVoiceModels.download(precision: .int8, force: false) { p in
-            progress(p.fractionCompleted)
-        }
-        hearLog("SenseVoice 下载返回：\(String(describing: r))")
-        UserDefaults.standard.removeObject(forKey: "senseVoiceFolder")
-        if let f = installedFolder() {
-            hearLog("SenseVoice 模型位置：\(f.path)")
-        } else {
-            // 下载说完成了却找不到模型：把目录里的文件列出来，方便查原因
-            let fm = FileManager.default
-            let base = folder.deletingLastPathComponent()
-            let list = (fm.enumerator(atPath: base.path)?.allObjects as? [String] ?? []).prefix(40)
-            hearLog("SenseVoice 下载后没找到模型，\(base.path) 里有：\(list.joined(separator: ", "))", .error)
-            throw NSError(domain: "Hear", code: 5, userInfo: [NSLocalizedDescriptionKey:
-                "SenseVoice 下载完成但没有找到模型文件，请到 运行日志 查看详情"])
+        let files = FileManager.default
+        let previous = folder.deletingLastPathComponent()
+            .appendingPathComponent(".sensevoice-backup-\(UUID().uuidString)")
+        let existing = force && files.fileExists(atPath: folder.path)
+        if existing { try files.copyItem(at: folder, to: previous) }
+        do {
+            _ = try await SenseVoiceModels.download(precision: .int8, force: force) { p in
+                progress(p.fractionCompleted)
+            }
+            try Task.checkCancellation()
+            guard hasModels(folder) else {
+                throw VoiceCloneGGUFError.modelMissing("SenseVoice 下载后模型文件不完整")
+            }
+            UserDefaults.standard.removeObject(forKey: "senseVoiceFolder")
+            if existing { try? files.removeItem(at: previous) }
+        } catch {
+            if existing { try ModelManager.installModelFile(previous, at: folder) }
+            throw error
         }
     }
 

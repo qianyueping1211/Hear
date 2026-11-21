@@ -25,7 +25,7 @@ actor SpeechRecognizer {
     private struct Waiter {
         let prio: Priority
         let order: Int              // 同一个优先级里按先来后到
-        let cont: CheckedContinuation<Void, Never>
+        let cont: CheckedContinuation<Void, Error>
     }
     private var waiters: [Waiter] = []
     private var ticket = 0
@@ -36,19 +36,30 @@ actor SpeechRecognizer {
     /// 两边都在等对方 → 谁也走不了，整条识别队列就卡死了。
     /// 现在改成一条真正的排队：按优先级挑下一个，取消的请求不占位置。
     private func acquire(_ prio: Priority) async throws {
-        if busy {
-            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-                ticket += 1
-                waiters.append(Waiter(prio: prio, order: ticket, cont: c))
-            }
-        } else {
+        try Task.checkCancellation()
+        if !busy {
             busy = true
+            return
         }
-        // 排队期间被取消了：把位置让出去，别占着引擎
+
+        ticket += 1
+        let id = ticket
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                waiters.append(Waiter(prio: prio, order: id, cont: continuation))
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
         if Task.isCancelled {
             release()
             throw CancellationError()
         }
+    }
+
+    private func cancelWaiter(_ id: Int) {
+        guard let index = waiters.firstIndex(where: { $0.order == id }) else { return }
+        waiters.remove(at: index).cont.resume(throwing: CancellationError())
     }
 
     /// 释放：位置交给下一个等着的（优先级高的先，同级先来后到）

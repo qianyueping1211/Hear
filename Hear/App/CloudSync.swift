@@ -511,6 +511,7 @@ final class CloudSync: ObservableObject {
         let local = store.allUpdated
         var ids = Set(local.keys.map(\.uuidString))
         ids.formUnion(manifest.conversations.keys)
+        var hadFileFailure = false
         for key in ids {
             guard let id = UUID(uuidString: key) else { continue }
             let file = convDir.appendingPathComponent("\(key).json")
@@ -524,26 +525,20 @@ final class CloudSync: ObservableObject {
                 if let data = store.rawData(id), await Self.io({ Self.write(data, to: file) }) {
                     manifest.conversations[key] = l
                     pushed += 1
+                } else {
+                    hadFileFailure = true
                 }
             } else if let c, l == nil || c > l! + 1 {
-                // 拉取之前再看一眼本地有没有被改过：
-                // 这期间用户在这页上改过东西，就别用云上的旧版本盖掉
-                if let l2 = store.allUpdated[id], let l, l2 > l + 1 {
-                    hearLog("iCloud 同步：本地这页刚改过，不用云上的旧版本盖掉", .info)
+                let deletionBeforeRead = ConversationStore.deletedIDs[key]
+                guard let data = await Self.read(file) else {
+                    hadFileFailure = true
                     continue
                 }
-                if let data = await Self.read(file) {
-                    // 读文件是异步的：这段时间用户可能又改了这一页。
-                    // 导入之前再核对一次本地版本，
-                    // 别把人家刚改的东西盖掉（差一秒以内也算改过）。
-                    if let l3 = store.allUpdated[id], let l, l3 > l {
-                        hearLog("iCloud 同步：这一页刚被改过，不用云上的旧版本盖掉", .info)
-                        continue
-                    }
-                    if store.importRaw(data) {
-                        pulled += 1
-                    }
-                }
+                // The read suspends. Compare optionals so creation and deletion also count as changes.
+                guard store.allUpdated[id] == l,
+                      ConversationStore.deletedIDs[key] == deletionBeforeRead else { continue }
+                if store.importRaw(data) { pulled += 1 }
+                else { hadFileFailure = true }
             }
         }
 
@@ -559,17 +554,21 @@ final class CloudSync: ObservableObject {
             guard let data = try? Self.encoder.encode(manifest) else { break }
             let ok = await Self.io { Self.write(data, to: manifestURL) }
             if !ok { break }
-            wrote = true
-            guard let after = await Self.readManifest(dir) else { break }
-            // 少了的：既不在清单里、也没被删除记录说明的 = 被别人盖掉了
-            let lost = manifest.conversations.keys.filter { k in
-                after.conversations[k] == nil && after.deleted[k] == nil
+            guard let after = await Self.readManifest(dir) else { continue }
+            let includesConversations = manifest.conversations.allSatisfy { key, revision in
+                max(after.conversations[key] ?? .distantPast, after.deleted[key] ?? .distantPast) >= revision
             }
-            if lost.isEmpty { break }
-            hearLog("iCloud 同步：刚写的内容被别的设备盖掉了，再合并一次（第 \(attempt + 1) 次）", .info)
-            for k in lost {
-                if let v = manifest.conversations[k] { manifest.conversations[k] = v }
+            let includesDeletions = manifest.deleted.allSatisfy { key, revision in
+                (after.deleted[key] ?? .distantPast) >= revision
             }
+            let includesSettings = (after.settingsUpdatedAt ?? .distantPast)
+                >= (manifest.settingsUpdatedAt ?? .distantPast)
+            if includesConversations && includesDeletions && includesSettings {
+                wrote = !hadFileFailure
+                break
+            }
+            manifest = Self.mergeManifest(after, manifest)
+            hearLog("iCloud 同步：重新核对并合并清单（第 \(attempt + 1) 次）", .info)
         }
         if wrote {
             lastSync = Date()
@@ -646,7 +645,7 @@ final class CloudSync: ObservableObject {
             if let cur = out.deleted[k] { out.deleted[k] = max(cur, v) }
             else { out.deleted[k] = v }
         }
-        if let sa = b.settingsUpdatedAt, let ca = a.settingsUpdatedAt, sa > ca {
+        if let sa = b.settingsUpdatedAt, sa > (a.settingsUpdatedAt ?? .distantPast) {
             out.settingsHash = b.settingsHash
             out.settingsUpdatedAt = sa
         }

@@ -142,3 +142,21 @@ server/                          云端模型服务（WSL2 上跑，README 在�
 - **打包显示 “The job was not acquired by Runner” 或 “Internal server error”**：这是 GitHub 自己的服务器临时出问题，和代码无关。进入这次打包，点右上角 **Re-run all jobs** 重新打包即可。
 - **免费账号限制**：同时最多 3 个自签 App；每 7 天需要重签。
 - **版本号**：三位数字，写在仓库根目录的 `VERSION` 文件里（例如 `1.0.0`），打包时用它命名安装包，例如 `Hear-1.0.0.ipa`。之前的版本已改为 0.x.y（例如 4.3 → 0.4.3）。
+
+
+## 本地声音克隆
+
+iPhone 端可选择 Qwen3‑TTS CPU 低内存模式，或使用实验性 ZipVoice‑Distill INT8。
+ZipVoice 支持中文和英文，需要准确匹配的参考音频与原文。请从
+[模型部署说明](https://k2-fsa.github.io/sherpa/onnx/tts/zipvoice.html) 下载 INT8 模型和
+\`vocos_24khz.onnx\`，解压，并把 Vocos 文件放到包含 \`encoder.int8.onnx\`、
+\`decoder.int8.onnx\`、\`tokens.txt\`、\`lexicon.txt\` 和 \`espeak-ng-data\` 的同一目录。
+在听见设置选择「本地引擎 → ZipVoice（试验）」，再导入该目录。
+Qwen3 的低内存模式保留与其他本地模型的互斥。ZipVoice 的多模型共存需在设备上验证。
+
+## Windows 启动器更新
+
+仓库中的 \`start-hear-cloud.bat\` 使用同目录服务源码。单独放置时，会在旁边的
+\`Hear\server\` 同步同一份 GitHub 源码快照，已下载模型、证书与设置保留。
+旧版只逐个更新几个文件的启动器需要换成仓库中的新版。
+运行 \`start-hear-cloud.bat --check\` 可只检查启动所需文件。

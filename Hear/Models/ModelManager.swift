@@ -116,19 +116,31 @@ enum ModelManager {
         let encoded = file.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? file
         let url = URL(string: "https://\(host)/\(ggufRepo)/resolve/main/\(encoded)")!
         let dst = modelsDir.appendingPathComponent((file as NSString).lastPathComponent)
-        try await FileDownloader().download(url, to: dst, progress: progress)
+        let stage = modelsDir.appendingPathComponent(".download-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: stage) }
+        try await FileDownloader().download(url, to: stage, progress: progress)
         // 下完了先验一验：这到底是不是 GGUF 模型。
         // 有些地址会返回 HTTP 200 但内容是个网页或者一段提示——
         // 那种文件装上去，模型加载时才炸，排查起来很麻烦。
         do {
-            try checkGGUF(dst)
+            try checkGGUF(stage)
         } catch {
-            try? FileManager.default.removeItem(at: dst)
             throw NSError(domain: "Hear", code: 6, userInfo: [NSLocalizedDescriptionKey:
                 "下下来的不是模型文件（开头不是 GGUF），已经删掉了，没动原来那个模型"])
         }
+        try Task.checkCancellation()
+        try installModelFile(stage, at: dst)
         select(dst)
         return dst
+    }
+
+    static func installModelFile(_ staging: URL, at destination: URL) throws {
+        let files = FileManager.default
+        if files.fileExists(atPath: destination.path) {
+            _ = try files.replaceItemAt(destination, withItemAt: staging)
+        } else {
+            try files.moveItem(at: staging, to: destination)
+        }
     }
 
     /// 删除当前使用的翻译模型文件（用于重新下载）
@@ -212,18 +224,35 @@ enum ModelManager {
         UserDefaults.standard.set("huggingface/imported/" + src.lastPathComponent, forKey: "whisperRelPath")
     }
 
-    static func downloadWhisper(host: String, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
+    static func downloadWhisper(host: String, force: Bool = false, progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
         if host != "huggingface.co" { setenv("HF_ENDPOINT", "https://\(host)", 1) }
+        let oldFolder = whisperFolder()
+        let staging = force ? whisperBase.appendingPathComponent("refresh-\(UUID().uuidString)") : whisperBase
+        var installed = false
+        defer {
+            if force && !installed { try? FileManager.default.removeItem(at: staging) }
+        }
         let folder = try await WhisperKit.download(
             variant: SpeechRecognizer.modelVariant,
-            downloadBase: whisperBase,
+            downloadBase: staging,
             progressCallback: { p in progress(p.fractionCompleted) }
         )
+        try Task.checkCancellation()
+        for name in ["AudioEncoder.mlmodelc", "TextDecoder.mlmodelc", "MelSpectrogram.mlmodelc"] {
+            guard FileManager.default.fileExists(atPath: folder.appendingPathComponent(name).path) else {
+                throw VoiceCloneGGUFError.modelMissing(name)
+            }
+        }
         let docPath = documents.standardizedFileURL.path
         var rel = folder.standardizedFileURL.path
         if rel.hasPrefix(docPath) { rel = String(rel.dropFirst(docPath.count)) }
         rel = rel.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         UserDefaults.standard.set(rel, forKey: "whisperRelPath")
+        installed = true
+        if force, let oldFolder, oldFolder != folder,
+           oldFolder.path.hasPrefix(whisperBase.path + "/") {
+            try? FileManager.default.removeItem(at: oldFolder)
+        }
         return folder
     }
 }

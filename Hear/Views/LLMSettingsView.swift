@@ -68,6 +68,11 @@ struct LLMSettingsView: View {
 struct ProviderEditView: View {
     @State var provider: LLMProvider
     let isNew: Bool
+    @State private var plaintextKeyConfirmation = 0
+    private var plaintextKeyIsApproved: Bool {
+        _ = plaintextKeyConfirmation
+        return LLMClient.isPlaintextKeyApproved(provider, key: apiKey)
+    }
     @State private var apiKey = ""
     @State private var loading = false
     @State private var message = ""
@@ -101,6 +106,15 @@ struct ProviderEditView: View {
                             if !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 Text("你还填了 API Key：它也会用明文发出去，路上可能被别人看到。")
                                     .font(.caption).foregroundStyle(.red)
+                                if plaintextKeyIsApproved {
+                                    Text("已确认明文发送当前 API Key").font(.caption)
+                                } else {
+                                    Button("确认明文发送当前 API Key") {
+                                        LLMClient.approvePlaintextKey(provider, key: apiKey)
+                                        plaintextKeyConfirmation += 1
+                                    }
+                                    .font(.footnote)
+                                }
                             }
                             if LLMSettings.shared.isPlaintextConfirmed(provider.baseURL) {
                                 Text("已确认使用（明文发送）").font(.caption).foregroundStyle(.secondary)

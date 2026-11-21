@@ -80,17 +80,15 @@ enum VoiceCloneGGUF {
 
     /// 把本地导入的两个 gguf 文件复制到位
     static func install(backbone: URL, mmproj: URL) throws {
-        let fm = FileManager.default
-        try fm.createDirectory(at: base, withIntermediateDirectories: true)
-        try replace(backboneURL, with: backbone)
-        try replace(mmprojURL, with: mmproj)
-    }
-
-    private static func replace(_ dst: URL, with src: URL) throws {
-        let fm = FileManager.default
-        if src.standardizedFileURL.path == dst.standardizedFileURL.path { return }
-        if fm.fileExists(atPath: dst.path) { try fm.removeItem(at: dst) }
-        try fm.copyItem(at: src, to: dst)
+        try ModelManager.checkGGUF(backbone)
+        try ModelManager.checkGGUF(mmproj)
+        let files = FileManager.default
+        let temporary = base.deletingLastPathComponent().appendingPathComponent(".qwen-\(UUID().uuidString)")
+        try files.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? files.removeItem(at: temporary) }
+        try files.copyItem(at: backbone, to: temporary.appendingPathComponent(backboneFile))
+        try files.copyItem(at: mmproj, to: temporary.appendingPathComponent(mmprojFile))
+        try ModelManager.installModelFile(temporary, at: base)
     }
 
     static func delete() {
@@ -98,20 +96,23 @@ enum VoiceCloneGGUF {
     }
 
     /// 下载骨架模型和 mmproj（各约 360 MB / 400 MB）
-    static func download(host: String, progress: @escaping @Sendable (Double) -> Void) async throws {
-        let fm = FileManager.default
-        try fm.createDirectory(at: base, withIntermediateDirectories: true)
-
-        // 先下骨架模型
-        if !fm.fileExists(atPath: backboneURL.path) {
-            try await downloadFile(repo: backboneRepo, path: backbonePath,
-                                   to: backboneURL, host: host, progress: progress, from: 0.0, to: 0.5)
-        }
-        // 再下 mmproj
-        if !fm.fileExists(atPath: mmprojURL.path) {
-            try await downloadFile(repo: mmprojRepo, path: mmprojPath,
-                                   to: mmprojURL, host: host, progress: progress, from: 0.5, to: 1.0)
-        }
+    static func download(host: String, force: Bool = false,
+                         progress: @escaping @Sendable (Double) -> Void) async throws {
+        if installed && !force { return }
+        let files = FileManager.default
+        let temporary = base.deletingLastPathComponent().appendingPathComponent(".qwen-\(UUID().uuidString)")
+        try files.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? files.removeItem(at: temporary) }
+        let backbone = temporary.appendingPathComponent(backboneFile)
+        let projector = temporary.appendingPathComponent(mmprojFile)
+        try await downloadFile(repo: backboneRepo, path: backbonePath, to: backbone,
+                               host: host, progress: progress, from: 0.0, to: 0.5)
+        try await downloadFile(repo: mmprojRepo, path: mmprojPath, to: projector,
+                               host: host, progress: progress, from: 0.5, to: 1.0)
+        try Task.checkCancellation()
+        try ModelManager.checkGGUF(backbone)
+        try ModelManager.checkGGUF(projector)
+        try ModelManager.installModelFile(temporary, at: base)
     }
 
     /// 从 HF 下载单个文件（支持 hf-mirror 镜像）
@@ -186,23 +187,10 @@ enum VoiceCloneGGUF {
                 backbone = sorted.first
             }
         }
-        guard let b = backbone else {
-            throw NSError(domain: "Hear", code: 22, userInfo: [NSLocalizedDescriptionKey:
-                "没找到声音克隆模型。需要两个 .gguf：骨架模型和 mmproj。"])
+        guard let backbone, let mmproj else {
+            throw VoiceCloneGGUFError.modelMissing("需要同时提供主模型和 mmproj")
         }
-
-        try fm.createDirectory(at: base, withIntermediateDirectories: true)
-        if fm.fileExists(atPath: backboneURL.path) { try fm.removeItem(at: backboneURL) }
-        try fm.copyItem(at: b, to: backboneURL)
-        hearLog("已导入骨架模型 \(b.lastPathComponent)")
-
-        if let m = mmproj {
-            if fm.fileExists(atPath: mmprojURL.path) { try fm.removeItem(at: mmprojURL) }
-            try fm.copyItem(at: m, to: mmprojURL)
-            hearLog("已导入 mmproj \(m.lastPathComponent)")
-        } else {
-            hearLog("没找到 mmproj 文件（\(mmprojFile)），声音克隆暂时用不了")
-        }
+        try install(backbone: backbone, mmproj: mmproj)
     }
 }
 
@@ -231,7 +219,7 @@ actor GGUFVoiceCloner {
     /// 加载骨架模型 + mmproj
     /// useGPU = false 时整个模型都放 CPU：
     /// 内存紧张时用，Metal 里的权重是常驻的、不可回收，mmap 出来的文件页还能被系统回收。
-    func load(useGPU: Bool = true) async throws {
+    func load(useGPU: Bool = true, lowMemory: Bool = false) async throws {
         guard model == nil else { return }
         guard !loading else { return }
         loading = true
@@ -258,7 +246,8 @@ actor GGUFVoiceCloner {
         var cp = llama_context_default_params()
         cp.embeddings = true
         cp.n_ctx = 2048
-        cp.n_batch = 2048
+        cp.n_batch = lowMemory ? 512 : 2048
+        if lowMemory { cp.n_ubatch = 128 }
         let threads = Int32(max(2, min(6, ProcessInfo.processInfo.activeProcessorCount - 1)))
         cp.n_threads = threads
         cp.n_threads_batch = threads

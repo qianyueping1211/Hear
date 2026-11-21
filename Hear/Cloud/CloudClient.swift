@@ -115,27 +115,25 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
     /// （配对的时候还没确认过指纹，根也就还没存下来，
     ///   要是还按严格模式来，就连不上了——配对也就无从谈起。
     ///   这一次只取一根证书，不发任何对话内容。）
-    private static var pairing = false
+    private let pairingHost: String?
 
-    static func beginPairing() {
-        hostLock.lock()
-        pairing = true
-        hostLock.unlock()
+    init(pairingHost: String? = nil) {
+        self.pairingHost = pairingHost?.lowercased()
+        super.init()
     }
 
-    static func endPairing() {
-        hostLock.lock()
-        pairing = false
-        hostLock.unlock()
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        guard pairingHost == nil, let original = task.originalRequest?.url, let next = request.url,
+              original.scheme == next.scheme, original.host == next.host,
+              (original.port ?? 443) == (next.port ?? 443) else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
     }
 
-    static var pairingMode: Bool {
-        hostLock.lock()
-        defer { hostLock.unlock() }
-        return pairing
-    }
-
-    /// 记住配对过的签发根（DER）
     static func pinRoot(_ der: Data) {
         hostLock.lock()
         pinnedRoot = der
@@ -175,10 +173,15 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
         }
         let host = challenge.protectionSpace.host
         let userLocal = Self.isUserLocalHost(host)
+        let isPairingRequest = host.lowercased() == pairingHost
+        if pairingHost != nil, !isPairingRequest {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
         // 严格模式只管"用户自己填的内网地址"：
         // 公网地址照常走系统证书校验（不能因为开了严格模式就把公网服务也毙了）。
         // 配对中的这一次是例外：还没确认指纹，先让它连上（只取证书，不发内容）。
-        if Self.strictModeEnabled, !Self.pairingMode, userLocal {
+        if Self.strictModeEnabled, !isPairingRequest, userLocal {
             if let cert = SecTrustGetCertificateAtIndex(trust, 0),
                let strictTrust = Self.evaluateAgainstPinnedRoot(cert, host: host) {
                 // 严格模式：这台电脑的证书过了（根是配对过的那个）
@@ -449,7 +452,9 @@ actor CloudClient {
         }
         // 访问口令（服务要求时才发）
         let token = CloudClient.accessToken
-        if !token.isEmpty {
+        // The configured gateway owns the token. Direct or fallback servers have their own identity.
+        if !token.isEmpty, !sharedAddress.isEmpty,
+           Self.cleanURL(address) == Self.cleanURL(sharedAddress) {
             req.setValue(token, forHTTPHeaderField: "X-Hear-Token")
         }
         return req
@@ -479,7 +484,7 @@ actor CloudClient {
                 if (code == 503 || code == 429), attempt < tries - 1 {
                     let wait = attempt == 0 ? 1.0 : 2.5
                     hearLog("云端忙（HTTP \(code)），等 \(wait) 秒重试：\(path)", .warning)
-                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
                     continue
                 }
                 return (data, resp as? HTTPURLResponse)
@@ -496,7 +501,7 @@ actor CloudClient {
                 if Self.isTransientNetworkError(e), attempt < tries - 1 {
                     let wait = attempt == 0 ? 1.5 : 4.0
                     hearLog("云端连不上，等 \(wait) 秒重试：\(path)（\(e.code.rawValue)）", .warning)
-                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
                     continue
                 }
                 throw CloudError.net(Self.friendlyError(e))
@@ -577,9 +582,13 @@ actor CloudClient {
         // 配对这一次临时按兼容模式放行自签证书：
         // 还没配过的电脑，在严格模式下是连不上的（那就没法配对了）。
         // 这一次只取一根证书，不发任何对话内容。
-        LocalServerTrust.beginPairing()
-        defer { LocalServerTrust.endPairing() }
-        let (data, resp) = try await CloudClient.session.data(for: req)
+        guard let host = url.host, LocalServerTrust.isUserLocalHost(host) else {
+            throw CloudError.badResponse("严格模式配对需要已配置的局域网地址")
+        }
+        let pairing = URLSession(configuration: .ephemeral,
+                                 delegate: LocalServerTrust(pairingHost: host), delegateQueue: nil)
+        defer { pairing.invalidateAndCancel() }
+        let (data, resp) = try await pairing.data(for: req)
         guard (200..<300).contains((resp as? HTTPURLResponse)?.statusCode ?? 0) else {
             throw CloudError.badResponse("服务没有回应（是不是地址填错了？）")
         }
@@ -823,13 +832,15 @@ actor CloudClient {
                 sawOnlyModelService = true
                 continue
             }
+            if let deadline, Date() >= deadline { break }
+            try Task.checkCancellation()
             attempted = true
             do {
                 let wav = Wav.encode(samples: samples, sampleRate: 16_000)
                 // 预览要快：给个短超时，而且不重试
                 // （整句那种慢请求要是排在这里，后面的原文预览就都被它堵住了）
                 // 这一次请求最多只能用"总时限里还剩下的时间"
-                let budget: TimeInterval = deadline.map { max(2, $0.timeIntervalSinceNow) } ?? 120
+                let budget: TimeInterval = deadline.map { max(0.05, $0.timeIntervalSinceNow) } ?? 120
                 var req = try makeRequest("/v1/asr", address: addr, method: "POST", body: wav,
                                           contentType: "audio/wav", timeout: preview ? budget : 120)
                 req.setValue(candidates.joined(separator: ","), forHTTPHeaderField: "X-Languages")

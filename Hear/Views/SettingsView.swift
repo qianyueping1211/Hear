@@ -155,7 +155,21 @@ struct SettingsView: View {
                     }
                     Picker("声音克隆", selection: voiceCloneEngineBinding) {
                         Text("云端服务引擎").tag("cloud")
-                        Text("本地引擎：Qwen").tag("local")
+                        Text("本地引擎").tag("local")
+                    }
+                    if !session.voiceCloneCloud {
+                        Picker("本地克隆模型", selection: zipVoiceBinding) {
+                            Text("Qwen3-TTS").tag(false)
+                            Text("ZipVoice（试验）").tag(true)
+                        }
+                        if session.useZipVoice {
+                            Button("导入 ZipVoice 模型文件夹") {
+                                lastImportKind = .voiceClone
+                                importKind = .voiceClone
+                            }
+                        } else {
+                            Toggle("Qwen3 低内存模式（CPU）", isOn: $session.cloneLowMemory)
+                        }
                     }
                     if session.translationEngine == "local", !session.isInstalled(.translation) {
                         Text("翻译模型还没下载，选本地后会自动下载").font(.footnote).foregroundStyle(.orange)
@@ -368,7 +382,8 @@ struct SettingsView: View {
                 syncModelTab()
                 checkLocalNetwork()
                 // 打开声音克隆但本地模型还没下载：先问要不要下载
-                if on, !session.voiceCloneCloud, !session.isInstalled(.voiceClone), !session.bgDownloading {
+                if on, !session.voiceCloneCloud, !session.useZipVoice,
+                   !session.isInstalled(.voiceClone), !session.bgDownloading {
                     askClone = true
                 }
             }
@@ -515,6 +530,16 @@ struct SettingsView: View {
         return f.string(from: d)
     }
 
+    private var zipVoiceBinding: Binding<Bool> {
+        Binding(get: { session.useZipVoice }, set: { useZipVoice in
+            if !useZipVoice, let reason = session.conflictWithOtherLocals(allowZipVoice: false) {
+                conflictMessage = reason
+                return
+            }
+            session.useZipVoice = useZipVoice
+        })
+    }
+
     private var voiceCloneEngineBinding: Binding<String> {
         Binding(
             get: { session.voiceCloneCloud ? "cloud" : "local" },
@@ -530,7 +555,7 @@ struct SettingsView: View {
                 }
                 session.voiceCloneCloud = false
                 // 模型没下载的话，先问要不要下（不自动开开关）
-                if !session.isInstalled(.voiceClone), !session.bgDownloading {
+                if !session.useZipVoice, !session.isInstalled(.voiceClone), !session.bgDownloading {
                     askClone = true
                 }
             }

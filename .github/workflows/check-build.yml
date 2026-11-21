@@ -7,6 +7,7 @@ on:
     branches: [main]
     paths:
       - 'Hear/**'
+      - 'tests/**'
       - 'project.yml'
       - 'scripts/**'
       - 'Frameworks/LLAMA_VERSION'
@@ -75,6 +76,11 @@ jobs:
           echo "--- HEAD: $(git log -1 --format='%H %s') ---"
           sed -n '125,145p' Hear/Translate/LlamaTranslator.swift
           xcodegen generate
+
+      - name: Session queue tests
+        run: |
+          swiftc -parse-as-library Hear/App/SessionJobQueue.swift tests/SessionJobQueueTests.swift -o "$RUNNER_TEMP/hear-session-tests"
+          "$RUNNER_TEMP/hear-session-tests"
 
       - name: Build
         run: |

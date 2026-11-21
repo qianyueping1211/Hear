@@ -6,6 +6,9 @@ options:
   createIntermediateGroups: true
 
 packages:
+  SherpaOnnx:
+    url: https://github.com/k2-fsa/sherpa-onnx
+    exactVersion: 1.13.8
   WhisperKit:
     url: https://github.com/argmaxinc/WhisperKit
     from: 1.0.0
@@ -20,6 +23,8 @@ targets:
     sources:
       - path: Hear
     dependencies:
+      - package: SherpaOnnx
+        product: sherpa-onnx
       - package: WhisperKit
         product: WhisperKit
       - package: FluidAudio

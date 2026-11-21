@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import CryptoKit
 
 /// 大模型接口类型
 enum LLMKind: String, Codable, CaseIterable, Identifiable {
@@ -202,6 +203,7 @@ enum LLMError: LocalizedError {
     case plaintextBlocked
     /// 局域网自建服务用了 http：还没在设置里确认过明文发送
     case plaintextNotApproved
+    case plaintextKeyNotApproved
     var errorDescription: String? {
         switch self {
         case .badURL: return "接口地址不正确"
@@ -209,6 +211,8 @@ enum LLMError: LocalizedError {
         case .empty: return "模型没有返回内容"
         case .plaintextBlocked:
             return "这个公网地址用的是 http（明文）：对话内容和 API Key 都会明文传出去。公网服务请换成 https 地址。"
+        case .plaintextKeyNotApproved:
+            return "请在大模型 API 设置中单独确认以明文发送当前 API Key"
         case .plaintextNotApproved:
             return "这个地址是用明文（http）发送的：对话内容和 API Key 都会明文传出去。请到 设置 → 大模型 API 里确认一次再试。"
         }
@@ -300,6 +304,31 @@ enum LLMClient {
         plaintextApproved.contains(endpointDescription(base))
     }
 
+    private static func plaintextKeyID(_ provider: LLMProvider, key: String) -> String {
+        let source = provider.id.uuidString + "|" + provider.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            + "|" + key
+        return SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func isPlaintextKeyApproved(_ provider: LLMProvider, key: String) -> Bool {
+        let approved = UserDefaults.standard.dictionary(forKey: "llmPlaintextKeys") as? [String: String]
+        return approved?[provider.id.uuidString] == plaintextKeyID(provider, key: key)
+    }
+
+    static func approvePlaintextKey(_ provider: LLMProvider, key: String) {
+        guard !key.isEmpty, isPlaintextEndpoint(provider.baseURL), isLocalEndpoint(provider.baseURL) else { return }
+        var approved = UserDefaults.standard.dictionary(forKey: "llmPlaintextKeys") as? [String: String] ?? [:]
+        approved[provider.id.uuidString] = plaintextKeyID(provider, key: key)
+        UserDefaults.standard.set(approved, forKey: "llmPlaintextKeys")
+    }
+
+    private static func checkCredentials(_ provider: LLMProvider, key: String) throws {
+        try checkEndpoint(provider.baseURL)
+        if !key.isEmpty, isPlaintextEndpoint(provider.baseURL), !isPlaintextKeyApproved(provider, key: key) {
+            throw LLMError.plaintextKeyNotApproved
+        }
+    }
+
     /// 发送前的检查：公网地址必须用 https；
     /// 局域网里的自建服务可以用 http，但要先在设置里确认过
     /// （确认之前一个字节都不发——连"取模型列表"也不行，
@@ -332,7 +361,7 @@ enum LLMClient {
 
     /// 获取模型列表
     static func listModels(_ p: LLMProvider, key: String) async throws -> [String] {
-        try checkEndpoint(p.baseURL)
+        try checkCredentials(p, key: key)
         var req: URLRequest
         switch p.kind {
         case .openai:
@@ -354,7 +383,7 @@ enum LLMClient {
     /// 发送一次对话，返回文字结果
     static func complete(_ p: LLMProvider, key: String, model: String,
                          system: String, user: String) async throws -> String {
-        try checkEndpoint(p.baseURL)
+        try checkCredentials(p, key: key)
         var req: URLRequest
         let body: [String: Any]
         switch p.kind {
