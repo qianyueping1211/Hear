@@ -116,9 +116,11 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
     ///   要是还按严格模式来，就连不上了——配对也就无从谈起。
     ///   这一次只取一根证书，不发任何对话内容。）
     private let pairingHost: String?
+    private let enteredHost: String?
 
-    init(pairingHost: String? = nil) {
+    init(pairingHost: String? = nil, enteredHost: String? = nil) {
         self.pairingHost = pairingHost?.lowercased()
+        self.enteredHost = enteredHost?.lowercased()
         super.init()
     }
 
@@ -173,6 +175,7 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
         }
         let host = challenge.protectionSpace.host
         let userLocal = Self.isUserLocalHost(host)
+            || (host.lowercased() == enteredHost && Self.isLocalHost(host))
         let isPairingRequest = host.lowercased() == pairingHost
         if pairingHost != nil, !isPairingRequest {
             completionHandler(.cancelAuthenticationChallenge, nil)
@@ -606,26 +609,35 @@ actor CloudClient {
         return (fp, der)
     }
 
+    struct ProbeResult: Equatable, Sendable {
+        let kind: ServiceKind
+        let health: [String: String]
+    }
+
     /// 顺便看一下这个地址上跑的是哪种服务
-    static func probe(address: String, timeout: TimeInterval = 5) async -> (kind: ServiceKind, health: [String: String])? {
+    static func probe(address: String, timeout: TimeInterval = 5) async -> ProbeResult? {
         let s = cleanURL(address)
         guard !s.isEmpty, let url = URL(string: s + "/health") else { return nil }
         var req = URLRequest(url: url)
         req.timeoutInterval = timeout
         guard let (data, resp) = try? await CloudClient.session.data(for: req),
               let code = (resp as? HTTPURLResponse)?.statusCode else { return nil }
+        return probeResult(data: data, code: code)
+    }
+
+    private static func probeResult(data: Data, code: Int) -> ProbeResult? {
         let out = CloudModelReadiness.fields(from: data)
         // 总服务回的是 asr / mt / clone；llama-server 回的是 status
         if out["asr"] != nil || out["mt"] != nil || out["clone"] != nil ||
             out["asr_ready"] != nil || out["mt_ready"] != nil || out["clone_ready"] != nil {
-            return (.aggregator, out)
+            return ProbeResult(kind: .aggregator, health: out)
         }
         if out["status"] != nil {
-            return (.llamaServer, out)
+            return ProbeResult(kind: .llamaServer, health: out)
         }
         // 别的服务：能不能连上算连上了
         if (200..<300).contains(code) || code == 503 {
-            return (.llamaServer, out)
+            return ProbeResult(kind: .llamaServer, health: out)
         }
         return nil
     }
@@ -680,19 +692,30 @@ actor CloudClient {
         var text: String
         /// 是不是「本地网络」权限没开（系统直接拦下来了）
         var localNetworkDenied: Bool = false
+        var service: ProbeResult? = nil
     }
 
     /// 连一下某个地址，把失败的原因说清楚（设置界面"测试连接"用）
     /// 不只说"连不上"，要说清楚是被系统拦了、对方没开、还是被防火墙挡了
-    static func diagnose(address: String) async -> Diagnosis {
+    static func diagnose(address: String, testingEnteredAddress: Bool = false) async -> Diagnosis {
         let s = cleanURL(address)
         if s.isEmpty { return Diagnosis(text: "还没填地址") }
-        var r = await diagnoseOne(s)
+        let testSession: URLSession?
+        if testingEnteredAddress, let host = URL(string: s)?.host, LocalServerTrust.isLocalHost(host) {
+            // 保存前也能测试。地址仅对这次测试有效，不写入全局配置。
+            testSession = URLSession(configuration: .ephemeral,
+                                     delegate: LocalServerTrust(enteredHost: host), delegateQueue: nil)
+        } else {
+            testSession = nil
+        }
+        defer { testSession?.finishTasksAndInvalidate() }
+        let connection = testSession ?? session
+        var r = await diagnoseOne(s, session: connection)
         if !Self.looksConnected(r.text) {
             // 第一次访问局域网会弹系统的「本地网络」授权框。
             // 用户点「允许」之前请求是不通的，等一下再试一次就能通。
             try? await Task.sleep(nanoseconds: 1_200_000_000)
-            r = await diagnoseOne(s)
+            r = await diagnoseOne(s, session: connection)
         }
         return r
     }
@@ -721,25 +744,26 @@ actor CloudClient {
         "本地网络权限没开：设置 → 隐私与安全性 → 本地网络 → 听见 → 打开"
 
     /// 真的连一次，把失败的原因说清楚
-    private static func diagnoseOne(_ s: String) async -> Diagnosis {
+    private static func diagnoseOne(_ s: String, session: URLSession) async -> Diagnosis {
         guard let url = URL(string: s + "/health") else { return Diagnosis(text: "地址格式不对：\(s)") }
         var req = URLRequest(url: url)
         // 放长一点：第一次访问局域网会弹系统的「本地网络」授权框，
         // 用户点「允许」之前请求是等着的，6 秒太短会先超时
         req.timeoutInterval = 25
         do {
-            let (data, resp) = try await CloudClient.session.data(for: req)
+            let (data, resp) = try await session.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200..<300).contains(code) else {
                 let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
                 // llama-server 加载模型时回 503 {"status":"loading model"}，
                 // 这是"连上了、正在准备"，不是连不上
                 if code == 503, body.contains("loading") {
-                    return Diagnosis(text: "服务在加载模型（稍等几秒再试一次）")
+                    return Diagnosis(text: "服务在加载模型（稍等几秒再试一次）",
+                                     service: probeResult(data: data, code: code))
                 }
                 return Diagnosis(text: "连上了，但服务返回 \(code)：\(body)")
             }
-            return Diagnosis(text: "连接正常，服务在运行")
+            return Diagnosis(text: "连接正常，服务在运行", service: probeResult(data: data, code: code))
         } catch let e as URLError {
             // 系统把本地网络访问拦下来了：这是最常见的原因，
             // 而且系统只问一次，拒绝了就得自己去设置里开——要单独说清楚
@@ -762,13 +786,12 @@ actor CloudClient {
                 let u = URL(string: s)
                 let host = u?.host ?? "电脑的IP"
                 let port = u?.port ?? 8000
-                return Diagnosis(text: "超时，手机没收到回应。先在手机浏览器打开 https://\(host):\(port)/ 试试：能打开说明是 App 的「本地网络」权限没给（设置 → 隐私与安全性 → 本地网络 → 听见 → 打开），打不开说明网络不通。刚点过系统的授权框的话，再试一次就好。")
+                return Diagnosis(text: "连接超时。请确认电脑上的服务仍在响应，并检查手机和电脑的网络连接。也可以在手机浏览器打开 https://\(host):\(port)/，确认能否访问服务。")
             case .secureConnectionFailed, .serverCertificateUntrusted,
                  .serverCertificateHasUnknownRoot, .serverCertificateHasBadDate,
                  .serverCertificateNotYetValid, .clientCertificateRejected:
-                // 自签证书握手不上：多半是电脑上还没生成证书
                 hearLog("云端连接证书握手失败：\(s)（\(e.code.rawValue)）", .warning)
-                return Diagnosis(text: "服务地址不可用，请确认：连不上多半是电脑上还没生成证书（server/certs/cert.pem），重新跑一次 start-windows.ps1 就会生成")
+                return Diagnosis(text: "无法建立 HTTPS 连接。请确认服务地址与电脑启动窗口显示的地址一致。")
             case .cannotFindHost:
                 return Diagnosis(text: "找不到这个地址：IP 写错了？")
             case .notConnectedToInternet:

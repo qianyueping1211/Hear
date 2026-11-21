@@ -32,6 +32,7 @@ import io
 import ipaddress
 import json
 import os
+import queue
 import secrets
 import socket
 import ssl
@@ -43,6 +44,7 @@ import urllib.error
 import urllib.request
 import wave
 import struct
+from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 
 from hear_http import RequestHandler, RequestPolicy
@@ -126,8 +128,69 @@ def access_token():
         return ""
 
 
+class ConsoleLog:
+    def __init__(self):
+        self.pending = queue.Queue(maxsize=512)
+
+    def start(self):
+        threading.Thread(target=self.write, name="hear-console-log", daemon=True).start()
+
+    def submit(self, *args):
+        # A selected Windows console or an unread pipe can block writes indefinitely.
+        # Keep serving requests even when the logging backlog is full.
+        try:
+            self.pending.put_nowait(args)
+        except queue.Full:
+            pass
+
+    def write(self):
+        while True:
+            args = self.pending.get()
+            try:
+                print("[听见]", *args, flush=True)
+            except OSError:
+                pass
+
+
+_console_log = ConsoleLog()
+
+
 def log(*args):
-    print("[听见]", *args, flush=True)
+    _console_log.submit(*args)
+
+
+@contextmanager
+def console_without_quick_edit():
+    if os.name != "nt":
+        yield
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32")
+    get_handle = kernel32.GetStdHandle
+    get_handle.argtypes = [wintypes.DWORD]
+    get_handle.restype = wintypes.HANDLE
+    get_mode = kernel32.GetConsoleMode
+    get_mode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    get_mode.restype = wintypes.BOOL
+    set_mode = kernel32.SetConsoleMode
+    set_mode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    set_mode.restype = wintypes.BOOL
+
+    std_input_handle = -10
+    quick_edit = 0x0040
+    extended_flags = 0x0080
+    handle = get_handle(std_input_handle)
+    mode = wintypes.DWORD()
+    changed = (get_mode(handle, ctypes.byref(mode)) and mode.value & quick_edit
+               and set_mode(handle, (mode.value | extended_flags) & ~quick_edit))
+    try:
+        yield
+    finally:
+        if changed:
+            set_mode(handle, mode.value | extended_flags)
 
 
 def log_text(prefix, content):
@@ -1284,33 +1347,19 @@ class MixedServer(ThreadingHTTPServer):
             # 读超时：手机连上了不发数据、或者发一半就断开的，不能一直占着线程
             wrapped.settimeout(180)
             return wrapped
-        except ssl.SSLError as e:
-            # 常见两种：手机不认自签证书（certificate unknown）、
-            # 手机自己先断开了（EOF）。都不是服务本身坏了，记一笔就行
-            log("TLS 握手失败：%s%s" % (e, Self.tls_hint(e)))
-            self._close(sock)
-            return None
         except OSError as e:
-            log("TLS 握手失败：%s%s" % (e, Self.tls_hint(e)))
             self._close(sock)
+            log("TLS 握手失败：%s%s" % (e, self.tls_hint(e)))
             return None
 
     @staticmethod
     def tls_hint(err):
         """握手失败时补一句人话：这个错误十有八九是什么意思。"""
-        code = getattr(err, "winerror", None) or getattr(err, "errno", None)
-        try:
-            code = int(code)
-        except Exception:
-            return ""
-        # 10053/10054/1040：客户端在握手过程中把连接掐了
-        # 最常见的原因是手机不认这个自签证书（证书里没有它现在连的这个地址：
-        # 换了网络、开了 WARP/VPN 之后地址变了，证书没跟着重签），
-        # 手机验证证书不通过就直接把连接断了
-        if code in (10053, 10054, 1040, 10060):
-            return ("\n    ↳ 手机在握手时把连接断了：多半是不认这个自签证书"
-                    "（证书里没有它现在连的地址——换网络或开了 VPN 之后要重签）。"
-                    "在电脑上重跑一次 start-windows.ps1，证书会按现在所有网卡的地址重新签。")
+        if getattr(err, "reason", None) in {
+            "SSLV3_ALERT_CERTIFICATE_UNKNOWN", "TLSV1_ALERT_UNKNOWN_CA",
+            "SSLV3_ALERT_BAD_CERTIFICATE", "SSLV3_ALERT_CERTIFICATE_EXPIRED",
+        }:
+            return "（客户端未接受服务端证书，请核对当前服务地址与 HTTPS 配置）"
         return ""
 
     @staticmethod
@@ -1323,6 +1372,7 @@ class MixedServer(ThreadingHTTPServer):
 
 
 def main():
+    _console_log.start()
     # 先把端口占上（这样别人连过来不会报"拒绝连接"），再开始处理请求
     ctx = make_ssl_context()
     token = access_token() if REQUIRE_TOKEN else None
@@ -1337,7 +1387,7 @@ def main():
         log("证书指纹（配对时核对这一串）：%s" % _pair["root_fingerprint"])
     if REQUIRE_TOKEN:
         log("访问口令：%s" % token)
-        log("   手机上要填这个：设置 → 在线模型 → 通用服务地址 → 访问口令")
+        log("   手机上要填这个：设置 → 云端模型 → 通用服务地址 → 访问口令")
     log("本机测试：https://127.0.0.1:%d/" % PORT)
     for ip in local_ips():
         if ctx is not None:
@@ -1365,4 +1415,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with console_without_quick_edit():
+        main()

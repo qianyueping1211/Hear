@@ -73,12 +73,13 @@ struct SettingsView: View {
         case LiveSession.cloudStatusChecking: indicator = ("ellipsis.circle", .secondary)
         default: indicator = ("questionmark.circle", .secondary)
         }
-        return LabeledContent {
+        return modelManagementRow(title: title, icon: icon) {
             Button(action: onConfig) {
                 HStack(spacing: 5) {
                     Image(systemName: indicator.symbol)
                         .font(.title3)
                         .foregroundStyle(indicator.color)
+                        .frame(width: 34, height: 34)
                     Text(readiness).lineLimit(1)
                     Image(systemName: "chevron.right")
                         .font(.caption.weight(.semibold))
@@ -87,6 +88,15 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(title)，\(configured ? status : "未配置")")
+        }
+    }
+
+    private func modelManagementRow<Controls: View>(
+        title: String, icon: String, @ViewBuilder controls: () -> Controls
+    ) -> some View {
+        LabeledContent {
+            controls()
+                .frame(minHeight: 34)
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: icon)
@@ -94,8 +104,11 @@ struct SettingsView: View {
                     .foregroundStyle(.tint)
                     .frame(width: 28)
                 Text(title)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
         }
+        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
     }
 
     var body: some View {
@@ -554,8 +567,7 @@ struct SettingsView: View {
         let downloading = session.bgDownloadKind == kind
         let paused = session.isModelDownloadPaused(kind)
         let waiting = !downloading && session.bgDownloading && session.bgQueue.contains(kind)
-        // 跟云端模型那一行一模一样的结构，两个页签高度才一样
-        LabeledContent {
+        return modelManagementRow(title: title, icon: icon) {
             HStack(spacing: 8) {
                 // 状态：已下载是绿色对勾；没配置是灰色圆圈感叹号；下载中转圈
                 Group {
@@ -594,7 +606,7 @@ struct SettingsView: View {
                     localEdit = .model(kind, title)
                 } label: {
                     HStack(spacing: 4) {
-                        Text(status.installed ? "已配置" : "未配置")
+                        Text(status.installed ? "已配置" : "未配置").lineLimit(1)
                         Image(systemName: "chevron.right")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.tertiary)
@@ -602,16 +614,6 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(session.isBusyWithModels && !paused)
-            }
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
-                    .font(.title3)
-                    .foregroundStyle(.tint)
-                    .frame(width: 28)
-                Text(title)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
             }
         }
     }
@@ -1042,12 +1044,14 @@ struct CloudEditSheet: View {
             }
             var text = ""
             var okAddr = ""
+            var info: CloudClient.ProbeResult?
             var denied = false
             for a in targets {
-                let d = await CloudClient.diagnose(address: a)
+                let d = await CloudClient.diagnose(address: a, testingEnteredAddress: true)
                 let t = d.text
                 if CloudClient.looksConnected(t) {
                     okAddr = a
+                    info = d.service
                     text = t
                     break
                 }
@@ -1055,7 +1059,7 @@ struct CloudEditSheet: View {
                 if d.localNetworkDenied { denied = true }
                 if text.isEmpty { text = t }
             }
-            if !okAddr.isEmpty, let info = await CloudClient.probe(address: okAddr) {
+            if let info {
                 func modelStatus(_ model: CloudModel) -> String {
                     let readiness: CloudModelReadiness
                     if info.kind == .aggregator {

@@ -3355,7 +3355,7 @@ final class LiveSession: ObservableObject {
         var reachable: Set<String> = []
         var models: [String: [String: String]] = [:]
         var kinds: [String: CloudClient.ServiceKind] = [:]
-        await withTaskGroup(of: (String, (kind: CloudClient.ServiceKind, health: [String: String])?).self) { g in
+        await withTaskGroup(of: (String, CloudClient.ProbeResult?).self) { g in
             for a in wanted {
                 g.addTask { (a, await CloudClient.probe(address: a)) }
             }

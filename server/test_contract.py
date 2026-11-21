@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.client import HTTPConnection
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -210,6 +211,54 @@ def check_speaker_endpoint(wav):
         check("speaker endpoint supplies the WAV sample rate", detector.call_args.args[1] == 16000)
         hear_cloud.Handler.speaker(request, b"not a wave")
         check("speaker endpoint rejects malformed audio", errors == [400])
+
+
+def check_connection_recovery():
+    import hear_cloud
+
+    for error in (ssl.SSLError("certificate unknown"), ConnectionResetError()):
+        with patch.object(hear_cloud, "log") as log:
+            sock = SimpleNamespace(settimeout=lambda _: None, recv=lambda *_: b"\x16",
+                                   close=lambda: None)
+            server = SimpleNamespace(
+                ssl_context=SimpleNamespace(wrap_socket=lambda *args, **kwargs: None),
+                _close=hear_cloud.MixedServer._close,
+                tls_hint=hear_cloud.MixedServer.tls_hint,
+            )
+            with patch.object(server.ssl_context, "wrap_socket", side_effect=error), \
+                 patch.object(sock, "close") as close:
+                result = hear_cloud.MixedServer._wrap_tls(server, sock)
+                check("failed TLS handshake closes the socket (%s)" % type(error).__name__,
+                      result is None and close.call_count == 1 and log.call_count == 1)
+
+    blocked = threading.Event()
+    release = threading.Event()
+
+    def stalled_console(*args, **kwargs):
+        blocked.set()
+        release.wait(5)
+
+    with patch.object(hear_cloud, "print", stalled_console, create=True), \
+         patch.object(hear_cloud, "_console_log", hear_cloud.ConsoleLog()), \
+         hear_cloud.MixedServer(("127.0.0.1", 0), hear_cloud.Handler) as server:
+        hear_cloud._console_log.start()
+        hear_cloud.log("simulate a blocked console")
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        client = HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+        try:
+            assert blocked.wait(2), "console writer did not reach the test sink"
+            client.request("GET", "/ping")
+            response = client.getresponse()
+            check("HTTP responds while the console logger is blocked",
+                  response.status == 200 and json.loads(response.read())["pong"])
+        except (OSError, AssertionError, ValueError) as error:
+            check("HTTP responds while the console logger is blocked", False, str(error))
+        finally:
+            client.close()
+            release.set()
+            server.shutdown()
+            worker.join(2)
 
 
 def main():
@@ -401,6 +450,7 @@ def main():
 
     check_hybrid_asr(wav)
     check_speaker_endpoint(wav)
+    check_connection_recovery()
 
     print("\npassed %d, failed %d" % (len(PASSED), len(FAILED)))
     if FAILED:
