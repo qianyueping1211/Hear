@@ -74,10 +74,7 @@ function Update-ServerFiles {
 }
 
 try {
-    Write-Host '检查服务文件...' -NoNewline
-    try { [Console]::Out.Flush() } catch {}
     if ($mode -eq '--help') {
-        Write-Host ''
         Write-Host '听见 Windows 云端服务'
         Write-Host 'SenseVoice 默认先出原文，Whisper 随后校正。'
         Write-Host '启动菜单可选择 Whisper 校正档位：base / small / medium / large-v3。首次直接回车用 small。'
@@ -86,12 +83,10 @@ try {
         exit 0
     }
     if ($mode -eq '--check') {
-        Write-Host ''
         if (-not (Test-ServerFiles $serverDir)) { throw "Incomplete server folder: $serverDir" }
         Write-Host "Hear server files OK: $serverDir"
         exit 0
     }
-    Write-Host '完成'
     if (-not $inCheckout) {
         try { Update-ServerFiles }
         catch {
