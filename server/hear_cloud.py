@@ -94,9 +94,9 @@ _whisper_state = {"status": "未加载", "detail": ""}
 
 
 # 日志里要不要记用户说的话（识别出来的原文、译文）。
-# 默认不记：日志会留在电脑上，也容易被复制走。
-# 要看得设环境变量 HEAR_LOG_CONTENT=1。
-LOG_CONTENT = os.environ.get("HEAR_LOG_CONTENT", "").strip().lower() in ("1", "true", "yes", "on")
+# 内测期间默认记录，便于从这里直接排查识别和翻译问题。
+# 正式上线前应恢复默认关闭；需要临时关闭时设 HEAR_LOG_CONTENT=0。
+LOG_CONTENT = os.environ.get("HEAR_LOG_CONTENT", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 # 访问口令：开了以后，客户端必须带上 X-Hear-Token 才能用推理接口。
