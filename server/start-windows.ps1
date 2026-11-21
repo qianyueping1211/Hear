@@ -81,12 +81,45 @@ $CloneChoices = @(
 )
 
 function Read-Choice($prompt) {
-    # 没交互（不是从窗口里跑的）就直接用默认值
-    Write-Host $prompt -NoNewline
+    # 没交互（不是从窗口里跑的）就直接用默认值。
+    # 交互运行时最多等 5 秒；超时沿用上次选择，避免启动脚本一直卡在菜单。
+    $timeoutSeconds = 5
+    if ($env:HEAR_INPUT_TIMEOUT_SECONDS -match '^\d+$') {
+        $timeoutSeconds = [Math]::Max(1, [int]$env:HEAR_INPUT_TIMEOUT_SECONDS)
+    }
+    Write-Host "$prompt（${timeoutSeconds}秒后使用默认）" -NoNewline
     try { [Console]::Out.Flush() } catch {}
-    try { $a = [Console]::ReadLine() } catch { return "" }
-    if ($null -eq $a) { return "" }
-    return "$a".Trim()
+    try {
+        if ([Console]::IsInputRedirected) { return "" }
+        $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+        $buffer = ""
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if (-not [Console]::KeyAvailable) {
+                Start-Sleep -Milliseconds 50
+                continue
+            }
+            $key = [Console]::ReadKey($true)
+            if ($key.Key -eq [ConsoleKey]::Enter) {
+                Write-Host ""
+                return $buffer.Trim()
+            }
+            if ($key.Key -eq [ConsoleKey]::Backspace) {
+                if ($buffer.Length -gt 0) {
+                    $buffer = $buffer.Substring(0, $buffer.Length - 1)
+                    Write-Host "`b `b" -NoNewline
+                }
+                continue
+            }
+            if ($key.KeyChar -match '^\d$') {
+                $buffer += [string]$key.KeyChar
+                Write-Host $key.KeyChar -NoNewline
+            }
+        }
+        Write-Host "（超时，使用默认）"
+        return ""
+    } catch {
+        return ""
+    }
 }
 
 function Read-Pick($title, $choices, $defaultKey) {
