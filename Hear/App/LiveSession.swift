@@ -493,8 +493,10 @@ final class LiveSession: ObservableObject {
         let cloudAddr = d.string(forKey: "cloudAddress") ?? ""
         cloudAddress = cloudAddr
         cloudASRScheme = d.string(forKey: "cloudASRScheme") ?? "sensevoice+whisper"
-        cloudAccessToken = d.string(forKey: "cloudAccessToken") ?? ""
-        CloudClient.accessToken = cloudAccessToken
+        // 先放到局部变量里：init 还没结束，读 self 的属性编译不过
+        let accessTok = d.string(forKey: "cloudAccessToken") ?? ""
+        cloudAccessToken = accessTok
+        CloudClient.accessToken = accessTok
         let cloudOwn = d.object(forKey: "cloudModelAddress") as? [String: String] ?? [:]
         cloudModelAddress = cloudOwn
         let cloudClient = cloud
