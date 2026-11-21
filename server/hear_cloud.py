@@ -1034,13 +1034,31 @@ class MixedServer(ThreadingHTTPServer):
         except ssl.SSLError as e:
             # 常见两种：手机不认自签证书（certificate unknown）、
             # 手机自己先断开了（EOF）。都不是服务本身坏了，记一笔就行
-            log("TLS 握手失败：%s" % e)
+            log("TLS 握手失败：%s%s" % (e, Self.tls_hint(e)))
             self._close(sock)
             return None
         except OSError as e:
-            log("TLS 握手失败：%s" % e)
+            log("TLS 握手失败：%s%s" % (e, Self.tls_hint(e)))
             self._close(sock)
             return None
+
+    @staticmethod
+    def tls_hint(err):
+        """握手失败时补一句人话：这个错误十有八九是什么意思。"""
+        code = getattr(err, "winerror", None) or getattr(err, "errno", None)
+        try:
+            code = int(code)
+        except Exception:
+            return ""
+        # 10053/10054/1040：客户端在握手过程中把连接掐了
+        # 最常见的原因是手机不认这个自签证书（证书里没有它现在连的这个地址：
+        # 换了网络、开了 WARP/VPN 之后地址变了，证书没跟着重签），
+        # 手机验证证书不通过就直接把连接断了
+        if code in (10053, 10054, 1040, 10060):
+            return ("\n    ↳ 手机在握手时把连接断了：多半是不认这个自签证书"
+                    "（证书里没有它现在连的地址——换网络或开了 VPN 之后要重签）。"
+                    "在电脑上重跑一次 start-windows.ps1，证书会按现在所有网卡的地址重新签。")
+        return ""
 
     @staticmethod
     def _close(sock):
