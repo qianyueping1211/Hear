@@ -3717,6 +3717,7 @@ final class LiveSession: ObservableObject {
 
     /// 这句为什么没能用克隆声音（写进日志，别只说一句"没有样本"）
     private func cloneMissingReason(_ item: TranslationItem) -> String {
+        if !voiceClone { return "声音克隆开关没有打开" }
         if item.translated.isEmpty { return "这句还没有译文" }
         if item.translated.hasPrefix("（翻译失败") { return "这句翻译失败了" }
         // 克隆模型只会说这几门语言（说译文那门语言，样本是源语言的，这是跨语言克隆）
@@ -3727,8 +3728,14 @@ final class LiveSession: ObservableObject {
         if CloudVoiceReference.languageNames[item.target.id] == nil {
             return "\(item.target.displayName)这个语言声音克隆不支持"
         }
-        if cloneRefs[item.id] == nil {
+        guard let ref = cloneRefs[item.id] else {
             return cloneNote[item.id] ?? "这句没有留到声音样本"
+        }
+        let refText = ref.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if refText.isEmpty || refText == "…" {
+            return Self.hasRealText(item.sourceText)
+                ? "参考文字还没有更新到这句的原文"
+                : "声音样本没有可用的参考文字"
         }
         return "克隆任务没有启动"
     }
@@ -3768,7 +3775,7 @@ final class LiveSession: ObservableObject {
         guard voiceClone else { return nil }
         // 已经有一个任务在跑（或者已经生成好了）：直接用，别再发一遍请求
         if let existing = cloneTasks[id] { return existing }
-        guard let ref = cloneRefs[id],
+        guard var ref = cloneRefs[id],
               let item = items.first(where: { $0.id == id }),
               item.canReadAloud,
               CloudVoiceReference.languageNames[item.target.id] != nil else { return nil }
@@ -3777,6 +3784,15 @@ final class LiveSession: ObservableObject {
         // 参考音频和参考文字对不上，模型念出来就是一堆乱响
         var refText = ref.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if refText == "…" { refText = "" }
+        // 早期为尽快保存音频，参考文字可能还是“…”占位。
+        // 现在这句已经定稿，就用当前原文补齐，避免明明识别成功却无法启动克隆。
+        if refText.isEmpty, Self.hasRealText(item.sourceText) {
+            refText = item.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+            ref.text = refText
+            cloneRefs[id] = ref
+            lastCloneRef[item.source.id] = ref
+            cloneNote[id] = nil
+        }
         // 云端的参考音频沿用既有降噪。
         // 克隆会把参考音频里的环境音一起学过去，
         // 不降噪的话环境音就跟着念出来，听着是"有杂的声音"
