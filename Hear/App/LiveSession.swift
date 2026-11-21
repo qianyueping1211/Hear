@@ -71,6 +71,16 @@ final class LiveSession: ObservableObject {
         }
     }
     @Published var showReadingIcon: Bool { didSet { save("showReadingIcon", showReadingIcon) } }
+    @Published var liveActivityEnabled: Bool {
+        didSet {
+            save("liveActivityEnabled", liveActivityEnabled)
+            if liveActivityEnabled, isRunning {
+                HearLiveActivityController.shared.start(liveActivityState())
+            } else if !liveActivityEnabled {
+                HearLiveActivityController.shared.end(liveActivityState(isLive: false))
+            }
+        }
+    }
     @Published var useContext: Bool { didSet { save("useContext", useContext) } }
     @Published var sensitivity: Double { didSet { save("sensitivity", sensitivity); pushConfig() } }
     @Published var silenceMs: Double { didSet { save("silenceMs", silenceMs); pushConfig() } }
@@ -494,6 +504,7 @@ final class LiveSession: ObservableObject {
         langB = Language.find(d.string(forKey: "langB") ?? "en")
         speakOutput = d.object(forKey: "speakOutput") as? Bool ?? true
         showReadingIcon = d.object(forKey: "showReadingIcon") as? Bool ?? true
+        liveActivityEnabled = d.object(forKey: "liveActivityEnabled") as? Bool ?? true
         useContext = d.object(forKey: "useContext") as? Bool ?? true
         sensitivity = d.object(forKey: "sensitivity") as? Double ?? 12
         silenceMs = d.object(forKey: "silenceMs") as? Double ?? 700
@@ -1667,6 +1678,9 @@ final class LiveSession: ObservableObject {
         }
         if outputMode == .headphones { AudioRoute.apply(.headphones) }
         isRunning = true
+        if liveActivityEnabled {
+            HearLiveActivityController.shared.start(liveActivityState())
+        }
         if dualLive { startAppleASR() }
         if talkMode, let l = talkLang {
             hearLog("对话翻译：按住说\(l.displayName)")
@@ -1776,6 +1790,7 @@ final class LiveSession: ObservableObject {
         capture.stop()
         capture.muted = false
         isRunning = false
+        HearLiveActivityController.shared.end(liveActivityState(isLive: false))
         meter.level = 0
         activity = ""
         UIApplication.shared.isIdleTimerDisabled = false
@@ -2930,12 +2945,16 @@ final class LiveSession: ObservableObject {
             self.items[index].speakerName = speaker?.speakerName
             self.items[index].speakerDetails = speaker?.speakerDetails
             self.persist()
+            self.publishLiveActivity()
         } timedOut: { _ in }
     }
 
     func editSpeaker(in conversation: UUID, itemID: UUID, change: ConversationSpeakerEdit) {
         if conversation == conversationID {
-            if items.editSpeaker(itemID: itemID, change: change, reservedThrough: speakerTracker.lastID) { persist() }
+            if items.editSpeaker(itemID: itemID, change: change, reservedThrough: speakerTracker.lastID) {
+                persist()
+                publishLiveActivity()
+            }
         } else {
             ConversationStore.shared.editSpeaker(conversationID: conversation, itemID: itemID, change: change)
         }
@@ -3191,11 +3210,29 @@ final class LiveSession: ObservableObject {
         let changed = items[i].translated != text
         items[i].translated = text
         items[i].done = done
+        publishLiveActivity()
         // 播报开关只决定自动播放。译文定稿后仍准备克隆声音，供用户点按播放。
         if done, voiceClone {
             if changed { discardCloneTask(id) }
             _ = prepareClone(id)
         }
+    }
+
+    private func liveActivityState(isLive: Bool = true) -> HearLiveActivityAttributes.ContentState {
+        let item = items.last
+        return HearLiveActivityAttributes.ContentState(
+            sourceText: item?.sourceText ?? "",
+            translatedText: item?.translated ?? "",
+            sourceLanguage: item?.source.name ?? langA.name,
+            targetLanguage: item?.target.name ?? langB.name,
+            speaker: item?.speakerLabel,
+            isLive: isLive,
+            updatedAt: Date())
+    }
+
+    private func publishLiveActivity() {
+        guard isRunning else { return }
+        HearLiveActivityController.shared.update(liveActivityState())
     }
 
     // MARK: - 声音克隆
@@ -3234,6 +3271,8 @@ final class LiveSession: ObservableObject {
         if so != speakOutput { speakOutput = so }
         let showIcon = d.object(forKey: "showReadingIcon") as? Bool ?? true
         if showIcon != showReadingIcon { showReadingIcon = showIcon }
+        let liveActivity = d.object(forKey: "liveActivityEnabled") as? Bool ?? true
+        if liveActivity != liveActivityEnabled { liveActivityEnabled = liveActivity }
         let uc = d.object(forKey: "useContext") as? Bool ?? true
         if uc != useContext { useContext = uc }
         let sen = d.object(forKey: "sensitivity") as? Double ?? 12
