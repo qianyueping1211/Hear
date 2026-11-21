@@ -37,6 +37,10 @@ enum ZipVoiceModel {
 
     static var installed: Bool { (try? validate(directory)) != nil }
 
+    static func isImportableFolder(_ folder: URL) -> Bool {
+        (try? validate(folder)) != nil
+    }
+
     static func supports(_ language: String) -> Bool {
         language == "zh" || language == "en"
     }

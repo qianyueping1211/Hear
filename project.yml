@@ -12,6 +12,9 @@ packages:
   FluidAudio:
     url: https://github.com/FluidInference/FluidAudio
     exactVersion: 0.18.3
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    exactVersion: 0.9.19
 
 targets:
   Hear:
@@ -24,6 +27,8 @@ targets:
         product: sherpa-onnx
       - package: FluidAudio
         product: FluidAudio
+      - package: ZIPFoundation
+        product: ZIPFoundation
       - framework: Frameworks/llama.xcframework
         embed: true
       - sdk: libbz2.tbd

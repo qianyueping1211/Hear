@@ -361,17 +361,9 @@ struct SettingsView: View {
                                                set: { if !$0 { importKind = nil } }),
                           allowedContentTypes: lastImportKind == .translation
                               ? [UTType(filenameExtension: "gguf") ?? .data, .data]
-                              : [UTType.folder]) { result in
+                              : [UTType.folder, .zip]) { result in
                 guard case .success(let url) = result else { return }
-                let kind = lastImportKind
-                Task {
-                    await session.prepareForModelImport(kind)
-                    switch kind {
-                    case .senseVoice: await session.importSenseVoice(url)
-                    case .translation: await session.importModel(url)
-                    case .voiceClone: await session.importVoiceClone(url)
-                    }
-                }
+                importSelectedModel(url, kind: lastImportKind)
             }
         }
         // 本地网络权限没开：弹提示告诉用户去哪儿开。
@@ -669,6 +661,37 @@ struct SettingsView: View {
         case .importFile(let k):
             lastImportKind = k
             importKind = k
+        }
+    }
+
+    private func importSelectedModel(_ url: URL, kind: LiveSession.ModelKind) {
+        Task {
+            let access = url.startAccessingSecurityScopedResource()
+            defer {
+                if access { url.stopAccessingSecurityScopedResource() }
+            }
+            var prepared: LocalModelImport.Prepared?
+            do {
+                let input = try await Task.detached(priority: .userInitiated) {
+                    try LocalModelImport.prepare(url, for: kind)
+                }.value
+                prepared = input
+                await session.prepareForModelImport(kind)
+                switch kind {
+                case .senseVoice:
+                    await session.importSenseVoice(input.source)
+                case .translation:
+                    await session.importModel(input.source)
+                case .voiceClone:
+                    await session.importVoiceClone(input.source)
+                }
+            } catch {
+                session.showToast("模型导入失败：\(error.localizedDescription)", seconds: 5)
+                hearLog("模型压缩包导入失败：\(error)", .error)
+            }
+            if let prepared {
+                LocalModelImport.cleanup(prepared)
+            }
         }
     }
 
@@ -1181,7 +1204,7 @@ struct LocalModelSheet: View {
                 } footer: {
                     Text(kind == .translation
                          ? "本地导入：选一个 .gguf 模型文件。"
-                         : "本地导入：选这个模型的文件夹。")
+                         : "本地导入：可以选择模型文件夹，也可以直接选择 ZIP 压缩包。")
                 }
 
                 Section {

@@ -143,6 +143,10 @@ actor SenseVoiceRecognizer {
             || SenseVoiceModels.modelsExist(at: f, precision: .fp16)
     }
 
+    static func isImportableFolder(_ folder: URL) -> Bool {
+        hasModels(folder)
+    }
+
     /// 在 Application Support 和 Caches 里找含有 SenseVoice 模型的文件夹（最多往下 5 层）
     private static func scan() -> URL? {
         let fm = FileManager.default
