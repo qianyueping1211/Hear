@@ -44,9 +44,14 @@ extension Notification.Name {
 }
 
 /// 局域网服务用的是自签证书（电脑上自己生成的），系统默认不认。
-/// 这里只对"内网地址"放行自签证书：
-///   - 私有网段（10.x / 172.16-31.x / 192.168.x / 169.254.x）和 .local / localhost 才放行
-///   - 公网域名照常走系统校验，免得真的连到别的地方时什么证书都信
+///
+/// 两种模式：
+///   · **兼容模式**（默认）：只对"用户自己在设置里填的内网地址"放宽自签证书校验。
+///     换了网络、开了 VPN 都能连上（证书会按新地址重签）。
+///     公网地址一律走系统证书校验——就算用户填了公网地址也一样。
+///   · **严格模式**（可选）：只认配对过的那台电脑的证书。
+///     手机上确认一次它的"签发根"指纹，之后它重签证书（换网络、换 IP）也照样认，
+///     但别的电脑拿别的证书来，一律拒绝。
 final class LocalServerTrust: NSObject, URLSessionDelegate {
     static let shared = LocalServerTrust()
 
@@ -80,6 +85,63 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
         return userHosts.contains(host.lowercased())
     }
 
+    /// 是不是"用户自己填的内网地址"：
+    /// 只有这种地址才放宽自签证书的校验。
+    /// 公网地址（用户填的也一样）走系统证书校验。
+    static func isUserLocalHost(_ host: String) -> Bool {
+        guard isUserHost(host) else { return false }
+        return isLocalHost(host)
+    }
+
+    // MARK: - 严格模式（配对过的签发根）
+
+    private static var strict = false
+    private static var pinnedRoot: Data?
+
+    /// 打开/关闭严格模式
+    static func setStrictMode(_ on: Bool) {
+        hostLock.lock()
+        strict = on
+        hostLock.unlock()
+    }
+
+    static var strictModeEnabled: Bool {
+        hostLock.lock()
+        defer { hostLock.unlock() }
+        return strict
+    }
+
+    /// 记住配对过的签发根（DER）
+    static func pinRoot(_ der: Data) {
+        hostLock.lock()
+        pinnedRoot = der
+        hostLock.unlock()
+    }
+
+    static func pinnedRootData() -> Data? {
+        hostLock.lock()
+        defer { hostLock.unlock() }
+        return pinnedRoot
+    }
+
+    /// 严格模式：用配对过的签发根验这张证书
+    /// （根没配对、或者不是这个根签的，一律不认）
+    private static func evaluateAgainstPinnedRoot(_ cert: SecCertificate, host: String) -> SecTrust? {
+        hostLock.lock()
+        let root = pinnedRoot
+        hostLock.unlock()
+        guard let root, let rootCert = SecCertificateCreateWithData(nil, root as CFData) else { return nil }
+        var t: SecTrust?
+        // 这次要检查主机名：地址填错了也得发现
+        let policy = SecPolicyCreateSSL(true, host as CFString)
+        guard SecTrustCreateWithCertificates(cert, policy, &t) == errSecSuccess, let trust = t else { return nil }
+        SecTrustSetAnchorCertificates(trust, [rootCert] as CFArray)
+        SecTrustSetAnchorCertificatesOnly(trust, true)   // 只认这个根，不要系统那些
+        var err: CFError?
+        guard SecTrustEvaluateWithError(trust, &err) else { return nil }
+        return trust
+    }
+
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
@@ -87,7 +149,19 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
             completionHandler(.performDefaultHandling, nil)
             return
         }
-        if Self.isLocalHost(challenge.protectionSpace.host) || Self.isUserHost(challenge.protectionSpace.host) {
+        let host = challenge.protectionSpace.host
+        if Self.strictModeEnabled, let cert = SecTrustGetCertificateAtIndex(trust, 0),
+           let strictTrust = Self.evaluateAgainstPinnedRoot(cert, host: host) {
+            // 严格模式：这台电脑的证书过了（根是配对过的那个）
+            completionHandler(.useCredential, URLCredential(trust: strictTrust))
+            return
+        }
+        if Self.strictModeEnabled {
+            // 严格模式：不是配对过的那台电脑，一律拒绝
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        if Self.isUserLocalHost(host) {
             // 内网自签证书：把证书本身当成自己的根，并且不校验主机名。
             // （证书里的 IP 是生成证书那一刻的，电脑换了网络、IP 变了，
             //   旧证书里就没有新 IP，手机会直接拒绝：
@@ -439,6 +513,26 @@ actor CloudClient {
     /// 读某个地址上的 /health，拿到各模型的状态。连不上返回 nil
     static func healthInfo(address: String) async -> [String: String]? {
         await probe(address: address)?.health
+    }
+
+    /// 取这台电脑的"签发根"信息（配对用）：
+    /// 手机第一次配对的时候确认一下指纹，以后它换网络重签证书都不用再配对。
+    static func pairInfo(address: String) async throws -> (fingerprint: String, rootDer: Data) {
+        let s = cleanURL(address)
+        guard !s.isEmpty, let url = URL(string: s + "/v1/pair") else { throw CloudError.notConfigured }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 10
+        let (data, resp) = try await CloudClient.session.data(for: req)
+        guard (200..<300).contains((resp as? HTTPURLResponse)?.statusCode ?? 0) else {
+            throw CloudError.badResponse("服务没有回应（是不是地址填错了？）")
+        }
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let fp = obj["root_fingerprint"] as? String,
+              let b64 = obj["root_der"] as? String,
+              let der = Data(base64Encoded: b64), !der.isEmpty else {
+            throw CloudError.badResponse("服务返回的内容看不懂（可能是老版本的服务）")
+        }
+        return (fp, der)
     }
 
     /// 顺便看一下这个地址上跑的是哪种服务

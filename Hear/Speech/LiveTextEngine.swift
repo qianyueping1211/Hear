@@ -20,6 +20,10 @@ protocol LiveTextEngine: AnyObject {
     func markSegmentEnd(_ id: Int)
     /// 第 id 句目前识别到的文字，以及平均置信度（0~1）
     func segmentText(_ id: Int) -> (text: String, confidence: Double)
+    /// 第 id 句覆盖的时间范围（秒）
+    /// 用来判断两句话是不是同一段声音：
+    /// 范围不重叠 = 用户真的说了两遍，要分开记，不能合并
+    func segmentRange(_ id: Int) -> (start: Double, end: Double)?
 }
 
 enum LiveTextEngineFactory {
@@ -90,6 +94,10 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
     private var segs: [Int: (start: Double, end: Double?)] = [:]
     private var _languageID: String?
     private var generation = 0
+    /// 还没启动好的时候收到的声音（先存着，等启动了补给它）
+    /// 用户一开口就说的话，听写要下语言包、起引擎，那一下没收到就丢了
+    private var pendingFeed: [Float] = []
+    private static let pendingFeedMax = 48_000      // 最多留 3 秒
 
     private let srcFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                           sampleRate: 16_000, channels: 1, interleaved: false)!
@@ -130,6 +138,9 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         self.volatilePiece = nil
         self.segs.removeAll()
         self._languageID = languageID
+        // 把启动前收到的声音取出来（用户可能一开口就在说话）
+        let preRoll = pendingFeed
+        pendingFeed = []
         lock.unlock()
 
         resultsTask = Task { [weak self] in
@@ -164,6 +175,16 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
             }
         }
         hearLog("系统听写：开始（\(loc.identifier)，\(Int(fmt.sampleRate)) Hz）")
+        // 补上启动前收到的那一段（分块送，块太大引擎会卡）
+        if !preRoll.isEmpty {
+            hearLog("系统听写：补送启动前的 \(Double(preRoll.count) / 16000) 秒声音", .info)
+            var i = 0
+            while i < preRoll.count {
+                let end = min(i + 4096, preRoll.count)
+                self.feed(Array(preRoll[i..<end]))
+                i = end
+            }
+        }
     }
 
     func stop() async {
@@ -193,6 +214,12 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         lock.unlock()
     }
 
+    func segmentRange(_ id: Int) -> (start: Double, end: Double)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let seg = segs[id] else { return nil }
+        return (seg.start, seg.end ?? .greatestFiniteMagnitude)
+    }
+
     func segmentText(_ id: Int) -> (text: String, confidence: Double) {
         lock.lock(); defer { lock.unlock() }
         guard let seg = segs[id] else { return ("", 0) }
@@ -218,7 +245,18 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
 
     func feed(_ samples: [Float]) {
         lock.lock()
-        guard let cont = input, let fmt = format, !samples.isEmpty else { lock.unlock(); return }
+        guard let cont = input, let fmt = format, !samples.isEmpty else {
+            // 还没准备好（语言包在下载、引擎在起）：先存着，
+            // 等准备好了补给它——不然用户开口的第一句就丢了
+            if !samples.isEmpty {
+                pendingFeed.append(contentsOf: samples)
+                if pendingFeed.count > Self.pendingFeedMax {
+                    pendingFeed.removeFirst(pendingFeed.count - Self.pendingFeedMax)
+                }
+            }
+            lock.unlock()
+            return
+        }
         if converter == nil, fmt != srcFormat {
             converter = AVAudioConverter(from: srcFormat, to: fmt)
         }

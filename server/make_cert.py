@@ -18,6 +18,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CERT_DIR = os.path.join(HERE, "certs")
 CERT_FILE = os.path.join(CERT_DIR, "cert.pem")
 KEY_FILE = os.path.join(CERT_DIR, "key.pem")
+# 这台电脑自己的签发根（长期不变）：服务器证书用它签
+ROOT_FILE = os.path.join(CERT_DIR, "root.pem")
+ROOT_KEY_FILE = os.path.join(CERT_DIR, "root.key")
 
 
 def local_ips():
@@ -96,6 +99,55 @@ def cert_revoked(path):
         return False
 
 
+def ensure_root():
+    """这台电脑自己的签发根（长期不变）。
+
+    服务器证书用它来签：换了网络、IP 变了，重新签一张就行，
+    根还是那一个——手机上配对过一次就一直认，不用重新配对。
+    """
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+    except ImportError:
+        return None
+    try:
+        os.makedirs(CERT_DIR, exist_ok=True)
+        if os.path.exists(ROOT_FILE) and os.path.exists(ROOT_KEY_FILE):
+            with open(ROOT_FILE, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+            with open(ROOT_KEY_FILE, "rb") as f:
+                key = serialization.load_pem_private_key(f.read(), password=None)
+            return (cert, key)
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "hear-cloud root"),
+                          x509.NameAttribute(NameOID.ORGANIZATION_NAME, "hear-cloud")])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+            .sign(key, hashes.SHA256())
+        )
+        with open(ROOT_FILE, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        with open(ROOT_KEY_FILE, "wb") as f:
+            f.write(key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption()))
+        print("签发根证书：%s" % ROOT_FILE)
+        return (cert, key)
+    except Exception as e:
+        print("签发根证书生成失败：%s" % e)
+        return None
+
+
 def cert_covers_ip():
     """现有证书里有没有本机现在的所有 IP（换了网络、开了 VPN 就得重新生成）"""
     ips = local_ips()
@@ -156,21 +208,32 @@ def main():
     san += [x509.IPAddress(i) for i in ips]
 
     now = datetime.datetime.now(datetime.timezone.utc)
+    # 用这台电脑的签发根来签（根没有就退回自己签自己）
+    root = ensure_root()
+    issuer = name
+    signer = key
+    if root:
+        issuer = root[0].subject
+        signer = root[1]
     cert = (
         x509.CertificateBuilder()
         .subject_name(name)
-        .issuer_name(name)
+        .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - datetime.timedelta(days=1))
         .not_valid_after(now + datetime.timedelta(days=3650))
         .add_extension(x509.SubjectAlternativeName(san), critical=False)
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .sign(key, hashes.SHA256())
+        .sign(signer, hashes.SHA256())
     )
 
+    # 证书文件里带上签发根：客户端要能顺着链找到它
+    pem = cert.public_bytes(serialization.Encoding.PEM)
+    if root:
+        pem += root[0].public_bytes(serialization.Encoding.PEM)
     with open(CERT_FILE, "wb") as f:
-        f.write(cert.public_bytes(serialization.Encoding.PEM))
+        f.write(pem)
     with open(KEY_FILE, "wb") as f:
         f.write(key.private_bytes(
             encoding=serialization.Encoding.PEM,
@@ -179,6 +242,16 @@ def main():
         ))
     print("证书生成好了：%s" % CERT_FILE)
     print("包含的地址：%s" % ", ".join(str(i) for i in ips))
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        with open(ROOT_FILE, "rb") as f:
+            rc = x509.load_pem_x509_certificate(f.read())
+        fp = rc.fingerprint(hashes.SHA256()).hex()
+        print("证书指纹（手机上配对时核对这一串）：%s"
+              % ":".join(fp[i:i + 2] for i in range(0, len(fp), 2)).upper())
+    except Exception as e:
+        print("（指纹没算出来：%s）" % e)
     return 0
 
 

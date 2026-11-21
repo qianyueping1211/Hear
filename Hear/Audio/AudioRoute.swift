@@ -99,6 +99,7 @@ enum AudioRoute {
     /// 要好几百毫秒，卡住主线程会让界面发涩。
     static func deactivate() {
         if capturing { return }          // 还在收音，不能停会话
+        if speaking { return }           // 还在放声音：停了会把声音切断
         genLock.lock(); deactivateGen += 1; genLock.unlock()
         let s = AVAudioSession.sharedInstance()
         try? s.setActive(false, options: .notifyOthersOnDeactivation)

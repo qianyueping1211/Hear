@@ -217,6 +217,29 @@ struct SettingsView: View {
                     Text("模型管理")
                 }
 
+                // MARK: 云端证书（严格模式 / 配对）
+                Section {
+                    Toggle("严格模式（只连配对过的电脑）", isOn: $session.cloudStrictMode)
+                    if session.cloudStrictMode {
+                        Button("跟这台电脑配对") {
+                            Task { await session.pairWithCloudService() }
+                        }
+                        if !session.cloudRootFingerprint.isEmpty {
+                            LabeledContent("已配对的证书指纹", value: session.cloudRootFingerprint)
+                                .font(.footnote)
+                        }
+                        Text("配对以后，只有这台电脑签出来的证书才认。它换网络、换 IP 重新签证书都不用再配对；别的电脑拿别的证书来冒充会被拒绝。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("兼容模式：只对你自己填的内网地址放宽自签证书校验（换网络、开了 VPN 也照样能连）。公网地址一律走系统证书校验。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("云端证书")
+                } footer: {
+                    Text("电脑上第一次启动服务时会打印一份证书指纹；配对时对着它核对一下。")
+                }
+
                 // MARK: 语音识别（收音 → 断句 → 运行方式）
                 Section {
                     Picker("声音来源", selection: inputBinding) {
@@ -355,6 +378,13 @@ struct SettingsView: View {
             .sheet(isPresented: $showCloudPicker) {
                 CloudFolderPicker { url in cloud.setFolder(url) }
                     .ignoresSafeArea()
+            }
+            // 配对：把这台电脑的证书指纹给用户确认一下
+            .alert("确认这台电脑的证书", isPresented: $session.showPairConfirm) {
+                Button("确认配对") { session.confirmPairing() }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("这台电脑的证书指纹：\n\(session.pendingPairFingerprint)\n\n跟电脑上服务窗口里打印的那一串核对一致再确认。确认以后只认这台电脑。")
             }
             // 授权 iCloud 云盘：先试系统的（自己就弹「允许访问 iCloud 云盘」），
             // 没有权限才让用户在文件里挑一个文件夹。
@@ -784,6 +814,9 @@ struct CloudEditSheet: View {
                                 // 选了"默认"就不能改这一行，要单独填地址先把它关掉
                                 .disabled(useDefault)
                         }
+                        // 信任边界：这个地址上的自签证书，App 才会放宽校验
+                        Text("这个地址是你自己填的自建服务：App 只对它放宽自签证书的校验（公网地址照常走系统校验）。别人要是也在同一个网络里冒充它，证书校验是拦不住的——介意的话开「云端证书 → 严格模式」配对一次。")
+                            .font(.caption).foregroundStyle(.secondary)
                         // 语音识别：在"自定义"下面选识别方案
                         // 选项完全照着电脑上服务报上来的清单来：
                         // 电脑上没装的方案一个都不给（比如没装 SenseVoice 就只有 Whisper）

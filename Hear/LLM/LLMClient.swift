@@ -126,6 +126,27 @@ final class LLMSettings: ObservableObject {
 
     var active: LLMProvider? { providers.first { $0.id == activeID } ?? providers.first }
 
+    // MARK: - 明文发送（http）的确认
+
+    /// 用户确认过的"明文发送"目标（按 host:port 记）
+    private static let plaintextConfirmedKey = "llmPlaintextConfirmed"
+
+    /// 这个地址是不是已经确认过用明文发送了
+    func isPlaintextConfirmed(_ base: String) -> Bool {
+        let id = LLMClient.endpointDescription(base)
+        let set = (UserDefaults.standard.stringArray(forKey: Self.plaintextConfirmedKey)) ?? []
+        return set.contains(id)
+    }
+
+    /// 记下：这个地址用明文发送，用户确认过了
+    func confirmPlaintext(_ base: String) {
+        let id = LLMClient.endpointDescription(base)
+        var set = (UserDefaults.standard.stringArray(forKey: Self.plaintextConfirmedKey)) ?? []
+        if !set.contains(id) { set.append(id) }
+        UserDefaults.standard.set(set, forKey: Self.plaintextConfirmedKey)
+        hearLog("大模型 API：已确认用明文发送到 \(id)", .warning)
+    }
+
     /// iCloud 同步过来的设置：直接换上，不用重开 App
     func reloadFromDefaults() {
         if let data = UserDefaults.standard.data(forKey: "llmProviders"),
@@ -177,12 +198,33 @@ final class LLMSettings: ObservableObject {
 
 enum LLMError: LocalizedError {
     case badURL, http(Int, String), empty
+    /// 公网地址用了 http（明文）：正文和 API Key 都会明文传出去
+    case plaintextBlocked
     var errorDescription: String? {
         switch self {
         case .badURL: return "接口地址不正确"
         case .http(let code, let body): return "接口返回错误 \(code)：\(body.prefix(300))"
         case .empty: return "模型没有返回内容"
+        case .plaintextBlocked:
+            return "这个公网地址用的是 http（明文）：对话内容和 API Key 都会明文传出去。公网服务请换成 https 地址。"
         }
+    }
+}
+
+/// 跨主机的重定向一律不跟：正文和 API Key 不能被转发到别的地方
+final class LLMRedirectGuard: NSObject, URLSessionTaskDelegate {
+    static let shared = LLMRedirectGuard()
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        if let old = task.originalRequest?.url?.host?.lowercased(),
+           let new = request.url?.host?.lowercased(), old != new {
+            // 换主机了：不跟（正文和密钥不能被转发出去）
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
     }
 }
 
@@ -195,8 +237,52 @@ enum LLMClient {
         return u
     }
 
+    /// 发请求用的会话：跨主机的重定向由 LLMRedirectGuard 拦下来
+    private static let session: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpShouldSetCookies = false
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: cfg, delegate: LLMRedirectGuard.shared, delegateQueue: nil)
+    }()
+
+    /// 这个地址是不是局域网里的服务（Ollama、LM Studio 这种）
+    static func isLocalEndpoint(_ base: String) -> Bool {
+        guard let u = URL(string: base.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let host = u.host else { return false }
+        return LocalServerTrust.isLocalHost(host)
+    }
+
+    /// 是不是"明文发送"的地址（http）
+    static func isPlaintextEndpoint(_ base: String) -> Bool {
+        guard let u = URL(string: base.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+        return u.scheme?.lowercased() == "http"
+    }
+
+    /// 实际接收内容的是哪个地址（提示用户的时候给他看这个）
+    static func endpointDescription(_ base: String) -> String {
+        let s = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let u = URL(string: s), let host = u.host else { return s }
+        let port = u.port.map { ":\($0)" } ?? ""
+        return "\(host)\(port)"
+    }
+
+    /// 发送前的检查：公网地址必须用 https；
+    /// 局域网里的自建服务可以用 http（但要用户确认过，见 LLMSettings）
+    static func checkEndpoint(_ base: String) throws {
+        let s = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let u = URL(string: s), let scheme = u.scheme?.lowercased() else {
+            throw LLMError.badURL
+        }
+        if scheme == "https" { return }
+        if scheme == "http" {
+            if isLocalEndpoint(s) { return }     // 局域网里的自建服务，允许
+            throw LLMError.plaintextBlocked       // 公网的明文地址，不给发
+        }
+        throw LLMError.badURL
+    }
+
     private static func send(_ req: URLRequest) async throws -> [String: Any] {
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await session.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             throw LLMError.http(code, String(decoding: data, as: UTF8.self))
@@ -206,6 +292,7 @@ enum LLMClient {
 
     /// 获取模型列表
     static func listModels(_ p: LLMProvider, key: String) async throws -> [String] {
+        try checkEndpoint(p.baseURL)
         var req: URLRequest
         switch p.kind {
         case .openai:
@@ -225,6 +312,7 @@ enum LLMClient {
     /// 发送一次对话，返回文字结果
     static func complete(_ p: LLMProvider, key: String, model: String,
                          system: String, user: String) async throws -> String {
+        try checkEndpoint(p.baseURL)
         var req: URLRequest
         let body: [String: Any]
         switch p.kind {

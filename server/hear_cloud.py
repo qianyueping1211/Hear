@@ -53,6 +53,11 @@ ASR_MODEL = os.environ.get("HEAR_ASR_MODEL", "small")
 _HERE = os.path.dirname(os.path.abspath(__file__))
 TLS_CERT = os.environ.get("HEAR_TLS_CERT", os.path.join(_HERE, "certs", "cert.pem"))
 TLS_KEY = os.environ.get("HEAR_TLS_KEY", os.path.join(_HERE, "certs", "key.pem"))
+# 这台电脑自己的"签发根"：长期不变的一份根证书。
+# 换网络、换 IP 的时候用它重签服务器证书就行，
+# 手机上配对过一次就一直认（不用每次重新配对）。
+ROOT_CERT = os.environ.get("HEAR_ROOT_CERT", os.path.join(_HERE, "certs", "root.pem"))
+ROOT_KEY = os.environ.get("HEAR_ROOT_KEY", os.path.join(_HERE, "certs", "root.key"))
 # 接到连接后偷看第一个字节，最多等这么久（等太久就当这个连接没用了）
 TLS_PEEK_TIMEOUT = float(os.environ.get("HEAR_TLS_PEEK_TIMEOUT", "8"))
 # 识别用哪个方案：
@@ -634,8 +639,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if self.path.startswith("/health"):
                 self._send_json(self.health())
+            elif self.path.startswith("/v1/pair"):
+                self._send_json(pair_info())
             elif self.path.startswith("/ping"):
                 self._send_json({"pong": True, "time": time.time()})
+            elif self.path.startswith("/v1/"):
+                self._error("没有这个接口", 404)
             elif self.path.startswith("/"):
                 self._send_html(self.test_page())
             else:
@@ -949,20 +958,121 @@ def cert_covers_ip():
         return True, ""
 
 
+def cert_signed_by_root(path, root_cert):
+    """这张服务器证书是不是签发根签出来的。
+
+    不是的话（比如以前自己签自己的），手机上"严格模式"就认不认——
+    这种要重新签一张。
+    """
+    try:
+        from cryptography import x509
+        with open(path, "rb") as f:
+            pem = f.read()
+        cert = x509.load_pem_x509_certificate(pem)
+        if cert.issuer != root_cert.subject:
+            return False
+        # 新版的 cryptography 能直接验签；老版就只看签发者名字
+        try:
+            cert.verify_directly_issued_by(root_cert)
+        except AttributeError:
+            pass
+        except Exception:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def ensure_root():
+    """这台电脑自己的签发根（长期不变）。
+
+    服务器证书用这个根来签：换了网络、IP 变了，重新签一张就行，
+    但根还是那一个——手机上配对过一次就一直认，不用重新配对。
+    """
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+    except ImportError:
+        return None
+    try:
+        os.makedirs(os.path.dirname(ROOT_CERT), exist_ok=True)
+        if os.path.exists(ROOT_CERT) and os.path.exists(ROOT_KEY):
+            with open(ROOT_CERT, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+            with open(ROOT_KEY, "rb") as f:
+                key = serialization.load_pem_private_key(f.read(), password=None)
+            return (cert, key)
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "hear-cloud root"),
+                          x509.NameAttribute(NameOID.ORGANIZATION_NAME, "hear-cloud")])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=3650))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+            .sign(key, hashes.SHA256())
+        )
+        with open(ROOT_CERT, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        with open(ROOT_KEY, "wb") as f:
+            f.write(key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption()))
+        log("签发根证书生成好了：%s" % ROOT_CERT)
+        return (cert, key)
+    except Exception as e:
+        log("签发根证书生成失败：%s" % e)
+        return None
+
+
+def pair_info():
+    """这台电脑的签发根信息：手机第一次配对时用。
+
+    确认了指纹以后，以后换网络重签证书都不用重新配对。
+    """
+    import base64
+    try:
+        with open(ROOT_CERT, "rb") as f:
+            pem = f.read()
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        cert = x509.load_pem_x509_certificate(pem)
+        der = cert.public_bytes(serialization.Encoding.DER)
+        fp = cert.fingerprint(hashes.SHA256()).hex()
+        return {"root_fingerprint": ":".join(fp[i:i + 2] for i in range(0, len(fp), 2)).upper(),
+                "root_der": base64.b64encode(der).decode("ascii")}
+    except Exception as e:
+        return {"error": "拿不到签发根：%s" % e}
+
+
 def ensure_cert():
-    """确保有自签证书；没有就自己生成一份。
+    """确保有服务器证书；没有就自己生成一份。
 
     App 只走 https，所以证书必须有。放在这里自己生成，
     就不会因为"某个文件没下载下来"而没有证书。
     """
+    # 签发根先准备好：手机上的"严格模式"配对要用它
+    root = ensure_root()
     if os.path.exists(TLS_CERT) and os.path.exists(TLS_KEY):
         if cert_revoked(TLS_CERT):
             log("这张证书的私钥曾经公开过，已经作废，重新签一张")
         else:
             ok, missing = cert_covers_ip()
             if ok:
-                return True
-            log("本机 IP 变成 %s 了（旧证书里没有），重新生成证书" % missing)
+                if root and not cert_signed_by_root(TLS_CERT, root[0]):
+                    # 以前签的（自己签自己），重新用签发根签一张
+                    log("这张证书不是用签发根签的，重新签一张")
+                else:
+                    return True
+            else:
+                log("本机 IP 变成 %s 了（旧证书里没有），重新生成证书" % missing)
     try:
         from cryptography import x509
         from cryptography.x509.oid import NameOID
@@ -976,6 +1086,12 @@ def ensure_cert():
         os.makedirs(os.path.dirname(TLS_CERT), exist_ok=True)
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "hear-cloud")])
+        # 用这台电脑的签发根来签（根没有就退回自己签自己）
+        issuer = name
+        signer = key
+        if root:
+            issuer = root[0].subject
+            signer = root[1]
         ips = []
         for ip in local_ips():
             try:
@@ -992,17 +1108,21 @@ def ensure_cert():
         now = datetime.datetime.now(datetime.timezone.utc)
         cert = (
             x509.CertificateBuilder()
-            .subject_name(name).issuer_name(name)
+            .subject_name(name).issuer_name(issuer)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - datetime.timedelta(days=1))
             .not_valid_after(now + datetime.timedelta(days=3650))
             .add_extension(x509.SubjectAlternativeName(san), critical=False)
             .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-            .sign(key, hashes.SHA256())
+            .sign(signer, hashes.SHA256())
         )
+        # 证书文件里带上签发根：客户端要能顺着链找到它
+        pem = cert.public_bytes(serialization.Encoding.PEM)
+        if root:
+            pem += root[0].public_bytes(serialization.Encoding.PEM)
         with open(TLS_CERT, "wb") as f:
-            f.write(cert.public_bytes(serialization.Encoding.PEM))
+            f.write(pem)
         with open(TLS_KEY, "wb") as f:
             f.write(key.private_bytes(
                 encoding=serialization.Encoding.PEM,
@@ -1122,6 +1242,10 @@ def main():
     ctx = make_ssl_context()
     srv = MixedServer((HOST, PORT), Handler, ctx)
     log("服务起来了，监听 %s:%d" % (HOST, PORT))
+    # 签发根指纹：手机上开"严格模式"配对的时候，要对着这一串核对
+    _pair = pair_info()
+    if _pair.get("root_fingerprint"):
+        log("证书指纹（配对时核对这一串）：%s" % _pair["root_fingerprint"])
     log("本机测试：https://127.0.0.1:%d/" % PORT)
     for ip in local_ips():
         if ctx is not None:

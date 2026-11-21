@@ -454,7 +454,23 @@ final class CloudSync: ObservableObject {
             hearLog("iCloud 同步：建文件夹失败 \(error)", .error)
             return
         }
-        var manifest = await Self.readManifest(dir) ?? Manifest()
+        // 清单读不出来的时候，不能拿一份空的当"没有"——
+        // 那样一写就把别的设备的数据抹掉了。
+        let manifestURL = dir.appendingPathComponent("manifest.json")
+        var manifest: Manifest
+        if let m = await Self.readManifest(dir) {
+            manifest = m
+        } else if FileManager.default.fileExists(atPath: manifestURL.path) {
+            message = "iCloud 上的同步清单读不出来，这次先不同步"
+            hearLog("iCloud 同步：清单读不出来，先不同步（不拿空清单去覆盖）", .error)
+            return
+        } else if Self.isCloudPlaceholder(manifestURL) {
+            message = "iCloud 上的同步清单还没下载到手机，稍后再试"
+            hearLog("iCloud 同步：清单还没下载到手机，先不同步", .warning)
+            return
+        } else {
+            manifest = Manifest()          // 真的还没有清单：空的没问题
+        }
         var pushed = 0, pulled = 0, removed = 0
 
         // 1. 设置
@@ -510,19 +526,36 @@ final class CloudSync: ObservableObject {
                     pushed += 1
                 }
             } else if let c, l == nil || c > l! + 1 {
+                // 拉取之前再看一眼本地有没有被改过：
+                // 这期间用户在这页上改过东西，就别用云上的旧版本盖掉
+                if let l2 = store.allUpdated[id], let l, l2 > l + 1 {
+                    hearLog("iCloud 同步：本地这页刚改过，不用云上的旧版本盖掉", .info)
+                    continue
+                }
                 if let data = await Self.read(file), store.importRaw(data) {
                     pulled += 1
                 }
             }
         }
 
-        manifest.updatedAt = Date()
-        if let data = try? Self.encoder.encode(manifest) {
-            let url = dir.appendingPathComponent("manifest.json")
-            _ = await Self.io { Self.write(data, to: url) }
+        // 提交前再读一次：别的设备可能刚改过，
+        // 直接把整份清单盖上去会把人家的改动抹掉。两份合并着写。
+        if let latest = await Self.readManifest(dir) {
+            manifest = Self.mergeManifest(latest, manifest)
         }
-        lastSync = Date()
-        UserDefaults.standard.set(lastSync, forKey: Keys.lastSync)
+        manifest.updatedAt = Date()
+        var wrote = false
+        if let data = try? Self.encoder.encode(manifest) {
+            wrote = await Self.io { Self.write(data, to: manifestURL) }
+        }
+        if wrote {
+            lastSync = Date()
+            UserDefaults.standard.set(lastSync, forKey: Keys.lastSync)
+        } else {
+            // 没写回去就别装作同步成功了
+            message = "同步结果没能写回 iCloud（稍后再试一次）"
+            hearLog("iCloud 同步：清单没写回去，不记同步时间", .warning)
+        }
         message = settingsNote ?? (pushedSettings > 0 ? "已上传 \(pushedSettings) 项设置到 iCloud" : nil)
         if pushed + pulled + removed > 0 || settingsNote != nil || pushedSettings > 0 {
             hearLog("iCloud 同步：上传 \(pushed) 页，下载 \(pulled) 页，删除 \(removed) 页")
@@ -576,6 +609,24 @@ final class CloudSync: ObservableObject {
     private static func readSettings(_ dir: URL) async -> [String: Any]? {
         parseSettings(await read(dir.appendingPathComponent("settings.plist")))
     }
+    /// 两份清单合并：每页取更新的那个时间，删除记录也取更新的那个
+    private static func mergeManifest(_ a: Manifest, _ b: Manifest) -> Manifest {
+        var out = a
+        for (k, v) in b.conversations {
+            if let cur = out.conversations[k] { out.conversations[k] = max(cur, v) }
+            else { out.conversations[k] = v }
+        }
+        for (k, v) in b.deleted {
+            if let cur = out.deleted[k] { out.deleted[k] = max(cur, v) }
+            else { out.deleted[k] = v }
+        }
+        if let sa = b.settingsUpdatedAt, let ca = a.settingsUpdatedAt, sa > ca {
+            out.settingsHash = b.settingsHash
+            out.settingsUpdatedAt = sa
+        }
+        return out
+    }
+
     private static func readManifest(_ dir: URL) async -> Manifest? {
         parseManifest(await read(dir.appendingPathComponent("manifest.json")))
     }

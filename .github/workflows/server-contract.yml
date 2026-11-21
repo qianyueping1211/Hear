@@ -1,0 +1,62 @@
+name: Server contract test
+
+# 检查电脑上跑的那个云端服务，它的接口约定没变
+# （App 依赖 /health、/v1/pair、/v1/asr 等接口的形状）
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - '.github/workflows/server-contract.yml'
+  pull_request:
+    paths:
+      - 'server/**'
+      - '.github/workflows/server-contract.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-contract
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install cryptography
+
+      - name: Contract test
+        run: python3 server/test_contract.py
+
+      # 顺便用给 Windows 用的那个自测脚本测一下 /health（翻译要模型，CI 里没有，所以只测健康检查）
+      - name: Start service
+        env:
+          HEAR_PORT: '8200'
+        run: |
+          nohup python3 server/hear_cloud.py > server.log 2>&1 &
+          echo $! > server.pid
+          for i in $(seq 1 60); do
+            if curl -sk https://127.0.0.1:8200/health >/dev/null 2>&1; then
+              echo "service is up"
+              break
+            fi
+            sleep 1
+          done
+          tail -30 server.log
+
+      - name: API self-test (health)
+        run: python3 server/test_api.py health --url https://127.0.0.1:8200
+
+      - name: Stop service
+        if: always()
+        run: kill "$(cat server.pid)" 2>/dev/null || true

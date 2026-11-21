@@ -91,6 +91,27 @@ struct ProviderEditView: View {
                     SecureField("API Key", text: $apiKey)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                    // 明文发送（http）的地址：把实际接收地址摆出来，让用户确认
+                    if LLMClient.isPlaintextEndpoint(provider.baseURL) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("这个地址是明文发送（http）", systemImage: "exclamationmark.triangle.fill")
+                                .font(.footnote).foregroundStyle(.orange)
+                            Text("实际接收地址：\(LLMClient.endpointDescription(provider.baseURL))。生成总结时，这段对话的原文和译文会明文发到这个地址（不加密）。")
+                                .font(.caption).foregroundStyle(.secondary)
+                            if !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Text("你还填了 API Key：它也会用明文发出去，路上可能被别人看到。")
+                                    .font(.caption).foregroundStyle(.red)
+                            }
+                            if LLMSettings.shared.isPlaintextConfirmed(provider.baseURL) {
+                                Text("已确认使用（明文发送）").font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                Button("我知道了，仍然使用（明文发送）") {
+                                    LLMSettings.shared.confirmPlaintext(provider.baseURL)
+                                }
+                                .font(.footnote)
+                            }
+                        }
+                    }
                 }
 
                 Section {

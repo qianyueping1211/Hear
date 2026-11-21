@@ -152,7 +152,12 @@ final class ConversationStore: ObservableObject {
 
     static func mergeDeleted(_ other: [String: Date]) {
         var gone = deletedIDs
-        for (k, v) in other where gone[k] == nil { gone[k] = v }
+        // 删除时间取较新的那个：
+        // 不然一台设备上"删掉"会被另一台设备上"更早的删掉"压住，
+        // 已经删掉的对话又被同步回来
+        for (k, v) in other {
+            if let cur = gone[k] { gone[k] = max(cur, v) } else { gone[k] = v }
+        }
         UserDefaults.standard.set(gone, forKey: "deletedConversations")
     }
 

@@ -133,11 +133,18 @@ jobs:
             echo "2. 用 [Sideloadly](https://sideloadly.io) + 你的 Apple ID 安装到 iPhone"
             echo "3. 已安装过的直接覆盖安装，模型不用重新下载"
           } > notes.md
-          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$TAG" "Hear-${VER}.ipa" \
-            --title "听见 ${VER}" \
-            --notes-file notes.md \
-            --latest
+          # 已经有同名发布就直接覆盖安装包，不删发布。
+          # （以前先 delete 再 create：重新打包失败的话，旧下载链接就没了）
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "已有发布 $TAG，覆盖安装包"
+            gh release upload "$TAG" "Hear-${VER}.ipa" --clobber
+            gh release edit "$TAG" --title "听见 ${VER}" --notes-file notes.md --latest
+          else
+            gh release create "$TAG" "Hear-${VER}.ipa" \
+              --title "听见 ${VER}" \
+              --notes-file notes.md \
+              --latest
+          fi
 
       # 只在失败时上传编译日志，方便排查；安装包只发布到 Releases
       - uses: actions/upload-artifact@v6

@@ -22,7 +22,9 @@ final class SummaryService {
             problem = "还没有添加大模型 API：请到 设置 → 大模型 API 添加"
         } else if settings.active!.selectedModel.isEmpty {
             problem = "「\(settings.active!.name)」还没有选择模型：请到 设置 → 大模型 API 里选择"
-        } else if (settings.key(for: settings.active!) ?? "").isEmpty {
+        } else if (settings.key(for: settings.active!) ?? "").isEmpty
+                    && !LLMClient.isLocalEndpoint(settings.active!.baseURL) {
+            // 局域网里的自建服务（Ollama、LM Studio）不用 Key 也行
             problem = "「\(settings.active!.name)」没有读到 API Key：请到 设置 → 大模型 API 左滑编辑，重新填写 Key 后保存"
         } else {
             problem = nil
@@ -36,6 +38,16 @@ final class SummaryService {
         guard !conv.items.isEmpty else {
             store.updateSummary(conversationID, templateID: templateID,
                                 SummaryRecord(status: .failed, error: "这段对话没有内容"))
+            return
+        }
+        // 明文发送（http）的地址：要先在设置里确认过
+        // （要确认的是"这次对话正文会明文发到这个地址"）
+        if LLMClient.isPlaintextEndpoint(provider.baseURL),
+           !settings.isPlaintextConfirmed(provider.baseURL) {
+            let msg = "这个地址是用明文（http）发送的：对话正文会明文传到 \(LLMClient.endpointDescription(provider.baseURL))。请到 设置 → 大模型 API 里确认一次再生成总结。"
+            store.updateSummary(conversationID, templateID: templateID,
+                                SummaryRecord(status: .failed, error: msg))
+            hearLog("总结：明文发送还没确认过，不发", .warning)
             return
         }
 

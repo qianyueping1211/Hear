@@ -95,6 +95,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             queue.asyncAfter(deadline: .now() + limit) { [weak self] in
                 guard let self, gen == self.generation, self.continuation != nil else { return }
                 hearLog("朗读：超过 \(Int(limit)) 秒没有结束，自动跳过", .warning)
+                // 光把等待方叫醒不够：声音还在放。
+                // 先把这一次播放作废、声音停掉，再叫醒等待方。
+                self.stopPlayback(gen: gen)
                 self.resume(gen)
             }
         }
@@ -103,6 +106,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         // 麦克风一断，后面的话就再也识别不到了（以前就是这样：读一句、断一句）。
         if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         stopEngineIfIdle()
+        onPlaybackFinished?()
     }
 
     /// 播放一段已经生成好的声音（声音克隆朗读用），播完（或被 stop 打断）后返回。
@@ -172,6 +176,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             queue.asyncAfter(deadline: .now() + limit) { [weak self] in
                 guard let self, gen == self.generation, self.continuation != nil else { return }
                 hearLog("朗读：克隆声音播放超时，自动跳过", .warning)
+                self.stopPlayback(gen: gen)     // 声音也要停，不能只叫醒等待方
                 self.resume(gen)
             }
         }
@@ -184,6 +189,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         AudioRoute.speaking = false
         if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         stopEngineIfIdle()
+        onPlaybackFinished?()
         if cancelled { return .cancelled }
         return started ? .played : .failed
     }
@@ -221,6 +227,25 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             guard !AudioRoute.capturing else { return }
             self.engine.stop()
         }
+    }
+
+    /// 播放结束/被打断以后叫醒外面：外面好知道"现在没在出声了"，
+    /// 可以考虑放开麦克风（不然音频会话一直占着）。
+    var onPlaybackFinished: (() -> Void)?
+
+    /// 把这一次播放作废：声音停掉、后面的缓冲回调也作废。
+    ///
+    /// 只能在 queue 上调用。**不动 generation**：
+    /// 外面（play 结束以后）还要用这一代数判断"是不是被人中途停掉的"，
+    /// 这里自己改掉的话，外面就分不清"超时"和"被取消"了，
+    /// 超时的时候就没法退回系统朗读。
+    private func stopPlayback(gen: Int) {
+        guard gen == generation else { return }
+        current = nil
+        playStarted = false
+        if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
+        player.stop()
+        player.reset()
     }
 
     /// 在 queue 上调用

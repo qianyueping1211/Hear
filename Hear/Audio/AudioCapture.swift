@@ -69,6 +69,16 @@ final class AudioCapture {
         set { lock.lock(); _lastSample = newValue; lock.unlock() }
     }
 
+    private var _lastDelivered = Date()
+    /// 最近一次"真的把声音送到识别那里"的时间。
+    /// 麦克风回调有声音、但转换失败（或者送不出去）的时候，
+    /// 光看回调时间会以为一切正常——其实识别早就哑了，
+    /// 界面上还显示"正在聆听"，用户说什么都没反应。
+    private var lastDeliveredAt: Date {
+        get { lock.lock(); defer { lock.unlock() }; return _lastDelivered }
+        set { lock.lock(); _lastDelivered = newValue; lock.unlock() }
+    }
+
     /// 朗读译文时静音麦克风，避免把喇叭声音又识别一遍
     var muted: Bool {
         get { lock.lock(); defer { lock.unlock() }; return _muted }
@@ -266,6 +276,7 @@ final class AudioCapture {
         tapInstalled = true
         installedFormat = (inFormat.sampleRate, inFormat.channelCount)
         lastSampleAt = Date()
+        lastDeliveredAt = Date()
         engine.prepare()
         try engine.start()
     }
@@ -300,6 +311,12 @@ final class AudioCapture {
     /// 重新接一次麦克风。接不上就重试几次；
     /// 全失败了也别悄悄哑掉——看门狗下一轮还会再来一次。
     private func rearmMic(reason: String) {
+        // 现在不需要麦克风了（比如来电的时候用户已经停了收音）：
+        // 不要再把它抢回来——用户以为已经停了呢
+        guard isRunning else {
+            hearLog("现在不需要麦克风了（\(reason)），不重新连接", .info)
+            return
+        }
         guard !rearming else { return }
         rearming = true
         defer { rearming = false }
@@ -360,7 +377,11 @@ final class AudioCapture {
             rearmMic(reason: "看门狗")
             return
         }
-        if Date().timeIntervalSince(lastSampleAt) > 4 {
+        // 两个都看：
+        //   · 回调都没了 → 麦克风真的断了
+        //   · 回调有、但声音没送到识别那里 → 转换坏了，识别是哑的
+        // 只看回调时间的话，后一种情况永远发现不了
+        if Date().timeIntervalSince(lastSampleAt) > 4 || Date().timeIntervalSince(lastDeliveredAt) > 4 {
             silentTicks += 1
             // 连续两次（大约 6 秒）没有声音才动手，避免打断正常的短暂卡顿
             if silentTicks >= 2 {
@@ -399,6 +420,8 @@ final class AudioCapture {
             return buffer
         }
         guard error == nil, let ch = out.floatChannelData, out.frameLength > 0 else { return }
+        // 真的转换出来了：更新"送到识别那边"的时间
+        lastDeliveredAt = Date()
         let samples = Array(UnsafeBufferPointer(start: ch[0], count: Int(out.frameLength)))
         let isMuted = muted
         // 送样本的活儿放到后台线程做：

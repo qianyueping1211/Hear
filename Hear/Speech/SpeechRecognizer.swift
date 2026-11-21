@@ -10,14 +10,21 @@ actor SpeechRecognizer {
     private var zhPromptTokens: [Int]?
     private var busy = false   // WhisperKit 不保证并发安全，这里串行化
     private var finalWaiting = 0
+    private var correctionWaiting = 0
 
-    /// 整句识别优先：有整句在等时，实时预览先让路
-    private func acquire(final: Bool) async {
+    /// 整句识别优先：有整句在等时，实时预览先让路。
+    /// 校正（Whisper 再认一遍）优先级最低：整句和预览都排在它前面，
+    /// 它可以一直等——不能让它挡住用户刚说的下一句。
+    private func acquire(final: Bool, correction: Bool = false) async {
         if final { finalWaiting += 1 }
-        while busy || (!final && finalWaiting > 0) {
+        if correction { correctionWaiting += 1 }
+        while busy
+              || (!final && finalWaiting > 0)                // 有整句在等：预览和校正都让路
+              || (!correction && correctionWaiting > 0) {    // 有校正在等：别的先走
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         if final { finalWaiting -= 1 }
+        if correction { correctionWaiting -= 1 }
         busy = true
     }
     private func release() { busy = false }
@@ -113,8 +120,10 @@ actor SpeechRecognizer {
     /// 识别一句话：先让 Whisper 自动判断语种；如果判断结果不在两种候选语言里，再用 fallback 语言重识别。
     /// 返回 (语言代码, 文字)
     /// preview = true：说话过程中的实时预览，只识别一遍、不重试，速度优先
+    /// correction = true：这是"校正"（整句之后再用 Whisper 复核一遍），
+    /// 优先级最低，不挡着新句子
     func recognize(_ samples: [Float], candidates: [String], fallback: String,
-                   preview: Bool = false) async throws -> (String, String) {
+                   preview: Bool = false, correction: Bool = false) async throws -> (String, String) {
         guard let pipe else {
             // 模型不在了（内存不足被卸载、或者没加载成功）：
             // 静悄悄返回空字符串的话，上层会当成"用户没说话"，
@@ -122,7 +131,7 @@ actor SpeechRecognizer {
             throw NSError(domain: "Hear", code: 20, userInfo: [NSLocalizedDescriptionKey:
                 "语音识别模型不在了（可能被内存不足卸载了），请重新开始一次"])
         }
-        await acquire(final: !preview); defer { release() }
+        await acquire(final: !preview && !correction, correction: correction); defer { release() }
         let secs = Double(samples.count) / 16_000
 
         // 只有一种候选语言（对话翻译模式按住了某种语言）：直接按这种语言识别，不再自动判断
@@ -218,7 +227,11 @@ actor SpeechRecognizer {
             total += 1
             if inScript(s.value, lang) { hit += 1 }
         }
-        guard total > 0 else { return false }
+        guard total > 0 else {
+            // 一个字母都没有（纯数字、订单号、"2026"这种）：
+            // 判断不了语言，但也不能因为这个把用户说的话丢掉
+            return true
+        }
         return Double(hit) / Double(total) >= 0.6
     }
 
@@ -249,7 +262,12 @@ actor SpeechRecognizer {
                     "Thank you for watching", "Thanks for watching", "Subtitles by", "明镜", "请不吝",
                     "Продолжение следует", "Субтитры", "Редактор субтитров", "ご視聴ありがとうございました",
                     "MBC 뉴스", "시청해주셔서"]
-        if junk.contains(where: { t.localizedCaseInsensitiveContains($0) }) { return false }
+        // 黑名单：整句就是这些短语才丢。
+        // 长句里顺带提到"谢谢观看""字幕"这种，不能把整句话丢掉
+        if junk.contains(where: { p in
+            if t.localizedCaseInsensitiveCompare(p) == .orderedSame { return true }
+            return t.count <= 8 && t.localizedCaseInsensitiveContains(p)
+        }) { return false }
         if t.hasPrefix("[") || t.hasPrefix("(") || t.hasPrefix("（") { return false }
         // 背景声的描述，例如 *Humming*、♪音乐♪、(笑声)
         let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
