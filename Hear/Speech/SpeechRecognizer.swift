@@ -9,25 +9,64 @@ actor SpeechRecognizer {
     private var pipe: WhisperKit?
     private var zhPromptTokens: [Int]?
     private var busy = false   // WhisperKit 不保证并发安全，这里串行化
-    private var finalWaiting = 0
-    private var correctionWaiting = 0
 
-    /// 整句识别优先：有整句在等时，实时预览先让路。
-    /// 校正（Whisper 再认一遍）优先级最低：整句和预览都排在它前面，
-    /// 它可以一直等——不能让它挡住用户刚说的下一句。
-    private func acquire(final: Bool, correction: Bool = false) async {
-        if final { finalWaiting += 1 }
-        if correction { correctionWaiting += 1 }
-        while busy
-              || (!final && finalWaiting > 0)                // 有整句在等：预览和校正都让路
-              || (!correction && correctionWaiting > 0) {    // 有校正在等：别的先走
-            try? await Task.sleep(nanoseconds: 10_000_000)
-        }
-        if final { finalWaiting -= 1 }
-        if correction { correctionWaiting -= 1 }
-        busy = true
+    /// 排队的优先级：数字小的先走
+    ///   0 整句识别（最终结果，最急）
+    ///   1 实时预览（说话过程中出字，可以等）
+    ///   2 校正（Whisper 再认一遍，最不急，可以一直等）
+    private enum Priority: Int, Comparable {
+        case finalASR = 0
+        case preview = 1
+        case correction = 2
+        static func < (a: Priority, b: Priority) -> Bool { a.rawValue < b.rawValue }
     }
-    private func release() { busy = false }
+
+    /// 排队等着用引擎的请求
+    private struct Waiter {
+        let prio: Priority
+        let order: Int              // 同一个优先级里按先来后到
+        let cont: CheckedContinuation<Void, Never>
+    }
+    private var waiters: [Waiter] = []
+    private var ticket = 0
+
+    /// 等到轮到我们。
+    ///
+    /// 之前这地方是用"几个计数器"互相等的（整句等预览让路、预览又等校正让路），
+    /// 两边都在等对方 → 谁也走不了，整条识别队列就卡死了。
+    /// 现在改成一条真正的排队：按优先级挑下一个，取消的请求不占位置。
+    private func acquire(_ prio: Priority) async throws {
+        if busy {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                ticket += 1
+                waiters.append(Waiter(prio: prio, order: ticket, cont: c))
+            }
+        } else {
+            busy = true
+        }
+        // 排队期间被取消了：把位置让出去，别占着引擎
+        if Task.isCancelled {
+            release()
+            throw CancellationError()
+        }
+    }
+
+    /// 释放：位置交给下一个等着的（优先级高的先，同级先来后到）
+    private func release() {
+        if waiters.isEmpty {
+            busy = false
+            return
+        }
+        var best = 0
+        for i in waiters.indices.dropFirst() {
+            if waiters[i].prio < waiters[best].prio
+                || (waiters[i].prio == waiters[best].prio && waiters[i].order < waiters[best].order) {
+                best = i
+            }
+        }
+        let w = waiters.remove(at: best)
+        w.cont.resume()          // 位置直接交给他（busy 仍然是 true）
+    }
 
     var isLoaded: Bool { pipe != nil }
 
@@ -131,7 +170,10 @@ actor SpeechRecognizer {
             throw NSError(domain: "Hear", code: 20, userInfo: [NSLocalizedDescriptionKey:
                 "语音识别模型不在了（可能被内存不足卸载了），请重新开始一次"])
         }
-        await acquire(final: !preview && !correction, correction: correction); defer { release() }
+        let prio: Priority = correction ? .correction : (preview ? .preview : .finalASR)
+        try await acquire(prio); defer { release() }
+        // 等到了位置，但排队期间可能被取消了：别再跑模型
+        if Task.isCancelled { throw CancellationError() }
         let secs = Double(samples.count) / 16_000
 
         // 只有一种候选语言（对话翻译模式按住了某种语言）：直接按这种语言识别，不再自动判断
@@ -158,7 +200,7 @@ actor SpeechRecognizer {
     /// 指定语言识别（用于说话过程中的实时预览）
     func transcribe(_ samples: [Float], language: String?) async throws -> String {
         guard let pipe else { return "" }
-        await acquire(final: true); defer { release() }
+        try await acquire(.preview); defer { release() }
         let results = try await pipe.transcribe(audioArray: samples, decodeOptions: options(language: language))
         return Self.joinText(results, language: language ?? results.first?.language)
     }
@@ -263,10 +305,13 @@ actor SpeechRecognizer {
                     "Продолжение следует", "Субтитры", "Редактор субтитров", "ご視聴ありがとうございました",
                     "MBC 뉴스", "시청해주셔서"]
         // 黑名单：整句就是这些短语才丢。
-        // 长句里顺带提到"谢谢观看""字幕"这种，不能把整句话丢掉
+        // 长句里顺带提到"谢谢观看""字幕"这种，不能把整句话丢掉；
+        // 短句也一样：像"字幕由你提供"这种是真的有人在说话，不能因为里面
+        // 有"字幕由"三个字就把整句丢了——只有四个字以上的整句黑名单短语
+        // 才允许"包含即丢"。
         if junk.contains(where: { p in
             if t.localizedCaseInsensitiveCompare(p) == .orderedSame { return true }
-            return t.count <= 8 && t.localizedCaseInsensitiveContains(p)
+            return p.count >= 4 && t.count <= 8 && t.localizedCaseInsensitiveContains(p)
         }) { return false }
         if t.hasPrefix("[") || t.hasPrefix("(") || t.hasPrefix("（") { return false }
         // 背景声的描述，例如 *Humming*、♪音乐♪、(笑声)

@@ -70,6 +70,16 @@ final class AudioCapture {
     }
 
     private var _lastDelivered = Date()
+    /// 送进识别队列、还没被消费的声音块数。
+    /// 积压说明"麦克风是好的，但识别那边不消费了"——
+    /// 这跟"麦克风断了"是两回事，不能混在一起说。
+    private var _pendingBlocks = 0
+    /// 还没被识别那边消费掉的声音块数
+    var pendingBlocks: Int {
+        get { lock.lock(); defer { lock.unlock() }; return _pendingBlocks }
+        set { lock.lock(); _pendingBlocks = newValue; lock.unlock() }
+    }
+
     /// 最近一次"真的把声音送到识别那里"的时间。
     /// 麦克风回调有声音、但转换失败（或者送不出去）的时候，
     /// 光看回调时间会以为一切正常——其实识别早就哑了，
@@ -381,6 +391,11 @@ final class AudioCapture {
         //   · 回调都没了 → 麦克风真的断了
         //   · 回调有、但声音没送到识别那里 → 转换坏了，识别是哑的
         // 只看回调时间的话，后一种情况永远发现不了
+        // 积压：声音送进去了，识别那边却不消费（后端卡住了）。
+        // 这跟麦克风断了不是一回事：重接麦克风没有用，得让用户知道。
+        if pendingBlocks > 40 {
+            hearLog("识别那边不消费声音了（积压 \(pendingBlocks) 块），先继续收音", .warning)
+        }
         if Date().timeIntervalSince(lastSampleAt) > 4 || Date().timeIntervalSince(lastDeliveredAt) > 4 {
             silentTicks += 1
             // 连续两次（大约 6 秒）没有声音才动手，避免打断正常的短暂卡顿
@@ -429,7 +444,12 @@ final class AudioCapture {
         // 喂系统听写，哪一下没赶上就会漏音，听起来是「刺刺」的杂音。
         if let feed = onSamples {
             let input = isMuted ? [Float](repeating: 0, count: samples.count) : samples
-            feedQueue.async { feed(input) }
+            pendingBlocks += 1
+            feedQueue.async { [weak self] in
+                feed(input)
+                guard let self else { return }
+                self.pendingBlocks -= 1
+            }
         }
         queue.async { [segmenter] in
             // 正在朗读：这一段声音不要（免得把喇叭的声音又识别一遍），

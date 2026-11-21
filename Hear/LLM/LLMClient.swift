@@ -200,6 +200,8 @@ enum LLMError: LocalizedError {
     case badURL, http(Int, String), empty
     /// 公网地址用了 http（明文）：正文和 API Key 都会明文传出去
     case plaintextBlocked
+    /// 局域网自建服务用了 http：还没在设置里确认过明文发送
+    case plaintextNotApproved
     var errorDescription: String? {
         switch self {
         case .badURL: return "接口地址不正确"
@@ -207,6 +209,8 @@ enum LLMError: LocalizedError {
         case .empty: return "模型没有返回内容"
         case .plaintextBlocked:
             return "这个公网地址用的是 http（明文）：对话内容和 API Key 都会明文传出去。公网服务请换成 https 地址。"
+        case .plaintextNotApproved:
+            return "这个地址是用明文（http）发送的：对话内容和 API Key 都会明文传出去。请到 设置 → 大模型 API 里确认一次再试。"
         }
     }
 }
@@ -218,13 +222,32 @@ final class LLMRedirectGuard: NSObject, URLSessionTaskDelegate {
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
-        if let old = task.originalRequest?.url?.host?.lowercased(),
-           let new = request.url?.host?.lowercased(), old != new {
-            // 换主机了：不跟（正文和密钥不能被转发出去）
+        // 换主机、换协议、换端口，一律不跟：
+        // 正文和凭据不能被转发到别的地方去
+        // （只比主机名是不够的：同一台机器上换个端口、或者从 https 掉到 http，
+        //   一样会把内容交到不该交的地方）
+        guard let old = task.originalRequest?.url, let new = request.url else {
+            completionHandler(nil)
+            return
+        }
+        let sameOrigin = old.scheme?.lowercased() == new.scheme?.lowercased()
+            && old.host?.lowercased() == new.host?.lowercased()
+            && Self.effectivePort(old) == Self.effectivePort(new)
+        if !sameOrigin {
             completionHandler(nil)
             return
         }
         completionHandler(request)
+    }
+
+    /// 端口没写出来的时候按协议算默认端口
+    private static func effectivePort(_ u: URL) -> Int? {
+        if let p = u.port { return p }
+        switch u.scheme?.lowercased() {
+        case "https": return 443
+        case "http": return 80
+        default: return nil
+        }
     }
 }
 
@@ -266,8 +289,21 @@ enum LLMClient {
         return "\(host)\(port)"
     }
 
+    /// 用户确认过的"明文发送"地址（按 host:port 记）
+    static var plaintextApproved: Set<String> {
+        let arr = UserDefaults.standard.stringArray(forKey: "llmPlaintextConfirmed") ?? []
+        return Set(arr)
+    }
+
+    /// 这个地址是不是已经确认过用明文发送了
+    static func isPlaintextApproved(_ base: String) -> Bool {
+        plaintextApproved.contains(endpointDescription(base))
+    }
+
     /// 发送前的检查：公网地址必须用 https；
-    /// 局域网里的自建服务可以用 http（但要用户确认过，见 LLMSettings）
+    /// 局域网里的自建服务可以用 http，但要先在设置里确认过
+    /// （确认之前一个字节都不发——连"取模型列表"也不行，
+    ///   那一次请求里带着 API Key 呢）。
     static func checkEndpoint(_ base: String) throws {
         let s = base.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let u = URL(string: s), let scheme = u.scheme?.lowercased() else {
@@ -275,7 +311,11 @@ enum LLMClient {
         }
         if scheme == "https" { return }
         if scheme == "http" {
-            if isLocalEndpoint(s) { return }     // 局域网里的自建服务，允许
+            if isLocalEndpoint(s) {
+                // 局域网里的自建服务：允许，但要用户确认过
+                guard isPlaintextApproved(s) else { throw LLMError.plaintextNotApproved }
+                return
+            }
             throw LLMError.plaintextBlocked       // 公网的明文地址，不给发
         }
         throw LLMError.badURL
@@ -297,10 +337,12 @@ enum LLMClient {
         switch p.kind {
         case .openai:
             req = URLRequest(url: try url(p.baseURL, "/models"))
-            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            // 没有 Key 就别发认证头（局域网的自建服务不需要 Key，
+            // 发一个空的头出去反而怪）
+            if !key.isEmpty { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         case .anthropic:
             req = URLRequest(url: try url(p.baseURL, "/v1/models?limit=100"))
-            req.setValue(key, forHTTPHeaderField: "x-api-key")
+            if !key.isEmpty { req.setValue(key, forHTTPHeaderField: "x-api-key") }
             req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         }
         req.timeoutInterval = 30
@@ -318,14 +360,14 @@ enum LLMClient {
         switch p.kind {
         case .openai:
             req = URLRequest(url: try url(p.baseURL, "/chat/completions"))
-            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            if !key.isEmpty { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
             body = ["model": model,
                     "temperature": 0.3,
                     "messages": [["role": "system", "content": system],
                                  ["role": "user", "content": user]]]
         case .anthropic:
             req = URLRequest(url: try url(p.baseURL, "/v1/messages"))
-            req.setValue(key, forHTTPHeaderField: "x-api-key")
+            if !key.isEmpty { req.setValue(key, forHTTPHeaderField: "x-api-key") }
             req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
             body = ["model": model,
                     "max_tokens": 8000,

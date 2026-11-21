@@ -203,8 +203,18 @@ function Die($t)  { Write-Host "!! $t" -ForegroundColor Red; exit 1 }
 
 # 列出网卡（WLAN / 以太网）各自的 IP，让用户挑一个填到手机里。
 # 不能随便取第一个：VPN、虚拟网卡、WSL 的地址都可能出现，手机连不上。
+# 模型端口（8081 / 8082）默认只让本机访问：
+# 手机是通过总服务（8000）用这两个后端的，没必要把它们暴露到局域网。
+# 确实需要直连（比如想在别的机器上单独调模型）时，
+# 设环境变量 HEAR_OPEN_MODEL_PORTS=1 再启动。
+$OpenModelPorts = ($env:HEAR_OPEN_MODEL_PORTS -eq "1")
+# 防火墙的网络类型：默认只放行「专用网络」。
+# 家里的 Wi-Fi 如果被 Windows 标成「公用网络」，手机就连不上——
+# 那就把网络类型改成「专用网络」，或者设 HEAR_FIREWALL_PROFILE=Any。
+$FirewallProfile = if ($env:HEAR_FIREWALL_PROFILE) { $env:HEAR_FIREWALL_PROFILE } else { "Private" }
+
 function Ensure-FirewallRule($ports) {
-    # 防火墙：手机连不上 8000/8081/8082，多半是 Windows 防火墙拦了入站。
+    # 防火墙：手机连不上 8000，多半是 Windows 防火墙拦了入站。
     # 管理员权限的话直接建好规则；不是管理员就把命令打印出来（复制到管理员 PowerShell 里跑一次就行）。
     $isAdmin = $false
     try {
@@ -219,15 +229,15 @@ function Ensure-FirewallRule($ports) {
             Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue |
                 Remove-NetFirewallRule -ErrorAction SilentlyContinue
             New-NetFirewallRule -DisplayName $ruleName -Direction Inbound `
-                -LocalPort $ports -Protocol TCP -Action Allow -Profile Any | Out-Null
-            Write-Host "  防火墙已放行 $($ports -join ', ')（管理员权限自动设置好了）" -ForegroundColor Green
+                -LocalPort $ports -Protocol TCP -Action Allow -Profile $FirewallProfile | Out-Null
+            Write-Host "  防火墙已放行 $($ports -join ', ')（网络类型：$FirewallProfile）" -ForegroundColor Green
             return
         } catch {
             Write-Host "  防火墙规则没建成：$($_.Exception.Message)" -ForegroundColor Yellow
         }
     }
     Write-Host "  防火墙放行：用【管理员】PowerShell 执行一次下面这行就行" -ForegroundColor Yellow
-    Write-Host "      New-NetFirewallRule -DisplayName `"Hear Cloud`" -Direction Inbound -LocalPort $($ports -join ',') -Protocol TCP -Action Allow" -ForegroundColor Yellow
+    Write-Host "      New-NetFirewallRule -DisplayName `"Hear Cloud`" -Direction Inbound -LocalPort $($ports -join ',') -Protocol TCP -Action Allow -Profile $FirewallProfile" -ForegroundColor Yellow
     Write-Host ""
 }
 
@@ -524,11 +534,17 @@ foreach ($p in @($Port, $MtPort, $ClonePort)) {
                 if ($w) { $cmd = "$($w.CommandLine)" }
             } catch { $cmd = "" }
             $ours = $false
+            $unknown = $false
             if ($cmd) {
-                $ours = ($cmd -like "*hear_cloud.py*") -or ($cmd -like "*$ServerDir*") -or ($cmd -like "*$ModelDir*")
+                # 要同时满足：是我们这个目录里的脚本 / 模型，
+                # 光是命令行里出现个同名文件不算（别的程序也可能提到它）
+                $isPython = ($cmd -like "*python*")
+                $hasScript = ($cmd -like "*hear_cloud.py*") -and ($cmd -like "*$ServerDir*")
+                $hasModel = ($owner.ProcessName -like "llama-server*") -and ($cmd -like "*$ModelDir*")
+                $ours = ($isPython -and $hasScript) -or $hasModel
             } else {
-                # 拿不到命令行（权限不够）时保守一点：只认 llama-server
-                $ours = ($owner.ProcessName -like "llama-server*")
+                # 拿不到命令行（权限不够）：没法确认是谁的，就不动它
+                $unknown = $true
             }
             if ($ours) {
                 Step "停掉占着端口 $p 的旧进程（$($owner.ProcessName)）"
@@ -537,7 +553,11 @@ foreach ($p in @($Port, $MtPort, $ClonePort)) {
                 Write-Host ""
                 Write-Host "!! 端口 $p 被别的程序占着：$($owner.ProcessName)（PID $($c.OwningProcess)）" -ForegroundColor Yellow
                 if ($cmd) { Write-Host "   它的命令行：$cmd" -ForegroundColor DarkGray }
-                Write-Host "   那是别的程序，我没动它（不该乱杀你机器上别的服务）。" -ForegroundColor Yellow
+                if ($unknown) {
+                    Write-Host "   查不到它的命令行（权限不够），没法确认是不是「听见」起的进程，所以我没动它。" -ForegroundColor Yellow
+                } else {
+                    Write-Host "   那是别的程序，我没动它（不该乱杀你机器上别的服务）。" -ForegroundColor Yellow
+                }
                 Write-Host "   把那个程序关掉再跑一次就行；" -ForegroundColor Yellow
                 Write-Host "   或者换三个端口跑：set HEAR_PORT=8010 && set HEAR_MT_PORT=8091 && set HEAR_CLONE_PORT=8092" -ForegroundColor Yellow
                 Write-Host ""
@@ -652,9 +672,12 @@ if (-not $cloneServer) { $cloneServer = Server-For "CPU" }
 if (-not $cloneServer) { Die "没找到 llama-server.exe" }
 $procs = @()
 
-# 监听 0.0.0.0（不是 127.0.0.1），这样手机才能直接连 8081 / 8082
+# 模型端口默认只监听 127.0.0.1：手机是通过总服务（$Port）用这两个后端的，
+# 把模型端口暴露到局域网没有好处（谁都能来连）。
+# 确实需要直连时设 HEAR_OPEN_MODEL_PORTS=1。
+$ModelHost = if ($OpenModelPorts) { "0.0.0.0" } else { "127.0.0.1" }
 $mtArgs = @("-m", (Join-Path $ModelDir $MtFile),
-             "--host", "0.0.0.0", "--port", $MtPort, "-c", $Context, "--no-warmup")
+             "--host", $ModelHost, "--port", $MtPort, "-c", $Context, "--no-warmup")
 if ($MtDevice -eq "NPU") {
     # OpenVINO 后端：NPU 只支持无状态执行，-np 只能是 1，-c 必须明确给
     $env:GGML_OPENVINO_DEVICE = "NPU"
@@ -673,7 +696,7 @@ $procs += $mt
 
 $cloneArgs = @("-m", (Join-Path $ModelDir $CloneModelFile),
                 "--mmproj", (Join-Path $ModelDir $CloneMmprojFile),
-                "--host", "0.0.0.0", "--port", $ClonePort, "-c", $Context, "--no-warmup")
+                "--host", $ModelHost, "--port", $ClonePort, "-c", $Context, "--no-warmup")
 if ($CloneDevice -eq "GPU") { $cloneArgs += "--device", $gpuDevice }
 
 Say "起声音克隆模型（$CloneModelFile，后端 $CloneDevice，端口 $ClonePort）"
@@ -720,7 +743,7 @@ if (-not $mtOk -and $MtDevice -ne "CPU") {
     $cpuMt = Server-For "CPU"
     if ($cpuMt) {
         $cpuArgs = @("-m", (Join-Path $ModelDir $MtFile),
-                     "--host", "0.0.0.0", "--port", $MtPort, "-c", $Context, "--no-warmup")
+                     "--host", $ModelHost, "--port", $MtPort, "-c", $Context, "--no-warmup")
         $mt = Start-Process -FilePath $cpuMt -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $mtLog -RedirectStandardError "$mtLog.err"
         $procs += $mt
@@ -736,7 +759,7 @@ if (-not $cloneOk -and $CloneDevice -ne "CPU") {
     if ($cpuClone) {
         $cpuArgs = @("-m", (Join-Path $ModelDir $CloneModelFile),
                      "--mmproj", (Join-Path $ModelDir $CloneMmprojFile),
-                     "--host", "0.0.0.0", "--port", $ClonePort, "-c", $Context, "--no-warmup")
+                     "--host", $ModelHost, "--port", $ClonePort, "-c", $Context, "--no-warmup")
         $clone = Start-Process -FilePath $cpuClone -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $cloneLog -RedirectStandardError "$cloneLog.err"
         $procs += $clone
@@ -751,7 +774,15 @@ $env:HEAR_ASR_MODEL = $AsrModel
 
 Show-LanInfo $Port
 Write-Host ""
-Ensure-FirewallRule @($Port, $MtPort, $ClonePort)
+# 防火墙只放行总服务端口：模型端口只在本机用，不需要暴露到局域网
+if ($OpenModelPorts) {
+    Ensure-FirewallRule @($Port, $MtPort, $ClonePort)
+    Write-Host "  （按你的要求，模型端口也开放了）" -ForegroundColor DarkGray
+} else {
+    Ensure-FirewallRule @($Port)
+    Write-Host "  模型端口（$MtPort / $ClonePort）只在这台电脑上用，手机是通过 $Port 访问它们的。" -ForegroundColor DarkGray
+    Write-Host "  确实需要直连的话，设 HEAR_OPEN_MODEL_PORTS=1 再启动。" -ForegroundColor DarkGray
+}
 Write-Host ""
 Write-Host "  关掉这个窗口就等于关掉服务。"
 Write-Host "  （日志文件是 UTF-8 编码，换个窗口看中文乱码的话先执行 chcp 65001）" -ForegroundColor DarkGray
@@ -766,11 +797,18 @@ try {
         if ($o.asr)   { $asrTxt   = "$($o.asr)" }
         if ($o.mt)    { $mtTxt    = "$($o.mt)" }
         if ($o.clone) { $cloneTxt = "$($o.clone)" }
+        # 新服务直接给布尔值（不用去猜文字）
+        if ($null -ne $o.asr_ready)   { $asrOk       = [bool]$o.asr_ready }
+        if ($null -ne $o.mt_ready)    { $mtOkNow     = [bool]$o.mt_ready }
+        if ($null -ne $o.clone_ready) { $cloneOkNow  = [bool]$o.clone_ready }
     }
 } catch { }
-$asrOk = $asrTxt.StartsWith("就绪") -or $asrTxt.StartsWith("外部服务")
-$mtOkNow = $mtTxt.StartsWith("就绪")
-$cloneOkNow = $cloneTxt.StartsWith("就绪")
+# 老服务没有布尔字段，才退回看文字（"外部服务连不上"不能算就绪）
+if (-not $asrOk) {
+    $asrOk = $asrTxt.StartsWith("就绪") -or ($asrTxt.StartsWith("外部服务") -and -not $asrTxt.Contains("连不上"))
+}
+if (-not $mtOkNow)    { $mtOkNow    = $mtTxt.StartsWith("就绪") }
+if (-not $cloneOkNow) { $cloneOkNow = $cloneTxt.StartsWith("就绪") }
 if ($asrOk -and $mtOkNow -and $cloneOkNow) {
     Write-Host "  模型都准备好了：识别 / 翻译 / 克隆三个接口现在都能用。" -ForegroundColor Green
 } else {

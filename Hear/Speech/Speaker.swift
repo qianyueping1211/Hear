@@ -37,6 +37,10 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     private var connectedFormat: AVAudioFormat?
     /// 这次播放有没有真的开始（只在 queue 上读写）
     private var playStarted = false
+    /// 因为超时被作废的那一代（只在 queue 上读写）。
+    /// 超时和"被人停掉"要分开：超时算失败（可以退回系统声音），
+    /// 被人停掉算取消（千万别再出声）。
+    private var timedOutGen: Int?
     /// 引擎启动时的"会话停用代数"（只在 queue 上读写）
     private var engineGen = -1
     private var currentPan: Float = 0
@@ -78,6 +82,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             currentPan = req.pan
             usingEngine = engineMode
             current = u
+            timedOutGen = nil
             return generation
         }
         // 超时：按字数估一个很宽松的时长
@@ -95,10 +100,10 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             queue.asyncAfter(deadline: .now() + limit) { [weak self] in
                 guard let self, gen == self.generation, self.continuation != nil else { return }
                 hearLog("朗读：超过 \(Int(limit)) 秒没有结束，自动跳过", .warning)
-                // 光把等待方叫醒不够：声音还在放。
-                // 先把这一次播放作废、声音停掉，再叫醒等待方。
-                self.stopPlayback(gen: gen)
+                // 先把等待方叫醒（作废会把代数改掉，顺序反了 resume 就叫不醒了），
+                // 再把这一次播放作废、声音停掉。
                 self.resume(gen)
+                self.stopPlayback(gen: gen, timedOut: true)
             }
         }
         AudioRoute.speaking = false
@@ -143,6 +148,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             usingEngine = true
             current = nil
             playStarted = false
+            timedOutGen = nil
             return generation
         }
         let limit = 5 + Double(samples.count) / sr * 1.5
@@ -176,13 +182,18 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             queue.asyncAfter(deadline: .now() + limit) { [weak self] in
                 guard let self, gen == self.generation, self.continuation != nil else { return }
                 hearLog("朗读：克隆声音播放超时，自动跳过", .warning)
-                self.stopPlayback(gen: gen)     // 声音也要停，不能只叫醒等待方
-                self.resume(gen)
+                self.resume(gen)                 // 先叫醒等待方
+                self.stopPlayback(gen: gen, timedOut: true)   // 声音也要停
             }
         }
-        let started = queue.sync { playStarted }
-        // 代数变了 = 播放途中被人 stop() 了（用户停了朗读，或者切到后台）
-        let cancelled = queue.sync { gen != generation }
+        // 结果分三种：正常播了 / 超时或起不来（失败，可以退回系统声音）/
+        // 被人中途停掉（取消，千万别再出声）
+        let outcome: PlayOutcome = queue.sync {
+            if timedOutGen == gen { return .failed }        // 超时
+            if gen != generation { return .cancelled }     // 被人停了
+            return playStarted ? .played : .failed
+        }
+        let started = outcome == .played
         if started {
             hearLog("朗读：克隆声音 \(String(format: "%.1f", Double(samples.count) / sr)) 秒，\(Int(sr)) Hz，峰值 \(String(format: "%.2f", peak))")
         }
@@ -190,8 +201,7 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         stopEngineIfIdle()
         onPlaybackFinished?()
-        if cancelled { return .cancelled }
-        return started ? .played : .failed
+        return outcome
     }
 
     /// 现在有没有在出声（用来判断能不能放开麦克风）
@@ -235,12 +245,17 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
 
     /// 把这一次播放作废：声音停掉、后面的缓冲回调也作废。
     ///
-    /// 只能在 queue 上调用。**不动 generation**：
-    /// 外面（play 结束以后）还要用这一代数判断"是不是被人中途停掉的"，
-    /// 这里自己改掉的话，外面就分不清"超时"和"被取消"了，
-    /// 超时的时候就没法退回系统朗读。
-    private func stopPlayback(gen: Int) {
+    /// 只能在 queue 上调用。
+    ///
+    /// **代数要改**：单耳朗读是用 synth.write 合成声音的，
+    /// 合成是异步的——超时以后迟到的缓冲还会送过来。
+    /// 不作废这一代，那些缓冲照样进播放器，声音就又冒出来了。
+    /// 超时和"被人停掉"用 timedOutGen 分开：
+    /// 超时算失败（外面可以退回系统声音），被停掉算取消（千万别再出声）。
+    private func stopPlayback(gen: Int, timedOut: Bool = false) {
         guard gen == generation else { return }
+        if timedOut { timedOutGen = gen }
+        generation += 1
         current = nil
         playStarted = false
         if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }

@@ -38,6 +38,12 @@ final class AppLog: ObservableObject {
     @Published var enabled: Bool {
         didSet { UserDefaults.standard.set(enabled, forKey: "logEnabled") }
     }
+    /// 记不记用户说的话（识别出来的原文、译文）。
+    /// 默认不记：日志经常被导出、发给别人看，里面留着原话不合适。
+    /// 排查问题时可以自己打开。
+    @Published var contentEnabled: Bool {
+        didSet { UserDefaults.standard.set(contentEnabled, forKey: "logContentEnabled") }
+    }
     @Published var maxMB: Int {
         didSet { UserDefaults.standard.set(maxMB, forKey: "logMaxMB"); rotateIfNeeded() }
     }
@@ -57,6 +63,7 @@ final class AppLog: ObservableObject {
         fileURL = docs.appendingPathComponent("hear-log.txt")
         oldURL = docs.appendingPathComponent("hear-log.old.txt")
         enabled = UserDefaults.standard.object(forKey: "logEnabled") as? Bool ?? true
+        contentEnabled = UserDefaults.standard.object(forKey: "logContentEnabled") as? Bool ?? false
         maxMB = UserDefaults.standard.object(forKey: "logMaxMB") as? Int ?? 100
         loadTail()
     }
@@ -243,6 +250,19 @@ func hearLog(_ message: String, _ level: LogLevel = .info) {
         AppLog.appendDirect(message, level)
     }
     Task { @MainActor in AppLog.shared.add(message, level: level, saveToFile: false) }
+}
+
+/// 记一条带"用户说的话"的日志（识别出来的原文、译文）。
+///
+/// 默认只记"发生了什么"，不记原话：
+/// 日志是要导出、发给别人看的，里面留着说的话不合适。
+/// 要看得在 设置 → 日志 里打开「记录对话内容」。
+func hearLogText(_ prefix: String, _ content: String, _ level: LogLevel = .info) {
+    if UserDefaults.standard.bool(forKey: "logContentEnabled") {
+        hearLog(prefix + content, level)
+    } else {
+        hearLog(prefix + "（内容没记：在 设置 → 日志 里打开「记录对话内容」才看得到）", level)
+    }
 }
 
 /// 关键节点日志：立刻同步落盘。

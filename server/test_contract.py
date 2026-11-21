@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """云端服务的"接口契约"自测。
 
-目的：保证 App 和服务之间的约定不会悄悄变。
-每次改完 server/ 都要跑一遍（CI 里也会跑）。
-
-测的是"约定"，不是模型效果：这里不真的跑识别/翻译/克隆，
-只检查接口的形状、错误处理和边界情况。
+测的是"约定"，不是模型效果：
+合法的 WAV 必须能拿到 200 + text + lang（用替身识别，不装模型也能测），
+格式不对的必须给约定的错误码，边界情况不能把服务搞崩。
 
     python3 server/test_contract.py
 """
@@ -19,13 +17,16 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 import wave
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get("HEAR_CONTRACT_PORT", "8199"))
+STUB_PORT = PORT + 1
 BASE = "https://127.0.0.1:%d" % PORT
 
 FAILED = []
@@ -74,20 +75,80 @@ def make_wav(seconds=1.0, rate=16000):
     return buf.getvalue()
 
 
-def main():
-    tmp = tempfile.mkdtemp(prefix="hear-contract-")
+class StubASR(BaseHTTPRequestHandler):
+    """替身识别服务：假装自己会识别（这样 CI 里不用装模型也能测）"""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        body = b'{"status":"ok"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        body = json.dumps({"text": "这是替身识别出来的文字", "language": "zh"}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def start_service(tmp, port, asr_url=""):
     env = dict(os.environ)
-    env["HEAR_PORT"] = str(PORT)
+    env["HEAR_PORT"] = str(port)
     env["HEAR_TLS_CERT"] = os.path.join(tmp, "cert.pem")
     env["HEAR_TLS_KEY"] = os.path.join(tmp, "key.pem")
     env["HEAR_ROOT_CERT"] = os.path.join(tmp, "root.pem")
     env["HEAR_ROOT_KEY"] = os.path.join(tmp, "root.key")
     env["HEAR_SENSEVOICE_DIR"] = os.path.join(tmp, "sensevoice")
     env["PYTHONUTF8"] = "1"
-
-    print("start service (port %d, tmp %s) ..." % (PORT, tmp))
+    if asr_url:
+        env["HEAR_ASR_URL"] = asr_url
+    else:
+        env.pop("HEAR_ASR_URL", None)
     proc = subprocess.Popen([sys.executable, os.path.join(HERE, "hear_cloud.py")],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    for _ in range(60):
+        code, _ = req("/health", timeout=3) if port == PORT else (0, b"")
+        if port == PORT:
+            if code == 200:
+                return proc
+        else:
+            # 换个端口就换个 BASE：直接看进程活没活
+            if proc.poll() is None:
+                time.sleep(0.5)
+                if proc.poll() is None:
+                    return proc
+        time.sleep(0.5)
+    return proc
+
+
+def stop_service(proc):
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def main():
+    global BASE
+    tmp = tempfile.mkdtemp(prefix="hear-contract-")
+    wav = make_wav()
+
+    # ============================================================ 第一轮：本机识别（没装模型）
+    print("== round 1: service without an external recognizer ==")
+    proc = start_service(tmp, PORT)
     try:
         ready = False
         for _ in range(60):
@@ -105,7 +166,7 @@ def main():
                 pass
             return 1
 
-        print("\n== /health ==")
+        print("\n-- /health --")
         code, data = req("/health")
         check("/health returns 200", code == 200, "got %d" % code)
         try:
@@ -114,10 +175,13 @@ def main():
                   "got %s" % list(h.keys()))
             check("/health has asr_schemes (App builds the scheme list from it)",
                   "asr_schemes" in h, "(older servers do not have it)")
+            check("/health has machine-readable readiness flags",
+                  all(k in h for k in ("asr_ready", "mt_ready", "clone_ready")),
+                  "got %s" % list(h.keys()))
         except Exception as e:
             check("/health returns JSON", False, str(e))
 
-        print("\n== /v1/pair ==")
+        print("\n-- /v1/pair --")
         code, data = req("/v1/pair")
         check("/v1/pair returns 200", code == 200, "got %d" % code)
         try:
@@ -127,24 +191,12 @@ def main():
         except Exception as e:
             check("/v1/pair returns JSON", False, str(e))
 
-        print("\n== /v1/asr ==")
-        wav = make_wav()
-        code, data = req("/v1/asr", method="POST", body=wav, ctype="audio/wav",
-                         headers={"X-Languages": "zh,en"})
-        check("posting wav does not crash the service", code in (200, 400, 500), "got %d" % code)
-        try:
-            j = json.loads(data.decode("utf-8"))
-            check("response is JSON (text or error)", ("text" in j) or ("error" in j),
-                  "got %s" % list(j.keys()))
-        except Exception as e:
-            check("response is JSON", False, str(e))
+        print("\n-- /v1/asr with a broken body --")
+        code, data = req("/v1/asr", method="POST", body=b"this is not a wav file",
+                         ctype="audio/wav")
+        check("a broken body returns 400 (not a 500)", code == 400, "got %d" % code)
 
-        code, data = req("/v1/asr", method="POST",
-                         body=json.dumps({"audio": "AAAA"}).encode("utf-8"))
-        check("posting JSON (wrong format) does not break it", code in (200, 400, 500),
-              "got %d" % code)
-
-        print("\n== /v1/clone/reference ==")
+        print("\n-- /v1/clone/reference --")
         code, data = req("/v1/clone/reference", method="POST", body=wav, ctype="audio/wav")
         check("storing a reference returns 200", code == 200, "got %d" % code)
         try:
@@ -153,7 +205,7 @@ def main():
         except Exception as e:
             check("response is JSON", False, str(e))
 
-        print("\n== limits ==")
+        print("\n-- limits --")
         try:
             c = ssl.create_default_context()
             c.check_hostname = False
@@ -177,15 +229,55 @@ def main():
         code, data = req("/")
         check("built-in console (GET /) returns 200", code == 200, "got %d" % code)
     finally:
+        stop_service(proc)
+
+    # ============================================================ 第二轮：替身识别
+    print("\n== round 2: service with a stub recognizer ==")
+    stub = ThreadingHTTPServer(("127.0.0.1", STUB_PORT), StubASR)
+    threading.Thread(target=stub.serve_forever, daemon=True).start()
+    tmp2 = tempfile.mkdtemp(prefix="hear-contract-stub-")
+    proc2 = start_service(tmp2, PORT, asr_url="http://127.0.0.1:%d" % STUB_PORT)
+    try:
+        ready = False
+        for _ in range(60):
+            code, _ = req("/health", timeout=3)
+            if code == 200:
+                ready = True
+                break
+            time.sleep(0.5)
+        if not ready:
+            print("service (stub) did not start")
+            return 1
+
+        code, data = req("/health")
         try:
-            proc.terminate()
-            proc.wait(timeout=5)
+            h = json.loads(data.decode("utf-8"))
+            check("asr_ready is true (the stub recognizer is up)", h.get("asr_ready") is True,
+                  "got %r" % h.get("asr_ready"))
+        except Exception as e:
+            check("/health returns JSON", False, str(e))
+
+        print("\n-- /v1/asr with a valid wav --")
+        code, data = req("/v1/asr", method="POST", body=wav, ctype="audio/wav",
+                         headers={"X-Languages": "zh,en"})
+        check("a valid wav returns 200", code == 200, "got %d: %s" % (code, data[:120]))
+        try:
+            j = json.loads(data.decode("utf-8"))
+            check("the response has text", isinstance(j.get("text"), str), "got %s" % list(j.keys()))
+            check("the response has lang", isinstance(j.get("lang"), str), "got %s" % list(j.keys()))
+            check("the text is what the recognizer returned",
+                  j.get("text") == "这是替身识别出来的文字", "got %r" % j.get("text"))
+        except Exception as e:
+            check("the response is JSON", False, str(e))
+    finally:
+        stop_service(proc2)
+        try:
+            stub.shutdown()
         except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        shutil.rmtree(tmp, ignore_errors=True)
+            pass
+        shutil.rmtree(tmp2, ignore_errors=True)
+
+    shutil.rmtree(tmp, ignore_errors=True)
 
     print("\npassed %d, failed %d" % (len(PASSED), len(FAILED)))
     if FAILED:

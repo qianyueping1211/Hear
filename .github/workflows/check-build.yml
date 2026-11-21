@@ -78,7 +78,10 @@ jobs:
 
       - name: Build
         run: |
-          set -o pipefail
+          # 一定要留住 xcodebuild 的退出码：
+          # 以前用 `| tee | grep ... || true`，退出码被吞了，
+          # 只能靠"产物在不在"来判断——有的失败场景会误判成成功。
+          RC=0
           xcodebuild \
             -project Hear.xcodeproj \
             -scheme Hear \
@@ -89,9 +92,10 @@ jobs:
             -skipPackagePluginValidation \
             -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build | tee build.log | grep -E "error:|BUILD" || true
-          if ! test -f build/Build/Products/Release-iphoneos/Hear.app/Hear; then
-            echo "::error::编译失败，错误如下："
+            build > build.log 2>&1 || RC=$?
+          grep -E "error:|BUILD" build.log | tail -30 || true
+          if [ "$RC" -ne 0 ] || ! test -f build/Build/Products/Release-iphoneos/Hear.app/Hear; then
+            echo "::error::编译失败（xcodebuild 退出码 $RC），错误如下："
             grep -E "error:" build.log | sed 's|.*/Hear/Hear/||' | sort -u | head -40
             exit 1
           fi

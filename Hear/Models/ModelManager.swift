@@ -117,6 +117,16 @@ enum ModelManager {
         let url = URL(string: "https://\(host)/\(ggufRepo)/resolve/main/\(encoded)")!
         let dst = modelsDir.appendingPathComponent((file as NSString).lastPathComponent)
         try await FileDownloader().download(url, to: dst, progress: progress)
+        // 下完了先验一验：这到底是不是 GGUF 模型。
+        // 有些地址会返回 HTTP 200 但内容是个网页或者一段提示——
+        // 那种文件装上去，模型加载时才炸，排查起来很麻烦。
+        do {
+            try checkGGUF(dst)
+        } catch {
+            try? FileManager.default.removeItem(at: dst)
+            throw NSError(domain: "Hear", code: 6, userInfo: [NSLocalizedDescriptionKey:
+                "下下来的不是模型文件（开头不是 GGUF），已经删掉了，没动原来那个模型"])
+        }
         select(dst)
         return dst
     }

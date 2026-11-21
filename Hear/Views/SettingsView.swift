@@ -220,14 +220,16 @@ struct SettingsView: View {
                 // MARK: 云端证书（严格模式 / 配对）
                 Section {
                     Toggle("严格模式（只连配对过的电脑）", isOn: $session.cloudStrictMode)
+                    // 配对按钮一直能看到：
+                    // 想先配对再开严格模式的话，得有个入口。
+                    Button("跟这台电脑配对") {
+                        Task { await session.pairWithCloudService() }
+                    }
+                    if !session.cloudRootFingerprint.isEmpty {
+                        LabeledContent("已配对的证书指纹", value: session.cloudRootFingerprint)
+                            .font(.footnote)
+                    }
                     if session.cloudStrictMode {
-                        Button("跟这台电脑配对") {
-                            Task { await session.pairWithCloudService() }
-                        }
-                        if !session.cloudRootFingerprint.isEmpty {
-                            LabeledContent("已配对的证书指纹", value: session.cloudRootFingerprint)
-                                .font(.footnote)
-                        }
                         Text("配对以后，只有这台电脑签出来的证书才认。它换网络、换 IP 重新签证书都不用再配对；别的电脑拿别的证书来冒充会被拒绝。")
                             .font(.caption).foregroundStyle(.secondary)
                     } else {
@@ -327,6 +329,9 @@ struct SettingsView: View {
                 // MARK: 日志
                 Section {
                     Toggle("开启日志", isOn: $log.enabled)
+                    Toggle("记录对话内容（排查问题时用）", isOn: $log.contentEnabled)
+                    Text("关着的时候日志里只有状态和耗时，不留你说的话。日志经常要导出发给别人看，默认不记内容更稳妥。")
+                        .font(.caption).foregroundStyle(.secondary)
                     Picker("最大日志文件大小", selection: $log.maxMB) {
                         ForEach(AppLog.sizeOptions, id: \.self) { mb in
                             Text("\(mb) MB").tag(mb)

@@ -9,6 +9,7 @@ final class Segmenter {
         var maxSeconds: Double = 15       // 单句最长时长
         var partialEvery: Double = 0.4    // 说话中每隔多久给一次中间结果（秒）
         var minSpeechMs: Int = 400        // 太短的声音忽略（咳嗽、碰撞声等）
+        var holdMode: Bool = false         // 按住说话：门槛放低（短回答也要认出来）
     }
 
     enum Event {
@@ -115,7 +116,11 @@ final class Segmenter {
             } else {
                 voicedRun = 0
             }
-            if voicedRun >= 5 {           // 连续 150ms 都高于阈值才算开始说话，减少误触发
+            // 连续高于阈值多久才算开始说话。
+            // 按住说话时（holdMode）门槛放低：用户是故意按着按钮的，
+            // "好""是"这种一两百毫秒的回答也得收进来。
+            let triggerFrames = config.holdMode ? 3 : 5
+            if voicedRun >= triggerFrames {
                 inSpeech = true
                 segID += 1
                 speech = preroll

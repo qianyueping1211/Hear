@@ -111,6 +111,30 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
         return strict
     }
 
+    /// 正在"配对"：这一次连接允许自签证书。
+    /// （配对的时候还没确认过指纹，根也就还没存下来，
+    ///   要是还按严格模式来，就连不上了——配对也就无从谈起。
+    ///   这一次只取一根证书，不发任何对话内容。）
+    private static var pairing = false
+
+    static func beginPairing() {
+        hostLock.lock()
+        pairing = true
+        hostLock.unlock()
+    }
+
+    static func endPairing() {
+        hostLock.lock()
+        pairing = false
+        hostLock.unlock()
+    }
+
+    static var pairingMode: Bool {
+        hostLock.lock()
+        defer { hostLock.unlock() }
+        return pairing
+    }
+
     /// 记住配对过的签发根（DER）
     static func pinRoot(_ der: Data) {
         hostLock.lock()
@@ -150,18 +174,23 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
             return
         }
         let host = challenge.protectionSpace.host
-        if Self.strictModeEnabled, let cert = SecTrustGetCertificateAtIndex(trust, 0),
-           let strictTrust = Self.evaluateAgainstPinnedRoot(cert, host: host) {
-            // 严格模式：这台电脑的证书过了（根是配对过的那个）
-            completionHandler(.useCredential, URLCredential(trust: strictTrust))
+        let userLocal = Self.isUserLocalHost(host)
+        // 严格模式只管"用户自己填的内网地址"：
+        // 公网地址照常走系统证书校验（不能因为开了严格模式就把公网服务也毙了）。
+        // 配对中的这一次是例外：还没确认指纹，先让它连上（只取证书，不发内容）。
+        if Self.strictModeEnabled, !Self.pairingMode, userLocal {
+            if let cert = SecTrustGetCertificateAtIndex(trust, 0),
+               let strictTrust = Self.evaluateAgainstPinnedRoot(cert, host: host) {
+                // 严格模式：这台电脑的证书过了（根是配对过的那个）
+                completionHandler(.useCredential, URLCredential(trust: strictTrust))
+            } else {
+                // 不是配对过的那台电脑：一律拒绝。
+                // 不能退回系统信任——那等于把"严格"又变回"看系统脸色"。
+                completionHandler(.cancelAuthenticationChallenge, nil)
+            }
             return
         }
-        if Self.strictModeEnabled {
-            // 严格模式：不是配对过的那台电脑，一律拒绝
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-        if Self.isUserLocalHost(host) {
+        if userLocal {
             // 内网自签证书：把证书本身当成自己的根，并且不校验主机名。
             // （证书里的 IP 是生成证书那一刻的，电脑换了网络、IP 变了，
             //   旧证书里就没有新 IP，手机会直接拒绝：
@@ -522,6 +551,11 @@ actor CloudClient {
         guard !s.isEmpty, let url = URL(string: s + "/v1/pair") else { throw CloudError.notConfigured }
         var req = URLRequest(url: url)
         req.timeoutInterval = 10
+        // 配对这一次临时按兼容模式放行自签证书：
+        // 还没配过的电脑，在严格模式下是连不上的（那就没法配对了）。
+        // 这一次只取一根证书，不发任何对话内容。
+        LocalServerTrust.beginPairing()
+        defer { LocalServerTrust.endPairing() }
         let (data, resp) = try await CloudClient.session.data(for: req)
         guard (200..<300).contains((resp as? HTTPURLResponse)?.statusCode ?? 0) else {
             throw CloudError.badResponse("服务没有回应（是不是地址填错了？）")
@@ -754,7 +788,13 @@ actor CloudClient {
         var lastError: Error = CloudError.notConfigured
         var sawOnlyModelService = false
         var attempted = false
+        // 预览只有一个总时限：探测、回退、加起来都不能超过它。
+        // （以前每个地址各等 12 秒，两个地址就是 24 秒——
+        //   屏幕上还是省略号，用户早就等不下去了。）
+        let deadline = preview ? Date().addingTimeInterval(12) : nil
         for addr in candidateAddresses(asrAddress) {
+            // 总时限到了就别再试下一个地址了
+            if let d = deadline, Date() >= d { break }
             // 单独的 llama-server 没有识别接口，识别只能用 8000 的总服务
             if await kind(of: addr) == .llamaServer {
                 sawOnlyModelService = true
@@ -765,8 +805,10 @@ actor CloudClient {
                 let wav = Wav.encode(samples: samples, sampleRate: 16_000)
                 // 预览要快：给个短超时，而且不重试
                 // （整句那种慢请求要是排在这里，后面的原文预览就都被它堵住了）
+                // 这一次请求最多只能用"总时限里还剩下的时间"
+                let budget: TimeInterval = deadline.map { max(2, $0.timeIntervalSinceNow)) } ?? 120
                 var req = try makeRequest("/v1/asr", address: addr, method: "POST", body: wav,
-                                          contentType: "audio/wav", timeout: preview ? 12 : 120)
+                                          contentType: "audio/wav", timeout: preview ? budget : 120)
                 req.setValue(candidates.joined(separator: ","), forHTTPHeaderField: "X-Languages")
                 req.setValue(fallback, forHTTPHeaderField: "X-Fallback-Language")
                 // 告诉服务端用哪个识别方案

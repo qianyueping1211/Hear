@@ -83,8 +83,49 @@ _whisper_lock = threading.Lock()
 _whisper_state = {"status": "未加载", "detail": ""}
 
 
+# 日志里要不要记用户说的话（识别出来的原文、译文）。
+# 默认不记：日志会留在电脑上，也容易被复制走。
+# 要看得设环境变量 HEAR_LOG_CONTENT=1。
+LOG_CONTENT = os.environ.get("HEAR_LOG_CONTENT", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# 推理并发上限：同时在跑的识别/翻译/克隆请求最多几个。
+# 多了的话手机会互相拖慢（模型是同一个），也可能把内存撑爆。
+# 0 = 不限制（自己知道机器扛得住再说）。
+MAX_INFLIGHT = int(os.environ.get("HEAR_MAX_INFLIGHT", "2"))
+_inflight = 0
+_inflight_lock = threading.Lock()
+
+
+def inflight_enter():
+    """占一个并发名额；返回 False 表示太满了（这次不接）。"""
+    global _inflight
+    if MAX_INFLIGHT <= 0:
+        return True
+    with _inflight_lock:
+        if _inflight >= MAX_INFLIGHT:
+            return False
+        _inflight += 1
+        return True
+
+
+def inflight_leave():
+    global _inflight
+    with _inflight_lock:
+        if _inflight > 0:
+            _inflight -= 1
+
+
 def log(*args):
     print("[听见]", *args, flush=True)
+
+
+def log_text(prefix, content):
+    """记一条带内容的话：默认把内容藏起来。"""
+    if LOG_CONTENT:
+        log("%s%s" % (prefix, content))
+    else:
+        log("%s（内容没记：设 HEAR_LOG_CONTENT=1 才记）" % prefix)
 
 
 def primary_ip():
@@ -415,7 +456,7 @@ def recognize(samples, rate, language, fallback, scheme=None, preview=False):
             return (slow_text, slow_lang or fallback)
         # 两个结果不一样就以 Whisper 为准，一样就用 SenseVoice 的（更快）
         if fast_text != slow_text:
-            log("Whisper 修正：「%s」→「%s」" % (fast_text[:30], slow_text[:30]))
+            log_text("Whisper 修正：「", "%s」→「%s」" % (fast_text[:30], slow_text[:30]))
             return (slow_text, slow_lang or fast_lang or fallback)
         return (fast_text, fast_lang or slow_lang or fallback)
 
@@ -722,6 +763,15 @@ a{color:#007aff;text-decoration:none}
                 out["clone_model"] = m
                 if "tts" not in m.lower():
                     out["clone"] += " 模型不对！应该是 Qwen3-TTS"
+        # 机器能判定的就绪状态（启动脚本、App 都看这个）：
+        # 别去猜"就绪""外部服务"这些字——
+        # "外部服务连不上"开头也是"外部服务"，按字面判就会把连不上的当成能用。
+        if ASR_URL:
+            out["asr_ready"] = backend_alive(ASR_URL)
+        else:
+            out["asr_ready"] = (_whisper_state.get("status", "") == "就绪")
+        out["mt_ready"] = (backend_state(MT_URL) == "就绪")
+        out["clone_ready"] = (backend_state(CLONE_URL) == "就绪")
         return out
 
     def send_error(self, code, message=None, explain=None):
@@ -742,14 +792,32 @@ a{color:#007aff;text-decoration:none}
             return
         try:
             if self.path.startswith("/v1/asr"):
-                self.asr(body)
+                if not inflight_enter():
+                    self._error("同时在跑的识别太多了，等一下再试", 503)
+                    return
+                try:
+                    self.asr(body)
+                finally:
+                    inflight_leave()
             elif self.path.startswith("/v1/translate"):
-                self.translate(body)
+                if not inflight_enter():
+                    self._error("同时在跑的翻译太多了，等一下再试", 503)
+                    return
+                try:
+                    self.translate(body)
+                finally:
+                    inflight_leave()
             elif self.path.startswith("/v1/clone/reference"):
                 # 注意：必须排在 /v1/clone 前面（这个路径也是 /v1/clone 开头）
                 self.clone_reference(body)
             elif self.path.startswith("/v1/clone"):
-                self.clone(body)
+                if not inflight_enter():
+                    self._error("同时在跑的克隆太多了，等一下再试", 503)
+                    return
+                try:
+                    self.clone(body)
+                finally:
+                    inflight_leave()
             else:
                 self._error("没有这个接口", 404)
         except (BrokenPipeError, ConnectionResetError):
@@ -774,12 +842,18 @@ a{color:#007aff;text-decoration:none}
         if ASR_URL:
             text, lang = self.asr_proxy(body, langs, fallback)
         else:
-            samples, rate = decode_wav(body)
+            try:
+                samples, rate = decode_wav(body)
+            except Exception as e:
+                # 音频格式不对：这是请求的问题（400），不是服务崩了（500）。
+                # 手机发错了格式的时候，要能一眼看出是哪边的问题。
+                self._error("音频格式不对：%s（要 16 位 wav）" % e, 400)
+                return
             language = langs[0] if len(langs) == 1 else None
             # 预览只要快：组合方案下只用 SenseVoice，不跑 Whisper 修正
             preview = (self.headers.get("X-ASR-Preview") or "").strip() == "1"
             text, lang = recognize(samples, rate, language, fallback, scheme, preview)
-        log("识别（%s）%.1fs：%s" % (scheme, time.time() - t0, text[:40]))
+        log_text("识别（%s）%.1fs：" % (scheme, time.time() - t0), text[:40])
         self._send_json({"lang": lang or fallback, "text": text})
 
     def asr_proxy(self, body, langs, fallback):
@@ -819,7 +893,7 @@ a{color:#007aff;text-decoration:none}
         raw = http_json(MT_URL + "/v1/chat/completions", payload, timeout=300)
         obj = json.loads(raw.decode("utf-8"))
         text = obj["choices"][0]["message"]["content"]
-        log("翻译 %.1fs：%s" % (time.time() - t0, text[:40]))
+        log_text("翻译 %.1fs：" % (time.time() - t0), text[:40])
         self._send_json({"text": text})
 
     # -- 声音克隆 --
