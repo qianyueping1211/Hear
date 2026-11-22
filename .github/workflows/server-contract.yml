@@ -34,8 +34,8 @@ jobs:
         run: |
           $tokens = $null
           $errors = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path 'server/start-windows.ps1'), [ref]$tokens, [ref]$errors)
+          $source = [IO.File]::ReadAllText((Resolve-Path 'server/start-windows.ps1'), [Text.Encoding]::UTF8)
+          [void][System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
           if ($errors.Count) { throw ($errors -join [Environment]::NewLine) }
           cmd /d /c "start-hear-cloud.bat --check"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

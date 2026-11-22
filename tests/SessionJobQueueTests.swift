@@ -43,6 +43,7 @@ struct SessionJobQueueTests {
         try testTranslationRevision()
         try testCurrentSegmentTranslation()
         testSpeechGating()
+        testConversationMerge()
         print("Session queue regressions passed")
     }
 
@@ -78,6 +79,23 @@ struct SessionJobQueueTests {
         let decoded = try JSONDecoder().decode([TranslationItem].self, from: data)
         precondition(decoded == items, "Speaker edits should survive persistence")
     }
+}
+
+private func testConversationMerge() {
+    let chinese = Language.find("zh"), english = Language.find("en")
+    let item = TranslationItem(source: chinese, target: english, sourceText: "好",
+                               translated: "Okay", done: true, speakerID: 1)
+    let base = Conversation(title: "测试对话", langA: chinese, langB: english, items: [item])
+    var local = base, remote = base
+    local.items[0].speakerName = "小林"
+    remote.items[0].translated = "All right"
+    remote.summaries["example"] = SummaryRecord(status: .done, content: "Meeting recap")
+    let merged = local.merging(remote, from: base)
+    precondition(!merged.conflict && merged.conversation.items[0].speakerName == "小林")
+    precondition(merged.conversation.items[0].translated == "All right")
+    precondition(merged.conversation.summaries["example"]?.content == "Meeting recap")
+    remote.items[0].speakerName = "小王"
+    precondition(local.merging(remote, from: base).conflict, "Both edits to the same speaker must be preserved as a conflict")
 }
 
 private func testSpeechGating() {

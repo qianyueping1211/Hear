@@ -420,7 +420,7 @@ final class LiveSession: ObservableObject {
     private let translationQueue = SessionJobQueue<MTJob>()
     /// itemID → 当前有效的任务令牌
     private var jobTokens: [UUID: UUID] = [:]
-    private var queuedTranslationIDs: Set<UUID> = []
+    private var queuedTranslationPages: [UUID: UUID] = [:]
     private var runGen = 0                // 每次停止 +1：停止前排队/进行中的识别和翻译全部作废
     private var working: Bool { !recognitionQueue.isIdle }
     private var currentSeg = 0
@@ -1833,10 +1833,16 @@ final class LiveSession: ObservableObject {
         correctionTask?.cancel()
         if keepTranslations {
             // 正常停录让已提交的译文继续；作废尚未交给翻译线的旧识别任务。
-            jobTokens = jobTokens.filter { queuedTranslationIDs.contains($0.key) }
+            jobTokens = jobTokens.filter { queuedTranslationPages[$0.key] != nil }
         } else {
             translationQueue.cancel()
-            queuedTranslationIDs.removeAll()
+            let store = ConversationStore.shared
+            for (id, page) in queuedTranslationPages where page != conversationID {
+                guard let item = store.load(page)?.items.first(where: { $0.id == id }) else { continue }
+                store.commitTranslation(conversationID: page, itemID: id, expectedSource: item.sourceText,
+                                        translation: "（翻译失败：收尾任务已中断）", done: true)
+            }
+            queuedTranslationPages.removeAll()
             jobTokens.removeAll()
             translator.cancelCurrent()
         }
@@ -1889,7 +1895,7 @@ final class LiveSession: ObservableObject {
     private func finishUnfinished() {
         for index in items.indices where !items[index].done {
             let item = items[index]
-            guard !queuedTranslationIDs.contains(item.id) else { continue }
+            guard queuedTranslationPages[item.id] == nil else { continue }
             guard Self.hasRealText(item.sourceText) else {
                 items[index].sourceText = "（这段识别未完成）"
                 items[index].applyTranslation("（翻译失败：没有可用原文）", done: true)
@@ -2720,7 +2726,7 @@ final class LiveSession: ObservableObject {
 
     private func enqueueTranslation(_ job: MTJob) {
         let page = conversationID
-        queuedTranslationIDs.insert(job.itemID)
+        queuedTranslationPages[job.itemID] = page
         translationQueue.submit(job) { [weak self] job in
             await self?.translateItem(job, conversation: page)
         } timedOut: { [weak self] job in
@@ -2728,7 +2734,7 @@ final class LiveSession: ObservableObject {
             self.applyTranslation(job.itemID, "（翻译失败：这一句等太久了）", done: true,
                                   conversation: page, expectedSource: job.text)
             self.jobTokens[job.itemID] = nil
-            self.queuedTranslationIDs.remove(job.itemID)
+            self.queuedTranslationPages[job.itemID] = nil
             self.activity = self.isRunning ? "正在聆听" : ""
             self.kickReader()
         }
@@ -2741,7 +2747,7 @@ final class LiveSession: ObservableObject {
         let rows = conversation == conversationID ? items : (ConversationStore.shared.load(conversation)?.items ?? [])
         guard let index = rows.firstIndex(where: { $0.id == id && $0.sourceText == job.text }) else {
             jobTokens[id] = nil
-            queuedTranslationIDs.remove(id)
+            queuedTranslationPages[id] = nil
             return
         }
         let hasPreview = !rows[index].translated.isEmpty
@@ -2787,7 +2793,7 @@ final class LiveSession: ObservableObject {
 
     private func completeTranslation(_ job: MTJob, _ result: String, conversation: UUID) {
         jobTokens[job.itemID] = nil
-        queuedTranslationIDs.remove(job.itemID)
+        queuedTranslationPages[job.itemID] = nil
         applyTranslation(job.itemID, result, done: true, conversation: conversation, expectedSource: job.text)
         if conversation == conversationID {
             activity = isRunning ? "正在聆听" : ""
@@ -3251,7 +3257,7 @@ final class LiveSession: ObservableObject {
         let convID = conversationID
         items[i].sourceText = text
         jobTokens[id] = nil
-        queuedTranslationIDs.remove(id)
+        queuedTranslationPages[id] = nil
         items[i].done = true
         items[i].beginTranslationRevision()
         // 版本号 +1：前一次翻译回来的时候版本对不上，就不要了

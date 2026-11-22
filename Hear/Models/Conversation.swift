@@ -1,38 +1,5 @@
 import Foundation
 
-/// 某个模板生成的总结
-struct SummaryRecord: Codable, Equatable {
-    enum Status: String, Codable { case generating, done, failed }
-
-    var status: Status
-    var content: String = ""
-    var error: String? = nil
-    var model: String? = nil
-    var edited = false
-    var updatedAt = Date()
-}
-
-/// 一次完整的对话（一页）
-struct Conversation: Codable, Identifiable, Equatable {
-    var id = UUID()
-    var title: String
-    var createdAt = Date()
-    var updatedAt = Date()
-    var langA: Language
-    var langB: Language
-    var items: [TranslationItem] = []
-    /// 每个模板各自的总结结果，key 是模板 id。切换模板不会覆盖别的模板的结果
-    var summaries: [String: SummaryRecord] = [:]
-    /// 总结页当前选中的模板
-    var activeTemplateID: String = SummaryTemplate.defaultID
-
-    static func defaultTitle(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateFormat = "M月d日 HH:mm 的对话"
-        return f.string(from: date)
-    }
-}
-
 /// 历史列表用的轻量信息（存在 index.json 里，不用打开每个对话文件）
 struct ConversationMeta: Codable, Identifiable, Equatable {
     var id: UUID
@@ -95,7 +62,8 @@ final class ConversationStore: ObservableObject {
         return try? decoder.decode(Conversation.self, from: data)
     }
 
-    func save(_ conversation: Conversation) {
+    @discardableResult
+    func save(_ conversation: Conversation) -> Bool {
         var c = conversation
         c.updatedAt = Date()
         do {
@@ -103,13 +71,14 @@ final class ConversationStore: ObservableObject {
             try data.write(to: fileURL(c.id), options: .atomic)
         } catch {
             hearLog("保存对话失败：\(error)", .error)
-            return
+            return false
         }
         let meta = Self.meta(of: c)
         if let i = metas.firstIndex(where: { $0.id == c.id }) { metas[i] = meta } else { metas.append(meta) }
         metas.sort { $0.updatedAt > $1.updatedAt }
         writeIndex()
         revision += 1
+        return true
     }
 
     func delete(_ id: UUID) {
@@ -118,6 +87,7 @@ final class ConversationStore: ObservableObject {
         gone[id.uuidString] = Date()
         UserDefaults.standard.set(gone, forKey: "deletedConversations")
         try? FileManager.default.removeItem(at: fileURL(id))
+        try? FileManager.default.removeItem(at: syncBaseURL(id))
         metas.removeAll { $0.id == id }
         writeIndex()
         revision += 1
@@ -170,6 +140,35 @@ final class ConversationStore: ObservableObject {
     /// 某个对话文件的原始内容
     func rawData(_ id: UUID) -> Data? { try? Data(contentsOf: fileURL(id)) }
 
+    private func syncBaseURL(_ id: UUID) -> URL {
+        dir.appendingPathComponent(".sync-\(id.uuidString).json")
+    }
+
+    func rememberSyncBase(_ data: Data, id: UUID) {
+        try? data.write(to: syncBaseURL(id), options: .atomic)
+    }
+
+    func syncBase(_ id: UUID) -> Conversation? {
+        guard let data = try? Data(contentsOf: syncBaseURL(id)) else { return nil }
+        return try? decoder.decode(Conversation.self, from: data)
+    }
+
+    func mergeSyncChanges(_ remoteData: Data, into id: UUID, base: Conversation) -> Data? {
+        guard let local = load(id), let remote = try? decoder.decode(Conversation.self, from: remoteData),
+              remote.id == id else { return nil }
+        let merged = local.merging(remote, from: base)
+        if merged.conflict {
+            var alternate = local.updatedAt >= remote.updatedAt ? remote : local
+            alternate.id = UUID()
+            alternate.title += "（同步冲突副本）"
+            guard save(alternate) else { return nil }
+        }
+        guard save(merged.conversation), let saved = rawData(id) else { return nil }
+        // The remote snapshot is now incorporated even if the upload below needs a retry.
+        rememberSyncBase(remoteData, id: id)
+        return saved
+    }
+
     /// 把 iCloud 里更新的对话放回本地（保留原来的修改时间，不当成新改动）
     @discardableResult
     func importRaw(_ data: Data) -> Bool {
@@ -187,6 +186,7 @@ final class ConversationStore: ObservableObject {
     func removeSynced(_ id: UUID) {
         guard metas.contains(where: { $0.id == id }) else { return }
         try? FileManager.default.removeItem(at: fileURL(id))
+        try? FileManager.default.removeItem(at: syncBaseURL(id))
         metas.removeAll { $0.id == id }
         writeIndex()
         revision += 1
@@ -212,7 +212,8 @@ final class ConversationStore: ObservableObject {
 
     /// 索引丢失或损坏时，从对话文件重新生成
     private func rebuildIndex() {
-        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil,
+                                                                   options: [.skipsHiddenFiles])) ?? []
         metas = files
             .filter { $0.pathExtension == "json" && $0.lastPathComponent != "index.json" }
             .compactMap { (try? Data(contentsOf: $0)).flatMap { try? decoder.decode(Conversation.self, from: $0) } }

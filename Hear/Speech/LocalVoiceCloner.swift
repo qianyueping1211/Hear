@@ -65,13 +65,20 @@ enum ZipVoiceModel {
         try fm.createDirectory(at: model, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: staging) }
 
-        let archive = staging.appendingPathComponent("model.tar.bz2")
+        let cache = fm.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("HearZipVoice", isDirectory: true)
+        try fm.createDirectory(at: cache, withIntermediateDirectories: true)
+        let archive = cache.appendingPathComponent(archiveRoot + ".tar.bz2")
         let archiveURL = URL(string: "\(releaseAssets)/tts-models/\(archiveRoot).tar.bz2")!
-        try await FileDownloader().download(archiveURL, to: archive) { progress($0 * 0.65) }
-        try ZipVoiceArchive.verify(archive, sha256: "77219c8b40f4ee8d73a7f902305ff6c1128ef9b54461c41b4ca6ed890b6c2803")
+        let archiveSHA = "77219c8b40f4ee8d73a7f902305ff6c1128ef9b54461c41b4ca6ed890b6c2803"
+        if (try? ZipVoiceArchive.verify(archive, sha256: archiveSHA)) == nil {
+            try await FileDownloader().download(archiveURL, to: archive) { progress($0 * 0.65) }
+            try ZipVoiceArchive.verify(archive, sha256: archiveSHA)
+        }
+        progress(0.65)
+        try Task.checkCancellation()
         try ZipVoiceArchive.extract(archive, into: model, root: archiveRoot,
                                     modelFiles: Set(files).subtracting(["vocos_24khz.onnx", "espeak-ng-data"]))
-        try fm.removeItem(at: archive)
 
         let vocos = model.appendingPathComponent("vocos_24khz.onnx")
         let vocosURL = URL(string: "\(releaseAssets)/vocoder-models/vocos_24khz.onnx")!
@@ -80,6 +87,7 @@ enum ZipVoiceModel {
         try validate(model)
         try Task.checkCancellation()
         try ModelManager.installModelFile(model, at: directory)
+        try? fm.removeItem(at: archive)
         progress(1)
     }
 

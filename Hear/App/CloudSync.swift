@@ -523,8 +523,23 @@ final class CloudSync: ObservableObject {
                 if c != nil { await Self.io { Self.remove(file) }; manifest.conversations[key] = nil }
                 continue
             }
-            if let l, c == nil || l > c! + 1 {
+            if let l, let c, let base = store.syncBase(id),
+               l.timeIntervalSince(base.updatedAt) >= 1, c.timeIntervalSince(base.updatedAt) >= 1 {
+                guard let remote = await Self.read(file) else { hadFileFailure = true; continue }
+                guard store.allUpdated[id] == l,
+                      ConversationStore.deletedIDs[key] == deleted[key] else { continue }
+                guard let merged = store.mergeSyncChanges(remote, into: id, base: base),
+                      let revision = store.allUpdated[id],
+                      await Self.io({ Self.write(merged, to: file) }) else {
+                    hadFileFailure = true
+                    continue
+                }
+                store.rememberSyncBase(merged, id: id)
+                manifest.conversations[key] = revision
+                pushed += 1
+            } else if let l, c == nil || l > c! + 1 {
                 if let data = store.rawData(id), await Self.io({ Self.write(data, to: file) }) {
+                    store.rememberSyncBase(data, id: id)
                     manifest.conversations[key] = l
                     pushed += 1
                 } else {
@@ -539,8 +554,14 @@ final class CloudSync: ObservableObject {
                 // The read suspends. Compare optionals so creation and deletion also count as changes.
                 guard store.allUpdated[id] == l,
                       ConversationStore.deletedIDs[key] == deletionBeforeRead else { continue }
-                if store.importRaw(data) { pulled += 1 }
+                if store.importRaw(data) {
+                    store.rememberSyncBase(data, id: id)
+                    pulled += 1
+                }
                 else { hadFileFailure = true }
+            } else if let l, let c, abs(l.timeIntervalSince(c)) < 1, store.syncBase(id) == nil,
+                      let data = store.rawData(id) {
+                store.rememberSyncBase(data, id: id)
             }
         }
 
