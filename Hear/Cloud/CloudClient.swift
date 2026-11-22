@@ -276,6 +276,12 @@ actor CloudClient {
         get { tokenLock.lock(); defer { tokenLock.unlock() }; return _accessToken }
         set { tokenLock.lock(); _accessToken = newValue; tokenLock.unlock() }
     }
+    /// 口令只属于通用服务地址；连接测试也只在测这个地址时才带口令去检查
+    private static var _tokenAddress = ""
+    static var tokenAddress: String {
+        get { tokenLock.lock(); defer { tokenLock.unlock() }; return _tokenAddress }
+        set { tokenLock.lock(); _tokenAddress = newValue; tokenLock.unlock() }
+    }
 
     /// 自己的会话：带自签证书放行 + 超时放宽
     /// （不用系统那个共享会话：它没法加证书处理程序）
@@ -464,6 +470,7 @@ actor CloudClient {
     /// 设置通用服务地址（三个模型共用的那个）
     func setSharedAddress(_ s: String) {
         let v = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        Self.tokenAddress = v
         if sharedAddress != v {
             sharedAddress = v
             kinds.removeAll()
@@ -831,7 +838,54 @@ actor CloudClient {
             do { try await Task.sleep(for: .milliseconds(1_200)) } catch { return r }
             r = await diagnoseOne(s, session: connection)
         }
+        // 只通过 /health 不代表能识别：再看这条线路和访问口令能不能用于推理
+        if Self.looksConnected(r.text), !Task.isCancelled {
+            r = await checkAuthorization(r, address: s, session: connection)
+        }
         return r
+    }
+
+    /// 连通以后再确认推理会不会被拒：
+    ///  - 服务开着口令校验、但请求是以明文 HTTP 到达的（比如 Cloudflare Tunnel 回源到 http://），
+    ///    推理一定返回 HTTPS_REQUIRED
+    ///  - 托管口令模式下，用 /v1/auth/check 检查填的口令（不调用模型）
+    private static func checkAuthorization(_ r: Diagnosis, address s: String,
+                                           session: URLSession) async -> Diagnosis {
+        guard let health = r.service?.health, let mode = health["auth_mode"], mode != "off" else { return r }
+        if health["transport_ready"] == "false" {
+            return Diagnosis(text: "连上了，但请求是以明文 HTTP 到达电脑上的服务，识别和翻译会被拒绝（HTTPS_REQUIRED）。多半是 Cloudflare Tunnel 回源用了 http://：在电脑上用 start-hear-cloud.bat --cloudflare-local-http 启动，或者把 Tunnel 回源改成 https://localhost:8000。",
+                             service: r.service)
+        }
+        guard mode == "managed" else { return r }
+        // 口令只发给通用服务地址，别的地址不带
+        let owner = tokenAddress
+        guard !owner.isEmpty, cleanURL(owner) == s else { return r }
+        let token = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token.isEmpty {
+            return Diagnosis(text: "连上了，但还没填访问口令：电脑上的服务只接受管理后台签发的 Token，识别和翻译会被拒绝。",
+                             service: r.service)
+        }
+        guard let url = URL(string: s + "/v1/auth/check") else { return r }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 15
+        req.setValue(token, forHTTPHeaderField: "X-Hear-Token")
+        guard let (data, resp) = try? await session.data(for: req),
+              let code = (resp as? HTTPURLResponse)?.statusCode else { return r }
+        if (200..<300).contains(code) {
+            return Diagnosis(text: r.text + "，访问口令有效", service: r.service)
+        }
+        let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let why: String
+        switch body?["code"] as? String ?? "" {
+        case "TOKEN_REQUIRED", "TOKEN_INVALID": why = "访问口令不对，请到管理后台核对或重新签发"
+        case "TOKEN_NOT_STARTED": why = "访问口令还没到生效时间"
+        case "TOKEN_EXPIRED": why = "访问口令已过期"
+        case "TOKEN_REVOKED": why = "访问口令已被撤销"
+        case "AUTH_SERVICE_UNAVAILABLE": why = "电脑上的口令服务还没就绪（Token 管理服务没开或同步失败），请稍后再试"
+        case "HTTPS_REQUIRED": why = "请求是以明文 HTTP 到达电脑上的服务，识别和翻译会被拒绝"
+        default: why = "口令检查返回 \(code)"
+        }
+        return Diagnosis(text: "连上了，但" + why, service: r.service)
     }
 
     /// 这段话是不是表示连上了
