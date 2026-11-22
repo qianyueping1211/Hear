@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>听见 Hear · 应用介绍与技术架构</title>
-<meta name="description" content="听见 Hear — iPhone 上的实时语音翻译 App。功能架构、功能清单、技术架构与关键技术点，以及可选的自建云端模型服务。">
+<title>听见 Hear · iPhone 与 Windows 实时语音翻译</title>
+<meta name="description" content="听见 Hear 当前提供 iPhone 实时语音翻译 App 和 Windows x64 桌面预览版。了解两个平台的下载方式、iPhone 功能架构与可选的模型服务。">
 <style>
 /* ============================================================
    听见 Hear · 介绍文档
@@ -350,6 +350,7 @@ section.band{scroll-margin-top:62px}
     <a class="mark" href="#top"><b>听见</b><span>HEAR</span></a>
     <nav class="topnav" id="nav">
       <a href="#top">首页</a>
+      <a href="#platforms">当前平台</a>
       <a href="#features">功能架构</a>
       <a href="#tech">技术架构</a>
       <a href="#cloud">云端模型服务</a>
@@ -364,25 +365,24 @@ section.band{scroll-margin-top:62px}
 <section class="hero">
   <div class="wrap hero-grid">
     <div>
-      <span class="kicker">iOS 18+ · Swift · 端侧推理 · 可选自建云端</span>
+      <span class="kicker">iPhone · Windows x64 · 实时语音翻译</span>
       <h1>听见<span class="lat">HEAR</span></h1>
       <p class="lead">
-        听见是 iPhone 上的<b>实时语音翻译</b>应用，支持双向识别、随说随译、说话人区分和译文朗读。
-        识别、翻译和声音克隆可以分别选用本机或局域网服务，配置好本地模型后可离线使用。
+        听见目前提供 <b>iPhone App</b> 和 <b>Windows 桌面预览版</b>。iPhone 可在本机识别、翻译和朗读，也可连接电脑上的模型服务；Windows 提供翻译工作台、悬浮字幕和本机模型服务入口。
+        iPhone 配置好本地模型后可以离线使用。
       </p>
 
       <dl class="facts">
-        <div><dt>文档对应版本</dt><dd>0.4.82</dd></div>
-        <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
-        <div><dt>本机模型</dt><dd>SenseVoice · Hy-MT2 · ZipVoice</dd></div>
-        <div><dt>云端模型</dt><dd>SenseVoice + Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
-        <div><dt>语言范围</dt><dd>应用提供 13 种，实际可选语种随识别引擎变化</dd></div>
-        <div><dt>云端部署</dt><dd>Windows 一键启动，通过局域网访问</dd></div>
+        <div><dt>iPhone 版</dt><dd>iOS 18+ · 0.4.86</dd></div>
+        <div><dt>Windows 版</dt><dd>x64 · 0.1.0 预览版</dd></div>
+        <div><dt>iPhone 本地模型</dt><dd>SenseVoice · Hy-MT2 · ZipVoice</dd></div>
+        <div><dt>可选模型服务</dt><dd>Windows 自建或远端服务</dd></div>
+        <div><dt>后续平台</dt><dd>iPad · Android · 鸿蒙 · macOS 尚未发布</dd></div>
       </dl>
 
       <div class="cta-row">
-        <a class="btn" href="https://github.com/qianyueping1211/Hear/releases/latest" target="_blank" rel="noopener">下载最新 iPhone 版</a>
-        <a class="btn ghost" href="#cloud">Windows 云端部署</a>
+        <a class="btn" href="https://github.com/qianyueping1211/Hear/releases/tag/v0.4.86" target="_blank" rel="noopener">下载 iPhone 版</a>
+        <a class="btn ghost" href="https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0" target="_blank" rel="noopener">下载 Windows 预览版</a>
       </div>
     </div>
 
@@ -459,9 +459,38 @@ section.band{scroll-margin-top:62px}
       </div>
       <figcaption>
         一句话说完产品链路：<b>声音 → 文字 → 译文 → 声音</b>。
-        四个环节各自可换引擎，本地跑不动的时候可以把任意一环外包给局域网里的电脑。
+        iPhone 版的各环节可分别选择本机或模型服务；下方详细说明 iPhone 的功能与服务接口。
       </figcaption>
     </figure>
+  </div>
+</section>
+
+<section class="band" id="platforms">
+  <div class="wrap">
+    <div class="sechead">
+      <div class="num">平台</div>
+      <div>
+        <h2>当前提供 iPhone 与 Windows</h2>
+        <p class="lede">两个客户端使用同一套模型服务接口，但安装包和版本号分别管理。Windows 桌面程序与供 iPhone 调用的 Windows 模型服务是两个不同的使用方式。</p>
+      </div>
+    </div>
+    <div class="fgroups">
+      <div class="fgroup">
+        <h3>iPhone <em>iOS 18+</em></h3>
+        <ul>
+          <li>实时识别、翻译和朗读；可选择本机模型或连接模型服务。</li>
+          <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases/tag/v0.4.86" target="_blank" rel="noopener">听见 iOS 0.4.86</a>（IPA）。</li>
+        </ul>
+      </div>
+      <div class="fgroup">
+        <h3>Windows <em>x64 · 预览版</em></h3>
+        <ul>
+          <li>桌面翻译工作台、悬浮字幕与本机模型服务入口。</li>
+          <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0" target="_blank" rel="noopener">听见 Windows 0.1.0</a>（EXE）；<a href="https://github.com/qianyueping1211/Hear/blob/main/desktop/README.md" target="_blank" rel="noopener">桌面端说明</a>。</li>
+          <li>只想让电脑为 iPhone 提供模型服务，可使用下方的 Windows 启动脚本。</li>
+        </ul>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -473,7 +502,7 @@ section.band{scroll-margin-top:62px}
       <div>
         <h2>功能架构</h2>
         <p class="lede">
-          整个 App 是<strong>一条五段式信号通路</strong>：采集 → 断句 → 识别 → 翻译 → 朗读。
+          下方详细说明 iPhone App 的<strong>五段式信号通路</strong>：采集 → 断句 → 识别 → 翻译 → 朗读。
           每一段都做了引擎抽象，可以独立选择「手机本地」「系统自带」或「局域网云端」，三者可以任意组合。
         </p>
       </div>
@@ -1235,7 +1264,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>文档对应 0.4.82</p>
+      <p>听见 Hear · iPhone 与 Windows 实时语音翻译<br>iOS 0.4.86 · Windows 0.1.0 预览版</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>
@@ -1243,11 +1272,11 @@ section.band{scroll-margin-top:62px}
     </div>
     <div class="fcol">
       <h5>技术栈</h5>
-      <p>Swift · SwiftUI · FluidAudio · ActivityKit<br>llama.cpp · faster-whisper · sherpa-onnx</p>
+      <p>iPhone：Swift · SwiftUI · ActivityKit<br>Windows：Tauri · Rust · React</p>
     </div>
     <div class="fcol">
       <h5>平台</h5>
-      <p>iOS 18.0+<br>系统听写与系统翻译需 iOS 26+</p>
+      <p>iPhone：iOS 18.0+<br>Windows：x64 预览版</p>
     </div>
   </div>
   <div class="foot-note">

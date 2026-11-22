@@ -1,6 +1,6 @@
-# Hear Desktop（Windows x64 / 后续 macOS）
+# Hear Desktop（Windows x64 预览版）
 
-基于 **Tauri v2（Rust + React/TypeScript/Tailwind）** 构建的听见桌面实时翻译与悬浮字幕客户端，与 iPhone 端共用 `server/` 云端协议与托管模型服务。
+基于 **Tauri v2（Rust + React/TypeScript/Tailwind）** 构建的听见 Windows 桌面实时翻译与悬浮字幕客户端，与 iPhone 端共用 `server/` 模型服务接口。[下载 Windows 0.1.0 预览版安装包](https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0)。macOS 适配尚未完成。
 
 ## 目录结构
 

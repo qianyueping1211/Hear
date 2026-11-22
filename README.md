@@ -1,6 +1,15 @@
 # 听见 (Hear)
 
-iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话就翻译。
+听见是面向 **iPhone 和 Windows** 的实时语音翻译项目。iPhone App 支持本机识别、翻译和朗读，也可以连接模型服务；Windows 桌面端提供翻译工作台、悬浮字幕和本机模型服务。选择本地模型并完成下载后，iPhone 可以离线使用。
+
+| 当前平台 | 版本 | 下载与说明 |
+| --- | --- | --- |
+| iPhone（iOS 18+） | 0.4.86 | [下载 iOS 安装包](https://github.com/qianyueping1211/Hear/releases/tag/v0.4.86) |
+| Windows x64 | 0.1.0 预览版 | [下载 Windows 安装程序](https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0) · [桌面端说明](desktop/README.md) |
+
+iPad、Android、鸿蒙和 macOS 客户端尚未发布；仓库中的 Android、鸿蒙目录目前只是预留。
+
+### iPhone 版
 
 - 选两种语言（默认 中文 ⇄ English），点一下开始，之后直接说话
 - 自动判断说的是哪种语言，翻译成另一种，并可朗读出来
@@ -9,21 +18,26 @@ iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话
 - 支持上下文连贯翻译、自定义术语表
 - 适配 iPhone 16 Pro / Pro Max 等 8GB 内存机型，iOS 18+
 
-📄 完整介绍与技术架构（功能清单、信号通路、服务接口、云端模型服务）：**[docs/index.html](docs/index.html)**
+📄 产品与技术介绍（两个平台的定位、iPhone 功能架构、服务接口）：**[docs/index.html](docs/index.html)**
 （下载后用浏览器打开就行）
 
-🪟 在 Windows 上把模型跑在自己电脑上：**[docs/windows-deploy.md](docs/windows-deploy.md)**
-（部署步骤、启动时按类型选模型、注意事项、已知问题和处理方案）
+🪟 Windows 桌面程序见 **[desktop/README.md](desktop/README.md)**。如果只想用 Windows 电脑为 iPhone 提供模型服务，见 **[docs/windows-deploy.md](docs/windows-deploy.md)**。
 
 ---
 
-## 安装方法（二选一）
+## Windows 桌面端
+
+从 [Windows 0.1.0 预览版](https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0) 下载 `Hear-Win-0.1.0.exe` 并安装。桌面程序可以连接已有的模型服务，也包含本机模型服务入口；首次使用本机模型需要准备模型。功能与开发说明见 [desktop/README.md](desktop/README.md)。
+
+`start-hear-cloud.bat` 是单独启动模型服务的脚本，适合让 iPhone 连接电脑上的模型；它不是 Windows 桌面程序的安装包。
+
+## iPhone 安装方法（二选一）
 
 不需要付费开发者账号。免费 Apple ID 签名的 App 有效期 7 天，到期后**覆盖安装**一次即可。不要先删除 App，模型和设置都会保留，不用重新下载。
 
 ### 方法 A：直接下载安装包 + Sideloadly 安装（不用学 Xcode，Windows 也行）
 
-1. 打开本仓库右侧的 **Releases（发行版）**，进入最新 iOS 版本，下载 `Hear-iOS-版本号.ipa`（例如 `Hear-iOS-1.0.0.ipa`）。不用登录。
+1. 打开 [iPhone 版发布页](https://github.com/qianyueping1211/Hear/releases/tag/v0.4.86)，下载 `Hear-iOS-0.4.86.ipa`。以后更新时从 Releases 中选名称带 **iOS** 的版本。
    （每次更新代码后，GitHub 会自动打包并发布一个新版本，大约 3～15 分钟。）
 2. 如果想手动重新打包：**Actions** → **Build IPA (unsigned)** → **Run workflow**。
 3. 在电脑上安装 [Sideloadly](https://sideloadly.io)（Mac / Windows 都有）。Windows 还需要装 iTunes 和 iCloud 的官网版本。
