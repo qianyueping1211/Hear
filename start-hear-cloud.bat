@@ -5,9 +5,10 @@ echo Starting Hear cloud service...
 echo Checking service files. The first launch may download required files.
 set "HEAR_LAUNCHER_FILE=%~f0"
 set "HEAR_LAUNCHER_MODE=%~1"
+set "HEAR_LAUNCHER_ARG=%~2"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=[IO.File]::ReadAllText($env:HEAR_LAUNCHER_FILE); $i=$s.LastIndexOf(':__HEAR_POWERSHELL__'); & ([scriptblock]::Create($s.Substring($i+20)))"
 set "RC=%ERRORLEVEL%"
-if /i not "%~1"=="--check" if /i not "%~1"=="--help" if not "%RC%"=="0" pause
+if /i not "%~1"=="--check" if /i not "%~1"=="--help" if /i not "%~1"=="--check-token" if not "%RC%"=="0" pause
 exit /b %RC%
 
 :__HEAR_POWERSHELL__
@@ -15,7 +16,9 @@ $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $env:HEAR_LAUNCHER_FILE
 $mode = $env:HEAR_LAUNCHER_MODE
 $files = @('start-windows.ps1', 'hear_cloud.py', 'hear_http.py', 'hear_speaker.py', 'make_cert.py',
-           'requirements.txt', 'test_api.py', 'test_contract.py')
+           'requirements.txt', 'test_api.py', 'test_contract.py',
+           'hear_auth.py', 'hear_check_token.py', 'hear_token_store.py', 'hear_token_service.py',
+           'hear_token_admin.html', 'hear_token_admin.js', 'hear_token_admin.css', 'test_token_auth.py')
 $inCheckout = Test-Path -LiteralPath (Join-Path $here 'server\start-windows.ps1')
 $root = if ($inCheckout) { $here } else { Join-Path $here 'Hear' }
 $serverDir = Join-Path $root 'server'
@@ -59,6 +62,42 @@ function Read-AccessMode {
         # Some hosts do not provide a readable console. Use the secure default.
     }
     return $true
+}
+
+# 口令管理模式：HEAR_AUTH_MODE=managed，或已配置管理服务三项时默认进入。
+# 网关凭据只通过 HEAR_GATEWAY_CREDENTIAL_FILE 指向的文件提供，这里只检查文件，不读取内容。
+function Resolve-AuthMode {
+    $names = @('HEAR_AUTH_API_URL', 'HEAR_GATEWAY_ID', 'HEAR_GATEWAY_CREDENTIAL_FILE')
+    $present = @($names | Where-Object { [Environment]::GetEnvironmentVariable($_) })
+    $requested = ([string]$env:HEAR_AUTH_MODE).Trim().ToLowerInvariant()
+    if ($requested -eq '' -and $present.Count -gt 0) { $requested = 'managed' }
+    if ($requested -eq '' -or $requested -eq 'legacy') { return 'legacy' }
+    if ($requested -eq 'off') { return 'off' }
+    if ($requested -ne 'managed') { throw "HEAR_AUTH_MODE 只能是 managed、legacy 或 off（现在是 $requested）" }
+    $missing = @($names | Where-Object { -not [Environment]::GetEnvironmentVariable($_) })
+    if ($missing.Count -gt 0) { throw ("口令管理模式配置不完整，缺少：" + ($missing -join '、')) }
+    $url = $env:HEAR_AUTH_API_URL.Trim()
+    if ($url -notmatch '^https://' -and $url -notmatch '^http://(127\.0\.0\.1|localhost|\[::1\])(:|/|$)') {
+        throw 'HEAR_AUTH_API_URL 需要是 https:// 地址（只有本机地址可以用 http）'
+    }
+    $credential = $env:HEAR_GATEWAY_CREDENTIAL_FILE.Trim()
+    if (-not (Test-Path -LiteralPath $credential -PathType Leaf)) { throw "网关凭据文件不存在：$credential" }
+    if ((Get-Item -LiteralPath $credential).Length -lt 16) { throw "网关凭据文件内容为空或不完整：$credential" }
+    if ($env:HEAR_AUTH_CA_FILE -and -not (Test-Path -LiteralPath $env:HEAR_AUTH_CA_FILE -PathType Leaf)) {
+        throw "HEAR_AUTH_CA_FILE 指向的文件不存在：$($env:HEAR_AUTH_CA_FILE)"
+    }
+    return 'managed'
+}
+
+function Find-LauncherPython {
+    $venv = Join-Path $serverDir '.venv\Scripts\python.exe'
+    if (Test-Path -LiteralPath $venv) { return @($venv) }
+    foreach ($candidate in @('python', 'python3')) {
+        $command = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($command -and $command.Source -notlike '*WindowsApps*') { return @($command.Source) }
+    }
+    if (Get-Command 'py' -ErrorAction SilentlyContinue) { return @('py', '-3') }
+    return @()
 }
 
 function Update-ServerFiles {
@@ -120,7 +159,10 @@ try {
         Write-Host 'Connect the phone app to this cloud service; Whisper is managed on the computer.'
         Write-Host 'Both LAN and internet access require a token by default. The startup choice times out after 5 seconds.'
         Write-Host 'start-hear-cloud.bat --check    Check required server files'
+        Write-Host 'start-hear-cloud.bat --check-token [https://host:port]    Check the gateway and one access token (hidden input).'
+        Write-Host '    Exit codes: 0 valid, 2 network/TLS, 3 missing/invalid, 4 not started, 5 expired, 6 revoked, 7 auth unavailable.'
         Write-Host 'start-hear-cloud.bat --cloudflare-local-http    Allow authenticated HTTP only from a local Tunnel connector.'
+        Write-Host 'Managed tokens: set HEAR_AUTH_MODE=managed, HEAR_AUTH_API_URL, HEAR_GATEWAY_ID, HEAR_GATEWAY_CREDENTIAL_FILE.'
         Write-Host 'HEAR_SERVER_REF accepts main, a release tag, or a full commit SHA.'
         exit 0
     }
@@ -128,6 +170,22 @@ try {
         if (-not (Test-ServerFiles $serverDir)) { throw "Incomplete server folder: $serverDir" }
         Write-Host 'Hear server files OK'
         exit 0
+    }
+    if ($mode -eq '--check-token') {
+        $checker = Join-Path $serverDir 'hear_check_token.py'
+        if (-not (Test-Path -LiteralPath $checker) -and -not $inCheckout) { Update-ServerFiles }
+        if (-not (Test-Path -LiteralPath $checker)) { throw "Missing $checker" }
+        # 函数返回的数组会被展开，这里重新收成数组
+        $python = @(Find-LauncherPython)
+        if ($python.Count -eq 0) { throw 'Python 3 was not found.' }
+        $env:PYTHONUTF8 = '1'
+        $pythonArgs = @()
+        if ($python.Count -gt 1) { $pythonArgs += $python[1..($python.Count - 1)] }
+        $pythonArgs += $checker
+        # 只把地址放进参数；口令由检查程序隐藏输入读取
+        if ($env:HEAR_LAUNCHER_ARG) { $pythonArgs += $env:HEAR_LAUNCHER_ARG }
+        & $python[0] @pythonArgs
+        exit $LASTEXITCODE
     }
     if (-not $inCheckout) {
         try { Update-ServerFiles }
@@ -142,10 +200,24 @@ try {
         $env:HEAR_ALLOW_LOOPBACK_HTTP = '1'
         Write-Host '已启用 Cloudflare 本机 HTTP 回源。' -ForegroundColor Cyan
     }
-    if ($loopbackHttp -or (Read-AccessMode)) {
+    $authMode = Resolve-AuthMode
+    if ($authMode -eq 'managed') {
+        # 管理模式只认后台签发的 Token：不显示关闭口令的选项，也不使用 access-token.txt
+        $env:HEAR_AUTH_MODE = 'managed'
+        $env:HEAR_REQUIRE_TOKEN = '0'
+        Write-Host "口令管理模式：网关 $($env:HEAR_GATEWAY_ID)，管理服务 $($env:HEAR_AUTH_API_URL)" -ForegroundColor Cyan
+        Write-Host '  口令清单加载完成前，推理请求会被拒绝（503）。' -ForegroundColor DarkGray
+    } elseif ($authMode -eq 'off') {
+        $env:HEAR_AUTH_MODE = 'off'
+        $env:HEAR_REQUIRE_TOKEN = '0'
+        if ($loopbackHttp) { throw '启用本机 HTTP 回源时，必须同时启用访问口令' }
+        Write-Host 'HEAR_AUTH_MODE=off：本次启动不校验访问口令。' -ForegroundColor Yellow
+    } elseif ($loopbackHttp -or (Read-AccessMode)) {
+        $env:HEAR_AUTH_MODE = 'legacy'
         $env:HEAR_REQUIRE_TOKEN = '1'
         Write-Host '访问口令已启用。' -ForegroundColor Cyan
     } else {
+        $env:HEAR_AUTH_MODE = 'legacy'
         $env:HEAR_REQUIRE_TOKEN = '0'
         Write-Host '本次启动已关闭访问口令。' -ForegroundColor Yellow
     }
