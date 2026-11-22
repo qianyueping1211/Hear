@@ -367,23 +367,22 @@ section.band{scroll-margin-top:62px}
       <span class="kicker">iOS 18+ · Swift · 端侧推理 · 可选自建云端</span>
       <h1>听见<span class="lat">HEAR</span></h1>
       <p class="lead">
-        一个跑在 iPhone 上的<b>实时语音翻译</b>应用。麦克风里的声音被切成句子、识别成文字、翻译成另一种语言，
-        再用合成的声音读出来。不联网、不上传、不需要账号——<b>识别、翻译、声音克隆三个环节都能在手机本地跑</b>，
-        也可以把其中几环搬到自己的电脑上，手机通过局域网调用。
+        听见是 iPhone 上的<b>实时语音翻译</b>应用，支持双向识别、随说随译、说话人区分和译文朗读。
+        识别、翻译和声音克隆可以分别选用本机或局域网服务，配置好本地模型后可离线使用。
       </p>
 
       <dl class="facts">
-        <div><dt>当前版本</dt><dd>0.4.58</dd></div>
+        <div><dt>文档对应版本</dt><dd>0.4.80</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
-        <div><dt>识别 / 翻译 / 克隆</dt><dd>Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
-        <div><dt>默认数据流向</dt><dd>设备本地，离线</dd></div>
-        <div><dt>支持语言</dt><dd>13 种（双向互译）</dd></div>
-        <div><dt>云端模型服务</dt><dd>可选，自建局域网服务</dd></div>
+        <div><dt>本机模型</dt><dd>SenseVoice · Hy-MT2 · ZipVoice</dd></div>
+        <div><dt>云端模型</dt><dd>SenseVoice + Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
+        <div><dt>语言范围</dt><dd>应用提供 13 种，实际可选语种随识别引擎变化</dd></div>
+        <div><dt>云端部署</dt><dd>Windows 一键启动，通过局域网访问</dd></div>
       </dl>
 
       <div class="cta-row">
-        <a class="btn" href="https://github.com/qianyueping1211/Hear" target="_blank" rel="noopener">查看源码仓库</a>
-        <a class="btn ghost" href="#features">从功能架构读起</a>
+        <a class="btn" href="https://github.com/qianyueping1211/Hear/releases/latest" target="_blank" rel="noopener">下载最新 iPhone 版</a>
+        <a class="btn ghost" href="#cloud">Windows 云端部署</a>
       </div>
     </div>
 
@@ -491,19 +490,19 @@ section.band{scroll-margin-top:62px}
       <div class="stage">
         <div class="n">STAGE 2</div>
         <h4>自动断句</h4>
-        <p>按 30 ms 帧做能量 VAD，判断起句、静音收尾，产出可提交的语音片段。</p>
+        <p>结合 Silero 人声检测与音量判断起句、停顿和收尾。</p>
         <span class="file">Segmenter.swift</span>
       </div>
       <div class="stage">
         <div class="n">STAGE 3</div>
         <h4>语音识别</h4>
-        <p>四选一引擎出文字，同时判断这句话是哪种语言。</p>
-        <span class="file">SpeechRecognizer.swift</span>
+        <p>识别引擎生成原文，支持的本机和云端方案还能区分说话人。</p>
+        <span class="file">SessionEngines.swift</span>
       </div>
       <div class="stage">
         <div class="n">STAGE 4</div>
         <h4>文本翻译</h4>
-        <p>注入上下文与术语表，按官方提示词格式送进翻译模型。</p>
+        <p>结合相关术语翻译当前语段，逐步显示并修正译文。</p>
         <span class="file">LlamaTranslator.swift</span>
       </div>
       <div class="stage">
@@ -516,21 +515,14 @@ section.band{scroll-margin-top:62px}
 
     <div class="engine-rail">
       <span class="lab">引擎可选</span>
-      <span class="opt"><b>识别</b>　Whisper / SenseVoice / 系统听写 / 云端</span>
-      <span class="opt"><b>翻译</b>　Hy-MT2 本地 / 系统翻译 / 云端</span>
-      <span class="opt"><b>朗读</b>　AVSpeechSynthesizer / Qwen3-TTS 克隆</span>
-      <span class="opt on"><b>默认</b>　全部本地，离线可用</span>
+      <span class="opt"><b>识别</b>　本机 SenseVoice / 苹果自带 / 云端</span>
+      <span class="opt"><b>翻译</b>　本机 Hy-MT2 / 苹果自带 / 云端 Hy-MT2</span>
+      <span class="opt"><b>声音克隆</b>　本机 ZipVoice / 云端 Qwen3-TTS</span>
     </div>
 
     <div class="note">
-      三个环节<strong>可以任意组合</strong>：全本地（全离线，不用开电脑）、全云端、或者一半一半。
-      全本地的配置是「识别：SenseVoice（快）或 Whisper（准）」+「翻译：本地引擎 MT」+
-      「声音克隆：本地引擎 Qwen」。代价是内存——Hy-MT2 约 1.1 GB、Qwen3-TTS 两个文件约 800 MB、
-      SenseVoice 约 240 MB，三个同时常驻对内存小的机型有压力。
-      App 的对策：声音克隆模型放到最后加载（等其它模型就绪）、用不到的模型自动卸载、
-      翻译切到云端就卸载本地翻译模型、收到内存警告时全部卸载、
-      麦克风起不来时先卸掉声音克隆模型再试。内存吃紧就先用 SenseVoice + 本地 MT，
-      需要原声朗读时再把 Qwen3-TTS 打开。
+      iOS 26 或以上的新安装默认用苹果自带识别和翻译，iOS 18–25 默认选择 SenseVoice 和本机 Hy-MT2。
+      声音克隆默认关闭。从「功能设置 → 引擎管理」切换引擎，在「模型管理」配置对应模型。
     </div>
 
     <h3 class="subhead">功能清单</h3>
@@ -539,127 +531,85 @@ section.band{scroll-margin-top:62px}
       <div class="fgroup">
         <h3><em>01</em>交互模式</h3>
         <ul>
-          <li><b>实时翻译模式</b>　点一下麦克风开始，直接说话，App 自动判断说的是哪种语言并翻成另一种；再点一下停止。</li>
-          <li><b>对话翻译模式</b>　左右两个「按住说 XX」按钮，按住说对应语言，松开即翻译并播报。</li>
-          <li><b>双向互译</b>　13 种语言任意配对（zh / en / ja / ko / ar / fr / de / es / ru / pt / it / th / vi）。</li>
-          <li><b>模式切换</b>　底部左右滑动切换，底部圆点指示当前模式，点圆点也能直接切。
-              <strong>上次用哪个模式会记住</strong>，下次打开还是那个模式（这个模式只存在本机，不跟 iCloud 走）。</li>
-          <li><b>暂停不丢内容</b>　整句话还没说完时（气泡是虚线的）按暂停，那句也会留下来继续翻译，不会消失。</li>
-          <li><b>气泡式对话</b>　左右分栏气泡，源语言侧在左、目标侧在右；实时气泡随识别持续刷新。</li>
-          <li><b>结果可编辑</b>　长按某句可改原文并重新翻译、复制原文或译文。</li>
-          <li><b>点气泡即朗读</b>　正在朗读的气泡带描边与声波动画。</li>
+          <li><b>实时翻译模式</b>　轻点麦克风开始收音，App 会在选定的两种语言间判断方向。再点一次停止。</li>
+          <li><b>对话翻译模式</b>　轻点左侧或右侧的语言圆圈开始，再点同一个圆圈停止。点另一侧会先收完当前语段，再切换语言。</li>
+          <li><b>模式切换</b>　底部横向滑动或点击圆点切换模式，应用会记住上次使用的模式。</li>
+          <li><b>翻译气泡</b>　先显示原文，再逐步显示译文。等待修正时保留已有译文，修正成功后标出变化。</li>
+          <li><b>编辑和重试</b>　长按气泡可修改原文并重译，也可选择复制译文。翻译失败且有原文时，可直接点「重试翻译」。</li>
+          <li><b>灵动岛和锁屏</b>　设置中可选「展示译文」或「展示原文和译文」。展开灵动岛或查看锁屏时可读译文，暂停收音后显示暂停状态。</li>
         </ul>
       </div>
 
       <div class="fgroup">
         <h3><em>02</em>语音识别</h3>
         <ul>
-          <li><b>Whisper</b>　<span class="hint">本地最准</span>，large-v3 turbo，标点与长句最好。</li>
-          <li><b>SenseVoice</b>　<span class="hint">本地最快</span>，约 240 MB，中英日韩粤，说完立刻出字。</li>
-          <li><b>SenseVoice + Whisper 校正</b>　<span class="hint">推荐</span>，先出快结果，空闲时用 Whisper 复核，明显有差异就替换，被改过的句子带魔法棒标记。</li>
-          <li><b>系统听写</b>　<span class="hint">iOS 26+</span>，说话时逐字显示，说完由 Whisper 定稿。</li>
-          <li><b>云端识别</b>　<span class="hint">可选</span>，走自家电脑上的服务，方案可指派。</li>
-          <li><b>语种自动判断</b>　识别结果与文字脚本不一致时自动改判另一侧语言。</li>
+          <li><b>本机 SenseVoice</b>　支持中文、英语、日语和韩语。实时识别可在语句结束前回显原文。</li>
+          <li><b>苹果自带</b>　iOS 26 或以上提供系统听写，适用语种随设备可用的语言资源变化。</li>
+          <li><b>云端语音识别</b>　从「模型管理 → 云端模型 → 语音识别」选择服务支持的 SenseVoice、Whisper 或 SenseVoice + Whisper。</li>
+          <li><b>区分说话人</b>　云端由服务器提供说话人模型。本机 SenseVoice 需带 CAM++ 模型文件，在「语音识别」里开启「实时翻译时区分说话人」。</li>
+          <li><b>说话人资料</b>　点击头像可修改姓名、性别、常用语言和口音。总结可引用已命名的说话人。</li>
         </ul>
       </div>
 
       <div class="fgroup">
         <h3><em>03</em>翻译</h3>
         <ul>
-          <li><b>本地 Hy-MT2</b>　<span class="hint">腾讯 1.8B GGUF，llama.cpp 跑在 GPU 上</span>。</li>
-          <li><b>云端翻译</b>　<span class="hint">可选</span>，调用局域网里的 llama-server。</li>
-          <li><b>系统翻译</b>　<span class="hint">iOS 26+</span>，调用系统 Translation 框架。</li>
-          <li><b>上下文连贯翻译</b>　可开关。开启后参考最近两句已完成的原文，代词与语气更连贯。</li>
-          <li><b>自定义术语表</b>　每行「原文=译文」，人名、公司名、专业词强制按表翻译。</li>
-          <li><b>采样参数</b>　Hy-MT2 官方推荐值：top_k 20 / top_p 0.6 / temperature 0.7。</li>
+          <li><b>本机 Hy-MT2</b>　使用 1.8B GGUF 模型。前台可用 GPU，切入后台可用 CPU 继续，同一份模型可直接沿用。</li>
+          <li><b>云端 Hy-MT2</b>　通过局域网调用电脑上的翻译服务。</li>
+          <li><b>苹果自带</b>　iOS 26 或以上可选，语言包可由系统下载。</li>
+          <li><b>结合上文翻译</b>　利用相邻语段帮助处理接续词，译文只对应当前语段。</li>
+          <li><b>术语配置</b>　从首页菜单打开「术语配置」，按「原文=译文」维护词表，翻译时加入匹配当前原文的条目。</li>
         </ul>
       </div>
 
       <div class="fgroup">
         <h3><em>04</em>朗读与声音</h3>
         <ul>
-          <li><b>译文朗读</b>　可开关；朗读期间麦克风自动静音，杜绝回声串音。</li>
-          <li><b>左右耳</b>　耳机模式下可指定译文进左耳或右耳，另一侧播放原文或静音。</li>
-          <li><b>声音克隆</b>　在「朗读」栏里单独开关（默认关）。模型在「引擎管理 → 声音克隆」里选：
-              <strong>云端服务引擎（默认）</strong>或本地 Qwen3-TTS 0.6B（喂一段参考音频 + 参考文本，用这个音色念译文）。
-              列表里没有「苹果自带」——系统本身没有声音克隆的能力。</li>
-          <li><b>克隆失败会明说</b>　云端克隆服务不可用时弹一条「声音克隆服务不可用，已改用系统声音朗读」，
-              并在日志里记下原因，不会悄悄换成系统声音。</li>
-          <li><b>云端和本地一样干净</b>　参考音频一律先降噪再送进模型（不然环境音会被一起学过去，
-              念出来有杂音）；采样参数也和本地完全一致
-              （<code>top_k 20</code>、<code>top_p 0.6</code>、用模型默认温度）——
-              服务端不传的话 <code>llama-server</code> 会用自己那套偏松的默认值，念出来会跑调、夹杂杂音。</li>
-          <li><b>生成中会转圈</b>　克隆声音要等电脑算完（好几秒），
-              这时候气泡里的喇叭变成<strong>一直在转的半圈</strong>，一眼就知道「马上就好」。</li>
-          <li><b>等得到再放弃</b>　云端克隆要等电脑那边算完，最多等 60 秒；
-              同一句只发一次请求（发两次会排队，等太久就超时退回系统声音）。</li>
-          <li><b>没有样本时说清楚原因</b>　克隆要拿说话人的原声当样本：
-              太短（不足 1.5 秒）或太长（超过 12 秒）的那一句，
-              会自动<strong>借用同一种语言上一句完整的声音</strong>（还是同一个人的音色）；
-              实在拿不到样本时，日志会写明是「录音时开关是关的」还是「这句太长了」，
-              而不是笼统一句「没有声音样本」。</li>
-          <li><b>克隆只会说几种语言</b>　参考音频用源语言（可以是英文），
-              念出来的是译文那门语言（跨语言克隆）；
-              阿拉伯语、泰语、越南语这些目前不在克隆模型的语种里，会直接说明。</li>
-          <li><b>克隆缓存</b>　内存 LRU 60 条 + 磁盘 WAV 长期留存，按 SHA256 命名。
-              键里带<strong>参考音频的指纹</strong>：同一句话换了说话人不会命中上一个人的缓存。</li>
-          <li><b>音色选择</b>　系统朗读优选高质量音色，过滤个人音色与 novelty 音色。</li>
+          <li><b>声音输出位置</b>　在「功能设置 → 朗读」选择手机扬声器或耳机。使用耳机时可分别指定左右耳听哪种译文或静音。</li>
+          <li><b>播报时机</b>　扬声器模式通常在停止收音后朗读。App 切到后台时暂停播放，识别、翻译及克隆生成可继续处理。</li>
+          <li><b>声音克隆</b>　在「朗读」里开启后，可以选本机 ZipVoice 或云端 Qwen3-TTS。本机 ZipVoice 适用于中英文。</li>
+          <li><b>样本和系统朗读</b>　优先使用这句的参考音频。同页中有已确认的相同说话人和同种语言时，可复用该说话人的合格样本。样本不足或克隆声音不可播放时，用系统声音朗读。</li>
+          <li><b>图标状态</b>　克隆生成中显示转圈，音频开始输出时喇叭变绿。播放结束后显示灰色喇叭，可在「显示声音图标」中关闭灰色图标。</li>
+          <li><b>静音与缓存</b>　播放前裁掉克隆音频首尾的长静音，保留句中的停顿。已有缓存首次读取也会处理。</li>
         </ul>
       </div>
 
       <div class="fgroup">
         <h3><em>05</em>会话与历史</h3>
         <ul>
-          <li><b>历史记录</b>　每次对话独立存档，列表页显示标题、条数、预览与语种。</li>
-          <li><b>多模板总结</b>　5 套模板：德鲁克式会议纪要、简明摘要、行动项清单、双语要点对照、沟通访谈记录。</li>
-          <li><b>总结可编辑</b>　生成结果可直接改写后保存。</li>
-          <li><b>中断恢复</b>　异常退出后残留的「生成中」总结会被标记为失败，不会永远转圈。</li>
+          <li><b>历史记录</b>　每页对话可独立存档，保留原文、译文及说话人资料。</li>
+          <li><b>大模型总结</b>　配置服务提供商后可选会议纪要、简明摘要、行动项清单、双语要点或沟通访谈记录，结果支持编辑。</li>
+          <li><b>继续使用</b>　异常中断的总结会标记为失败，可再次生成。</li>
         </ul>
       </div>
 
       <div class="fgroup">
         <h3><em>06</em>模型管理</h3>
         <ul>
-          <li><b>四类本地模型</b>　Whisper、SenseVoice、Hy-MT2 翻译模型、Qwen3-TTS 克隆模型，分别下载与导入。</li>
-          <li><b>断点续传</b>　网络中断自动续传，网络类错误最多重试 8 次，指数退避。</li>
-          <li><b>镜像加速</b>　自动探测所在网络，国内走 hf-mirror，海外走 huggingface.co。</li>
-          <li><b>本地导入</b>　从「文件」App 直接导入 .gguf 或模型目录。</li>
-          <li><b>云端模型</b>　识别 / 翻译 / 克隆三个模型各自独立配置地址，支持「测试连接」。</li>
-          <li><b>页签跟着引擎走</b>　三个引擎（识别 / 翻译 / 克隆）里只要有一个是本地引擎，就停在「本地模型」；
-              都是在线引擎、或者在线 + 苹果自带混着用，就默认「云端模型」。</li>
-          <li><b>状态可视</b>　每个模型行直接显示「未配置 / 正常 / 异常」，异常时给出具体原因。</li>
+          <li><b>本地模型</b>　分别管理 SenseVoice、Hy-MT2 翻译模型和声音克隆（ZipVoice）。</li>
+          <li><b>下载和导入</b>　下载时可在模型页暂停并继续。Hy-MT2 选 GGUF 文件，SenseVoice 和 ZipVoice 可选正确的模型文件夹或 ZIP。</li>
+          <li><b>云端模型</b>　填通用服务地址后可测试三个服务的就绪状态，也可为单个模型单独配置地址。</li>
+          <li><b>未配置时</b>　从「引擎管理」选择未配置的引擎，会打开对应的模型配置。</li>
         </ul>
       </div>
 
       <div class="fgroup">
         <h3><em>07</em>设置项</h3>
         <ul>
-          <li><b>说话灵敏度</b>　6–24 dB，环境吵就调高。</li>
-          <li><b>停顿时长</b>　400–1500 ms，调短出结果更快。</li>
-          <li><b>声音来源</b>　手机麦克风或耳机麦克风。</li>
-          <li><b>运行位置</b>　GPU 或神经引擎（Apple Silicon）。</li>
-          <li><b>语音增强</b>　回声消除 + 降噪 + 自动增益，可关。</li>
-          <li><b>日志</b>　可开关，上限 10 / 50 / 100 / 500 MB，支持在 App 内查看。</li>
+          <li><b>语音识别</b>　选择手机或耳机麦克风，并调整语音增强、说话灵敏度与断句停顿。</li>
+          <li><b>翻译与总结</b>　配置上下文、灵动岛与锁屏显示和大模型总结服务。</li>
+          <li><b>朗读</b>　管理声音输出位置、左右耳、声音克隆及声音图标。</li>
+          <li><b>语言和日志</b>　「显示语言」可选简体或繁体中文，应用内呈现的中文原文与译文按该设置显示。可查看日志并控制是否记录对话内容。</li>
         </ul>
       </div>
 
       <div class="fgroup">
         <h3><em>08</em>稳定性与同步</h3>
         <ul>
-          <li><b>iCloud 同步</b>　把设置与历史对话同步到 iCloud 云盘里的「听见」文件夹，位置固定，不用用户选；
-              打开开关<strong>不会弹选择框</strong>，只有系统还没给过云盘权限时才在设置里给一个「授权一次」的入口。</li>
-          <li><b>双向合并</b>　按修改时间判定谁新推谁，删除记录双向合并，设置用哈希指纹判断。</li>
-          <li><b>崩溃捕获</b>　未捕获异常 + 6 类信号，崩溃现场写入本地日志。</li>
-          <li><b>异常退出检测</b>　结合崩溃记录、内存警告、退出前可用内存三项判断，避免误报。</li>
-          <li><b>麦克风自恢复</b>　启动失败自动重试，音频路由变化时重装采样回调。</li>
-          <li><b>停了就把麦克风放开</b>　停止实时翻译（或按住说话松手）以后，
-              会停用音频会话把麦克风让出来——不然音频会话一直停在「可录音」状态，
-              手机上别的录音 App 录出来是静音。正在朗读的时候不会停会话（避免切断声音），
-              等读完再放。</li>
-          <li><b>云端失败降级</b>　云端引擎出错自动切回系统引擎并重启会话，不中断使用。</li>
-          <li><b>日志看得到开始与结束</b>　云端克隆、云端翻译这类要等好几秒的操作，
-              都会先记一条「开始」，结束后再记一条带用时的「结束」；关键节点同步落盘，
-              中途崩溃也查得到停在哪一步。</li>
+          <li><b>iCloud 同步</b>　可将设置和历史同步到 iCloud 云盘。需要访问授权时，可从功能设置授权；暂时失去访问后会在后续同步重新检查。</li>
+          <li><b>本机资源</b>　收到内存警告后会卸载本地模型。停止收音和朗读后，应用会释放音频会话。</li>
+          <li><b>云端繁忙</b>　正式识别和译文优先，服务忙时预览短暂退让，正式请求在限定次数内重试。</li>
+          <li><b>排查问题</b>　运行日志可区分识别、翻译、声音克隆、连接和模型加载相关问题。</li>
         </ul>
       </div>
 
@@ -675,9 +625,7 @@ section.band{scroll-margin-top:62px}
       <div>
         <h2>技术架构与关键技术点</h2>
         <p class="lede">
-          客户端是 Swift + SwiftUI 的 iOS 应用，推理层用两个方向不同的引擎：
-          <strong>WhisperKit</strong> 负责神经网络的语音识别，<strong>llama.cpp</strong> 负责翻译与声音克隆。
-          云端能力通过一个 actor 客户端接入，与本地引擎共享同一套提示词与接口约定。
+          客户端使用 Swift 和 SwiftUI。本机识别和说话人区分通过 FluidAudio，翻译通过 llama.cpp，声音克隆通过 sherpa-onnx。云端调用由 CloudClient 管理。
         </p>
       </div>
     </div>
@@ -691,10 +639,11 @@ section.band{scroll-margin-top:62px}
         <tbody>
           <tr><td>界面</td><td class="mono">SwiftUI</td><td class="mono">Swift 5</td><td>全部界面：对话页、历史页、设置、云端模型配置、日志查看</td></tr>
           <tr><td>音频</td><td class="mono">AVAudioEngine / AVAudioConverter</td><td class="mono">系统</td><td>麦克风采集、16 kHz 重采样、语音增强、音频路由与输出</td></tr>
-          <tr><td>识别</td><td class="mono">WhisperKit（SPM）</td><td class="mono">≥ 1.0.0</td><td>Whisper large-v3 turbo 的 CoreML 推理，GPU / 神经引擎</td></tr>
-          <tr><td>识别</td><td class="mono">FluidAudio（SPM）</td><td class="mono">0.18.3</td><td>SenseVoice ONNX 识别（int8 优先），中英日韩粤</td></tr>
+          <tr><td>识别</td><td class="mono">FluidAudio（SPM）</td><td class="mono">0.18.3</td><td>SenseVoice Core ML 识别与 CAM++ 说话人向量，均支持 CPU</td></tr>
           <tr><td>识别</td><td class="mono">SpeechAnalyzer / SpeechTranscriber</td><td class="mono">iOS 26+</td><td>系统听写，逐字回显</td></tr>
-          <tr><td>翻译 / 克隆</td><td class="mono">llama.xcframework</td><td class="mono">ggml-org/llama.cpp b12491</td><td>Hy-MT2 翻译、Qwen3-TTS 声音克隆，GPU 全层卸载</td></tr>
+          <tr><td>翻译</td><td class="mono">llama.xcframework</td><td class="mono">ggml-org/llama.cpp b12491</td><td>本机 Hy-MT2，前台 GPU、后台 CPU</td></tr>
+          <tr><td>人声检测 / 克隆</td><td class="mono">sherpa-onnx</td><td class="mono">1.13.8</td><td>Silero VAD 和 CPU 上的 ZipVoice + Vocos</td></tr>
+          <tr><td>灵动岛 / 锁屏</td><td class="mono">ActivityKit / WidgetKit</td><td class="mono">系统</td><td>展示最新原文、译文及暂停状态</td></tr>
           <tr><td>翻译</td><td class="mono">Translation 框架</td><td class="mono">iOS 26+</td><td>系统翻译兜底</td></tr>
           <tr><td>朗读</td><td class="mono">AVSpeechSynthesizer / AVAudioPlayerNode</td><td class="mono">系统</td><td>译文朗读与左右耳空间定位</td></tr>
           <tr><td>网络</td><td class="mono">URLSession</td><td class="mono">系统</td><td>云端模型服务调用、模型下载（续传）、大模型 API</td></tr>
@@ -719,15 +668,15 @@ section.band{scroll-margin-top:62px}
         <div class="lname">编排层</div>
         <div class="lbody">
           <span class="chip on">LiveSession（@MainActor · ObservableObject）</span>
-          <span class="chip">SummaryService</span><span class="chip">CrashGuard</span><span class="chip">AppLog</span><span class="chip">CloudSync</span>
+          <span class="chip">SessionJobQueue</span><span class="chip">SpeakerTracker</span><span class="chip">SummaryService</span><span class="chip">CrashGuard</span><span class="chip">AppLog</span><span class="chip">CloudSync</span>
         </div>
       </div>
       <div class="layer">
         <div class="lname">能力层</div>
         <div class="lbody">
-          <span class="chip cool">SpeechRecognizer</span><span class="chip cool">SenseVoiceRecognizer</span>
+          <span class="chip cool">SenseVoiceRecognizer</span><span class="chip cool">LocalSpeakerEmbedder</span>
           <span class="chip cool">LiveTextEngine</span><span class="chip cool">LlamaTranslator</span>
-          <span class="chip cool">GGUFVoiceCloner</span><span class="chip cool">Speaker</span>
+          <span class="chip cool">LocalVoiceCloner</span><span class="chip cool">Speaker</span>
           <span class="chip cool">SystemTranslator</span><span class="chip cool">CloudClient</span><span class="chip cool">LLMClient</span>
         </div>
       </div>
@@ -735,7 +684,7 @@ section.band{scroll-margin-top:62px}
         <div class="lname">音频层</div>
         <div class="lbody">
           <span class="chip">AudioCapture</span><span class="chip">Segmenter</span><span class="chip">AudioRoute</span>
-          <span class="chip">VoiceAnalyzer</span><span class="chip">Wav</span>
+          <span class="chip">SileroSpeechDetector</span><span class="chip">CloneAudio</span><span class="chip">Wav</span>
         </div>
       </div>
       <div class="layer">
@@ -753,153 +702,81 @@ section.band{scroll-margin-top:62px}
       <div class="key">
         <div class="term"><span class="tag">AUDIO</span><h4>采集与重采样</h4></div>
         <div class="detail">
-          <p>用 <code>AVAudioEngine</code> 的 <code>installTap</code>（format 传 nil 跟随真实格式）取流，
-             再用 <code>AVAudioConverter</code> 统一转成 <b>16 kHz / 单声道 / Float32</b>；格式变化时重建转换器，
-             容量按 <code>frameLength × ratio + 64</code> 预留，避免爆音。</p>
-          <p><strong>每次取整 100 毫秒</strong>（16 kHz 正好 1600 个采样）：
-             采样数不能被整除时，转到 16 kHz 会攒出零头，转换器偶尔错开一小截，
-             听起来就是「刺刺」的杂音。</p>
-          <p><strong>音频线程上只做最少的事</strong>：取到的样本立刻送去后台线程，
-             系统听写、其它识别引擎的喂样本都在后台做——
-             音频线程是实时线程，哪一下没赶上就会漏音。</p>
-          <p><strong>会话类别按「要不要麦克风」来定</strong>：正在收音是 <code>.playAndRecord</code>，
-             只是朗读就降成 <code>.playback</code>——<code>.playback</code> 不占麦克风，
-             手机上别的 App（录屏、录音机）才录得到声音。
-             改类别只在没有声音在放的时候做：改类别会打断正在播的声音。</p>
-          <p><strong>播放引擎用完就停</strong>：朗读结束 0.6 秒后把 <code>AVAudioEngine</code> 停掉。
-             引擎一直开着会一直占着音频输出，别的 App 放声音会跟我们互相干扰。</p>
-          <p><strong>语音增强（<code>setVoiceProcessingEnabled</code>）会独占麦克风</strong>：
-             同时录屏、录音的时候，别的 App 拿到的声音会又刺又碎。
-             设置里可以关掉，界面上也写清楚了。</p>
-          <p>语音增强用 <code>setVoiceProcessingEnabled</code>（回声消除 + 降噪 + AGC），同时把 ducking 配置为
-             <code>enableAdvancedDucking: false</code>、<code>duckingLevel: .min</code>——否则朗读时系统会把麦克风压低。</p>
-          <p><strong>麦克风起不来时的兜底</strong>：刚激活音频会话，硬件有时还没准备好，
-             输入格式会短暂地是 0×0。这时不直接报错，等最多 0.5 秒再看；
-             真的起不来会把「麦克风启动失败」弹出来并写进日志，不会闷着不动。</p>
-          <p><strong>语音增强只在收音的时候开</strong>：不收音就停掉音频会话，麦克风整个让出来。
-             而且 Apple 要求<strong>改语音处理之前必须先停会话</strong>，所以顺序是
-             「停会话 → 设语音增强 → 按需要激活会话」——开着会话改，轻则报错、重则录出来发闷发杂。
-             设置里把语音增强关掉，<strong>收音中也会立刻生效</strong>（重开一次麦克风），
-             录屏时想临时关掉不用先停一次翻译。</p>
+          <p><code>AudioCapture</code> 从 <code>AVAudioEngine</code> 采样，经 <code>AVAudioConverter</code> 转成 16 kHz 单声道 Float32。引擎启停与采样处理使用独立队列。</p>
+          <p>收音用 <code>.playAndRecord</code>，单独朗读用 <code>.playback</code>。音频路由变化时重新检查采样格式，停止收音并结束朗读后释放音频会话。语音增强可在设置中开关。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">VAD</span><h4>自动断句算法</h4></div>
         <div class="detail">
-          <p>按 <span class="num-hl">30 ms / 帧（480 采样）</span> 逐帧分析，参数全部可在设置里调：</p>
-          <ul>
-            <li><b>噪声底</b>：取最近 100 帧（约 3 秒）dB 的第 10 百分位，钳在 −75 ~ −25 dB；阈值 = <code>max(噪声底 + 灵敏度, −50 dB)</code>。</li>
-            <li><b>起句</b>：需连续 <span class="num-hl">5 帧（150 ms）</span> 超阈值才判定开始说话，并保留说话前 <span class="num-hl">300 ms</span> 的 preroll，避免吞掉第一个字。</li>
-            <li><b>收尾</b>：静音时长达到「停顿时长」（400–1500 ms）或整句超过 <span class="num-hl">15 秒</span> 即结束；尾部静音裁掉，只留约 200 ms。</li>
-            <li><b>静音线</b>：<code>max(噪声底 + 灵敏度×0.5, 本句平均音量 − 18 dB)</code>；本句音量用 EMA 更新（0.97 × 旧值 + 0.03 × 新值）。</li>
-            <li><b>丢弃</b>：有声时长不足 <span class="num-hl">400 ms</span> 的片段直接丢掉，不进识别。</li>
-          </ul>
+          <p><code>Segmenter</code> 按帧估计音量与停顿，同时参考内置 Silero 人声检测。判断为非语音时会抑制起句和识别请求。检测器不可用时使用音量阈值。</p>
+          <p>起句保留前置音频，收尾清理多余静音。对话模式允许较短的回答。识别后还会过滤无意义文本和与语种不符的结果。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">ASR</span><h4>识别引擎编排</h4></div>
         <div class="detail">
-          <p>WhisperKit 用 <code>openai_whisper-large-v3-v20240930_turbo</code>（CoreML，非 GGUF 量化），中文前置提示
-             「以下是普通话的句子，使用简体中文。」，输出经 <code>StringTransform("Hant-Hans")</code> 转简体。
-             关键采样参数：<code>temperature = 0</code>、<code>noSpeechThreshold = 0.6</code>、
-             <code>compressionRatioThreshold = 2.4</code>、<code>logProbThreshold = −1.0</code>、
-             <code>sampleLength = min(224, max(24, 秒数 × 15))</code>。</p>
-          <p>识别结果还要过两道闸：<code>confident()</code> 按分段平均 logprob 与 noSpeech 概率过滤幻觉，
-             <code>isMeaningful()</code> 再用字幕/广告语黑名单过滤「字幕」「点赞」「Subtitles by」这类无意义输出。</p>
-          <p><b>SenseVoice + Whisper 校正</b>的判定：去掉标点、空格与大小写后算编辑距离，
-             <span class="num-hl">距离 ≥ 2</span>，或 <span class="num-hl">距离 = 1 且较短句长度 ≤ 8</span> 才算「明显不同」；
-             不同则以 Whisper 为准并重译、标记魔法棒图标、把朗读位置回退到该句重读。</p>
+          <p>本机 SenseVoice 通过 FluidAudio 打开 Core ML 模型。苹果听写通过 <code>LiveTextEngine</code> 编排。中文简繁转换用于显示和复制。</p>
+          <p>云端组合方案先返回 SenseVoice 原文，再按队列与结果质量决定是否运行 Whisper 校正。校正后重新翻译成功才替换原文与译文，等待期间保留已有译文。</p>
+          <p>本机 CAM++ 与云端说话人模型提供声纹向量，App 在当前对话中跟踪说话人并保存手动补充的姓名等资料。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">LANG</span><h4>语种自动判断</h4></div>
         <div class="detail">
-          <p>不依赖模型的语言标签，而是统计识别文本的 Unicode script 区间——中日韩 / 西里尔 / 阿拉伯 / 泰 / 拉丁，
-             <span class="num-hl">命中率 ≥ 0.6</span> 才判定为该语言；CJK 文本里夹的连续拉丁字母按 1 个字计，
-             避免「Nginx」这类词把中文判成英文。</p>
-          <p>识别引擎返回的语言与文本脚本不一致时改判另一侧；<code>lastLangID</code> 记住上一句语种，作为下一句的 fallback。</p>
+          <p>实时模式结合引擎的语种、文本字符和当前两种语言判断方向。对话模式按用户选择的语言收音，切换语言前先交付上一轮音频。</p>
+          <p>应用提供 13 种语言条目，选择器会按当前识别引擎的能力过滤。本机 SenseVoice 当前提供中文、英语、日语和韩语。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">MT</span><h4>翻译模型与提示词</h4></div>
         <div class="detail">
-          <p>llama.cpp 参数：<code>n_gpu_layers = 999</code>（全 GPU）、<code>n_ctx = 4096</code>、<code>n_batch = 4096</code>。
-             采样链严格按 Hy-MT2 官方推荐：<span class="num-hl">top_k 20 → top_p 0.6 → temperature 0.7</span>，
-             正式翻译 <code>max_tokens = 512</code>，实时预览 256。</p>
-          <p>提示词用模型自带的 chat template（<code>llama_chat_apply_template</code>），格式分中英文两套，例如：</p>
-          <p><code>将以下文本翻译为English，注意只需要输出翻译后的结果，不要额外解释：</code><br>
-             <code>参考上面的信息，把下面的文本翻译成English，注意不需要翻译上文，也不要额外解释：</code></p>
-          <p>术语表只注入<strong>命中</strong>的条目（大小写不敏感的包含匹配），避免无关术语污染上下文。</p>
+          <p>本机 Hy-MT2 的上下文为 <code>2048</code>，批大小 <code>256</code>。正式翻译最多生成 512 个 token，实时预览最多 256 个。前台优先 GPU，后台使用 CPU。</p>
+          <p><code>PromptBuilder</code> 构建中英文提示词，并加入与当前语段匹配的术语。推理使用模型对话模板和参数 <code>top_k 20 / top_p 0.6 / temperature 0.7</code>。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">CTX</span><h4>上下文连贯翻译</h4></div>
         <div class="detail">
-          <p>每次翻译前调用 <code>llama_memory_clear(ctx, true)</code> 清空 KV cache——
-             <strong>每句独立推理</strong>，这样不会因为上一句的生成把下一句带跑偏，也保证了延迟稳定。</p>
-          <p>「上下文」是通过提示词文本注入实现的：开启后取最近 <span class="num-hl">2 句</span>已完成的原文，
-             按「参考上面的信息…」的模板拼进 prompt，历史本身不进模型状态。</p>
+          <p>每句独立推理，清空上次的 KV cache。开启「结合上文翻译」时，<code>TranslationSource</code> 用相邻原文处理断句处的接续词，仍只翻译当前语段。</p>
+          <p>预览更新时保留已有译文，最终译文成功后按变化范围高亮。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">TTS</span><h4>朗读与空间音频</h4></div>
         <div class="detail">
-          <p>双耳（pan = 0）直接走 <code>AVSpeechSynthesizer.speak</code>；单耳则用 <code>synth.write(u)</code> 拿到 PCM 缓冲，
-             转成硬件当前输出格式后交给 <code>AVAudioPlayerNode</code> 并设置 <code>player.pan</code> 播放，实现「原文进左耳、译文进右耳」。</p>
-          <p>细节：超时保护 <code>5 + 字符数 × 0.45</code> 秒；<code>bestVoice(for:)</code> 过滤掉个人音色与 novelty 音色，
-             取 quality 最高的一个；输出音量做峰值归一（峰值低于 0.5 时放大到 0.85）；设备路由变化时把
-             <code>connectedFormat</code> 置 nil 重建引擎。</p>
+          <p>系统声音通过 <code>AVSpeechSynthesizer</code> 朗读。分配到单耳时，将合成音频交给 <code>AVAudioPlayerNode</code> 并调整声道。</p>
+          <p>克隆播放根据播放器的渲染进度点亮喇叭，完成后解除播放状态。输出无法启动或停滞时尝试系统朗读。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">VC</span><h4>声音克隆</h4></div>
         <div class="detail">
-          <p>走 llama.cpp 的 <strong>mtmd 音频多模态接口</strong>，需要两个 GGUF：Qwen3-TTS 骨架（0.6B Q4_K_M）
-             与 mmproj 语音 tokenizer（Q8_0），输出 24 kHz。加载参数：
-             <code>n_gpu_layers = 999</code>（或 CPU 时 0）、<code>embeddings = true</code>、
-             <code>n_ctx = n_batch = 2048</code>、线程数 <code>min(6, 核数 − 1)</code>。</p>
-          <p>参考音频的处理链路：16 kHz PCM → <code>denoise()</code>（80 Hz 一阶高通 + 20 ms 分段取能量最低的 20% 估底噪，
-             做 0.5 倍软门限）→ 写临时 WAV → <code>mtmd_helper_bitmap_init_from_file</code> 得到 <code>speaker_ref</code>，
-             配合参考音频里那句原话（ICL 上下文）一起进模型。</p>
-          <p>采样 <code>top_k 20 / top_p 0.6 / temp −1（用模型默认）/ seed = UInt32.max</code>，
-             骨架部分用<strong>贪心</strong>采样（取最大 logit）；每次生成前后清 KV cache（该管线不支持复用 KV）。
-             输出做峰值归一 + 头尾 5 ms 淡入淡出，峰值低于 0.0005 判为静音并退回系统声音。</p>
+          <p>本机使用 sherpa-onnx 运行 ZipVoice-Distill INT8 和 Vocos。云端 Qwen3-TTS 通过 llama-server 使用参考音频和参考文本生成译文声音。</p>
+          <p>生成及缓存读取都会校验音频，去掉首尾长静音并在裁切位置短暂淡入淡出。句中停顿保留，近乎无声的结果会触发回退。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">CONCURRENCY</span><h4>并发与取消</h4></div>
         <div class="detail">
-          <p><code>LiveSession</code> 是 <code>@MainActor final class: ObservableObject</code>；
-             <code>SpeechRecognizer</code> / <code>SenseVoiceRecognizer</code> / <code>LlamaTranslator</code> /
-             <code>GGUFVoiceCloner</code> / <code>CloneCache</code> / <code>CloudClient</code> 全部是 <code>actor</code>；
-             音频采集回调跑在 <code>hear.audio.segmenter</code> 队列，引擎启停在 <code>hear.audio.engine</code> 队列。</p>
-          <p>取消机制是三级：<code>runGen</code>（停止会话时 +1，作废在途结果）、<code>loadGen</code>（防旧加载覆盖新状态）、
-             <code>EpochCounter</code>（取消预览翻译）与 <code>CancelFlag</code>（取消整句翻译）。
-             实时预览分两条独立循环：<code>previewLoop</code> 与 <code>previewTranslateLoop</code>，
-             各自用单飞标志，互不等待，只翻「最新一份」文本。</p>
+          <p><code>LiveSession</code> 在主线程维护会话。识别、翻译、说话人区分和克隆使用独立的任务协调，旧任务的迟到结果无法覆盖新状态。</p>
+          <p>实时原文与译文预览分别消费最新快照。停止收音先交付尾句，整句识别和翻译优先于预览。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">MODEL</span><h4>模型下载</h4></div>
         <div class="detail">
-          <p>翻译模型从 Hugging Face <code>tencent/Hy-MT2-1.8B-GGUF</code> 取：先调 <code>/api/models/{repo}</code> 拿文件列表，
-             按 <code>Q8_0 &gt; Q6_K &gt; Q5_K_M &gt; Q4_K_M</code> 的优先级挑量化版本，排除 1.25bit / 2bit / IMATRIX 变体。
-             WhisperKit 走 <code>WhisperKit.download(variant:downloadBase:progressCallback:)</code>，
-             镜像通过 <code>setenv("HF_ENDPOINT", …)</code> 切换。</p>
-          <p>下载器 <code>FileDownloader</code> 用 <code>URLSessionDownloadDelegate</code>：网络类错误（−1005 / −1001 / −1003 / 连接丢失）
-             最多重试 <span class="num-hl">8 次</span>，指数退避 <code>min(2ⁿ, 30)</code> 秒，
-             用 <code>NSURLSessionDownloadTaskResumeData</code> 续传；请求超时 120 秒、资源超时 2 小时。</p>
-          <p>导入的模型会校验是否包含 <code>AudioEncoder.mlmodelc</code> / <code>TextDecoder.mlmodelc</code> / <code>MelSpectrogram.mlmodelc</code>。
-             模型路径在 UserDefaults 里存<strong>相对路径</strong>——重装 App 后沙盒绝对路径会变。</p>
+          <p>本机 Hy-MT2 使用 GGUF。SenseVoice 与 ZipVoice 可导入目录或 ZIP，导入时检查必需文件，并在成功后替换旧模型。</p>
+          <p>下载状态可见，可暂停与继续。应用控制多个模型一起初始化的内存峰值，加载和完成提示都显示在对话页同一分隔线。</p>
         </div>
       </div>
 
@@ -926,69 +803,32 @@ section.band{scroll-margin-top:62px}
       <div class="key">
         <div class="term"><span class="tag">SYNC</span><h4>iCloud 同步</h4></div>
         <div class="detail">
-          <p>免费账号自签的 App 拿不到 CloudKit 权限，因此走 <strong>iCloud 云盘里的一个文件夹</strong>。
-             位置<strong>固定为「听见」</strong>（App 名字）：优先用 App 自己的 iCloud 容器
-             （<code>FileManager.url(forUbiquityContainerIdentifier:)</code>），没有就用之前授权过的文件夹，
-             在里面放一个「听见」。用户不用选目录，也不用改目录，界面上也不显示同步位置。
-             老版本用的「听见同步」文件夹会在升级后自动改名成「听见」。</p>
-          <p><strong>打开开关不会再弹「请选择文件夹」</strong>：位置永远是「听见」。
-             授权用的是<strong>普通书签</strong>（<code>URL.bookmarkData(options:)</code>，
-             iOS 上没有 macOS 那种带安全权限的选项），关键在于
-             <strong>书签解析出来的 URL 实例要用到底</strong>：同一份书签解析两次会得到两个 URL，
-             只有开过 <code>startAccessingSecurityScopedResource()</code> 的那一个能动里面的东西，
-             之前的版本解析了两次，于是每次都以为「没权限」，又要让用户重新选。
-             现在权限在整个 App 运行期间一直开着，
-             只有系统完全没给过云盘权限时，设置里才会出现一个「授权 iCloud 云盘」的按钮——
-             界面上不再有任何说明文字和提示气泡，点一下授权即可。</p>
-          <p>同步三类数据：<code>settings.plist</code>（设置，26 个键，用 SHA256 指纹判断是否被改过；
-             「实时翻译 / 对话翻译」这个模式<strong>只存在本机</strong>，不跟 iCloud 走，
-             否则每次启动都会被云盘里的旧值改回去；
-             含云端模型：通用服务地址、三个模型各自的地址、识别方案、用不用云端翻译/克隆）、
-             <code>conversations/&lt;uuid&gt;.json</code>（历史）、<code>manifest.json</code>（各页修改时间、删除记录、设置哈希）。</p>
-          <p>方向判定：对话按每页 <code>updatedAt</code> 谁新推谁；删除用 <code>deletedConversations</code> 字典两边合并；
-             设置是三态——只有 iCloud 改过而本机没改过才 pull，两边都改以本机为准。读写走 <code>NSFileCoordinator</code>，
-             文件未下载到本机时识别 <code>.文件名.icloud</code> 占位并触发下载，最多等 5 秒。</p>
-          <p>从 iCloud 拉下来的设置<strong>直接换上，不用重开 App</strong>：语言、灵敏度、词表、引擎、
-             云端模型地址都会立刻生效；改地址之后 2 秒内自动同步一次，
-             同步进行中改的会等这轮结束再补一次，不会漏。</p>
-          <p><strong>模型文件与 API Key 不参与同步。</strong></p>
+          <p>iCloud 同步使用云盘目录、文件协调和目录访问授权。App 可使用自己的容器，或借助系统文件选择器授权目录。失效的授权在后续同步重新检查。</p>
+          <p>同步包括 <code>settings.plist</code>、<code>conversations/</code> 与 <code>manifest.json</code>。对话按修改时间与同步基线合并，设置通过同步指纹判断更新来源。模型文件与 API Key 保留在本机。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">STABILITY</span><h4>崩溃保护与自恢复</h4></div>
         <div class="detail">
-          <p><code>NSSetUncaughtExceptionHandler</code> 捕获未捕获的 ObjC 异常（取前 15 帧调用栈），
-             另注册 SIGABRT / SIGSEGV / SIGILL / SIGTRAP / SIGFPE / SIGBUS 信号处理器；
-             写完日志后恢复默认处理器并 <code>raise</code>，让系统照常生成崩溃报告。
-             信号处理器内不做 <code>queue.sync</code>，直接用 <code>FileHandle</code> 追加写，避免死锁。</p>
-          <p>异常退出检测用标记文件 <code>hear-running.json</code>（含启动时间、是否收到内存警告、退出前可用内存）：
-             下次启动时文件还在即判定异常退出，但只有<strong>有崩溃记录 / 收过内存警告 / 退出前可用内存 &lt; 400 MB</strong>
-             三者之一才提示，避免用户划掉 App 时误报。</p>
-          <p>音频侧：麦克风启动失败重试 3 次（重置音频会话、关掉语音增强再试），仍失败则卸载已加载的克隆模型再试；
-             <code>AVAudioEngineConfigurationChange</code> 通知触发重装 tap（重试 2 次）；
-             停止引擎放到后台队列，避免蓝牙切换模式时卡住主线程。</p>
+          <p><code>CrashGuard</code> 结合启动标记、内存警告和崩溃日志辅助排查。内存紧张时卸载本地模型，后续按所选引擎重新准备。</p>
+          <p>麦克风启动异常时尝试恢复音频会话，设备路由变化时重新检查采样。App 切到后台时停止朗读。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">LOG</span><h4>日志系统</h4></div>
         <div class="detail">
-          <p>全局 <code>hearLog(_:_:)</code> 可从任意线程调用，日志写 <code>Documents/hear-log.txt</code>，
-             格式为 <code>[MM-dd HH:mm:ss] [I/W/E] 内容</code>；内存里保留最近 3000 条，启动时只读文件尾部 1 MB。
-             上限可选 10 / 50 / 100 / 500 MB，超过一半即轮转为 <code>hear-log.old.txt</code>，两份合计不超过上限。</p>
+          <p>App 运行日志支持查看、搜索和按容量轮转，并可选择是否记录对话内容。</p>
+          <p>Windows 内测服务当前默认记录相应的原文或译文，可用 <code>HEAR_LOG_CONTENT=0</code> 关闭服务默认记录。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">SECURITY</span><h4>凭据与隐私</h4></div>
         <div class="detail">
-          <p>大模型 API Key 优先存钥匙串（<code>kSecClassGenericPassword</code>，service <code>com.hear.llm</code>，
-             <code>kSecAttrAccessibleAfterFirstUnlock</code>）；自签 App 没有钥匙串权限时自动降级到
-             <code>FileKeyStore</code>（<code>Application Support/llm-keys.json</code>，
-             <code>completeFileProtectionUntilFirstUserAuthentication</code>，并标记 <code>isExcludedFromBackup</code> 不进 iCloud 备份）。</p>
-          <p>整个 App 的默认路径是<strong>数据不出设备</strong>：识别、翻译、克隆都在本地推理；
-             只有开了云端引擎或调用外部大模型 API 才会出网，且走的是用户自己填的局域网地址或用户自选的 API。</p>
+          <p>本机引擎在手机上推理。启用局域网引擎时，相关音频或文本发给配置的服务。使用大模型总结时发送用于总结的文本，启用 iCloud 同步后则会同步历史和设置。</p>
+          <p>API Key 优先存入钥匙串。钥匙串不可用时，App 将其保存在受文件保护且排除备份的本机文件。</p>
         </div>
       </div>
 
@@ -1012,21 +852,17 @@ section.band{scroll-margin-top:62px}
     </div>
 
     <div class="note">
-      <span class="h">两类服务的边界</span>
-      <p><b>自建云端模型服务</b>是「把模型换台机器跑」，接口与本地引擎一一对应，手机端无需任何改动；
-         <b>外部大模型 API</b>是「对话结束后的增值能力」，只有配置了 API Key 才能用，缺失时只影响总结功能，不影响翻译。</p>
+      <span class="h">局域网模型与对话总结</span>
+      <p>局域网服务接收语音识别、译文翻译或声音克隆请求。外部大模型服务用于对话总结，可按需在 App 设置里配置提供商。</p>
     </div>
 
     <div class="note">
       <span class="h">启动时按类型选模型</span>
-      <p>Windows 部署脚本每次启动都会按<b>语音识别 / 文本翻译 / 声音克隆</b>分别问你要用哪个模型
-         （直接回车就是上次选的），选完记在 <code>server/hear_models.json</code> 里。
-         识别可选 tiny ~ large-v3，
-         翻译可选 Hy-MT2 1.8B / 7B / 30B-A3B（混合专家，30B 里只激活 3B，又大又快又好），
-         克隆可选 Qwen3-TTS 0.6B / 1.7B。
-         手机端「云端模型」的状态后面会直接写出电脑上跑的是哪个模型。
-         完整的部署清单（步骤、注意事项、已知问题和处理方案）见
-         <a href="windows-deploy.md" target="_blank" rel="noopener">docs/windows-deploy.md</a>。</p>
+      <p>下载仓库根目录的 <a href="https://github.com/qianyueping1211/Hear/blob/main/start-hear-cloud.bat" target="_blank" rel="noopener">start-hear-cloud.bat</a> 并在 Windows 启动。单独下载的脚本默认获取最新服务文件；放在仓库内时使用当前工作副本。</p>
+      <p>默认由 SenseVoice 先输出原文，Whisper 后续校正。菜单可选 Whisper base、small、medium 或 large-v3，首次默认 small。
+         翻译可选 Hy-MT2 1.8B、7B 或 30B-A3B，克隆可选 Qwen3-TTS 0.6B 或 1.7B。
+         每项直接回车或 5 秒无操作时沿用上次选择，首次使用脚本默认值。</p>
+      <p>电脑和 iPhone 连同一个局域网后，在「功能设置 → 模型管理 → 云端模型」填写启动窗口显示的 HTTPS 地址，并点「测试连接」。Whisper 档位由 Windows 启动脚本管理。</p>
     </div>
 
     <!-- ---------- A. 自建服务 ---------- -->
@@ -1039,24 +875,24 @@ section.band{scroll-margin-top:62px}
         </thead>
         <tbody>
           <tr>
-            <td>语音识别</td>
+            <td>语音识别与说话人区分</td>
             <td>跑在总服务进程内<span class="sub">faster-whisper / sherpa-onnx SenseVoice</span></td>
-            <td>Whisper（默认 small）<span class="sub">启动时可选 tiny ~ large-v3</span></td>
+            <td>SenseVoice + Whisper<span class="sub">默认 small 校正</span></td>
             <td class="mono">8000</td>
-            <td class="mono">POST /v1/asr</td>
+            <td class="mono">POST /v1/asr<span class="sub">说话人区分用 /v1/speaker</span></td>
           </tr>
           <tr>
             <td>文本翻译</td>
             <td>llama.cpp <code>llama-server</code><span class="sub">独立进程</span></td>
             <td>Hy-MT2 GGUF<span class="sub">默认 1.8B Q4_K_M，可选 7B / 30B-A3B</span></td>
-            <td class="mono">8081</td>
+            <td class="mono">8000<span class="sub">本机后端 8081</span></td>
             <td class="mono">POST /v1/translate<span class="sub">或 OpenAI 兼容 /v1/chat/completions</span></td>
           </tr>
           <tr>
             <td>声音克隆</td>
             <td>llama.cpp <code>llama-server</code><span class="sub">独立进程，带 mmproj</span></td>
-            <td>Qwen3-TTS GGUF<span class="sub">默认 0.6B，可选 1.7B；骨架 + 语音 tokenizer</span></td>
-            <td class="mono">8082</td>
+            <td>Qwen3-TTS GGUF<span class="sub">默认 1.7B，可选 0.6B；模型 + 语音 tokenizer</span></td>
+            <td class="mono">8000<span class="sub">本机后端 8082</span></td>
             <td class="mono">POST /v1/clone<span class="sub">或 /tts</span></td>
           </tr>
           <tr>
@@ -1102,7 +938,7 @@ section.band{scroll-margin-top:62px}
         <!-- 8000 -->
         <rect x="420" y="86" width="434" height="92" rx="7" fill="#FFFFFF" stroke="#0E6B66" stroke-width="1.6"/>
         <text x="438" y="110" font-family="Bahnschrift, sans-serif" font-size="13.5" fill="#0E6B66">8000 · hear_cloud.py</text>
-        <text x="438" y="128" font-family="Cascadia Mono, monospace" font-size="10" fill="#6D7C88">/v1/asr · /v1/translate · /v1/clone · /health</text>
+        <text x="438" y="128" font-family="Cascadia Mono, monospace" font-size="10" fill="#6D7C88">/v1/asr · /v1/speaker · /v1/translate · /v1/clone</text>
         <rect x="438" y="138" width="192" height="26" rx="4" fill="#E7F2F1"/>
         <text x="450" y="155" font-family="Cascadia Mono, monospace" font-size="10" fill="#0E6B66">faster-whisper（CPU int8）</text>
         <rect x="640" y="138" width="150" height="26" rx="4" fill="#E7F2F1"/>
@@ -1122,18 +958,18 @@ section.band{scroll-margin-top:62px}
         <text x="438" y="255" font-family="Cascadia Mono, monospace" font-size="10" fill="#6D7C88">/v1/chat/completions</text>
         <rect x="438" y="266" width="160" height="24" rx="4" fill="#F2F5F7"/>
         <text x="450" y="282" font-family="Cascadia Mono, monospace" font-size="10" fill="#33434F">Hy-MT2-1.8B GGUF</text>
-        <text x="438" y="302" font-family="Cascadia Mono, monospace" font-size="9.5" fill="#6D7C88">Vulkan / OpenVINO / CUDA</text>
+        <text x="438" y="302" font-family="Cascadia Mono, monospace" font-size="9.5" fill="#6D7C88">Vulkan / OpenVINO / CPU</text>
 
         <!-- 8082 -->
         <rect x="646" y="212" width="208" height="96" rx="7" fill="#FFFFFF" stroke="#111A22" stroke-width="1.4"/>
         <text x="664" y="236" font-family="Bahnschrift, sans-serif" font-size="13.5" fill="#111A22">8082 · llama-server</text>
         <text x="664" y="255" font-family="Cascadia Mono, monospace" font-size="10" fill="#6D7C88">/tts（带参考音频克隆音色）</text>
         <rect x="664" y="266" width="172" height="24" rx="4" fill="#F2F5F7"/>
-        <text x="676" y="282" font-family="Cascadia Mono, monospace" font-size="10" fill="#33434F">Qwen3-TTS-0.6B + mmproj</text>
-        <text x="664" y="302" font-family="Cascadia Mono, monospace" font-size="9.5" fill="#6D7C88">仅支持 Vulkan / CUDA</text>
+        <text x="676" y="282" font-family="Cascadia Mono, monospace" font-size="10" fill="#33434F">Qwen3-TTS + mmproj</text>
+        <text x="664" y="302" font-family="Cascadia Mono, monospace" font-size="9.5" fill="#6D7C88">Vulkan / CPU</text>
 
         <!-- 底部说明 -->
-        <text x="420" y="336" font-family="Cascadia Mono, monospace" font-size="9.5" fill="#6D7C88">WSL2 访问不到 Intel NPU；要在 Windows 原生跑才能吃满核显与 NPU</text>
+        <text x="420" y="336" font-family="Cascadia Mono, monospace" font-size="9.5" fill="#6D7C88">手机使用 8000；8081 与 8082 默认只供电脑本机访问</text>
       </svg>
     </div>
 
@@ -1147,7 +983,7 @@ section.band{scroll-margin-top:62px}
           <tr>
             <td class="mono">GET /health</td>
             <td>—</td>
-            <td class="mono">{"asr":"就绪（small）","mt":"就绪","clone":"就绪"}</td>
+            <td class="mono">asr_ready / mt_ready / clone_ready / speaker_ready</td>
             <td>手机侧 5 s</td>
           </tr>
           <tr>
@@ -1158,9 +994,15 @@ section.band{scroll-margin-top:62px}
           </tr>
           <tr>
             <td class="mono">POST /v1/asr</td>
-            <td>请求体：16 kHz 单声道 wav（二进制）<span class="sub">头：X-Languages / X-Fallback-Language / X-ASR-Scheme / X-ASR-Preview</span></td>
-            <td class="mono">{"lang":"en","text":"..."}</td>
+            <td>请求体：16 kHz 单声道 wav（二进制）<span class="sub">头：X-Languages / X-ASR-Scheme / X-ASR-Preview / X-ASR-Stage</span></td>
+            <td class="mono">lang、text、can_correct、speaker_available</td>
             <td>120 s</td>
+          </tr>
+          <tr>
+            <td class="mono">POST /v1/speaker</td>
+            <td>16 kHz 单声道 WAV</td>
+            <td class="mono">embedding</td>
+            <td>按 App 侧请求配置</td>
           </tr>
           <tr>
             <td class="mono">POST /v1/translate</td>
@@ -1169,9 +1011,15 @@ section.band{scroll-margin-top:62px}
             <td>120 s</td>
           </tr>
           <tr>
+            <td class="mono">POST /v1/clone/reference</td>
+            <td>参考音频 WAV</td>
+            <td>参考音频 ID</td>
+            <td>按 App 侧请求配置</td>
+          </tr>
+          <tr>
             <td class="mono">POST /v1/clone</td>
-            <td class="mono">{"text":"Hello","lang":"english","reference_wav":"&lt;base64 wav&gt;","reference_text":"..."}</td>
-            <td class="mono">{"audio":"&lt;base64 wav&gt;","sample_rate":24000}</td>
+            <td class="mono">text、lang、reference_id 或 reference_wav、reference_text</td>
+            <td class="mono">WAV（X-Hear-Audio: wav）或含音频的 JSON</td>
             <td>300 s</td>
           </tr>
         </tbody>
@@ -1179,7 +1027,7 @@ section.band{scroll-margin-top:62px}
     </div>
 
     <p style="margin-top:12px;font-size:13.5px;color:var(--muted)">
-      <code>prompt</code> 是 App 拼好的，与本地翻译用的是同一套格式（含上下文与术语表）；服务端只做转发，
+      <code>prompt</code> 是 App 拼好的，与本地翻译用的是同一套格式（使用当前语段与匹配的术语）；服务端只做转发，
       由 llama.cpp 套用模型自带的对话模板。
     </p>
 
@@ -1189,185 +1037,84 @@ section.band{scroll-margin-top:62px}
       <div class="key">
         <div class="term"><span class="tag">PROBE</span><h4>客户端自动识别服务类型</h4></div>
         <div class="detail">
-          <p>App 不要求用户手工区分端口。往地址发一个 <code>GET /health</code>：返回里带 <code>asr</code> / <code>mt</code> / <code>clone</code>
-             字段的判定为<strong>总服务</strong>（有识别接口）；只带 <code>status</code> 的判定为<strong>单独 llama-server</strong>；
-             探测失败不写缓存，下次还会再问一次。</p>
-          <p>判定为 llama-server 时：翻译走 OpenAI 兼容的 <code>/v1/chat/completions</code>，克隆走 <code>/tts</code>，
-             而<strong>识别直接跳过</strong>——单独的模型服务没有识别接口，App 会明确提示「这个地址不提供语音识别，请用 8000 的总服务地址」。</p>
+          <p><code>CloudClient</code> 区分听见总服务与直接连接的 llama-server。总服务提供识别、翻译、克隆和健康检查，单独的 llama-server 可提供翻译或克隆接口。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">FALLBACK</span><h4>地址回退链</h4></div>
         <div class="detail">
-          <p>每个模型可以单独配地址，也共用一个「通用服务地址」。请求时按
-             <span class="num-hl">模型专属地址 → 通用地址（8000，会转发给真正干活的模型服务）</span> 的顺序依次尝试，
-             第一个成功的即采用；全部失败才把最后一个错误抛给界面。</p>
-          <p>这意味着即使某个模型单独配的地址没起来，只要总服务活着，功能依然可用。</p>
-          <p>协议只有一种：<strong>只用 https</strong>。用户只填 <code>192.168.x.x:8000</code> 的话，
-             App 会自动补上 <code>https://</code>，测试连接之后把补好之后的地址回显出来。</p>
+          <p>单个模型可设置独立地址，必要时尝试通用服务地址。常规部署只需填写 Windows 窗口显示的总服务 HTTPS 地址。</p>
+          <p>请求繁忙时保留所选引擎，正式请求按限定次数重试。预览利用冷却时间降低请求密度。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">HEALTH</span><h4>健康检查与状态判定</h4></div>
         <div class="detail">
-          <p>服务端探测后端 llama-server 时，把状态分成三档：<b>就绪</b>（200）、<b>加载中</b>（503 且响应体含 <code>loading</code>——
-             llama-server 模型还没加载完，这是「活着但在准备」，不是「连不上」）、<b>连不上</b>。</p>
-          <p>探测结果<strong>缓存 2 秒</strong>：不缓存的话后端没起来时每次 <code>/health</code> 都要等 3 秒 + 3 秒，
-             手机 5 秒就超时了，会被误报成「连不上」。</p>
+          <p><code>/health</code> 报告各模型的就绪状态、可选识别方案和可用模型信息。启动阶段可能显示加载中。</p>
+          <p>如果 App 连不上，先用手机浏览器打开同一个服务地址，再检查 App 的 iOS 本地网络权限和 Windows 的专用网络防火墙设置。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">TLS</span><h4>同一个端口，http 和 https 都能用</h4></div>
         <div class="detail">
-          <p>电脑上第一次启动服务时，<code>make_cert.py</code> 会用 <code>cryptography</code>
-             生成一张<strong>自签证书</strong>（SAN 里带上本机所有局域网 IP、127.0.0.1 和 localhost）。
-             私钥只留在本机的 <code>server/certs/</code> 里，不进仓库。</p>
-          <p>总服务在 8000 端口上<strong>同时接两种协议</strong>：接到连接先偷看第一个字节，
-             TLS 握手的第一个字节固定是 <code>0x16</code>，是 TLS 就套上 TLS，否则按普通 http 处理。
-             这样浏览器自检页面还能用 http 打开，App 则一律走 <code>https://</code>。</p>
-          <p><strong>握手放在工作线程里做</strong>（这一步很关键）。
-             偷看字节和 TLS 握手都<strong>不在 accept 线程里</strong>：
-             放在那里的话，一个连上不吭声的客户端、或者一个握手慢的手机，
-             就能把整个服务堵住（每个最多 5 秒），手机那边表现就是「有时卡住了」。
-             实测：旧写法被 3 个慢连接堵住时，一个 <code>/health</code> 要等 <strong>14.6 秒</strong>；
-             现在是 <strong>0.02 秒</strong>。</p>
-          <p><strong>用 HTTP/1.1 长连接</strong>：手机可以复用同一个连接，
-             不用每发一个请求就重做一次 TLS 握手。握手次数少，
-             「握手失败」（<code>certificate unknown</code>、<code>EOF</code>）和卡顿都跟着少。</p>
-          <p><strong>证书会自己更新</strong>：换了网络、路由器重新分配了 IP 之后，
-             旧证书里没有新 IP，手机会直接拒绝（<code>certificate unknown</code>）。
-             现在服务启动时会检查证书里有没有本机当前的 IP，没有就地重新生成一张。</p>
-          <p>App 侧只对<strong>内网地址</strong>（私有网段、<code>.local</code>、<code>localhost</code>）
-             放行自签证书，公网域名照常走系统校验；
-             同时用自带的会话而不是系统共享会话，因为共享会话没法挂证书处理程序。</p>
-          <p>内网自签证书是<strong>按内网地址放行、不校验主机名</strong>的：
-             证书里的 IP 是生成那一刻的，电脑换网络、IP 变了也照样连得上，
-             不用每次换网络都重新装证书。</p>
-          <p>地址写成 <code>http://</code> 也会被自动换成 <code>https://</code>，
-             根本没写协议的（只写 <code>192.168.x.x:8000</code>）则补上 <code>https://</code>。</p>
-          <p><strong>本地网络权限</strong>：访问电脑上的服务需要系统的「本地网络」权限，
-             而<strong>系统的授权框只问一次</strong>——用户选了「不允许」以后 App 再也弹不出来，
-             只能自己去 <code>设置 → 隐私与安全性 → 本地网络 → 听见</code> 里打开。
-             大部分人不知道这个开关在哪儿，所以 App 会自己认出来（系统拒绝时返回的是
-             「操作不被允许」errno 1，跟「电脑没开机」不是一回事），
-             然后弹一个提示把步骤写清楚，还能一键跳到设置页。
-             触发时机：刚把引擎换成云端、点「测试连接」失败、以及用云端引擎时请求被系统拦下。</p>
-          <p><strong>声音克隆可以直接回原始 wav</strong>：手机在请求头里带 <code>X-Hear-Audio: wav</code>，
-             服务就回 wav 原始数据（<code>Content-Type: audio/wav</code>），省掉 base64，
-             手机那边内存占用小很多；不带这个头的老客户端仍然收到 JSON（<code>audio</code> 是 base64）。</p>
-          <p><strong>三个端口都要清干净</strong>：Windows 上绑在具体地址（<code>127.0.0.1</code>）
-             的套接字会<strong>优先于</strong>绑 <code>0.0.0.0</code> 的。
-             所以上一个窗口没关干净、残留了一个监听 <code>127.0.0.1:8082</code> 的旧
-             <code>llama-server</code> 时，总服务（走回环）连到的是旧实例，
-             手机（走局域网地址）连到的是新实例——两边对不上，
-             克隆出来的声音是乱的、还慢十倍。
-             现在启动脚本会把 8000 / 8081 / 8082 三个端口一起清掉，
-             并且 <code>/health</code> 里直接报出后端跑的是哪个模型，一眼能看出有没有连错。</p>
-          <p><strong>自检脚本</strong> <code>server/test_api.py</code>：在 Windows 上直接测本机服务，
-             不经过手机、不经过 App，用来分清「是服务端的问题还是 App 的问题」。
-             <code>python test_api.py health</code> 看服务状态；
-             <code>python test_api.py clone --wav 参考.wav --text "Hello"</code> 用一段中文声音念英文，
-             成功的话会存成 <code>clone_out.wav</code>，双击就能听。</p>
-          <p>证书由服务<strong>自己保证</strong>：<code>hear_cloud.py</code> 启动时发现
-             <code>server/certs/cert.pem</code> 不在，就地生成一份（SAN 带上本机所有局域网 IP）。
-             Windows 的 <code>start-windows.ps1</code> 和启动脚本会在服务起来之前先生成一次，
-             生成失败会明确报错并给出安装 <code>cryptography</code> 的命令，不再静默跳过。</p>
-          <p>没有证书时，TLS 握手会打到 HTTP 的解析器上，日志里会出现一条 400 和一段乱码。
-             现在乱码会被拦下来换成一句「收到一段二进制内容（不是 HTTP 请求），已忽略」，
-             并直接说明多半是没证书——不是编码问题。</p>
-          <p><strong>证书没生成 = 手机连不上</strong>：App 只走 https，
-             所以 <code>make_cert.py</code> 必须成功跑过一次（<code>start-windows.ps1</code> 会自动跑，
-             失败会明确报错）。少了证书时服务仍然起得来，但只说 http，
-             此时 TLS 握手会打到 http 的解析器上，日志里会出现一条 400 和一行乱码——
-             那不是乱码问题，是没证书。</p>
+          <p>启动时，服务为局域网访问准备 HTTPS 证书。手机优先使用控制台给出的 HTTPS 地址。监听地址变化时服务会检查证书，并在需要时更新。</p>
+          <p>TLS 握手在连接工作线程处理。空闲的 HTTPS 长连接到期会正常关闭。服务端可通过 <code>HEAR_REQUIRE_TOKEN=1</code> 为推理请求启用访问口令。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">BOOT</span><h4>先占端口，再后台预热</h4></div>
         <div class="detail">
-          <p>主线程立刻把 8000 端口监听起来并 <code>serve_forever</code>，让手机连过来不会吃「拒绝连接」；
-             识别模型的加载、翻译/克隆后端的探测、启动自检全部放到后台线程，不阻塞请求处理。</p>
-          <p>识别模型（faster-whisper）是<strong>懒加载 + 后台预热</strong>的：第一次要下载几百 MB 权重，
-             期间 <code>/health</code> 会如实返回「加载中（第一次要下识别模型）」，下完变成「就绪」。
-             权重缓存到 <code>~/.cache/huggingface</code>，只下一次。</p>
+          <p>HTTP 总服务先开始监听，识别权重和其他模型按启动流程准备。可以用 <code>/health</code> 等待实际需要的模型就绪。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">ASR</span><h4>云端识别的三套方案</h4></div>
         <div class="detail">
-          <p>由 App 在请求头 <code>X-ASR-Scheme</code> 指定，服务端按它执行，也可以用环境变量 <code>HEAR_ASR_SCHEME</code> 设默认值：</p>
-          <ul>
-            <li><b>sensevoice</b>　只用 SenseVoice（ONNX，CPU 也能跑，约 230 MB），最快。</li>
-            <li><b>whisper</b>　只用 faster-whisper，最准但慢一些。</li>
-            <li><b>sensevoice+whisper</b>　<span class="num-hl">推荐</span>。SenseVoice 先出结果，Whisper 再复核；两者文本不同以 Whisper 为准。</li>
-          </ul>
-          <p>实时预览走 <code>X-ASR-Preview: 1</code>，此时组合方案只用 SenseVoice，不跑复核——预览要的是快。
-             SenseVoice 的输出带 <code>&lt;|zh|&gt;</code>、<code>&lt;|NEUTRAL|&gt;</code> 这类语言与情绪标记，
-             服务端负责解析出语种并清洗标签。</p>
+          <p><code>sensevoice</code> 只用 SenseVoice，<code>whisper</code> 只用 faster-whisper。默认组合 <code>sensevoice+whisper</code> 先返回 SenseVoice 的原文，再按条件校正。</p>
+          <p>组合方案的实时预览用 SenseVoice。正式识别和翻译优先，预览、校正、说话人区分和声音克隆使用其余并发名额。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">DETAIL</span><h4>踩过的坑与对应处理</h4></div>
         <div class="detail">
-          <ul>
-            <li><b>faster-whisper 必须喂 numpy float32 数组</b>。给普通 list 它会当成文件去 <code>av.open()</code>，老版本 av 直接报
-                <code>open() got an unexpected keyword argument 'metadata_errors'</code>。服务端统一转成 ndarray，非 16 kHz 先线性重采样。</li>
-            <li><b>av 版本必须 ≥ 12</b>，老版本没有 <code>metadata_errors</code> 参数，faster-whisper 解码会报错——这条写进了 <code>requirements.txt</code>。</li>
-            <li><b>手机超时断开会刷 BrokenPipe 报错</b>，两个处理分支都单独捕获，安静收尾。</li>
-            <li><b>手机连的是 8081 / 8082 会失败</b>：这两个端口默认只监听本机，手机访问不到。诊断文案里直接写明了这一点。</li>
-          </ul>
+          <p>识别器统一接收与指定采样率对应的 PCM 数据。客户端断开时，服务会收尾释放请求。</p>
+          <p>Windows 日志会区分上传超时（408）、推理繁忙（503）和等待后端超时（504），对应接口会写入相关诊断日志。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">PARAM</span><h4>采样参数透传</h4></div>
         <div class="detail">
-          <p>服务端向 llama-server 转发翻译请求时，携带与手机本地完全一致的采样参数：
-             <code>top_k = 20</code>、<code>top_p = 0.6</code>、<code>temperature = 0.7</code>、<code>max_tokens = 512</code>、
-             <code>stream = false</code>。这样同一条句子走本地和走云端，输出风格不会变。</p>
+          <p>翻译请求由 App 构建提示词，总服务转发给 llama-server。正式请求通常最多生成 512 个 token，带预览标记时限为 256。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">PROXY</span><h4>识别可外接到别的服务</h4></div>
         <div class="detail">
-          <p>设置 <code>HEAR_ASR_URL</code> 后，服务端不再安装 faster-whisper，而是把 wav 转成
-             <code>multipart/form-data</code> 转发给 OpenAI 兼容的 <code>/v1/audio/transcriptions</code>——
-             比如 whisper.cpp 的 <code>whisper-server</code>。转发的 multipart 请求体是手写拼装的，
-             边界串固定为 <code>----HearBoundary7MA4YWxkTrZu0gW</code>。</p>
+          <p>配置 <code>HEAR_ASR_URL</code> 后，总服务可以把语音识别请求作为 multipart WAV 转发到兼容的 <code>/v1/audio/transcriptions</code> 接口。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">BACKEND</span><h4>硬件后端矩阵</h4></div>
         <div class="detail">
-          <p>llama.cpp 在不同机器上走的路子不一样，脚本通过环境变量切换：</p>
-          <ul>
-            <li><b>NVIDIA 显卡</b>　CUDA。</li>
-            <li><b>Intel Core Ultra 核显</b>　Vulkan（<code>--device Vulkan</code>），兼容性最好，多模态（声音克隆）只能走这条。</li>
-            <li><b>Intel NPU</b>　OpenVINO 后端（<code>GGML_OPENVINO_DEVICE=NPU</code>），官方文档验证机型是 Lunar Lake（Core Ultra 5 238V）。
-                限制：<b>只支持纯文本模型</b>、无状态执行（<code>-np 1</code>）、必须明确给 <code>-c</code>。</li>
-            <li><b>Apple Silicon</b>　Metal。</li>
-            <li><b>WSL2</b>　<strong>访问不到 Intel NPU</strong>，核显的 Vulkan 也不太稳，实际等同于纯 CPU。要吃满硬件必须原生跑 Windows。</li>
-          </ul>
-          <p>默认分工：翻译走核显或 NPU，声音克隆走核显，识别走 CPU（faster-whisper int8）。</p>
+          <p>Windows 启动脚本默认使用 GPU。翻译可选 GPU、CPU 或兼容设备上的 OpenVINO NPU；声音克隆支持 Windows 脚本的 GPU 或 CPU 模式。</p>
+          <p>默认语音识别在 CPU 上运行。实际速度取决于模型档位、设备和同时进行的任务。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">DEPLOY</span><h4>一键启动</h4></div>
         <div class="detail">
-          <p><b>Windows 原生（推荐）</b>：<code>server\start-windows.ps1</code> 自动下载 llama.cpp 的 Vulkan 版与 OpenVINO 版运行包、
-             三个模型文件（Hy-MT2 约 1.1 GB、Qwen3-TTS 两个文件约 800 MB），建 venv 装 faster-whisper，
-             起三个服务，最后打印一个局域网地址供填入 App。不需要编译、不需要 Visual Studio、不需要 WSL。</p>
-          <p><b>WSL2</b>：<code>server/start.sh</code>，需要手动装 cmake / ffmpeg / python3-venv，实质是纯 CPU 运行。</p>
-          <p>防火墙需要放行 8000 / 8081 / 8082 三个入站端口。</p>
+          <p>Windows 推荐运行仓库根目录的 <code>start-hear-cloud.bat</code>，由脚本准备服务文件、运行环境和模型。首次下载耗时取决于网络与模型大小。</p>
+          <p>局域网只需访问总服务端口 8000，8081 和 8082 默认只在电脑本机监听。占用端口时，脚本仅自动处理能确认归属的旧服务实例。</p>
         </div>
       </div>
 
@@ -1380,13 +1127,15 @@ section.band{scroll-margin-top:62px}
               <tbody>
                 <tr><td class="mono">HEAR_PORT</td><td>总服务端口</td><td class="mono">8000</td></tr>
                 <tr><td class="mono">HEAR_MT_PORT / HEAR_CLONE_PORT</td><td>两个 llama-server 端口</td><td class="mono">8081 / 8082</td></tr>
-                <tr><td class="mono">HEAR_MT_DEVICE / HEAR_CLONE_DEVICE</td><td>翻译 / 克隆后端：NPU / GPU / CPU</td><td class="mono">GPU</td></tr>
+                <tr><td class="mono">HEAR_MT_DEVICE / HEAR_CLONE_DEVICE</td><td>翻译支持 NPU / GPU / CPU；克隆支持 GPU / CPU</td><td class="mono">GPU</td></tr>
                 <tr><td class="mono">HEAR_ASR_SCHEME</td><td>识别方案</td><td class="mono">sensevoice+whisper</td></tr>
-                <tr><td class="mono">HEAR_ASR_MODEL</td><td>Whisper 模型（tiny…large-v3）</td><td class="mono">small</td></tr>
+                <tr><td class="mono">HEAR_ASR_MODEL</td><td>Whisper 档位（base / small / medium / large-v3）</td><td class="mono">small</td></tr>
                 <tr><td class="mono">HEAR_ASR_DEVICE / HEAR_ASR_COMPUTE</td><td>识别设备与量化</td><td class="mono">cpu / int8</td></tr>
                 <tr><td class="mono">HEAR_ASR_URL</td><td>转发给外部转写服务</td><td class="mono">空</td></tr>
                 <tr><td class="mono">HEAR_MT_QUANT</td><td>翻译模型量化</td><td class="mono">Q4_K_M</td></tr>
-                <tr><td class="mono">HEAR_THREADS / HEAR_CTX</td><td>线程数 / 上下文长度</td><td class="mono">8 / 4096</td></tr>
+                <tr><td class="mono">HEAR_CTX</td><td>Windows 服务的模型上下文长度</td><td class="mono">4096</td></tr>
+                <tr><td class="mono">HEAR_MAX_INFLIGHT</td><td>总服务推理并发上限</td><td class="mono">3</td></tr>
+                <tr><td class="mono">HEAR_LOG_CONTENT</td><td>是否记录原文或译文（当前内测默认）</td><td class="mono">1</td></tr>
                 <tr><td class="mono">HEAR_TOP_K / HEAR_TOP_P / HEAR_TEMPERATURE</td><td>采样参数</td><td class="mono">20 / 0.6 / 0.7</td></tr>
               </tbody>
             </table>
@@ -1397,26 +1146,14 @@ section.band{scroll-margin-top:62px}
       <div class="key">
         <div class="term"><span class="tag">DIAG</span><h4>错误要说清楚原因</h4></div>
         <div class="detail">
-          <p>「测试连接」不只回答连不连，而是区分开：</p>
-          <ul>
-            <li><b>ATS 拦截</b>（不允许 http 明文）→ 提示需要 0.4.19 以上版本。</li>
-            <li><b>端口没在监听</b> → 提示确认服务已启动，并说明 8081 / 8082 默认只在本机监听。</li>
-            <li><b>超时</b> → 引导先用手机浏览器打开同一个地址：能打开说明是「本地网络」权限没给，打不开说明网络不通。</li>
-            <li><b>503 且含 loading</b> → 明确说「服务在加载模型（稍等几秒再试一次）」，而不是当成连不上。</li>
-            <li>另有找不到主机、手机没联网、连接断开等分支。</li>
-          </ul>
+          <p>空闲连接回收不会显示请求失败。真实超时可按日志区分上传阶段和后端阶段。Windows 启动后的自检页与 <code>/health</code> 可辅助确认地址及服务状态。</p>
         </div>
       </div>
 
       <div class="key">
         <div class="term"><span class="tag">PERF</span><h4>性能参考</h4></div>
         <div class="detail">
-          <p>以 Intel Core Ultra 7 258V（16 核、Arc 130V 核显、NPU 48 TOPS）为例：</p>
-          <ul>
-            <li>翻译（Hy-MT2 Q4_K_M，核显 Vulkan）：一句十来字的英文约 <span class="num-hl">1 ~ 2 秒</span>，走 NPU 更快。</li>
-            <li>识别（faster-whisper small，CPU int8）：10 秒语音约 <span class="num-hl">1 ~ 2 秒</span>。</li>
-            <li>声音克隆（Qwen3-TTS 0.6B Q4_K_M，核显 Vulkan）：一句约 <span class="num-hl">2 ~ 4 秒</span>。</li>
-          </ul>
+          <p>首轮模型下载及加载时间与实际识别耗时分开。可通过运行日志查看正式识别、翻译或声音克隆的耗时。</p>
         </div>
       </div>
 
@@ -1426,8 +1163,8 @@ section.band{scroll-margin-top:62px}
     <h3 class="subhead">B · 外部大模型 API <small>仅用于对话总结，不参与翻译链路</small></h3>
 
     <p class="prose">
-      用户可以配置多个大模型服务，在「设置 → 大模型 API」里切换当前使用的那个。
-      App 会把整页对话整理成带双方语言标注的逐句记录，套上模板提示词后送去生成纪要，
+      用户可以在「功能设置 → 翻译与总结 → 大模型 API」配置并切换服务。
+      App 会将整页对话连同原文、译文和已标记的说话人整理后，根据所选模板生成总结，
       结果写回对话文件，支持二次编辑。
     </p>
 
@@ -1452,10 +1189,8 @@ section.band{scroll-margin-top:62px}
     </div>
 
     <div class="note warn">
-      <span class="h">两条链路不要混淆</span>
-      <p>翻译<strong>永远不</strong>走外部大模型 API。翻译只有三条路：本地 Hy-MT2、云端 llama-server、系统翻译框架。
-         外部 API 只在「生成总结」时被调用——它是把对话内容发出去的唯一路径，因此需要用户自己明确配置并填写 Key。
-         推理模型返回的 <code>&lt;think&gt;…&lt;/think&gt;</code> 思考过程会被 <code>stripThinking()</code> 剥掉，不写进纪要。</p>
+      <span class="h">总结的数据流向</span>
+      <p>生成总结时，App 会把对话文本发送给所选提供商。公网总结地址使用 HTTPS；局域网自建总结地址可在 App 内显式确认 HTTP。</p>
     </div>
 
     <h3 class="subhead">总结模板</h3>
@@ -1500,7 +1235,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>版本 0.4.58</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>文档对应 0.4.80</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>
@@ -1508,7 +1243,7 @@ section.band{scroll-margin-top:62px}
     </div>
     <div class="fcol">
       <h5>技术栈</h5>
-      <p>Swift · SwiftUI · WhisperKit · FluidAudio<br>llama.cpp · faster-whisper · sherpa-onnx</p>
+      <p>Swift · SwiftUI · FluidAudio · ActivityKit<br>llama.cpp · faster-whisper · sherpa-onnx</p>
     </div>
     <div class="fcol">
       <h5>平台</h5>
