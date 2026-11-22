@@ -5,8 +5,10 @@
 """
 import argparse
 import http.client
+import http.client
 import http.cookiejar
 import json
+import io
 import os
 import shutil
 import socket
@@ -210,6 +212,8 @@ def unit_authenticator():
     check("still ready 59 s after the last success", auth.ready())
     responses.append((urllib.error.URLError(ConnectionRefusedError()), None, None))
     check("a network failure counts as a failed sync", not auth.sync_once())
+    responses.append((http.client.IncompleteRead(b"partial", 10), None, None))
+    check("a truncated HTTP response does not kill sync", not auth.sync_once())
     clock["mono"] += 2
     check("over 60 s without success refuses with 503",
           not auth.ready() and auth.verify("hear_ut_good").http_status == 503)
@@ -247,6 +251,34 @@ def unit_authenticator():
         check("a non-loopback http management URL is refused", False)
     except hear_auth.AuthConfigError:
         check("a non-loopback http management URL is refused", True)
+
+
+# ====================================================================== 单元：数据层
+
+
+def unit_request_guards():
+    print("\n== request guards ==")
+    handler = object.__new__(hear_token_service.Handler)
+    handler.headers = {"Content-Type": "application/json", "Content-Length": "-1"}
+    handler.rfile = io.BytesIO(b"{}")
+    handler.close_connection = False
+    try:
+        handler._read_json()
+        check("negative Content-Length is rejected before reading", False)
+    except hear_token_service.ApiError as error:
+        check("negative Content-Length is rejected before reading",
+              error.http_status == 400 and handler.close_connection)
+
+    clock = {"now": 100.0}
+    throttle = hear_token_service.LoginThrottle(clock=lambda: clock["now"])
+    locked = ("127.0.0.1", "admin")
+    throttle.failures[locked] = (5, 100.0, 1000.0)
+    throttle.failures.update({("127.0.0.1", str(i)): (1, 100.0, 0) for i in range(9999)})
+    check("a full throttle refuses new usernames without clearing locks",
+          throttle.blocked(("127.0.0.1", "new")) and throttle.blocked(locked))
+    throttle.fail(("127.0.0.1", "new"))
+    check("a new failure cannot evict an existing lock",
+          locked in throttle.failures and len(throttle.failures) == 10000)
 
 
 # ====================================================================== 单元：数据层
@@ -656,6 +688,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="hear-token-")
     try:
         unit_authenticator()
+        unit_request_guards()
         unit_store(tmp)
         end_to_end(tmp)
     finally:

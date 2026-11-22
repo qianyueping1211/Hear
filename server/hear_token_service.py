@@ -65,8 +65,19 @@ class LoginThrottle:
 
     def blocked(self, key):
         with self.guard:
+            # 满额时拒绝新用户名，不能清空已有的锁定记录让攻击者重试。
+            if key not in self.failures and len(self.failures) >= 10000:
+                self._prune_expired()
+                if len(self.failures) >= 10000:
+                    return True
             entry = self.failures.get(key)
             return bool(entry and entry[2] and entry[2] > self.clock())
+
+    def _prune_expired(self):
+        now = self.clock()
+        for key, (_, first, locked) in list(self.failures.items()):
+            if now - first > self.window and locked <= now:
+                del self.failures[key]
 
     def fail(self, key):
         now = self.clock()
@@ -76,9 +87,11 @@ class LoginThrottle:
                 count, first = 0, now
             count += 1
             locked = now + self.lock_seconds if count >= self.limit else 0
+            if key not in self.failures and len(self.failures) >= 10000:
+                self._prune_expired()
+                if len(self.failures) >= 10000:
+                    return
             self.failures[key] = (count, first, locked)
-            if len(self.failures) > 10000:
-                self.failures.clear()
 
     def succeed(self, key):
         with self.guard:
@@ -188,10 +201,20 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self.close_connection = True
             raise ApiError(400, "BAD_REQUEST", "Content-Length 不合法")
+        if length < 0:
+            self.close_connection = True
+            raise ApiError(400, "BAD_REQUEST", "Content-Length 不合法")
         if length > MAX_JSON_BODY:
             self.close_connection = True
             raise ApiError(413, "PAYLOAD_TOO_LARGE", "请求体过大")
-        raw = self.rfile.read(length) if length else b""
+        try:
+            raw = self.rfile.read(length) if length else b""
+        except TimeoutError:
+            self.close_connection = True
+            raise ApiError(408, "REQUEST_TIMEOUT", "请求体接收超时")
+        if len(raw) != length:
+            self.close_connection = True
+            raise ApiError(400, "BAD_REQUEST", "请求体未传输完整")
         self._body_read = True
         if not raw:
             return {}

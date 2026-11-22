@@ -416,7 +416,7 @@ actor CloudClient {
                                                  inferenceDeadline: deadline, retryConnection: true)
         let code = resp?.statusCode ?? 0
         guard (200..<300).contains(code) else {
-            throw CloudError.http(code, String(data: data.prefix(200), encoding: .utf8) ?? "")
+            throw CloudError.http(code, String(decoding: data.prefix(200), as: UTF8.self))
         }
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rid = obj["id"] as? String, !rid.isEmpty else {
@@ -533,7 +533,7 @@ actor CloudClient {
         }
         // 用户在 App 设置里明确开启“记录对话内容”时，允许当前云端服务
         // 也记录这次请求的原文 / 译文。关闭时服务端继续保持内容隐藏。
-        if UserDefaults.standard.bool(forKey: "logContentEnabled") {
+        if AppLog.logEnabledNow && UserDefaults.standard.bool(forKey: "logContentEnabled") {
             req.setValue("1", forHTTPHeaderField: "X-Hear-Log-Content")
         }
         return req
@@ -638,12 +638,12 @@ actor CloudClient {
                                                   inferenceDeadline: inferenceDeadline, retryConnection: retryConnection)
         let code = resp?.statusCode ?? 0
         guard (200..<300).contains(code) else {
-            let msg = String(data: data.prefix(400), encoding: .utf8) ?? ""
+            let msg = String(decoding: data.prefix(400), as: UTF8.self)
             throw CloudError.http(code, msg)
         }
         guard let obj = try? JSONSerialization.jsonObject(with: data),
               let dict = obj as? [String: Any] else {
-            throw CloudError.badResponse(String(data: data.prefix(200), encoding: .utf8) ?? "")
+            throw CloudError.badResponse(String(decoding: data.prefix(200), as: UTF8.self))
         }
         return dict
     }
@@ -661,7 +661,7 @@ actor CloudClient {
                                                   inferenceDeadline: inferenceDeadline, retryConnection: retryConnection)
         let code = resp?.statusCode ?? 0
         guard (200..<300).contains(code) else {
-            let msg = String(data: data.prefix(400), encoding: .utf8) ?? ""
+            let msg = String(decoding: data.prefix(400), as: UTF8.self)
             throw CloudError.http(code, msg)
         }
         return data
@@ -970,7 +970,7 @@ actor CloudClient {
             let (data, resp) = try await session.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             guard (200..<300).contains(code) else {
-                let body = String(data: data.prefix(200), encoding: .utf8) ?? ""
+                let body = String(decoding: data.prefix(200), as: UTF8.self)
                 // llama-server 加载模型时回 503 {"status":"loading model"}，
                 // 这是"连上了、正在准备"，不是连不上
                 if code == 503, body.contains("loading") {
@@ -1116,11 +1116,11 @@ actor CloudClient {
                                                          retryConnection: !preview && index == addresses.count - 1)
                 let code = resp?.statusCode ?? 0
                 guard (200..<300).contains(code) else {
-                    throw CloudError.http(code, String(data: data.prefix(400), encoding: .utf8) ?? "")
+                    throw CloudError.http(code, String(decoding: data.prefix(400), as: UTF8.self))
                 }
                 guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                       let text = obj["text"] as? String else {
-                    throw CloudError.badResponse(String(data: data.prefix(200), encoding: .utf8) ?? "")
+                    throw CloudError.badResponse(String(decoding: data.prefix(200), as: UTF8.self))
                 }
                 let lang = (obj["lang"] as? String) ?? fallback
                 let correctionAddress = !preview && (obj["can_correct"] as? Bool == true) ? addr : nil

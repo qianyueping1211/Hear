@@ -157,7 +157,7 @@ def check_password(password, stored):
 
 
 # 登录失败时也做一次同样耗时的计算，避免用耗时区分“用户名不存在”
-_DUMMY_HASH = hash_password(secrets.token_hex(8), 1000)
+_DUMMY_HASH = hash_password(secrets.token_hex(8), PASSWORD_ITERATIONS)
 
 
 def encode_cursor(seq):

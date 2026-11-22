@@ -202,6 +202,11 @@ def console_without_quick_edit():
 
 def request_logs_content(headers):
     """App 明确打开“记录对话内容”时，本次请求允许记录文字。"""
+    # 正式环境默认禁止，运维明确设置 0 时也不允许客户端覆盖。
+    if DEPLOYMENT == "production" and not LOG_CONTENT:
+        return False
+    if "HEAR_LOG_CONTENT" in os.environ:
+        return LOG_CONTENT
     value = (headers.get("X-Hear-Log-Content") or "").strip().lower()
     return LOG_CONTENT or value in ("1", "true", "yes", "on")
 
@@ -322,6 +327,8 @@ def get_whisper():
 
 _sense = None
 _sense_lock = threading.Lock()
+_sense_inference_slots = threading.BoundedSemaphore(2)
+_whisper_inference_lock = threading.Lock()
 
 
 def get_sensevoice():
@@ -410,10 +417,11 @@ def sensevoice_transcribe(samples, rate):
             if n > 0:
                 idx = np.linspace(0, len(audio) - 1, n)
                 audio = np.interp(idx, np.arange(len(audio)), audio).astype(np.float32)
-        stream = rec.create_stream()
-        stream.accept_waveform(16000, audio)
-        rec.decode_stream(stream)
-        result = stream.result
+        with _sense_inference_slots:
+            stream = rec.create_stream()
+            stream.accept_waveform(16000, audio)
+            rec.decode_stream(stream)
+            result = stream.result
         text = (result.text or "").strip()
         # Newer bindings expose language separately; older ones can embed it in text.
         language_tag = (getattr(result, "lang", "") or "").strip("<|>").lower()
@@ -608,13 +616,15 @@ def whisper_transcribe(samples, rate, language, fallback):
     # 给普通 list 它会当成文件去 av.open()，老版本 av 会直接报
     # "open() got an unexpected keyword argument 'metadata_errors'"。
     audio = to_float32(samples, rate)
-    segments, info = model.transcribe(
-        audio, language=language, beam_size=1, vad_filter=True,
-        vad_parameters={"min_speech_duration_ms": 100, "min_silence_duration_ms": 300},
-        condition_on_previous_text=False,
-    )
-    text = "".join(s.text for s in segments).strip()
-    return (text, info.language or fallback)
+    # faster-whisper 的 segments 是惰性迭代器；锁必须覆盖迭代全过程。
+    with _whisper_inference_lock:
+        segments, info = model.transcribe(
+            audio, language=language, beam_size=1, vad_filter=True,
+            vad_parameters={"min_speech_duration_ms": 100, "min_silence_duration_ms": 300},
+            condition_on_previous_text=False,
+        )
+        text = "".join(s.text for s in segments).strip()
+        return (text, info.language or fallback)
 
 
 def to_float32(samples, rate):

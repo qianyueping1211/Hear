@@ -148,6 +148,8 @@ def main():
                 print(f"::warning::{name} error rate increased from {prior:.1%} to {rate:.1%}")
     if any(row["false_speech"] for row in results.values()):
         raise SystemExit("Non-speech generated a transcript")
+    if any(row["missed"] or row["wrong_language"] for row in results.values()):
+        raise SystemExit("SenseVoice missed speech or returned the wrong language")
 
 
 if __name__ == "__main__":

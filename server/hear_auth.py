@@ -13,6 +13,7 @@
 """
 import datetime
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -283,7 +284,8 @@ class ManagedAuthenticator:
                 self._last_success = self._monotonic()
             self._mark_ok("鉴权清单已更新：修订号 %d，%d 条记录" % (revision, len(entries)) if changed else None)
             return True
-        except (SnapshotError, urllib.error.URLError, OSError, ValueError, ssl.SSLError) as error:
+        except (SnapshotError, urllib.error.URLError, OSError, ValueError,
+                ssl.SSLError, http.client.HTTPException) as error:
             reason = getattr(error, "reason", None) or error
             self._mark_failure("%s" % reason)
             return False
@@ -314,7 +316,12 @@ class ManagedAuthenticator:
 
     def _run(self):
         while not self._stop.is_set():
-            ok = self.sync_once()
+            try:
+                ok = self.sync_once()
+            except Exception as error:
+                # 单次异常不能让鉴权清单同步线程永久退出。
+                self._mark_failure("%s: %s" % (type(error).__name__, error))
+                ok = False
             self._stop.wait(self.refresh_interval if ok else min(self.retry_interval, self.refresh_interval))
 
     # -- 查询 --

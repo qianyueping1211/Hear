@@ -318,6 +318,7 @@ struct LanguageMenu: View {
 
 struct TranscriptView: View {
     @EnvironmentObject var session: LiveSession
+    @State private var followsLatest = true
     var onEdit: (TranslationItem) -> Void = { _ in }
     var onSpeaker: (TranslationItem) -> Void = { _ in }
 
@@ -346,6 +347,11 @@ struct TranscriptView: View {
                 }
                 .padding()
             }
+            .onScrollGeometryChange(for: Bool.self) { geometry in
+                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 48
+            } action: { _, atBottom in
+                followsLatest = atBottom
+            }
             .overlay {
                 if session.items.isEmpty && session.partial.isEmpty {
                     EmptyHint()
@@ -353,17 +359,31 @@ struct TranscriptView: View {
                         .allowsHitTesting(false)
                 }
             }
+            .overlay(alignment: .bottomTrailing) {
+                if !followsLatest {
+                    Button {
+                        withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                    } label: {
+                        Label("回到底部", systemImage: "arrow.down")
+                            .font(.footnote.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .background(.regularMaterial, in: Capsule())
+                    }
+                    .padding(20)
+                }
+            }
             .onChange(of: session.items.last?.id) { _, _ in
-                withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                if followsLatest { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
             }
             .onChange(of: session.items.last?.translated) { _, _ in
-                proxy.scrollTo("bottom", anchor: .bottom)
+                if followsLatest { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: session.partial) { _, _ in
-                proxy.scrollTo("bottom", anchor: .bottom)
+                if followsLatest { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: session.partialTranslation) { _, _ in
-                proxy.scrollTo("bottom", anchor: .bottom)
+                if followsLatest { proxy.scrollTo("bottom", anchor: .bottom) }
             }
         }
     }

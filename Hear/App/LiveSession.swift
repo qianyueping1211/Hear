@@ -549,12 +549,14 @@ final class LiveSession: ObservableObject {
         let cloudOwn = d.object(forKey: "cloudModelAddress") as? [String: String] ?? [:]
         cloudModelAddress = cloudOwn
         let cloudClient = cloud
+        let initialASRScheme = cloudASRScheme
         Task {
             await cloudClient.setAddresses(
                 asr: Self.effectiveAddress(fallback: cloudAddr, own: cloudOwn[CloudModel.asr.rawValue] ?? ""),
                 mt: Self.effectiveAddress(fallback: cloudAddr, own: cloudOwn[CloudModel.mt.rawValue] ?? ""),
                 clone: Self.effectiveAddress(fallback: cloudAddr, own: cloudOwn[CloudModel.clone.rawValue] ?? ""))
             await cloudClient.setSharedAddress(cloudAddr)
+            await cloudClient.setASRScheme(initialASRScheme)
         }
         // 引擎默认都用苹果自带（不用下载模型，打开就能用）
         let canApple = LiveTextEngineFactory.isSupported
@@ -3225,7 +3227,7 @@ final class LiveSession: ObservableObject {
                items[current].translationPending == true {
                 items[current].translationPending = nil
             }
-            kickReader()
+            if gen == runGen && !Task.isCancelled { kickReader() }
         }
         let t0 = Date()
         guard let text = try? await cloud.correctTranscription(samples: samples, language: src.id,
@@ -3388,6 +3390,10 @@ final class LiveSession: ObservableObject {
             return
         }
         if mute { capture.muted = true }
+        defer {
+            // 停播会清理静音；过期朗读不能解除新一轮朗读的静音。
+            if mute && token == playbackToken { capture.muted = false }
+        }
         if let cloned {
             let outcome = await speaker.play(samples: cloned.samples, sampleRate: Double(cloned.sampleRate), pan: pan)
             switch outcome {
@@ -3409,7 +3415,6 @@ final class LiveSession: ObservableObject {
         }
         if mute {
             try? await Task.sleep(nanoseconds: 300_000_000)
-            capture.muted = false
         }
     }
 
@@ -3550,7 +3555,7 @@ final class LiveSession: ObservableObject {
         if cm != cloudModelAddress { cloudModelAddress = cm }
         let cas = d.string(forKey: "cloudASRScheme") ?? "sensevoice+whisper"
         if cas != cloudASRScheme { cloudASRScheme = cas }
-        let vcc = d.object(forKey: "voiceCloneCloud") as? Bool ?? false
+        let vcc = d.object(forKey: "voiceCloneCloud") as? Bool ?? true
         if vcc != voiceCloneCloud { voiceCloneCloud = vcc }
         let te = d.string(forKey: "translationEngine") ?? translationEngine
         if te != translationEngine { translationEngine = te }
