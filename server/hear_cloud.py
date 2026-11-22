@@ -1174,7 +1174,7 @@ def cert_signed_by_root(path, root_cert):
         return False
 
 
-def ensure_root():
+def ensure_root(report=log):
     """这台电脑自己的签发根（长期不变）。
 
     服务器证书用这个根来签：换了网络、IP 变了，重新签一张就行，
@@ -1216,10 +1216,10 @@ def ensure_root():
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.TraditionalOpenSSL,
                 encryption_algorithm=serialization.NoEncryption()))
-        log("签发根证书生成好了：%s" % ROOT_CERT)
+        report("签发根证书生成好了：%s" % ROOT_CERT)
         return (cert, key)
     except Exception as e:
-        log("签发根证书生成失败：%s" % e)
+        report("签发根证书生成失败：%s" % e)
         return None
 
 
@@ -1270,37 +1270,37 @@ def cert_has_current_server_profile(path):
         return False
 
 
-def ensure_cert():
+def ensure_cert(force=False, report=log):
     """确保有服务器证书；没有就自己生成一份。
 
     App 只走 https，所以证书必须有。放在这里自己生成，
     就不会因为"某个文件没下载下来"而没有证书。
     """
     # 签发根先准备好：手机上的"严格模式"配对要用它
-    root = ensure_root()
-    if os.path.exists(TLS_CERT) and os.path.exists(TLS_KEY):
+    root = ensure_root(report=report)
+    if not force and os.path.exists(TLS_CERT) and os.path.exists(TLS_KEY):
         if cert_revoked(TLS_CERT):
-            log("这张证书的私钥曾经公开过，已经作废，重新签一张")
+            report("这张证书的私钥曾经公开过，已经作废，重新签一张")
         else:
             ok, missing = cert_covers_ip()
             if ok:
                 if root and not cert_signed_by_root(TLS_CERT, root[0]):
                     # 以前签的（自己签自己），重新用签发根签一张
-                    log("这张证书不是用签发根签的，重新签一张")
+                    report("这张证书不是用签发根签的，重新签一张")
                 elif not cert_has_current_server_profile(TLS_CERT):
-                    log("更新 HTTPS 服务证书，沿用现有签发根")
+                    report("更新 HTTPS 服务证书，沿用现有签发根")
                 else:
                     return True
             else:
-                log("本机 IP 变成 %s 了（旧证书里没有），重新生成证书" % missing)
+                report("本机 IP 变成 %s 了（旧证书里没有），重新生成证书" % missing)
     try:
         from cryptography import x509
         from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
     except ImportError:
-        log("没有 cryptography 这个包，生成不了证书")
-        log("   装一下：pip install cryptography")
+        report("没有 cryptography 这个包，生成不了证书")
+        report("   装一下：pip install cryptography")
         return False
     try:
         os.makedirs(os.path.dirname(TLS_CERT), exist_ok=True)
@@ -1349,10 +1349,10 @@ def ensure_cert():
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.TraditionalOpenSSL,
                 encryption_algorithm=serialization.NoEncryption()))
-        log("自签证书生成好了：%s" % TLS_CERT)
+        report("自签证书生成好了：%s" % TLS_CERT)
         return True
     except Exception as e:
-        log("证书生成失败：%s" % e)
+        report("证书生成失败：%s" % e)
         return False
 
 
