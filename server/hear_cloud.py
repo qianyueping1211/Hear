@@ -764,6 +764,10 @@ class Handler(RequestHandler):
         else:
             log("收到一段二进制内容（不是 HTTP 请求），已忽略")
 
+    @staticmethod
+    def log_notice(message):
+        log(message)
+
     # -- 工具 --
 
     def _send_json(self, obj, code=200):
@@ -772,6 +776,8 @@ class Handler(RequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            if self.close_connection:
+                self.send_header("Connection", "close")
             if code == 503:
                 self.send_header("Retry-After", "1")
             self.end_headers()

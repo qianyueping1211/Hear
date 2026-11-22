@@ -22,8 +22,9 @@ import time
 import urllib.error
 import urllib.request
 import wave
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPSConnection
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -353,6 +354,83 @@ def check_inference_admission():
         check("single-slot servers admit a final after a preview releases the slot", final)
 
 
+def check_timeout_handling(cert_directory):
+    import hear_cloud
+    from hear_http import RequestPolicy
+
+    class Handler(hear_cloud.Handler):
+        timeout = 0.4
+
+        def asr(self, body):
+            self._send_json({"text": "asr"})
+
+        def translate(self, body):
+            if body == b'{"wrapped":true}':
+                raise urllib.error.URLError(TimeoutError("connection timed out"))
+            raise TimeoutError("model response timed out")
+
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(os.path.join(cert_directory, "cert.pem"),
+                        os.path.join(cert_directory, "key.pem"))
+    with patch.object(hear_cloud, "log") as log, \
+         hear_cloud.MixedServer(("127.0.0.1", 0), Handler, tls) as server:
+        server.request_policy = RequestPolicy(max_body=1024, max_inflight=1)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+
+        def connect():
+            return closing(HTTPSConnection("127.0.0.1", server.server_port, timeout=3, context=ctx()))
+
+        def messages():
+            return [call.args[0] for call in log.call_args_list]
+
+        try:
+            with connect() as client:
+                client.request("GET", "/ping")
+                response = client.getresponse()
+                response.read()
+                assert response.status == 200 and client.sock is not None
+                check("an idle HTTPS keep-alive closes without a timeout warning",
+                      client.sock.recv(1) == b"" and
+                      not any("timed out" in line or "超时" in line for line in messages()))
+
+            with connect() as client:
+                client.connect()
+                client.sock.sendall(b"GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+                check("an incomplete HTTP header is reported separately from idle timeout",
+                      client.sock.recv(1) == b"" and
+                      any("请求头或响应传输超时" in line for line in messages()))
+
+            with connect() as client:
+                client.putrequest("POST", "/v1/asr")
+                client.putheader("Content-Length", "64")
+                client.endheaders(b"partial")
+                response = client.getresponse()
+                check("a stalled upload returns 408 and closes the connection",
+                      response.status == 408 and response.getheader("Connection") == "close"
+                      and "上传请求体超时" in json.loads(response.read())["error"]
+                      and any("上传请求体超时（/v1/asr）" in line for line in messages()))
+
+            with connect() as client:
+                client.request("POST", "/v1/asr", body=b"wav")
+                response = client.getresponse()
+                check("a new request succeeds after an upload timeout",
+                      response.status == 200 and json.loads(response.read())["text"] == "asr")
+                for body in (b"{}", b'{"wrapped":true}'):
+                    client.request("POST", "/v1/translate", body=body)
+                    response = client.getresponse()
+                    check("a model timeout returns 504 after a complete upload (%s)" % body.decode(),
+                          response.status == 504 and
+                          "推理后端响应超时" in json.loads(response.read())["error"])
+                check("the backend timeout names its route in the log",
+                      any("等待推理后端响应超时（/v1/translate）" in line for line in messages()))
+        except (OSError, AssertionError, ValueError) as error:
+            check("HTTP timeout handling over TLS", False, str(error))
+        finally:
+            server.shutdown()
+            worker.join(2)
+
+
 def main():
     global BASE
     tmp = tempfile.mkdtemp(prefix="hear-contract-")
@@ -538,6 +616,7 @@ def main():
             pass
         shutil.rmtree(tmp3, ignore_errors=True)
 
+    check_timeout_handling(tmp)
     shutil.rmtree(tmp, ignore_errors=True)
 
     check_hybrid_asr(wav)
