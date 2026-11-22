@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>听见 · Token 管理</title>
+<link rel="stylesheet" href="/admin/app.css">
+<script src="/admin/app.js" defer></script>
+</head>
+<body>
+<header class="bar">
+  <div class="brand">听见 <span>Token 管理</span></div>
+  <nav id="nav" hidden>
+    <button data-view="users" class="tab active">用户</button>
+    <button data-view="audit" class="tab">审计</button>
+    <button data-view="gateways" class="tab">网关</button>
+  </nav>
+  <div class="who" id="who" hidden><span id="who-name"></span><span id="who-role" class="pill"></span><button id="logout" class="ghost">退出</button></div>
+</header>
+
+<main>
+  <section id="view-login" class="card narrow" hidden>
+    <h1>管理员登录</h1>
+    <form id="login-form">
+      <label>用户名<input name="username" autocomplete="username" required></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit" class="primary">登录</button>
+      <p class="error" id="login-error"></p>
+    </form>
+  </section>
+
+  <section id="view-users" hidden>
+    <div class="toolbar">
+      <input id="user-search" placeholder="按用户名或名称查找" type="search">
+      <select id="user-status">
+        <option value="">全部（不含已删除）</option>
+        <option value="active">启用</option>
+        <option value="disabled">停用</option>
+        <option value="deleted">已删除</option>
+      </select>
+      <span class="grow"></span>
+      <button id="user-new" class="primary write">新增用户</button>
+    </div>
+    <table class="list">
+      <thead><tr><th>用户名</th><th>显示名称</th><th>状态</th><th>Token（可用/全部）</th><th>最近更新</th></tr></thead>
+      <tbody id="user-rows"></tbody>
+    </table>
+    <button id="user-more" class="ghost more" hidden>加载更多</button>
+  </section>
+
+  <section id="view-user" hidden>
+    <button id="back-users" class="ghost">← 返回用户列表</button>
+    <div class="card">
+      <div class="row">
+        <h1 id="u-title"></h1><span id="u-status" class="pill"></span><span class="grow"></span>
+        <button id="u-edit" class="write">编辑</button>
+        <button id="u-toggle" class="write"></button>
+        <button id="u-delete" class="danger write">删除</button>
+      </div>
+      <dl class="meta">
+        <dt>user_id</dt><dd id="u-id" class="mono"></dd>
+        <dt>备注</dt><dd id="u-notes"></dd>
+        <dt>创建</dt><dd id="u-created"></dd>
+        <dt>更新</dt><dd id="u-updated"></dd>
+        <dt>停用</dt><dd id="u-disabled"></dd>
+      </dl>
+    </div>
+    <div class="toolbar">
+      <h2>Token</h2>
+      <select id="token-status">
+        <option value="">全部状态</option>
+        <option value="active">active 可用</option>
+        <option value="scheduled">scheduled 未生效</option>
+        <option value="expired">expired 已到期</option>
+        <option value="revoked">revoked 已撤销</option>
+      </select>
+      <span class="grow"></span>
+      <button id="token-new" class="primary write">签发 Token</button>
+    </div>
+    <table class="list">
+      <thead><tr><th>标签</th><th>后缀</th><th>网关</th><th>状态</th><th>生效</th><th>计划结束</th><th>实际失效</th><th></th></tr></thead>
+      <tbody id="token-rows"></tbody>
+    </table>
+    <button id="token-more" class="ghost more" hidden>加载更多</button>
+  </section>
+
+  <section id="view-audit" hidden>
+    <form class="toolbar" id="audit-filter">
+      <select name="action">
+        <option value="">全部操作</option>
+        <option>user.create</option><option>user.update</option><option>user.disable</option>
+        <option>user.enable</option><option>user.delete</option><option>token.issue</option>
+        <option>token.update</option><option>token.revoke</option><option>gateway.create</option>
+        <option>gateway.rotate_credential</option><option>admin.login</option><option>admin.logout</option>
+      </select>
+      <input name="user_id" placeholder="user_id">
+      <input name="token_id" placeholder="token_id">
+      <label class="inline">从<input name="since" type="datetime-local"></label>
+      <label class="inline">到<input name="until" type="datetime-local"></label>
+      <button type="submit">筛选</button>
+    </form>
+    <table class="list">
+      <thead><tr><th>时间</th><th>操作人</th><th>操作</th><th>对象</th><th>变更</th></tr></thead>
+      <tbody id="audit-rows"></tbody>
+    </table>
+    <button id="audit-more" class="ghost more" hidden>加载更多</button>
+  </section>
+
+  <section id="view-gateways" hidden>
+    <div class="toolbar"><h2>网关</h2><span class="grow"></span><button id="gw-new" class="primary write">登记网关</button></div>
+    <table class="list">
+      <thead><tr><th>gateway_id</th><th>名称</th><th>修订号</th><th>清单请求次数</th><th>最近同步</th><th>凭据轮换</th><th></th></tr></thead>
+      <tbody id="gw-rows"></tbody>
+    </table>
+    <p class="hint">清单请求次数由管理服务计数：健康同步时每个网关约每 30 秒一次，推理和口令检查不会产生请求。</p>
+  </section>
+</main>
+
+<dialog id="dlg-user">
+  <form method="dialog" id="user-form">
+    <h2 id="user-form-title">新增用户</h2>
+    <label>用户名<input name="username" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.@\-]{0,63}"></label>
+    <label>显示名称<input name="display_name" maxlength="100"></label>
+    <label>备注<textarea name="notes" maxlength="2000" rows="3"></textarea></label>
+    <p class="error" id="user-form-error"></p>
+    <div class="actions"><button value="cancel" formnovalidate class="ghost">取消</button><button value="ok" class="primary">保存</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-token">
+  <form method="dialog" id="token-form">
+    <h2 id="token-form-title">签发 Token</h2>
+    <label>标签（设备或用途）<input name="label" required maxlength="100"></label>
+    <label id="token-gw-label">网关<select name="gateway_id" required></select></label>
+    <label>开始时间（含）<input name="starts_at" type="datetime-local" step="1" required></label>
+    <label>结束时间（不含，必填）<input name="expires_at" type="datetime-local" step="1" required></label>
+    <p class="hint" id="tz-hint"></p>
+    <p class="error" id="token-form-error"></p>
+    <div class="actions"><button value="cancel" formnovalidate class="ghost">取消</button><button value="ok" class="primary">确定</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-secret">
+  <h2 id="secret-title">请立即复制</h2>
+  <p class="warn" id="secret-warning">原文只显示这一次，关闭后无法再查看。遗失后请撤销并重新签发。</p>
+  <div class="secret"><code id="secret-value"></code></div>
+  <div class="actions"><button id="secret-copy">复制</button><button id="secret-close" class="primary">我已保存，关闭</button></div>
+</dialog>
+
+<dialog id="dlg-revoke">
+  <form method="dialog" id="revoke-form">
+    <h2>撤销 Token</h2>
+    <p id="revoke-what"></p>
+    <label>原因（可选）<input name="reason" maxlength="200"></label>
+    <div class="actions"><button value="cancel" formnovalidate class="ghost">取消</button><button value="ok" class="danger">撤销</button></div>
+  </form>
+</dialog>
+
+<dialog id="dlg-gateway">
+  <form method="dialog" id="gw-form">
+    <h2>登记网关</h2>
+    <label>gateway_id<input name="gateway_id" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_.:\-]{0,63}" placeholder="hear-home"></label>
+    <label>名称<input name="name" maxlength="100"></label>
+    <p class="error" id="gw-form-error"></p>
+    <div class="actions"><button value="cancel" formnovalidate class="ghost">取消</button><button value="ok" class="primary">登记</button></div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+</body>
+</html>
