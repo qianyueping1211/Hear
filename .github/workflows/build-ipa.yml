@@ -57,6 +57,16 @@ jobs:
         run: |
           VER=$(tr -d ' \r\n' < VERSION)
           echo "$VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "::error::VERSION 文件格式不对：$VER（应为 1.0.0 这样的三位）"; exit 1; }
+          if gh release view "v$VER" >/dev/null 2>&1; then
+            RELEASE_COMMIT="$(git ls-remote --tags origin "refs/tags/v$VER^{}" | cut -f1)"
+            if [ -z "$RELEASE_COMMIT" ]; then
+              RELEASE_COMMIT="$(git ls-remote --tags origin "refs/tags/v$VER" | cut -f1)"
+            fi
+            if [ "$RELEASE_COMMIT" != "$GITHUB_SHA" ]; then
+              echo "::error::v$VER 已对应另一个源码版本。请提高 VERSION 再发布。"
+              exit 1
+            fi
+          fi
           echo "VER=$VER" >> "$GITHUB_ENV"
           echo "版本号：$VER"
 
@@ -93,7 +103,7 @@ jobs:
           swiftc -parse-as-library -import-objc-header Hear/Models/ModelArchive-Bridging-Header.h \
             Hear/App/SessionJobQueue.swift Hear/App/SpeakerTracker.swift Hear/Models/Language.swift \
             Hear/Models/ZipVoiceArchive.swift Hear/Cloud/CloudModelReadiness.swift \
-            Hear/Translate/PromptBuilder.swift Hear/Translate/TranslationOutput.swift \
+            Hear/Translate/PromptBuilder.swift Hear/Translate/TranslationOutput.swift Hear/Audio/Segmenter.swift \
             tests/SessionJobQueueTests.swift -lbz2 -o "$RUNNER_TEMP/hear-session-tests"
           "$RUNNER_TEMP/hear-session-tests"
 
@@ -124,13 +134,14 @@ jobs:
 
       - name: Package IPA
         run: |
+          test -s build/Build/Products/Release-iphoneos/Hear.app/silero_vad.onnx
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/Hear.app Payload/
           # 文件名带上版本号，例如 Hear-1.0.0.ipa
           zip -qry "Hear-${VER}.ipa" Payload
           ls -lh "Hear-${VER}.ipa"
 
-      # 重建同一个版本号时使用带构建号的新标签，确保安装包对应源代码。
+      # 相同版本只重试同一个源码提交。
       - name: Publish release
         if: github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[no release]')
         env:

@@ -29,12 +29,12 @@ enum SessionTextEngine {
     case local(LlamaTranslator)
 
     func translate(text: String, source: Language, target: Language,
-                   context: [String], glossary: String, strict: Bool,
+                   glossary: String,
                    onPartial: @escaping @Sendable (String) -> Void) async throws -> String {
         try Task.checkCancellation()
         func prompt() -> String {
-            PromptBuilder.build(text: text, from: source, to: target, context: context,
-                                glossary: PromptBuilder.parseGlossary(glossary), strict: strict)
+            PromptBuilder.build(text: text, from: source, to: target,
+                                glossary: PromptBuilder.parseGlossary(glossary))
         }
         switch self {
         case .system(let engine):

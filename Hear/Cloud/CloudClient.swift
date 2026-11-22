@@ -539,9 +539,9 @@ actor CloudClient {
     /// 请求并解析 JSON
     private func json(_ path: String, address: String, method: String = "GET", body: Data? = nil,
                       contentType: String = "application/json",
-                      timeout: TimeInterval = 60) async throws -> [String: Any] {
+                      timeout: TimeInterval = 60, retries: Int = 3) async throws -> [String: Any] {
         let req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
-        let (data, resp) = try await sendWithRetry(req, path: path)
+        let (data, resp) = try await sendWithRetry(req, path: path, retries: retries)
         let code = resp?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             let msg = String(data: data.prefix(400), encoding: .utf8) ?? ""
@@ -940,13 +940,21 @@ actor CloudClient {
     // MARK: - 文本翻译
 
     /// prompt 是 App 拼好的提示词（和本地模型用的是同一套格式）
-    func translate(prompt: String, src: String, dst: String) async throws -> String {
+    func translate(prompt: String, src: String, dst: String, preview: Bool = false) async throws -> String {
         // 先试这个模型自己的地址，不行就退回通用服务地址（8000 会转发给翻译后端）
         var lastError: Error = CloudError.notConfigured
+        let deadline = preview ? Date().addingTimeInterval(5) : nil
+        let retries = preview ? 1 : 3
         for addr in candidateAddresses(mtAddress) {
+            try Task.checkCancellation()
+            if let deadline, deadline.timeIntervalSinceNow <= 0 { break }
             do {
                 // 地址上跑的是单独的 llama-server（8081 那种）时，用 OpenAI 那套接口
-                if await kind(of: addr) == .llamaServer {
+                let service = await kind(of: addr, timeout: preview ? 1.0 : 5.0)
+                try Task.checkCancellation()
+                let budget = deadline?.timeIntervalSinceNow ?? 120
+                if budget <= 0 { break }
+                if service == .llamaServer {
                     let body: [String: Any] = [
                         "messages": [["role": "user", "content": prompt]],
                         "stream": false,
@@ -956,7 +964,7 @@ actor CloudClient {
                         "temperature": 0.7,
                     ]
                     let obj = try await json("/v1/chat/completions", address: addr, method: "POST",
-                                             body: try JSONSerialization.data(withJSONObject: body), timeout: 120)
+                                             body: try JSONSerialization.data(withJSONObject: body), timeout: budget, retries: retries)
                     if let choices = obj["choices"] as? [[String: Any]],
                        let msg = choices.first?["message"] as? [String: Any],
                        let text = msg["content"] as? String, !text.isEmpty {
@@ -966,12 +974,13 @@ actor CloudClient {
                 }
                 let body: [String: Any] = ["prompt": prompt, "src": src, "dst": dst]
                 let obj = try await json("/v1/translate", address: addr, method: "POST",
-                                         body: try JSONSerialization.data(withJSONObject: body), timeout: 120)
+                                         body: try JSONSerialization.data(withJSONObject: body), timeout: budget, retries: retries)
                 guard let text = obj["text"] as? String else {
                     throw CloudError.badResponse("没有 text 字段")
                 }
                 return text
             } catch {
+                try Task.checkCancellation()
                 lastError = error
             }
         }

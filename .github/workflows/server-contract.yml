@@ -8,10 +8,12 @@ on:
     branches: [main]
     paths:
       - 'server/**'
+      - 'start-hear-cloud.bat'
       - '.github/workflows/server-contract.yml'
   pull_request:
     paths:
       - 'server/**'
+      - 'start-hear-cloud.bat'
       - '.github/workflows/server-contract.yml'
 
 permissions:
@@ -22,6 +24,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-launcher:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check launcher without downloading models
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path 'server/start-windows.ps1'), [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { throw ($errors -join [Environment]::NewLine) }
+          cmd /d /c "start-hear-cloud.bat --check"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmd /d /c "start-hear-cloud.bat --help"
+          exit $LASTEXITCODE
+
   contract:
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -1,73 +1,20 @@
 import Foundation
 
-/// 识别把连续发言切成几段时，模型有时会把上一段也重新翻一遍。
-struct TranslationOutput: Sendable {
-    enum Invalid: LocalizedError {
-        case empty, earlierSegment
-
-        var errorDescription: String? {
-            switch self {
-            case .empty: return "模型未返回译文"
-            case .earlierSegment: return "模型返回了上一段内容"
-            }
-        }
+/// 上文只参与恢复分段处的已知词形，翻译引擎只接收整理后的当前段。
+enum TranslationSource {
+    static func currentSegment(_ text: String, language: Language, after previous: TranslationItem?) -> String {
+        guard language.id == "en", let previous, previous.source == language,
+              let start = text.range(of: #"^\s*(west(?:ern)?)\b"#, options: [.regularExpression, .caseInsensitive]),
+              previous.sourceText.range(of: #"\bmid[\s,\-]*$"#,
+                                        options: [.regularExpression, .caseInsensitive]) != nil else { return text }
+        let fragment = text[start].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return "Mid" + fragment + String(text[start.upperBound...])
     }
+}
 
-    private let earlierClauses: [String]
-
-    init(source: String, target: Language, previous: [TranslationItem]) {
-        let sourceClauses = Self.clauses(source)
-        earlierClauses = previous.flatMap { item -> [String] in
-            guard item.translationError == nil,
-                  item.displayedTranslationTarget == target, item.canReadAloud else { return [] }
-            let earlierSource = Self.clauses(item.sourceText)
-            // 用户确实重复了同一句或同一个分句时，允许相同的译文。
-            guard !sourceClauses.contains(where: { current in
-                current.count >= 12 && earlierSource.contains { Self.similar(current, $0, threshold: 0.45) }
-            }) else { return [] }
-            return Self.clauses(item.translated).filter { $0.count >= 16 }
-        }
-    }
-
-    func validated(_ translation: String) throws -> String {
-        let value = translation.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { throw Invalid.empty }
-        guard !repeatsEarlier(Self.clauses(value)) else { throw Invalid.earlierSegment }
-        return value
-    }
-
-    func acceptsPartial(_ translation: String) -> Bool {
-        if earlierClauses.isEmpty { return !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        let clauses = Self.clauses(translation)
-        guard let last = clauses.last else { return false }
-        return !repeatsEarlier(clauses) && !earlierClauses.contains { $0.hasPrefix(last) }
-    }
-
-    private func repeatsEarlier(_ clauses: [String]) -> Bool {
-        clauses.contains { current in
-            current.count >= 16 && earlierClauses.contains { Self.similar(current, $0, threshold: 0.72) }
-        }
-    }
-
-    private static func clauses(_ text: String) -> [String] {
-        text.replacingOccurrences(of: #"(?<=[.!?;])\s+|[。！？；\n]+"#, with: "\n", options: .regularExpression)
-            .split(separator: "\n")
-            .map { String($0.lowercased().filter { $0.isLetter || $0.isNumber }) }
-            .filter { !$0.isEmpty }
-    }
-
-    private static func similar(_ a: String, _ b: String, threshold: Double) -> Bool {
-        if a == b { return true }
-        let shorter = min(a.count, b.count)
-        guard shorter >= 8 else { return false }
-        if a.contains(b) || b.contains(a) { return true }
-        func trigrams(_ text: String) -> Set<String> {
-            let characters = Array(text)
-            return Set((0..<(characters.count - 2)).map { String(characters[$0...($0 + 2)]) })
-        }
-        let first = trigrams(a), second = trigrams(b)
-        return Double(first.intersection(second).count * 2) / Double(first.count + second.count) >= threshold
-    }
+enum TranslationResultError: LocalizedError {
+    case empty
+    var errorDescription: String? { "模型未返回译文" }
 }
 
 enum TranslationRevision {

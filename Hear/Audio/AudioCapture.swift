@@ -14,6 +14,7 @@ import AVFoundation
 ///    绝不能悄悄哑掉（用户只能把实时翻译关掉再打开才恢复）。
 final class AudioCapture {
     let segmenter = Segmenter()
+    private lazy var speechDetector = SileroSpeechDetector()
     enum Health: Equatable { case normal, backlogged, reconnecting }
     var onHealthChanged: ((Health) -> Void)?
 
@@ -163,7 +164,11 @@ final class AudioCapture {
         // 所有动引擎的活儿都在 engineQueue 上做，和 stop()/重新接麦克风串行
         engineQueue.sync {
             // The preceding stop flushes on this queue before the new capture can reset VAD.
-            queue.sync { [segmenter] in segmenter.reset() }
+            let detector = speechDetector
+            queue.sync { [segmenter] in
+                segmenter.speechDetector = detector
+                segmenter.reset()
+            }
             do {
                 try prepareAndStart()
                 lastError = nil

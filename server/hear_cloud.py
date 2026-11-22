@@ -599,7 +599,11 @@ def whisper_transcribe(samples, rate, language, fallback):
     # 给普通 list 它会当成文件去 av.open()，老版本 av 会直接报
     # "open() got an unexpected keyword argument 'metadata_errors'"。
     audio = to_float32(samples, rate)
-    segments, info = model.transcribe(audio, language=language, beam_size=1, vad_filter=False)
+    segments, info = model.transcribe(
+        audio, language=language, beam_size=1, vad_filter=True,
+        vad_parameters={"min_speech_duration_ms": 100, "min_silence_duration_ms": 300},
+        condition_on_previous_text=False,
+    )
     text = "".join(s.text for s in segments).strip()
     return (text, info.language or fallback)
 
@@ -828,6 +832,9 @@ a{color:#007aff;text-decoration:none}
 
     def health(self):
         out = {}
+        revision = os.environ.get("HEAR_SERVER_REVISION", "")
+        if revision:
+            out["server_revision"] = revision
         if ASR_URL:
             out["asr"] = "外部服务" if backend_alive(ASR_URL) else "外部服务连不上"
         else:
@@ -849,7 +856,9 @@ a{color:#007aff;text-decoration:none}
         mt_model = backend_model(MT_URL)
         if mt_model:
             out["mt_model"] = mt_model
-        out["clone"] = backend_state(CLONE_URL)
+        clone_state = backend_state(CLONE_URL)
+        clone_model_valid = True
+        out["clone"] = clone_state
         if out["clone"] == "连不上":
             out["clone"] = "连不上（%s）" % CLONE_URL
         else:
@@ -859,7 +868,8 @@ a{color:#007aff;text-decoration:none}
                 out["clone"] += "（%s）" % m
                 out["clone_model"] = m
                 if "tts" not in m.lower():
-                    out["clone"] += " 模型不对！应该是 Qwen3-TTS"
+                    clone_model_valid = False
+                    out["clone"] = "模型不匹配（%s，需要 Qwen3-TTS）" % m
         # 机器能判定的就绪状态（启动脚本、App 都看这个）：
         # 别去猜"就绪""外部服务"这些字——
         # "外部服务连不上"开头也是"外部服务"，按字面判就会把连不上的当成能用。
@@ -875,7 +885,7 @@ a{color:#007aff;text-decoration:none}
             else:
                 out["asr_ready"] = whisper_ready
         out["mt_ready"] = (backend_state(MT_URL) == "就绪")
-        out["clone_ready"] = (backend_state(CLONE_URL) == "就绪")
+        out["clone_ready"] = clone_state == "就绪" and clone_model_valid
         return out
 
     def send_error(self, code, message=None, explain=None):

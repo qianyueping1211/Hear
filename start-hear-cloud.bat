@@ -37,11 +37,18 @@ function Update-ServerFiles {
     New-Item -ItemType Directory -Path $stage, $backup | Out-Null
     $installed = [System.Collections.Generic.List[string]]::new()
     try {
-        $url = 'https://codeload.github.com/qianyueping1211/Hear/zip/refs/heads/main'
+        $ref = if ($env:HEAR_SERVER_REF) { $env:HEAR_SERVER_REF.Trim() } else { 'main' }
+        if ($ref -eq 'main') { $snapshot = 'refs/heads/main' }
+        elseif ($ref -match '^v[0-9]+\.[0-9]+\.[0-9]+$') { $snapshot = "refs/tags/$ref" }
+        elseif ($ref -match '^[0-9a-f]{40}$') { $snapshot = $ref }
+        else { throw 'HEAR_SERVER_REF must be main, a release tag such as v0.4.73, or a full commit SHA.' }
+        $url = "https://codeload.github.com/qianyueping1211/Hear/zip/$snapshot"
         Write-Host 'Downloading the Hear server source snapshot...'
         Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive -TimeoutSec 45
         Expand-Archive -LiteralPath $archive -DestinationPath $stage
-        $source = Join-Path $stage 'Hear-main\server'
+        $package = Get-ChildItem -LiteralPath $stage -Directory | Where-Object { $_.Name -like 'Hear-*' } | Select-Object -First 1
+        if (-not $package) { throw 'The source snapshot has no Hear directory.' }
+        $source = Join-Path $package.FullName 'server'
         if (-not (Test-ServerFiles $source)) { throw 'The downloaded server snapshot is incomplete.' }
         New-Item -ItemType Directory -Path $serverDir -Force | Out-Null
         foreach ($name in $files) {
@@ -52,6 +59,7 @@ function Update-ServerFiles {
             $installed.Add($name)
             Copy-Item -LiteralPath (Join-Path $source $name) -Destination $target -Force
         }
+        $env:HEAR_SERVER_REVISION = $ref
     } catch {
         foreach ($name in $installed) {
             $old = Join-Path $backup $name
@@ -79,6 +87,7 @@ try {
         Write-Host 'The startup menu selects Whisper base / small / medium / large-v3. Press Enter for small on first launch.'
         Write-Host 'Connect the phone app to this cloud service; Whisper is managed on the computer.'
         Write-Host 'start-hear-cloud.bat --check    Check required server files'
+        Write-Host 'HEAR_SERVER_REF accepts main, a release tag, or a full commit SHA.'
         exit 0
     }
     if ($mode -eq '--check') {

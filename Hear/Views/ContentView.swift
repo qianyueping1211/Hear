@@ -38,6 +38,14 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
+                    .overlay {
+                        if let hint = session.loadingHint {
+                            LoadingPill(text: hint)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityAddTraits(.updatesFrequently)
+                        }
+                    }
+                    .zIndex(1)
                 ControlBar()
             }
             // 弹出键盘时底部的实时翻译区域固定不动
@@ -321,8 +329,11 @@ struct TranscriptView: View {
                 }
                 .padding()
             }
-            .onChange(of: session.items.last) { _, _ in
+            .onChange(of: session.items.last?.id) { _, _ in
                 withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+            .onChange(of: session.items.last?.translated) { _, _ in
+                proxy.scrollTo("bottom", anchor: .bottom)
             }
             .onChange(of: session.partial) { _, _ in
                 proxy.scrollTo("bottom", anchor: .bottom)
@@ -339,7 +350,7 @@ struct EmptyHint: View {
     var body: some View {
         VStack(spacing: 10) {
             Image(systemName: "waveform").font(.system(size: 44)).foregroundStyle(.secondary)
-            Text(session.talkMode ? "按住下方对应语言的按钮说话，松开暂停" : "点下方按钮开始，之后直接说话即可")
+            Text(session.talkMode ? "按住对应语言的圆圈 2 秒后说话" : "按住下方麦克风圆圈 2 秒开始")
                 .font(.headline)
             Text(session.talkMode
                  ? "左边按钮说\(session.langA.name)，右边按钮说\(session.langB.name)。左右滑动底部可以切回实时翻译模式。"
@@ -575,15 +586,17 @@ struct SourceEditor: View {
 
 struct ControlBar: View {
     @EnvironmentObject var session: LiveSession
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    static let recordingHoldDuration: TimeInterval = 2
 
     private var mainColor: Color { Color.accentColor }        // 开始后也用蓝色，只换成停止图标
     private var mainIcon: String { session.isRunning ? "stop.fill" : "mic.fill" }
     private var mainHint: String {
         if session.talkMode {
             if let l = session.holding { return "正在听\(l.name) · 松开暂停" }
-            return "按住对应语言的按钮说话"
+            return "按住语种按钮 2 秒后说话"
         }
-        guard session.isRunning else { return "点击开始实时翻译" }
+        guard session.isRunning else { return "按住 2 秒开始实时翻译" }
         if session.speakOutput && session.outputMode == .speaker {
             return "实时翻译中 · 点击停止后朗读"
         }
@@ -607,6 +620,7 @@ struct ControlBar: View {
             }
             .frame(height: 140)
             .clipped()
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: session.talkMode)
 
             Text(mainHint)
                 .font(.callout.weight(.medium))
@@ -624,34 +638,21 @@ struct ControlBar: View {
                 let talk = dx < 0
                 guard talk != session.talkMode else { return }
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                withAnimation(.spring(duration: 0.3)) { session.talkMode = talk }
+                session.talkMode = talk
             }
         )
-        // 按钮上方的短暂提示（例如本地模型还在加载）
+        // 临时提示与分隔线上常驻的模型进度分开。
         .overlay(alignment: .top) {
-            VStack(spacing: 8) {
-                // 正在加载：一直显示到加载完
-                if let hint = session.loadingHint {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                        Text(hint).font(.subheadline.weight(.medium))
-                    }
+            if let t = session.toast {
+                Text(t)
+                    .font(.subheadline.weight(.medium))
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                     .background(.regularMaterial, in: Capsule())
                     .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
-                }
-                if let t = session.toast {
-                    Text(t)
-                        .font(.subheadline.weight(.medium))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(.regularMaterial, in: Capsule())
-                        .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
-                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                }
+                    .offset(y: session.loadingHint == nil ? -30 : 20)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
-            .offset(y: -30)
         }
         .animation(.spring(duration: 0.25), value: session.toast)
     }
@@ -664,18 +665,33 @@ struct ControlBar: View {
 
             Spacer()
 
-            Button { Task { await session.toggle() } } label: {
-                MicButton(meter: session.meter, running: session.isRunning,
-                          color: mainColor, icon: mainIcon)
-            }
-            .disabled(!(session.phase == .ready || session.isLoadingPhase))
-            .opacity(session.phase == .ready || session.isLoadingPhase ? 1 : 0.4)
+            liveMicrophone
 
             Spacer()
 
             ContextToggle()
         }
         .padding(.horizontal, 24)
+    }
+
+    @ViewBuilder
+    private var liveMicrophone: some View {
+        let label = MicButton(meter: session.meter, running: session.isRunning,
+                              color: mainColor, icon: mainIcon)
+        if session.isRunning {
+            Button { Task { await session.toggle() } } label: { label }
+                .accessibilityLabel("停止实时翻译")
+        } else {
+            label
+                .contentShape(Circle())
+                .onLongPressGesture(minimumDuration: Self.recordingHoldDuration, maximumDistance: 12) {
+                    guard !session.isRunning, session.phase == .ready else { return }
+                    Task { await session.toggle() }
+                }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("按住两秒开始实时翻译")
+                .opacity(session.phase == .ready || session.isLoadingPhase ? 1 : 0.4)
+        }
     }
 
     /// 对话翻译模式：左边按住说语言 A，右边按住说语言 B，中间是播报和上下文
@@ -716,7 +732,7 @@ struct ModeDots: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 guard session.holding == nil, !active else { return }
-                withAnimation(.spring(duration: 0.3)) { action() }
+                action()
             }
     }
 }
@@ -744,14 +760,12 @@ struct HoldButton: View {
     @EnvironmentObject var session: LiveSession
     let lang: Language
     @State private var pressing = false
-    /// 这次按下时启动的“开始听”任务，以及按了第几次（松开时用来确认没有再按下）
     @State private var beginTask: Task<Void, Never>?
-    @State private var pressCount = 0
+    @State private var requestedRecording = false
 
     var body: some View {
-        // 手指一按下就显示按住效果，不等麦克风真正打开
-        let active = pressing || session.holding == lang
-        let enabled = session.phase == .ready || session.isLoadingPhase
+        let active = session.isRunning && session.holding == lang
+        let enabled = session.phase == .ready
         VStack(spacing: 6) {
             ZStack {
                 if active { RippleRings() }
@@ -764,41 +778,44 @@ struct HoldButton: View {
             }
             .frame(width: 116, height: 110)
             .scaleEffect(active ? 1.08 : 1)
-            Text(active ? "松开暂停" : "按住说\(lang.name)")
+            .contentShape(Circle())
+            .onLongPressGesture(minimumDuration: .infinity, maximumDistance: 12, perform: {},
+                                onPressingChanged: { pressChanged($0, enabled: enabled) })
+            Text(active ? "松开暂停" : (pressing ? "继续按住…" : "按住说\(lang.name)"))
                 .font(.caption.weight(active ? .semibold : .regular))
                 .foregroundStyle(active ? Color.accentColor : Color.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
                 .frame(width: 116)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
         }
         .animation(.spring(duration: 0.2), value: active)
         .opacity(enabled ? 1 : 0.4)
-        .contentShape(Rectangle())
-        // 按下就开始听，松开就暂停。
-        // 用“按压状态”而不是拖动手势：拖动手势要等系统判断你是不是在左右滑动切换模式，
-        // 会过好一会儿才有反应；按压状态手指一碰到就触发。手势被系统取消（来电等）时也会自动松开
-        .onLongPressGesture(minimumDuration: .infinity, maximumDistance: .infinity, perform: {},
-                            onPressingChanged: { p in
-            guard p != pressing else { return }
-            pressing = p
-            if p {
-                guard enabled else { return }
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                pressCount += 1
-                beginTask = Task { await session.holdBegan(lang) }
-            } else {
-                session.holdEnded()
-                // 很快地按一下就松开：松开时“开始听”可能还没来得及开始，等它开始后再松开一次，
-                // 否则会一直在听（界面也一直显示“松开暂停”）
-                let task = beginTask
-                let count = pressCount
-                Task {
-                    await task?.value
-                    if count == pressCount, !pressing { session.holdEnded() }
-                }
-            }
-        })
-        .accessibilityLabel("按住说\(lang.name)")
+        .onDisappear { cancelPress() }
+        .accessibilityLabel("按住两秒后说\(lang.name)")
+    }
+
+    private func pressChanged(_ down: Bool, enabled: Bool) {
+        guard down else { cancelPress(); return }
+        guard enabled, !pressing else { return }
+        pressing = true
+        beginTask = Task {
+            do { try await Task.sleep(for: .seconds(ControlBar.recordingHoldDuration)) }
+            catch { return }
+            guard pressing, !Task.isCancelled, session.talkMode else { return }
+            requestedRecording = true
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            await session.holdBegan(lang)
+        }
+    }
+
+    private func cancelPress() {
+        beginTask?.cancel()
+        beginTask = nil
+        if requestedRecording, session.holding == lang { session.holdEnded() }
+        requestedRecording = false
+        pressing = false
     }
 }
 

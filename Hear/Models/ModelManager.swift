@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// 管理本地模型文件：下载、导入、查找
 enum ModelManager {
@@ -38,34 +39,18 @@ enum ModelManager {
         UserDefaults.standard.set(url.lastPathComponent, forKey: "ggufName")
     }
 
-    static func importGGUF(from src: URL) throws -> URL {
+    static func stageGGUF(from src: URL) throws -> URL {
         let access = src.startAccessingSecurityScopedResource()
         defer { if access { src.stopAccessingSecurityScopedResource() } }
-        let fm = FileManager.default
-        // 先看一眼内容：不是 GGUF 就别碰原来那个模型
         try checkGGUF(src)
-        let dst = modelsDir.appendingPathComponent(src.lastPathComponent)
-        // 先复制到临时文件，成功了再换上去：
-        // 中途失败（磁盘满、没权限）的话，原来那个还能用的模型不会被动
-        let tmp = modelsDir.appendingPathComponent(".\(dst.lastPathComponent).importing")
-        try? fm.removeItem(at: tmp)
-        try fm.copyItem(at: src, to: tmp)
-        // 换名替换：先把旧的挪到一边，新的放到位，最后再删旧的
-        let old = modelsDir.appendingPathComponent(".\(dst.lastPathComponent).old")
-        try? fm.removeItem(at: old)
-        if fm.fileExists(atPath: dst.path) {
-            try fm.moveItem(at: dst, to: old)
-        }
+        let staging = modelsDir.appendingPathComponent(".import-\(UUID().uuidString).gguf")
         do {
-            try fm.moveItem(at: tmp, to: dst)
+            try FileManager.default.copyItem(at: src, to: staging)
+            return staging
         } catch {
-            if fm.fileExists(atPath: old.path) { try? fm.moveItem(at: old, to: dst) }
-            try? fm.removeItem(at: tmp)
+            try? FileManager.default.removeItem(at: staging)
             throw error
         }
-        try? fm.removeItem(at: old)
-        select(dst)
-        return dst
     }
 
     /// 确认这个文件真的是 GGUF（不是的话不能拿去替换正在用的模型）
@@ -75,10 +60,12 @@ enum ModelManager {
                 "读不了这个文件：\(url.lastPathComponent)"])
         }
         defer { try? fh.close() }
-        let head = (try? fh.read(upToCount: 4)) ?? Data()
-        guard String(data: head, encoding: .ascii) == "GGUF" else {
+        let head = Array((try? fh.read(upToCount: 24)) ?? Data())
+        guard head.count == 24, head.prefix(4).elementsEqual([71, 71, 85, 70]),
+              [2, 3].contains(head[4]), head[5..<8].allSatisfy({ $0 == 0 }),
+              head[8..<16].contains(where: { $0 != 0 }), fileSize(url) > 24 else {
             throw NSError(domain: "Hear", code: 5, userInfo: [NSLocalizedDescriptionKey:
-                "这个文件不是 GGUF 模型（开头不是 GGUF），没有替换原来的模型"])
+                "这个 GGUF 文件的头部无效或不完整"])
         }
     }
 
@@ -168,6 +155,7 @@ enum ModelManager {
 final class FileDownloader: NSObject, URLSessionDownloadDelegate {
     private final class DownloadCancellation: @unchecked Sendable {
         private let lock = NSLock()
+        private let saving = DispatchGroup()
         private var task: URLSessionDownloadTask?
         private var cancelled = false
 
@@ -175,16 +163,27 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
             lock.lock()
             task = running
             let alreadyCancelled = cancelled
+            if !alreadyCancelled { running.resume() }
             lock.unlock()
-            if alreadyCancelled { running.cancel() } else { running.resume() }
+            if alreadyCancelled { running.cancel() }
         }
 
-        func cancel() {
+        func cancel(savingTo url: URL) {
             lock.lock()
             cancelled = true
             let running = task
+            if running != nil { saving.enter() }
             lock.unlock()
-            running?.cancel()
+            running?.cancel(byProducingResumeData: { [saving] data in
+                if let data, !data.isEmpty { try? data.write(to: url, options: .atomic) }
+                saving.leave()
+            })
+        }
+
+        func waitForResumeData() async {
+            await withCheckedContinuation { continuation in
+                saving.notify(queue: .global(qos: .utility)) { continuation.resume() }
+            }
         }
     }
 
@@ -198,22 +197,31 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
     private var retryCount = 0
     private let maxRetries = 8
     private var sourceURL: URL!
-    /// 续传时已经有的进度（用于合并进度条）
-    private var alreadyDone: Double = 0
+
+    private static func resumeFile(for url: URL) -> URL {
+        let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("HearModelTransfers", isDirectory: true)
+        try? FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let key = SHA256.hash(data: Data(url.absoluteString.utf8)).map { String(format: "%02x", $0) }.joined()
+        return cache.appendingPathComponent(key)
+    }
 
     func download(_ url: URL, to dst: URL, progress: @escaping (Double) -> Void) async throws {
         destination = dst
         self.progress = progress
         sourceURL = url
-        resumeData = nil
+        let savedResume = Self.resumeFile(for: url)
+        resumeData = try? Data(contentsOf: savedResume)
         retryCount = 0
-        alreadyDone = 0
         // 网络中断（-1005）、超时（-1001）这类错误会自动重试，能续传就从断点继续
         var lastError: Error?
+        var retriedWithoutSavedData = false
         while retryCount <= maxRetries {
             try Task.checkCancellation()
+            let wasResuming = resumeData != nil
             do {
-                try await run()
+                try await run(savingResumeTo: savedResume)
+                try? FileManager.default.removeItem(at: savedResume)
                 return
             } catch {
                 try Task.checkCancellation()
@@ -229,6 +237,12 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
                     try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
                     continue
                 }
+                if wasResuming, !retriedWithoutSavedData {
+                    retriedWithoutSavedData = true
+                    resumeData = nil
+                    try? FileManager.default.removeItem(at: savedResume)
+                    continue
+                }
                 throw error
             }
         }
@@ -237,7 +251,7 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
     }
 
     /// 跑一次下载；失败且还能重试就自动重来
-    private func run() async throws {
+    private func run(savingResumeTo url: URL) async throws {
         // 超时放宽：大文件在网络慢的时候容易触发默认的 60 秒超时
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 120
@@ -245,15 +259,21 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
         let session = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         let cancellation = DownloadCancellation()
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
-                continuation = c
-                let task = resumeData.map { session.downloadTask(withResumeData: $0) }
-                    ?? session.downloadTask(with: sourceURL)
-                cancellation.start(task)
+        moveError = nil
+        do {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
+                    continuation = c
+                    let task = resumeData.map { session.downloadTask(withResumeData: $0) }
+                        ?? session.downloadTask(with: sourceURL)
+                    cancellation.start(task)
+                }
+            } onCancel: {
+                cancellation.cancel(savingTo: url)
             }
-        } onCancel: {
-            cancellation.cancel()
+        } catch {
+            if Task.isCancelled { await cancellation.waitForResumeData() }
+            throw error
         }
     }
 
@@ -261,8 +281,7 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
                     didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
                     totalBytesExpectedToWrite: Int64) {
         guard totalBytesExpectedToWrite > 0 else { return }
-        // 续传时 totalBytesWritten 只是本次的部分，要加上之前已下载的
-        let done = alreadyDone + Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        let done = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
         progress?(min(done, 1.0))
     }
 
@@ -304,12 +323,6 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
             let ns = e as NSError
             if let rd = ns.userInfo[NSURLSessionDownloadTaskResumeData] as? Data, rd.count > 0 {
                 resumeData = rd
-            }
-            // 已经下载了一部分的话，进度要算上
-            if let dlTask = task as? URLSessionDownloadTask,
-               let resp = dlTask.response as? HTTPURLResponse,
-               resp.expectedContentLength > 0 {
-                alreadyDone = Double(dlTask.countOfBytesReceived) / Double(resp.expectedContentLength)
             }
             continuation?.resume(throwing: e)
         } else {

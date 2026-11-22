@@ -1,5 +1,10 @@
 import Foundation
 
+protocol SpeechPresenceDetector: AnyObject {
+    func containsSpeech(_ samples: ArraySlice<Float>) -> Bool
+    func reset()
+}
+
 /// 基于音量的自动断句（VAD）。输入 16kHz 单声道 Float 采样。
 /// 说话开始 → 每隔 1 秒给一次“中间结果” → 停顿超过设定时长 → 输出整句。
 final class Segmenter {
@@ -23,6 +28,7 @@ final class Segmenter {
 
     var config = Config()
     var onEvent: ((Event) -> Void)?
+    var speechDetector: SpeechPresenceDetector?
 
     private let sr = 16_000
     private let frame = 480               // 30ms
@@ -56,6 +62,7 @@ final class Segmenter {
     /// 但环境噪声还得继续估（不然朗读一结束门限就乱跳）。
     func discardCurrent() {
         if inSpeech { onEvent?(.discarded(segID)) }
+        speechDetector?.reset()
         carry.removeAll(); preroll.removeAll(); speech.removeAll()
         inSpeech = false; voicedRun = 0; silentRun = 0; voicedFrames = 0
     }
@@ -98,20 +105,24 @@ final class Segmenter {
         }
 
         let noise = noiseEstimate
+        let humanSpeech = speechDetector?.containsSpeech(f)
         // 门限不再钉死在 -50：房间很安静的时候（比如没开语音增强、离得远），
         // 说话声可能只有 -55 dB，钉在 -50 就永远够不着门限，
         // 于是“停一会儿再说话”那一句就再也断不出来了。
         let threshold = max(noise + config.sensitivityDB, -68)
         if frameCounter % 167 == 0 { onEvent?(.noise(noise, threshold)) }   // 约 5 秒一次
 
-        if !inSpeech { updateNoise(db, threshold: threshold) }
+        if !inSpeech, humanSpeech != true {
+            updateNoise(db, threshold: threshold, knownBackground: humanSpeech == false)
+        }
 
         if !inSpeech {
             preroll.append(contentsOf: f)
             let keep = sr * 3 / 10        // 保留说话前 300ms
             if preroll.count > keep { preroll.removeFirst(preroll.count - keep) }
 
-            if db > threshold {
+            let speechFloor = humanSpeech == nil ? threshold : max(noise + config.sensitivityDB * 0.35, -70)
+            if humanSpeech != false, db > speechFloor {
                 voicedRun += 1
             } else {
                 voicedRun = 0
@@ -119,14 +130,16 @@ final class Segmenter {
             // 连续高于阈值多久才算开始说话。
             // 按住说话时（holdMode）门槛放低：用户是故意按着按钮的，
             // "好""是"这种一两百毫秒的回答也得收进来。
-            let triggerFrames = config.holdMode ? 3 : 5
+            let triggerFrames = humanSpeech == nil ? (config.holdMode ? 3 : 5) : 2
             if voicedRun >= triggerFrames {
                 inSpeech = true
                 segID += 1
                 speech = preroll
                 preroll.removeAll()
                 silentRun = 0
-                voicedFrames = voicedRun
+                // The detector confirms speech after its first windows. Those
+                // samples are already in the preroll for short replies.
+                voicedFrames = voicedRun + (humanSpeech == true ? 2 : 0)
                 voicedLevel = db
                 lastPartialAt = speech.count
                 onEvent?(.started(segID))
@@ -136,7 +149,7 @@ final class Segmenter {
             // 停顿：音量回落到“噪声 + 灵敏度的一半”以下，或比这句话的说话音量低 18 dB 以上
             // （第二条让嘈杂环境里也能断句）
             let pauseLevel = max(noise + config.sensitivityDB * 0.5, voicedLevel - 18)
-            if db > pauseLevel {
+            if humanSpeech != false, db > pauseLevel {
                 silentRun = 0
                 voicedFrames += 1
                 voicedLevel = voicedLevel * 0.97 + db * 0.03
@@ -147,7 +160,8 @@ final class Segmenter {
             let maxed = speech.count >= Int(config.maxSeconds * Double(sr))
             if silentMs >= config.silenceMs || maxed {
                 finish()
-            } else if speech.count - lastPartialAt >= Int(config.partialEvery * Double(sr)) {
+            } else if voicedFrames * 30 >= config.minSpeechMs,
+                      speech.count - lastPartialAt >= Int(config.partialEvery * Double(sr)) {
                 lastPartialAt = speech.count
                 onEvent?(.partial(segID, speech))
             }
@@ -155,11 +169,11 @@ final class Segmenter {
     }
 
     /// 更新环境噪声的估计（只在没在说话的时候调）。
-    private func updateNoise(_ db: Float, threshold: Float) {
+    private func updateNoise(_ db: Float, threshold: Float, knownBackground: Bool) {
         if db < noiseEstimate {
             // 真的安静下来了：赶紧跟上（跟慢了会错过开口那半秒）
             noiseEstimate += (db - noiseEstimate) * 0.5
-        } else if db <= threshold {
+        } else if knownBackground || db <= threshold {
             // 有点吵了：慢慢跟上（每秒最多涨零点几个 dB）
             noiseEstimate += (db - noiseEstimate) * 0.01
         }

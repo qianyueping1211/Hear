@@ -213,6 +213,18 @@ def check_speaker_endpoint(wav):
         check("speaker endpoint rejects malformed audio", errors == [400])
 
 
+def check_clone_readiness():
+    import hear_cloud
+    with patch.object(hear_cloud, "backend_state", return_value="就绪"):
+        with patch.object(hear_cloud, "backend_model", return_value="Hy-MT2-example.gguf"):
+            health = hear_cloud.Handler.health(None)
+            check("a translation model is not ready for voice cloning",
+                  health["clone_ready"] is False and "模型不匹配" in health["clone"])
+        with patch.object(hear_cloud, "backend_model", return_value="Qwen3-TTS-example.gguf"):
+            health = hear_cloud.Handler.health(None)
+            check("an available Qwen3-TTS backend is ready for voice cloning", health["clone_ready"] is True)
+
+
 def check_connection_recovery():
     import hear_cloud
 
@@ -450,6 +462,7 @@ def main():
 
     check_hybrid_asr(wav)
     check_speaker_endpoint(wav)
+    check_clone_readiness()
     check_connection_recovery()
 
     print("\npassed %d, failed %d" % (len(PASSED), len(FAILED)))

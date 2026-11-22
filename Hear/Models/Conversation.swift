@@ -43,6 +43,7 @@ struct ConversationMeta: Codable, Identifiable, Equatable {
     var preview: String
     var langs: String
     var summaryStatus: SummaryRecord.Status?
+    var hasPendingWork: Bool? = nil
 }
 
 /// 本地存储：
@@ -200,7 +201,8 @@ final class ConversationStore: ObservableObject {
             itemCount: c.items.count, preview: String(first.prefix(60)),
             langs: "\(c.langA.name) ⇄ \(c.langB.name)",
             summaryStatus: c.summaries[c.activeTemplateID]?.status
-                ?? c.summaries[SummaryTemplate.defaultID]?.status
+                ?? c.summaries[SummaryTemplate.defaultID]?.status,
+            hasPendingWork: c.items.contains { !$0.done } || c.summaries.values.contains { $0.status == .generating }
         )
     }
 
@@ -219,17 +221,32 @@ final class ConversationStore: ObservableObject {
         writeIndex()
     }
 
-    /// App 被关掉时还在生成的总结，标记为失败，方便用户重试
+    /// 收尾工作在进程退出后不能续跑，保留原文和已显示的译文。
     private func recoverInterrupted() {
-        for m in metas where m.summaryStatus == .generating {
+        var refreshedIndex = false
+        for m in metas where m.hasPendingWork != false {
             guard var c = load(m.id) else { continue }
+            var changed = false
+            for i in c.items.indices where !c.items[i].done {
+                c.items[i].applyTranslation("（翻译失败：上次退出时尚未完成）", done: true)
+                changed = true
+            }
             for (k, r) in c.summaries where r.status == .generating {
                 var r2 = r
                 r2.status = .failed
                 r2.error = "上次生成时 App 被关闭，请重试"
                 c.summaries[k] = r2
+                changed = true
             }
-            save(c)
+            if changed {
+                // 恢复只是本机任务状态，不应覆盖另一台已完成的结果。
+                c.updatedAt = m.updatedAt
+                if let data = try? encoder.encode(c) { _ = importRaw(data) }
+            } else if let i = metas.firstIndex(where: { $0.id == m.id }) {
+                metas[i].hasPendingWork = false
+                refreshedIndex = true
+            }
         }
+        if refreshedIndex { writeIndex() }
     }
 }

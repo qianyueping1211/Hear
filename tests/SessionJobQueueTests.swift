@@ -42,6 +42,7 @@ struct SessionJobQueueTests {
         try testConversationBubbleSides()
         try testTranslationRevision()
         try testCurrentSegmentTranslation()
+        testSpeechGating()
         print("Session queue regressions passed")
     }
 
@@ -79,6 +80,37 @@ struct SessionJobQueueTests {
     }
 }
 
+private func testSpeechGating() {
+    final class FakeSpeechDetector: SpeechPresenceDetector {
+        var detectsSpeech = false
+        func containsSpeech(_ samples: ArraySlice<Float>) -> Bool { detectsSpeech }
+        func reset() { detectsSpeech = false }
+    }
+
+    let detector = FakeSpeechDetector()
+    let segmenter = Segmenter()
+    segmenter.speechDetector = detector
+    segmenter.config.holdMode = true
+    segmenter.config.minSpeechMs = 200
+    var started = 0, ended = 0, previews = 0
+    segmenter.onEvent = {
+        switch $0 {
+        case .started: started += 1
+        case .ended: ended += 1
+        case .partial: previews += 1
+        default: break
+        }
+    }
+
+    segmenter.feed(Array(repeating: 0.05, count: 16_000))
+    precondition(started == 0 && previews == 0 && ended == 0, "Loud noise must not start recognition")
+    detector.detectsSpeech = true
+    segmenter.feed(Array(repeating: 0.25, count: 3_360))
+    detector.detectsSpeech = false
+    segmenter.feed(Array(repeating: 0.05, count: 16_000))
+    precondition(started == 1 && ended == 1, "Short speech followed by noise should be kept and finalized")
+}
+
 private func testTranslationRevision() throws {
     let english = Language.find("en"), chinese = Language.find("zh")
     var item = TranslationItem(source: english, target: chinese, sourceText: "The mayor has arrived.")
@@ -105,22 +137,18 @@ private func testTranslationRevision() throws {
 private func testCurrentSegmentTranslation() throws {
     let english = Language.find("en"), chinese = Language.find("zh")
     let priorSource = "The United States had been assessing the damage caused by severe storms and tornadoes, at least 21 people are now known to have died as the storms ripped through the south and the mid,"
-    let priorTranslation = "美国正在评估严重风暴和龙卷风造成的损失。目前已知有至少21人因这些风暴袭击南部和中部地区而丧生。"
     let source = "west leaving a trail of devastation hardest hit were Tennessee Arkansas and Indiana in Illinois one person was killed when a theater roof collapsed in Chicago"
-    let spill = "美国正在评估严重风暴和龙卷风造成的破坏。目前已知至少有21人丧生，风暴袭击了南部和中部地区。"
-    let translation = "西部地区遭受严重破坏。田纳西州、阿肯色州和印第安纳州受灾最严重。芝加哥一座剧院的屋顶倒塌，造成一人死亡。"
-    let prior = TranslationItem(source: english, target: chinese, sourceText: priorSource,
-                                translated: priorTranslation, done: true)
-    let scope = TranslationOutput(source: source, target: chinese, previous: [prior])
-    precondition(!scope.acceptsPartial("美国正在评估"))
-    precondition((try? scope.validated(spill + translation)) == nil, "The corrected paragraph must not repeat the previous paragraph")
-    precondition((try? scope.validated(translation)) == translation)
-    let repetition = TranslationOutput(source: priorSource, target: chinese, previous: [prior])
-    precondition((try? repetition.validated(priorTranslation)) == priorTranslation, "A real repetition in the source is valid")
-    let prompt = PromptBuilder.build(text: source, from: english, to: chinese, context: [priorSource], glossary: [])
-    precondition(prompt.contains("参考上文") && prompt.hasSuffix("\n\n" + source))
-    let retry = PromptBuilder.build(text: source, from: english, to: chinese, context: [], glossary: [], strict: true)
-    precondition(!retry.contains(priorSource) && retry.hasSuffix("\n\n" + source))
+    let prior = TranslationItem(source: english, target: chinese, sourceText: priorSource, done: true)
+    let currentSegment = TranslationSource.currentSegment(source, language: english, after: prior)
+    precondition(currentSegment.hasPrefix("Midwest leaving"))
+    precondition(TranslationSource.currentSegment(source, language: english, after: nil) == source)
+    var finished = prior
+    finished.sourceText = "The storm ended in mid."
+    precondition(TranslationSource.currentSegment(source, language: english, after: finished) == source)
+    let prompt = PromptBuilder.build(text: currentSegment, from: english, to: chinese, glossary: [])
+    precondition(!prompt.contains("21") && !prompt.contains(priorSource))
+    precondition(prompt.hasSuffix("\n\n" + currentSegment))
+
 }
 
 private func testConversationBubbleSides() throws {

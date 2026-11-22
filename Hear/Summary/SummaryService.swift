@@ -97,9 +97,10 @@ final class SummaryService {
         for (i, item) in c.items.enumerated() {
             let side = item.speakerLabel ?? (item.isLeading(left: c.langA, right: c.langB) ? "A方" : "B方")
             lines.append("\(i + 1). 【\(side)·\(item.source.zhName)】\(item.sourceText)")
-            if item.done, !item.translated.isEmpty {
+            if item.done, item.translationError == nil, !item.translated.isEmpty,
+               item.displayedTranslationTarget == item.target {
                 lines.append("   【译文·\(item.target.zhName)】\(item.translated)")
-            } else if !item.done {
+            } else if !item.done || item.translationError != nil {
                 lines.append("   【待翻译·\(item.target.zhName)】")
             }
         }
