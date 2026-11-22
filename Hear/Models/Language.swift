@@ -1,5 +1,23 @@
 import Foundation
 
+enum ChineseDisplayLanguage: String, CaseIterable {
+    static let preferenceKey = "chineseDisplayLanguage"
+    case simplified, traditional
+
+    var title: String {
+        switch self {
+        case .simplified: return "简体中文"
+        case .traditional: return "繁體中文"
+        }
+    }
+
+    func display(_ text: String, languageID: String?) -> String {
+        guard languageID == "zh", !text.isEmpty else { return text }
+        let transform = StringTransform(self == .simplified ? "Hant-Hans" : "Hans-Hant")
+        return text.applyingTransform(transform, reverse: false) ?? text
+    }
+}
+
 /// 支持的语言（Whisper 语音识别代码 + Hy-MT2 翻译用的语言名 + 系统朗读用的 locale）
 struct Language: Identifiable, Hashable, Codable {
     let id: String        // Whisper 语言代码，例如 "zh"、"en"
@@ -86,6 +104,15 @@ struct TranslationItem: Identifiable, Equatable, Codable {
     var defaultSpeakerLanguage: String { recognizedLanguage ?? source.id }
 
     var displayedTranslationTarget: Language { previewTarget ?? target }
+
+    func displayedSource(using preference: ChineseDisplayLanguage) -> String {
+        preference.display(sourceText, languageID: recognizedLanguage ?? source.id)
+    }
+
+    func displayedTranslation(using preference: ChineseDisplayLanguage) -> String {
+        preference.display(translated, languageID: displayedTranslationTarget.id)
+    }
+
     var canReadAloud: Bool {
         displayedTranslationTarget == target && !translated.isEmpty && !translated.hasPrefix("（翻译失败")
     }

@@ -30,7 +30,7 @@ struct LogView: View {
             .padding(.vertical, 8)
 
             if !log.enabled {
-                Text("日志已关闭，可以在 设置 → 日志 里开启")
+                Text("日志已关闭，可以在 功能设置 → 语言和日志 里开启")
                     .font(.footnote).foregroundStyle(.orange).padding(.bottom, 6)
             }
 

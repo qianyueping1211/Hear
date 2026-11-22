@@ -260,8 +260,14 @@ struct SettingsView: View {
                     Text("朗读")
                 }
 
-                // MARK: 日志
+                // MARK: 语言和日志
                 Section {
+                    Picker("显示语言", selection: $session.chineseDisplayLanguage) {
+                        ForEach(ChineseDisplayLanguage.allCases, id: \.self) { language in
+                            Text(language.title).tag(language)
+                        }
+                    }
+                    .accessibilityHint("控制中文识别原文和译文的简繁显示")
                     Toggle("开启日志", isOn: $log.enabled)
                     Toggle("记录对话内容（排查问题时用）", isOn: $log.contentEnabled)
                     Picker("最大日志文件大小", selection: $log.maxMB) {
@@ -276,7 +282,7 @@ struct SettingsView: View {
                         Label("查看日志", systemImage: "doc.text.magnifyingglass")
                     }
                 } header: {
-                    Text("日志")
+                    Text("语言和日志")
                 }
 
                 // MARK: 关于

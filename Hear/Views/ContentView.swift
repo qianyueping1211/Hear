@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var noLLMAlert = false
     @State private var editingID: UUID?          // 正在修改原文的那一条
     @State private var draft = ""
+    @State private var originalDraft = ""
     @State private var editingSpeaker: TranslationItem?
     @State private var showMenu = false          // 右上角 ⋯ 菜单
 
@@ -24,7 +25,9 @@ struct ContentView: View {
                     if session.phase == .ready || session.isLoadingPhase {
                         // 加载模型时也显示对话页；加载进度只在 功能设置 → 引擎 下方显示
                         TranscriptView(onEdit: { item in
-                            draft = item.sourceText
+                            let source = item.displayedSource(using: session.chineseDisplayLanguage)
+                            draft = source
+                            originalDraft = source
                             editingID = item.id
                         }, onSpeaker: { editingSpeaker = $0 })
                             .overlay(alignment: .top) {
@@ -74,8 +77,9 @@ struct ContentView: View {
             .overlay {
                 if let id = editingID, let item = session.items.first(where: { $0.id == id }) {
                     SourceEditor(text: $draft, flag: item.source.flag,
-                                 translation: item.translated, targetFlag: item.displayedTranslationTarget.flag) {
-                        session.editSource(id, to: draft)
+                                 translation: item.displayedTranslation(using: session.chineseDisplayLanguage),
+                                 targetFlag: item.displayedTranslationTarget.flag) {
+                        if draft != originalDraft { session.editSource(id, to: draft) }
                         editingID = nil
                     }
                 }
@@ -312,6 +316,7 @@ struct TranscriptView: View {
                     }
                     ForEach(session.items) { item in
                         BubbleView(item: item, leading: item.isLeading(left: session.langA, right: session.langB),
+                                   displayLanguage: session.chineseDisplayLanguage,
                                    reading: session.readingID == item.id,
                                    playing: session.speakingID == item.id,
                                    preparing: session.cloneWorking[item.id] != nil,
@@ -389,6 +394,7 @@ struct HalfCircleSpinner: View {
 struct BubbleView: View {
     let item: TranslationItem
     let leading: Bool
+    let displayLanguage: ChineseDisplayLanguage
     var reading: Bool = false
     /// 真的在出声：喇叭显示成绿色的（只有正在播的时候才是绿的）
     var playing: Bool = false
@@ -414,8 +420,10 @@ struct BubbleView: View {
 
     private var translatedText: Text {
         let flag = item.displayedTranslationTarget.flag
-        guard let baseline = item.translationBaseline else { return flagged(flag, item.translated) }
-        let revised = TranslationRevision.changes(from: baseline, to: item.translated)
+        let translated = item.displayedTranslation(using: displayLanguage)
+        guard let baseline = item.translationBaseline else { return flagged(flag, translated) }
+        let displayedBaseline = displayLanguage.display(baseline, languageID: item.displayedTranslationTarget.id)
+        let revised = TranslationRevision.changes(from: displayedBaseline, to: translated)
             .reduce(Text("")) { rendered, part in
                 rendered + (part.changed ? Text(part.text).bold().foregroundColor(.accentColor) : Text(part.text))
             }
@@ -461,7 +469,7 @@ struct BubbleView: View {
                     }
                 }
                 // 被 Whisper 校正过的句子，原文后面带一个魔法棒小图标
-                (flagged(item.source.flag, item.sourceText)
+                (flagged(item.source.flag, item.displayedSource(using: displayLanguage))
                  + (item.corrected == true
                     ? Text(" ") + Text(Image(systemName: "wand.and.stars")).foregroundStyle(Color.accentColor)
                     : Text("")))
@@ -497,7 +505,7 @@ struct BubbleView: View {
             )
             .contentShape(RoundedRectangle(cornerRadius: 16))
             .onTapGesture { if item.canReadAloud { onSpeak() } }
-            .modifier(BubbleLongPress(item: item, onEdit: onEdit, onSpeak: onSpeak))
+            .modifier(BubbleLongPress(item: item, displayLanguage: displayLanguage, onEdit: onEdit, onSpeak: onSpeak))
             if leading { Spacer(minLength: 40) }
         }
     }
@@ -506,6 +514,7 @@ struct BubbleView: View {
 /// 气泡的长按：对话页是修改原文，历史页是复制菜单
 private struct BubbleLongPress: ViewModifier {
     let item: TranslationItem
+    let displayLanguage: ChineseDisplayLanguage
     let onEdit: (() -> Void)?
     let onSpeak: () -> Void
 
@@ -518,10 +527,10 @@ private struct BubbleLongPress: ViewModifier {
             }
         } else {
             content.contextMenu {
-                Button { UIPasteboard.general.string = item.translated } label: {
+                Button { UIPasteboard.general.string = item.displayedTranslation(using: displayLanguage) } label: {
                     Label("复制译文", systemImage: "doc.on.doc")
                 }
-                Button { UIPasteboard.general.string = item.sourceText } label: {
+                Button { UIPasteboard.general.string = item.displayedSource(using: displayLanguage) } label: {
                     Label("复制原文", systemImage: "doc.on.doc")
                 }
                 if item.canReadAloud {
@@ -1016,12 +1025,12 @@ struct LiveBubble: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
                     Image(systemName: "waveform").symbolEffect(.variableColor.iterative)
-                    Text(session.partial).italic()
+                    Text(session.displayedPartial).italic()
                 }
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 if !session.partialTranslation.isEmpty {
-                    Text(session.partialTranslation)
+                    Text(session.displayedPartialTranslation)
                         .font(.title3.weight(.medium))
                         .foregroundStyle(Color.primary.opacity(0.75))
                 }

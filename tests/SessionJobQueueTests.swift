@@ -43,6 +43,7 @@ struct SessionJobQueueTests {
         try testTranslationRevision()
         try testCurrentSegmentTranslation()
         testSpeechGating()
+        testChineseDisplayLanguage()
         testConversationMerge()
         print("Session queue regressions passed")
     }
@@ -79,6 +80,23 @@ struct SessionJobQueueTests {
         let decoded = try JSONDecoder().decode([TranslationItem].self, from: data)
         precondition(decoded == items, "Speaker edits should survive persistence")
     }
+}
+
+private func testChineseDisplayLanguage() {
+    let simplified = ChineseDisplayLanguage.simplified
+    let traditional = ChineseDisplayLanguage.traditional
+    let original = "中文語音識別與翻譯"
+    let converted = "中文语音识别与翻译"
+    precondition(simplified.display(original, languageID: "zh") == converted)
+    precondition(traditional.display(converted, languageID: "zh") == original)
+    let japanese = "翻訳と図書"
+    precondition(simplified.display(japanese, languageID: "ja") == japanese)
+    let item = TranslationItem(source: .find("ja"), target: .find("en"),
+                               sourceText: original, translated: "Speech recognition",
+                               recognizedLanguage: "zh")
+    precondition(item.displayedSource(using: simplified) == converted)
+    precondition(item.displayedTranslation(using: simplified) == "Speech recognition")
+    precondition(item.sourceText == original, "Changing the display script must not edit conversation history")
 }
 
 private func testConversationMerge() {

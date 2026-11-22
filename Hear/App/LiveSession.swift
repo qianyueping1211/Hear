@@ -71,6 +71,24 @@ final class LiveSession: ObservableObject {
         }
     }
     @Published var showReadingIcon: Bool { didSet { save("showReadingIcon", showReadingIcon) } }
+    @Published var chineseDisplayLanguage = ChineseDisplayLanguage(
+        rawValue: UserDefaults.standard.string(forKey: ChineseDisplayLanguage.preferenceKey) ?? ""
+    ) ?? .simplified {
+        didSet {
+            guard chineseDisplayLanguage != oldValue else { return }
+            save(ChineseDisplayLanguage.preferenceKey, chineseDisplayLanguage.rawValue)
+            publishLiveActivity()
+        }
+    }
+
+    var displayedPartial: String {
+        chineseDisplayLanguage.display(partial, languageID: partialSource?.id)
+    }
+
+    var displayedPartialTranslation: String {
+        chineseDisplayLanguage.display(partialTranslation, languageID: partialTranslationTarget?.id)
+    }
+
     @Published var liveActivityOnlyTranslation: Bool {
         didSet {
             save("liveActivityOnlyTranslation", liveActivityOnlyTranslation)
@@ -3334,8 +3352,10 @@ final class LiveSession: ObservableObject {
             return raw
         }()
         return HearLiveActivityAttributes.ContentState(
-            sourceText: String((hasLiveTranslation ? partial : item?.sourceText ?? "").prefix(320)),
-            translatedText: String((hasLiveTranslation ? partialTranslation : item?.translated ?? "").prefix(320)),
+            sourceText: String((hasLiveTranslation ? displayedPartial
+                                : item?.displayedSource(using: chineseDisplayLanguage) ?? "").prefix(320)),
+            translatedText: String((hasLiveTranslation ? displayedPartialTranslation
+                                    : item?.displayedTranslation(using: chineseDisplayLanguage) ?? "").prefix(320)),
             sourceLanguage: (hasLiveTranslation ? partialSource : item?.source)?.name ?? langA.name,
             targetLanguage: (hasLiveTranslation ? partialTranslationTarget : item?.displayedTranslationTarget)?.name ?? langB.name,
             speaker: namedSpeaker,
