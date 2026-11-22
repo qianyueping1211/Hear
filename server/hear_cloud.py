@@ -47,7 +47,8 @@ import struct
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 
-from hear_http import RequestHandler, RequestPolicy, clone_upstream
+import hear_auth
+from hear_http import ERROR_CODES, RequestHandler, RequestPolicy, clone_upstream
 from hear_speaker import SpeakerDetector
 
 HOST = os.environ.get("HEAR_HOST", "0.0.0.0")
@@ -106,6 +107,10 @@ ACCESS_TOKEN_FILE = os.environ.get("HEAR_TOKEN_FILE",
                                    os.path.join(_HERE, "certs", "access-token.txt"))
 REQUIRE_TOKEN = os.environ.get("HEAR_REQUIRE_TOKEN", "").strip().lower() in ("1", "true", "yes", "on")
 ALLOW_LOOPBACK_HTTP = os.environ.get("HEAR_ALLOW_LOOPBACK_HTTP", "").strip().lower() in ("1", "true", "yes", "on")
+# 管理模式（HEAR_AUTH_MODE=managed）：口令由 Token 管理服务签发，网关定时同步清单（见 hear_auth.py）。
+# 这时 HEAR_REQUIRE_TOKEN 和 access-token.txt 都不再使用。
+AUTH = None
+AUTH_MODE = "legacy" if REQUIRE_TOKEN else "off"
 
 
 def access_token():
@@ -780,10 +785,13 @@ class Handler(RequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            # 响应里可能有口令状态和到期时间：任何一层都不缓存
+            self.send_header("Cache-Control", "no-store")
             if self.close_connection:
                 self.send_header("Connection", "close")
             if code == 503:
-                self.send_header("Retry-After", "1")
+                busy_auth = isinstance(obj, dict) and obj.get("code") == "AUTH_SERVICE_UNAVAILABLE"
+                self.send_header("Retry-After", "5" if busy_auth else "1")
             self.end_headers()
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError) as e:
@@ -803,8 +811,11 @@ class Handler(RequestHandler):
             # 手机等不及先断了（见 _send_json 的说明）
             log("客户端已断开（%s）：%s" % (type(e).__name__, e))
 
-    def _error(self, msg, code=400):
-        self._send_json({"error": str(msg)}, code)
+    def _error(self, msg, code=400, error_code=None):
+        # error 是现有 App 读的字段；code / message / request_id 是统一错误体
+        message = str(msg)
+        self._send_json({"error": message, "code": error_code or ERROR_CODES.get(code, "ERROR"),
+                         "message": message, "request_id": self.request_id}, code)
 
     def _send_html(self, html):
         data = html.encode("utf-8")
@@ -898,6 +909,12 @@ a{color:#007aff;text-decoration:none}
                 out["asr_ready"] = whisper_ready
         out["mt_ready"] = (backend_state(MT_URL) == "就绪")
         out["clone_ready"] = clone_state == "就绪" and clone_model_valid
+        # 口令服务是否就绪：auth_ready=false 时网关可达，但需要鉴权的请求会返回 503
+        if AUTH is not None:
+            out.update(AUTH.health())
+        else:
+            out["auth_mode"] = AUTH_MODE
+            out["auth_ready"] = True
         return out
 
     def send_error(self, code, message=None, explain=None):
@@ -1379,7 +1396,7 @@ class MixedServer(ThreadingHTTPServer):
     不用来回改。
 
     【关键】偷看字节和 TLS 握手都放在【工作线程】里做，不能放在 accept 线程里。
-    放在 accept 线程里的话，一个连上不吭声的客户端（或者一个握手慢的）就能把
+    放在 accept 线程里的话，一个连上不吁声的客户端（或者一个握手慢的）就能把
     整个服务堵住，手机那边就表现成"卡住了"。放线程里就各干各的，互不影响。
     """
 
@@ -1454,17 +1471,35 @@ class MixedServer(ThreadingHTTPServer):
 
 
 def main():
-    if ALLOW_LOOPBACK_HTTP and not REQUIRE_TOKEN:
+    global AUTH, AUTH_MODE
+    try:
+        mode = hear_auth.auth_mode_from_env()
+    except hear_auth.AuthConfigError as error:
+        raise SystemExit("鉴权配置错误：%s" % error)
+    if ALLOW_LOOPBACK_HTTP and not (REQUIRE_TOKEN or mode == "managed"):
         raise SystemExit("启用本机 HTTP 回源时，必须同时启用访问口令")
     _console_log.start()
     # 先把端口占上（这样别人连过来不会报"拒绝连接"），再开始处理请求
     ctx = make_ssl_context()
-    token = access_token() if REQUIRE_TOKEN else None
-    if REQUIRE_TOKEN and (not token or ctx is None):
-        raise SystemExit("访问口令已启用，需要可用的口令文件和 HTTPS 证书")
+    token = None
+    if mode == "managed":
+        if ctx is None:
+            raise SystemExit("管理模式需要 HTTPS 证书（server/certs/cert.pem），明文 HTTP 推理会被拒绝")
+        try:
+            AUTH = hear_auth.managed_from_env(logger=log)
+        except hear_auth.AuthConfigError as error:
+            raise SystemExit("鉴权配置错误：%s" % error)
+        AUTH_MODE = "managed"
+    elif mode == "legacy" and REQUIRE_TOKEN:
+        token = access_token()
+        if not token or ctx is None:
+            raise SystemExit("访问口令已启用，需要可用的口令文件和 HTTPS 证书")
+        AUTH_MODE = "legacy"
+    else:
+        AUTH_MODE = "off"
     srv = MixedServer((HOST, PORT), Handler, ctx)
     srv.request_policy = RequestPolicy(MAX_BODY, int(os.environ.get("HEAR_MAX_INFLIGHT", "3")), token,
-                                       allow_loopback_http=ALLOW_LOOPBACK_HTTP)
+                                       allow_loopback_http=ALLOW_LOOPBACK_HTTP, authenticator=AUTH)
     log("服务起来了，监听 %s:%d" % (HOST, PORT))
     if ALLOW_LOOPBACK_HTTP:
         log("已启用本机 HTTP 回源，仍需访问口令")
@@ -1472,7 +1507,12 @@ def main():
     _pair = pair_info()
     if _pair.get("root_fingerprint"):
         log("证书指纹（配对时核对这一串）：%s" % _pair["root_fingerprint"])
-    if REQUIRE_TOKEN:
+    if AUTH is not None:
+        log("口令管理模式：网关 %s，清单地址 %s（每 %d 秒同步）" % (AUTH.gateway_id, AUTH.snapshot_url,
+                                                          int(AUTH.refresh_interval)))
+        log("   清单加载前，推理请求返回 503；用户 Token 在管理后台签发")
+        AUTH.start()
+    elif token:
         log("访问口令：%s" % token)
         log("   手机上要填这个：设置 → 云端模型 → 通用服务地址 → 访问口令")
     log("本机测试：https://127.0.0.1:%d/" % PORT)
