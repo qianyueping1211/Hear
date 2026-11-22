@@ -226,7 +226,7 @@ struct SettingsView: View {
                         LLMSettingsView()
                     } label: {
                         LabeledContent("大模型 API") {
-                            Text(llm.active.map { "\($0.name) · \($0.selectedModel.isEmpty ? "未选模型" : $0.selectedModel)" } ?? "未配置")
+                            Text(llm.active?.name ?? "未配置")
                                 .lineLimit(1)
                         }
                     }

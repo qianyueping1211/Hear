@@ -684,10 +684,13 @@ struct ControlBar: View {
         } else {
             label
                 .contentShape(Circle())
-                .onLongPressGesture(minimumDuration: Self.recordingHoldDuration, maximumDistance: 12) {
+                .onLongPressGesture(minimumDuration: Self.recordingHoldDuration, maximumDistance: 12, perform: {
                     guard !session.isRunning, session.phase == .ready else { return }
                     Task { await session.toggle() }
-                }
+                }, onPressingChanged: { pressing in
+                    guard pressing, !session.isRunning, session.phase == .ready else { return }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                })
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel("按住两秒开始实时翻译")
                 .opacity(session.phase == .ready || session.isLoadingPhase ? 1 : 0.4)
@@ -768,20 +771,26 @@ struct HoldButton: View {
         let enabled = session.phase == .ready
         VStack(spacing: 6) {
             ZStack {
-                if active { RippleRings() }
+                if active { RippleRings().allowsHitTesting(false) }
                 HoldRing(meter: session.meter, active: active)
+                    .allowsHitTesting(false)
                 Circle()
                     .fill(Color.accentColor)
                     .frame(width: 78, height: 78)
                     .shadow(color: Color.accentColor.opacity(active ? 0.5 : 0), radius: 10)
-                Text(lang.flag).font(.system(size: 38))
+                    .overlay {
+                        Text(lang.flag)
+                            .font(.system(size: 38))
+                            .allowsHitTesting(false)
+                    }
+                    .contentShape(.interaction, Circle())
+                    .onLongPressGesture(minimumDuration: .infinity, maximumDistance: 12, perform: {},
+                                        onPressingChanged: { pressChanged($0, enabled: enabled) })
+                    .accessibilityLabel("按住两秒后说\(lang.name)")
             }
             .frame(width: 116, height: 110)
             .scaleEffect(active ? 1.08 : 1)
-            .contentShape(Circle())
-            .onLongPressGesture(minimumDuration: .infinity, maximumDistance: 12, perform: {},
-                                onPressingChanged: { pressChanged($0, enabled: enabled) })
-            Text(active ? "松开暂停" : (pressing ? "继续按住…" : "按住说\(lang.name)"))
+            Text(active ? "松开暂停" : "按住说\(lang.name)")
                 .font(.caption.weight(active ? .semibold : .regular))
                 .foregroundStyle(active ? Color.accentColor : Color.secondary)
                 .lineLimit(1)
@@ -793,19 +802,18 @@ struct HoldButton: View {
         .animation(.spring(duration: 0.2), value: active)
         .opacity(enabled ? 1 : 0.4)
         .onDisappear { cancelPress() }
-        .accessibilityLabel("按住两秒后说\(lang.name)")
     }
 
     private func pressChanged(_ down: Bool, enabled: Bool) {
         guard down else { cancelPress(); return }
         guard enabled, !pressing else { return }
         pressing = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         beginTask = Task {
             do { try await Task.sleep(for: .seconds(ControlBar.recordingHoldDuration)) }
             catch { return }
             guard pressing, !Task.isCancelled, session.talkMode else { return }
             requestedRecording = true
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             await session.holdBegan(lang)
         }
     }

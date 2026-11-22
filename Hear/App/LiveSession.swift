@@ -1529,7 +1529,7 @@ final class LiveSession: ObservableObject {
         dismissToast()
         modelsJustLoaded = false
         if isRunning { await finishRecording(); return }
-        _ = await beginListening()
+        _ = await beginListening(confirmHold: true)
     }
 
     /// 对话翻译模式：按下某种语言的按钮
@@ -1559,7 +1559,7 @@ final class LiveSession: ObservableObject {
             w += 1
         }
         guard startToken == token, holding == lang else { return }
-        let ok = await beginListening(intent: token)
+        let ok = await beginListening(intent: token, confirmHold: true)
         if !ok, startToken == token { holding = nil }
     }
 
@@ -1633,7 +1633,7 @@ final class LiveSession: ObservableObject {
     private var inputFinishToken: UUID?
     private var switchingConversation = false
 
-    private func beginListening(intent: UUID? = nil) async -> Bool {
+    private func beginListening(intent: UUID? = nil, confirmHold: Bool = false) async -> Bool {
         guard inputFinishToken == nil, !switchingConversation else { return false }
         let token = intent ?? UUID()
         if intent == nil { startToken = token }
@@ -1685,6 +1685,8 @@ final class LiveSession: ObservableObject {
         if inputSource == "headset", !hasHeadphones { inputSource = "phone" }   // 没耳机就用手机麦克风
         // 扬声器模式：聆听期间完全不播放、不改输出路由，停止后再从没读的那句开始读
         if outputMode == .speaker { stopReading() }
+        // 确认长按已生效。iOS 会抑制录音期间的触感，开麦前发送反馈。
+        if confirmHold { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
         do {
             try capture.start()
         } catch {
