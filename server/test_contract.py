@@ -431,6 +431,70 @@ def check_timeout_handling(cert_directory):
             worker.join(2)
 
 
+def check_clone_deadline():
+    import hear_cloud
+    from hear_http import RequestPolicy
+
+    arrived = threading.Event()
+    disconnected = threading.Event()
+    wav = make_wav()
+    calls = []
+
+    class SlowTTS(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            calls.append(self.path)
+            self.rfile.read(int(self.headers["Content-Length"]))
+            if len(calls) == 1:
+                arrived.set()
+                self.connection.settimeout(4)
+                if self.connection.recv(1) == b"":
+                    disconnected.set()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(wav)))
+            self.end_headers()
+            self.wfile.write(wav)
+
+    body = json.dumps({"text": "Clone deadline test", "lang": "english"}).encode()
+    with ThreadingHTTPServer(("127.0.0.1", 0), SlowTTS) as backend, \
+         hear_cloud.MixedServer(("127.0.0.1", 0), hear_cloud.Handler, None) as gateway, \
+         patch.object(hear_cloud, "CLONE_URL", f"http://127.0.0.1:{backend.server_port}"), \
+         patch.object(hear_cloud, "backend_model", return_value="qwen3-tts"):
+        gateway.request_policy = RequestPolicy(max_body=64 * 1024 * 1024, max_inflight=3)
+        servers = (backend, gateway)
+        workers = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
+        for worker in workers:
+            worker.start()
+
+        def request():
+            with closing(HTTPConnection("127.0.0.1", gateway.server_port, timeout=4)) as client:
+                client.request("POST", "/v1/clone", body=body, headers={
+                    "X-Hear-Audio": "wav", "X-Hear-Clone-Timeout": "1",
+                })
+                response = client.getresponse()
+                return response.status, response.read()
+
+        try:
+            first = []
+            pending = threading.Thread(target=lambda: first.append(request()), daemon=True)
+            pending.start()
+            assert arrived.wait(2), "the slow TTS did not receive the request"
+            check("a second clone is rejected while upstream is busy", request()[0] == 503)
+            pending.join(3)
+            check("the clone deadline returns 504 and closes the upstream request",
+                  bool(first) and first[0][0] == 504 and disconnected.wait(1))
+            check("the next clone succeeds and the timed-out synthesis was not resent",
+                  request() == (200, wav) and calls == ["/tts", "/tts"])
+        finally:
+            for server in servers:
+                server.shutdown()
+            for worker in workers:
+                worker.join(2)
+
+
 def main():
     global BASE
     tmp = tempfile.mkdtemp(prefix="hear-contract-")
@@ -617,6 +681,7 @@ def main():
         shutil.rmtree(tmp3, ignore_errors=True)
 
     check_timeout_handling(tmp)
+    check_clone_deadline()
     shutil.rmtree(tmp, ignore_errors=True)
 
     check_hybrid_asr(wav)

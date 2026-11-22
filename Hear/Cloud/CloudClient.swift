@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Security
 import UIKit
 
@@ -101,8 +102,10 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
     /// 打开/关闭严格模式
     static func setStrictMode(_ on: Bool) {
         hostLock.lock()
+        let changed = strict != on
         strict = on
         hostLock.unlock()
+        if changed { CloudClient.resetNetworkSession() }
     }
 
     static var strictModeEnabled: Bool {
@@ -117,10 +120,12 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
     ///   这一次只取一根证书，不发任何对话内容。）
     private let pairingHost: String?
     private let enteredHost: String?
+    private let verifiedRoot: Data?
 
-    init(pairingHost: String? = nil, enteredHost: String? = nil) {
+    init(pairingHost: String? = nil, enteredHost: String? = nil, verifiedRoot: Data? = nil) {
         self.pairingHost = pairingHost?.lowercased()
         self.enteredHost = enteredHost?.lowercased()
+        self.verifiedRoot = verifiedRoot
         super.init()
     }
 
@@ -138,8 +143,11 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
 
     static func pinRoot(_ der: Data) {
         hostLock.lock()
-        pinnedRoot = der
+        let root = der.isEmpty ? nil : der
+        let changed = pinnedRoot != root
+        pinnedRoot = root
         hostLock.unlock()
+        if changed { CloudClient.resetNetworkSession() }
     }
 
     static func pinnedRootData() -> Data? {
@@ -150,10 +158,7 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
 
     /// 严格模式：用配对过的签发根验这张证书
     /// （根没配对、或者不是这个根签的，一律不认）
-    private static func evaluateAgainstPinnedRoot(_ cert: SecCertificate, host: String) -> SecTrust? {
-        hostLock.lock()
-        let root = pinnedRoot
-        hostLock.unlock()
+    private static func evaluateAgainstRoot(_ cert: SecCertificate, host: String, root: Data?) -> SecTrust? {
         guard let root, let rootCert = SecCertificateCreateWithData(nil, root as CFData) else { return nil }
         var t: SecTrust?
         // 这次要检查主机名：地址填错了也得发现
@@ -181,12 +186,22 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
             completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
+        if let verifiedRoot {
+            guard host.lowercased() == enteredHost,
+                  let leaf = SecTrustGetCertificateAtIndex(trust, 0),
+                  let verified = Self.evaluateAgainstRoot(leaf, host: host, root: verifiedRoot) else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            completionHandler(.useCredential, URLCredential(trust: verified))
+            return
+        }
         // 严格模式只管"用户自己填的内网地址"：
         // 公网地址照常走系统证书校验（不能因为开了严格模式就把公网服务也毙了）。
         // 配对中的这一次是例外：还没确认指纹，先让它连上（只取证书，不发内容）。
         if Self.strictModeEnabled, !isPairingRequest, userLocal {
             if let cert = SecTrustGetCertificateAtIndex(trust, 0),
-               let strictTrust = Self.evaluateAgainstPinnedRoot(cert, host: host) {
+               let strictTrust = Self.evaluateAgainstRoot(cert, host: host, root: Self.pinnedRootData()) {
                 // 严格模式：这台电脑的证书过了（根是配对过的那个）
                 completionHandler(.useCredential, URLCredential(trust: strictTrust))
             } else {
@@ -201,24 +216,25 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
             // （证书里的 IP 是生成证书那一刻的，电脑换了网络、IP 变了，
             //   旧证书里就没有新 IP，手机会直接拒绝：
             //   "certificate unknown"——这里放开，省得每次换网络都要重装证书）
-            var t = trust
             // 先按系统的判断来：证书本来就合格就用系统的
-            var err: CFError?
-            if !SecTrustEvaluateWithError(trust, &err),
-               let cert = SecTrustGetCertificateAtIndex(trust, 0) {
+            if SecTrustEvaluateWithError(trust, nil) {
+                completionHandler(.useCredential, URLCredential(trust: trust))
+                return
+            }
+            if let cert = SecTrustGetCertificateAtIndex(trust, 0) {
                 // 系统不认（自签证书、或者证书里的 IP 是旧的）：
                 // 内网地址就放宽——把证书本身当成自己的根，并且不校验主机名
                 var relaxed: SecTrust?
                 let st = SecTrustCreateWithCertificates(cert, SecPolicyCreateSSL(true, nil), &relaxed)
                 if st == errSecSuccess, let r = relaxed {
                     SecTrustSetAnchorCertificates(r, [cert] as CFArray)
-                    var err2: CFError?
-                    if SecTrustEvaluateWithError(r, &err2) {
-                        t = r
+                    if SecTrustEvaluateWithError(r, nil) {
+                        completionHandler(.useCredential, URLCredential(trust: r))
+                        return
                     }
                 }
             }
-            completionHandler(.useCredential, URLCredential(trust: t))
+            completionHandler(.cancelAuthenticationChallenge, nil)
         } else {
             completionHandler(.performDefaultHandling, nil)
         }
@@ -257,14 +273,30 @@ actor CloudClient {
 
     /// 自己的会话：带自签证书放行 + 超时放宽
     /// （不用系统那个共享会话：它没法加证书处理程序）
-    static let session: URLSession = {
+    private static let sessionLock = NSLock()
+    private static var networkSession = makeNetworkSession()
+
+    static var session: URLSession {
+        sessionLock.lock(); defer { sessionLock.unlock() }
+        return networkSession
+    }
+
+    static func resetNetworkSession() {
+        sessionLock.lock()
+        let previous = networkSession
+        networkSession = makeNetworkSession()
+        sessionLock.unlock()
+        previous.invalidateAndCancel()
+    }
+
+    private static func makeNetworkSession() -> URLSession {
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 180
         cfg.timeoutIntervalForResource = 600
         cfg.waitsForConnectivity = false
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: cfg, delegate: LocalServerTrust.shared, delegateQueue: nil)
-    }()
+    }
 
     enum CloudError: LocalizedError {
         case notConfigured
@@ -329,15 +361,17 @@ actor CloudClient {
     /// 拿一个位置来跑克隆请求。
     /// 拿不到就等（前面的做完了会放出来）。
     /// 返回 false 表示任务被取消了，别发请求。
-    private func acquireCloneSlot() async -> Bool {
+    private func acquireCloneSlot(until deadline: ContinuousClock.Instant) async throws {
         // 轮询等位置（50 毫秒一次）：
         // 简单、不会漏掉、也不会把位置给错人
         while cloneBusy {
-            if Task.isCancelled { return false }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else { throw CloudError.inferenceTimeout }
+            try await Task.sleep(for: .milliseconds(50))
         }
+        try Task.checkCancellation()
+        guard ContinuousClock.now < deadline else { throw CloudError.inferenceTimeout }
         cloneBusy = true
-        return true
     }
 
     /// 用完了把位置放出来
@@ -351,26 +385,16 @@ actor CloudClient {
     /// 每句话都重传一遍参考音频的话，一段 10 秒的参考就是几百 KB，
     /// 一场对话下来白白占掉手机的流量，电脑那边的带宽也被占着——
     /// 手机自己的网络都可能被拖累（用户抱怨过切到别的软件手机提示断网）。
-    private var cloneRefID: String = ""
-    private var cloneRefKey: String = ""        // 参考音频的指纹（换参考了要重新传）
-    private var cloneRefUnsupported = false    // 老服务没有这个接口，别再试了
-
-    /// 参考音频的指纹（换了参考音频就得重新传）
-    private func refFingerprint(_ samples: [Float]) -> String {
-        var acc: Double = 0
-        var i = 0
-        while i < samples.count {
-            acc += Double(samples[i])
-            i += 331
-        }
-        return "\(samples.count)-\(Int(acc * 1000))"
-    }
+    private var cloneReferences: [String: (key: Data, id: String)] = [:]
+    private var cloneRefUnsupported: Set<String> = []
 
     /// 把参考音频传到服务器上，换一个 id 回来（后面每句话只带 id）
-    private func uploadCloneReference(_ refWav: Data, address: String) async throws -> String {
+    private func uploadCloneReference(_ refWav: Data, address: String,
+                                      deadline: ContinuousClock.Instant) async throws -> String {
         let req = try makeRequest("/v1/clone/reference", address: address, method: "POST",
-                                  body: refWav, contentType: "audio/wav", timeout: 60)
-        let (data, resp) = try await sendWithRetry(req, path: "/v1/clone/reference")
+                                  body: refWav, contentType: "audio/wav", timeout: 8)
+        let (data, resp) = try await sendWithRetry(req, path: "/v1/clone/reference", retries: 2,
+                                                 inferenceDeadline: deadline, retryConnection: true)
         let code = resp?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             throw CloudError.http(code, String(data: data.prefix(200), encoding: .utf8) ?? "")
@@ -400,7 +424,7 @@ actor CloudClient {
         let a = s.trimmingCharacters(in: .whitespacesAndNewlines)
         asrAddress = a; mtAddress = a; cloneAddress = a
         kinds.removeAll()
-        cloneRefID = ""; cloneRefKey = ""; cloneRefUnsupported = false
+        cloneReferences.removeAll(); cloneRefUnsupported.removeAll()
         noteUserAddresses()
     }
 
@@ -410,7 +434,7 @@ actor CloudClient {
         mtAddress = mt.trimmingCharacters(in: .whitespacesAndNewlines)
         cloneAddress = clone.trimmingCharacters(in: .whitespacesAndNewlines)
         kinds.removeAll()
-        cloneRefID = ""; cloneRefKey = ""; cloneRefUnsupported = false
+        cloneReferences.removeAll(); cloneRefUnsupported.removeAll()
         noteUserAddresses()
     }
 
@@ -430,6 +454,7 @@ actor CloudClient {
         if sharedAddress != v {
             sharedAddress = v
             kinds.removeAll()
+            cloneReferences.removeAll(); cloneRefUnsupported.removeAll()
         }
         noteUserAddresses()
     }
@@ -496,11 +521,14 @@ actor CloudClient {
 
     /// Retries are bounded by the caller. A timeout may already be running inference.
     private func sendWithRetry(_ req: URLRequest, path: String, retries: Int = 3,
-                               inferenceDeadline: ContinuousClock.Instant? = nil) async throws -> (Data, HTTPURLResponse?) {
+                               inferenceDeadline: ContinuousClock.Instant? = nil,
+                               retryConnection: Bool = false) async throws -> (Data, HTTPURLResponse?) {
         try await withBackgroundTime {
             let tries = max(1, retries)
             let busyDelays: [Double] = [1, 2.5, 4]
-            for attempt in 0..<tries {
+            var attempt = 0
+            var connectionRetried = false
+            while attempt < tries {
                 try Task.checkCancellation()
                 do {
                     let (data, resp) = try await Self.requestData(req, deadline: inferenceDeadline)
@@ -517,6 +545,7 @@ actor CloudClient {
                         }
                         hearLog("云端忙（HTTP \(code)），等 \(wait) 秒重试：\(path)")
                         try await Task.sleep(for: .seconds(wait))
+                        attempt += 1
                         continue
                     }
                     return (data, response)
@@ -528,7 +557,14 @@ actor CloudClient {
                         if inferenceDeadline != nil { throw CloudError.inferenceInterrupted(Self.friendlyError(e)) }
                         throw CloudError.net(Self.friendlyError(e))
                     }
-                    if inferenceDeadline != nil {
+                    if let inferenceDeadline {
+                        if retryConnection, !connectionRetried,
+                           CloudInferencePolicy.canRetryConnection(after: e.code),
+                           ContinuousClock.now.advanced(by: .seconds(1)) < inferenceDeadline {
+                            connectionRetried = true
+                            try await Task.sleep(for: .seconds(1))
+                            continue
+                        }
                         if e.code == .timedOut { throw CloudError.inferenceTimeout }
                         if CloudInferencePolicy.canTryAnotherAddress(after: e.code) {
                             throw CloudError.inferenceConnection(Self.friendlyError(e))
@@ -539,6 +575,7 @@ actor CloudClient {
                         let wait = attempt == 0 ? 1.5 : 4.0
                         hearLog("云端连不上，等 \(wait) 秒重试：\(path)（\(e.code.rawValue)）")
                         try await Task.sleep(for: .seconds(wait))
+                        attempt += 1
                         continue
                     }
                     throw CloudError.net(Self.friendlyError(e))
@@ -573,10 +610,12 @@ actor CloudClient {
                       contentType: String = "application/json",
                       timeout: TimeInterval = 60, retries: Int = 3,
                       headers: [String: String] = [:],
-                      inferenceDeadline: ContinuousClock.Instant? = nil) async throws -> [String: Any] {
+                      inferenceDeadline: ContinuousClock.Instant? = nil,
+                      retryConnection: Bool = false) async throws -> [String: Any] {
         var req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
         for (name, value) in headers { req.setValue(value, forHTTPHeaderField: name) }
-        let (data, resp) = try await sendWithRetry(req, path: path, retries: retries, inferenceDeadline: inferenceDeadline)
+        let (data, resp) = try await sendWithRetry(req, path: path, retries: retries,
+                                                  inferenceDeadline: inferenceDeadline, retryConnection: retryConnection)
         let code = resp?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             let msg = String(data: data.prefix(400), encoding: .utf8) ?? ""
@@ -593,10 +632,13 @@ actor CloudClient {
     private func rawData(_ path: String, address: String, method: String = "GET", body: Data? = nil,
                          contentType: String = "application/json",
                          headers: [String: String] = [:],
-                         timeout: TimeInterval = 60) async throws -> Data {
+                         timeout: TimeInterval = 60,
+                         inferenceDeadline: ContinuousClock.Instant? = nil,
+                         retryConnection: Bool = false) async throws -> Data {
         var req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
-        let (data, resp) = try await sendWithRetry(req, path: path)
+        let (data, resp) = try await sendWithRetry(req, path: path, retries: inferenceDeadline == nil ? 3 : 2,
+                                                  inferenceDeadline: inferenceDeadline, retryConnection: retryConnection)
         let code = resp?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             let msg = String(data: data.prefix(400), encoding: .utf8) ?? ""
@@ -630,11 +672,11 @@ actor CloudClient {
         // 配对这一次临时按兼容模式放行自签证书：
         // 还没配过的电脑，在严格模式下是连不上的（那就没法配对了）。
         // 这一次只取一根证书，不发任何对话内容。
-        guard let host = url.host, LocalServerTrust.isUserLocalHost(host) else {
-            throw CloudError.badResponse("严格模式配对需要已配置的局域网地址")
+        guard let host = url.host, LocalServerTrust.isLocalHost(host) else {
+            throw CloudError.badResponse("专用服务地址需要位于局域网")
         }
         let pairing = URLSession(configuration: .ephemeral,
-                                 delegate: LocalServerTrust(pairingHost: host), delegateQueue: nil)
+                                 delegate: LocalServerTrust(pairingHost: host, enteredHost: host), delegateQueue: nil)
         defer { pairing.invalidateAndCancel() }
         let (data, resp) = try await pairing.data(for: req)
         guard (200..<300).contains((resp as? HTTPURLResponse)?.statusCode ?? 0) else {
@@ -647,6 +689,28 @@ actor CloudClient {
             throw CloudError.badResponse("服务返回的内容看不懂（可能是老版本的服务）")
         }
         return (fp, der)
+    }
+
+    /// The fingerprint is copied from the computer. Only /v1/pair may be read
+    /// over the enrollment connection. A second connection proves the root.
+    static func verifyPairingAddress(_ pairing: CloudPairingAddress) async throws -> Data {
+        let info = try await pairInfo(address: pairing.address)
+        let digest = SHA256.hash(data: info.rootDer).map { String(format: "%02x", $0) }.joined()
+        guard digest == pairing.expectedRootSHA256,
+              let url = URL(string: pairing.address + "/ping"), let host = url.host else {
+            throw CloudError.badResponse("未能验证这台电脑，请从该电脑启动窗口重新复制专用地址")
+        }
+        let connection = URLSession(configuration: .ephemeral,
+                                    delegate: LocalServerTrust(enteredHost: host, verifiedRoot: info.rootDer),
+                                    delegateQueue: nil)
+        defer { connection.invalidateAndCancel() }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 8
+        let (_, response) = try await connection.data(for: req)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw CloudError.badResponse("专用服务地址验证失败")
+        }
+        return info.rootDer
     }
 
     struct ProbeResult: Equatable, Sendable {
@@ -909,11 +973,11 @@ actor CloudClient {
         var sawOnlyModelService = false
         var attempted = false
         // 探测、请求、退避和备用地址共享截止时间。
-        let seconds = Double(samples.count) / 16_000
-        let timeLimit = preview ? 12 : min(42, max(22, 12 + seconds * 2))
+        let timeLimit = preview ? 12 : CloudInferencePolicy.asrBudget(forSamples: samples.count)
         let deadline = ContinuousClock.now.advanced(by: .seconds(timeLimit))
         let wav = Wav.encode(samples: samples, sampleRate: 16_000)
-        for addr in candidateAddresses(asrAddress) {
+        let addresses = candidateAddresses(asrAddress)
+        for (index, addr) in addresses.enumerated() {
             try Task.checkCancellation()
             if ContinuousClock.now >= deadline { throw CloudError.inferenceTimeout }
             // 单独的 llama-server 没有识别接口，识别只能用 8000 的总服务
@@ -934,7 +998,8 @@ actor CloudClient {
                 if preview { req.setValue("1", forHTTPHeaderField: "X-ASR-Preview") }
                 else { req.setValue("first", forHTTPHeaderField: "X-ASR-Stage") }
                 let (data, resp) = try await sendWithRetry(req, path: "/v1/asr", retries: preview ? 1 : 3,
-                                                         inferenceDeadline: deadline)
+                                                         inferenceDeadline: deadline,
+                                                         retryConnection: !preview && index == addresses.count - 1)
                 let code = resp?.statusCode ?? 0
                 guard (200..<300).contains(code) else {
                     throw CloudError.http(code, String(data: data.prefix(400), encoding: .utf8) ?? "")
@@ -993,7 +1058,8 @@ actor CloudClient {
         case .revision: headers = ["X-MT-Stage": "revision"]
         case .final: headers = [:]
         }
-        for addr in candidateAddresses(mtAddress) {
+        let addresses = candidateAddresses(mtAddress)
+        for (index, addr) in addresses.enumerated() {
             try Task.checkCancellation()
             if ContinuousClock.now >= deadline { throw CloudError.inferenceTimeout }
             do {
@@ -1011,7 +1077,8 @@ actor CloudClient {
                     ]
                     let obj = try await json("/v1/chat/completions", address: addr, method: "POST",
                                              body: try JSONSerialization.data(withJSONObject: body), timeout: timeLimit,
-                                             retries: retries, inferenceDeadline: deadline)
+                                             retries: retries, inferenceDeadline: deadline,
+                                             retryConnection: stage == .final && index == addresses.count - 1)
                     if let choices = obj["choices"] as? [[String: Any]],
                        let msg = choices.first?["message"] as? [String: Any],
                        let text = msg["content"] as? String, !text.isEmpty {
@@ -1022,7 +1089,8 @@ actor CloudClient {
                 let body: [String: Any] = ["prompt": prompt, "src": src, "dst": dst]
                 let obj = try await json("/v1/translate", address: addr, method: "POST",
                                          body: try JSONSerialization.data(withJSONObject: body), timeout: timeLimit, retries: retries,
-                                         headers: headers, inferenceDeadline: deadline)
+                                         headers: headers, inferenceDeadline: deadline,
+                                             retryConnection: stage == .final && index == addresses.count - 1)
                 guard let text = obj["text"] as? String else {
                     throw CloudError.badResponse("没有 text 字段")
                 }
@@ -1045,115 +1113,98 @@ actor CloudClient {
     /// 每句话都会在后台预生成声音，同时来好几句的话，
     /// 好几个大响应一起在内存里，内存紧张时 App 会被系统直接杀掉。
     func clone(text: String, lang: String, reference: [Float], referenceText: String) async throws -> CloneAudio {
-        // 排队：一次只发一个克隆请求
-        guard await acquireCloneSlot() else {
-            throw CloudError.badResponse("任务已取消")
-        }
+        let timeLimit = CloudInferencePolicy.cloneBudget(forCharacters: text.count)
+        let now = ContinuousClock.now
+        let deadline = now.advanced(by: .seconds(timeLimit))
+        try await acquireCloneSlot(until: now.advanced(by: .seconds(15)))
         defer { releaseCloneSlot() }
-        guard !reference.isEmpty else {
-            throw CloudError.badResponse("没有参考音频")
-        }
-        // 换参考音频了：服务器上存的那份就作废了
-        let fp = refFingerprint(reference)
-        if cloneRefKey != fp {
-            cloneRefKey = fp
-            cloneRefID = ""
-        }
+        guard !reference.isEmpty else { throw CloudError.badResponse("没有参考音频") }
+
         let refWav = Wav.encode(samples: reference, sampleRate: 16_000)
-        hearLogNow("云端克隆：开始（参考音频 \(refWav.count) 字节）")
-        // 先试这个模型自己的地址，不行就退回通用服务地址（8000 会转发给克隆后端）
-        var lastError: Error = CloudError.notConfigured
-        for addr in candidateAddresses(cloneAddress) {
-            let isLlama = await kind(of: addr) == .llamaServer
-            // 最多试两次：服务器上存的参考音频可能没了（服务重启过）
-            for _ in 0..<2 {
-                do {
-                    let t0 = Date()
-                    var body: [String: Any] = ["text": text, "lang": lang]
-                    if isLlama {
-                        // 地址上跑的是单独的 llama-server（8082 那种）时，用 /tts，
-                        // 返回的是 wav 原始数据。它只认 base64 的参考音频，用不了 id。
-                        body["speaker_ref_b64"] = refWav.base64EncodedString()
-                        body["speaker_ref_text"] = referenceText
-                        hearLogNow("云端克隆：请求已发出（\(addr)）")
-                        let data = try await rawData("/tts", address: addr, method: "POST",
-                                                     body: try JSONSerialization.data(withJSONObject: body), timeout: 300)
-                        hearLogNow("云端克隆：收到回复（\(data.count) 字节）")
-                        guard let decoded = Wav.decode(data) else {
-                            throw CloudError.badResponse("llama-server 返回的不是 wav 音频")
-                        }
-                        hearLogNow("云端克隆：结束（\(decoded.samples.count) 个采样，\(decoded.sampleRate) Hz，用时 \(Self.secs(t0))s）")
-                        return CloneAudio(samples: decoded.samples, sampleRate: decoded.sampleRate)
-                    }
-                    // 总服务：参考音频只传一次，后面每句话只带 id
-                    var refID = cloneRefID
-                    if refID.isEmpty && !cloneRefUnsupported {
-                        do {
-                            let rid = try await uploadCloneReference(refWav, address: addr)
-                            if !rid.isEmpty {
-                                refID = rid
-                                cloneRefID = rid
-                                hearLogNow("云端克隆：参考音频已上传（\(refWav.count) 字节），后面几遍只传 id")
-                            }
-                        } catch let e as CloudError {
-                            if case .http = e {
-                                // 服务器不认识这个接口（老服务）：以后照旧整段发过去
-                                cloneRefUnsupported = true
-                                hearLog("云端克隆：服务器不支持参考音频 id，整段上传", .info)
-                            } else {
-                                hearLog("云端克隆：参考音频上传失败，整段上传（\(Self.friendlyError(e))）", .warning)
-                            }
-                        } catch {
-                            hearLog("云端克隆：参考音频上传失败，整段上传", .warning)
-                        }
-                    }
-                    if refID.isEmpty {
-                        body["reference_wav"] = refWav.base64EncodedString()
-                    } else {
-                        body["reference_id"] = refID
-                    }
-                    body["reference_text"] = referenceText
-                    hearLogNow("云端克隆：请求已发出（\(addr)）")
-                    // 请求头里说明要原始 wav：新服务直接回 wav 原始数据（省掉 base64，
-                    // 内存占用小很多）；老服务不认这个头，还是回 JSON，这里也照样能解。
-                    let data = try await rawData("/v1/clone", address: addr, method: "POST",
+        let fingerprint = Data(SHA256.hash(data: refWav))
+        let addresses = candidateAddresses(cloneAddress)
+        var lastError = CloudError.notConfigured
+        for (index, address) in addresses.enumerated() {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else { throw CloudError.inferenceTimeout }
+            let retryConnection = index == addresses.count - 1
+            let isLlama = await kind(of: address, timeout: 4, deadline: deadline) == .llamaServer
+            let key = Self.cleanURL(address)
+            do {
+                if isLlama {
+                    let body = ["input": text, "text": text, "lang": lang,
+                                "speaker_ref_b64": refWav.base64EncodedString(),
+                                "speaker_ref_text": referenceText]
+                    let data = try await rawData("/tts", address: address, method: "POST",
                                                  body: try JSONSerialization.data(withJSONObject: body),
-                                                 headers: ["X-Hear-Audio": "wav"], timeout: 300)
-                    hearLogNow("云端克隆：收到回复（\(data.count) 字节）")
-                    var wavData = data
-                    var rate = 0
-                    if !(data.count > 4 && data.prefix(4) == Data([0x52, 0x49, 0x46, 0x46])) {
-                        // 老服务：回的是 JSON（audio 是 base64）
-                        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                              let b64 = obj["audio"] as? String,
-                              let d = Data(base64Encoded: b64) else {
-                            throw CloudError.badResponse("没有 audio 字段")
-                        }
-                        wavData = d
-                        rate = (obj["sample_rate"] as? Int) ?? 0
-                    }
-                    guard let decoded = Wav.decode(wavData) else {
-                        throw CloudError.badResponse("返回的不是 wav 音频")
-                    }
-                    if rate <= 0 { rate = decoded.sampleRate }
-                    if rate <= 0 { rate = 24_000 }
-                    hearLogNow("云端克隆：结束（\(decoded.samples.count) 个采样，\(rate) Hz，用时 \(Self.secs(t0))s）")
-                    return CloneAudio(samples: decoded.samples, sampleRate: rate)
-                } catch {
-                    // 服务器上存的参考音频没了（服务重启过）：清掉，重新传一次再来
-                    if let ce = error as? CloudError, case .http(let code, _) = ce,
-                       code == 404, !cloneRefID.isEmpty {
-                        hearLog("云端克隆：服务器上的参考音频没了，重新上传", .warning)
-                        cloneRefID = ""
-                        continue
-                    }
-                    lastError = error
-                    hearLog("云端克隆失败：\(Self.friendlyError(error))", .error)
-                    break          // 这个地址不行，换下一个
+                                                 timeout: timeLimit, inferenceDeadline: deadline,
+                                                 retryConnection: retryConnection)
+                    return try Self.decodeClone(data)
                 }
+
+                for refreshReference in [false, true] {
+                    var refID = cloneReferences[key].flatMap { $0.key == fingerprint ? $0.id : nil }
+                    if refID == nil, !cloneRefUnsupported.contains(key) {
+                        do {
+                            let uploadDeadline = min(deadline, ContinuousClock.now.advanced(by: .seconds(8)))
+                            let id = try await uploadCloneReference(refWav, address: address, deadline: uploadDeadline)
+                            cloneReferences[key] = (fingerprint, id)
+                            refID = id
+                        } catch {
+                            try Task.checkCancellation()
+                            guard let error = error as? CloudError else { throw error }
+                            if case .http(let code, _) = error, [400, 404, 405, 501].contains(code) {
+                                cloneRefUnsupported.insert(key)
+                            } else if error.canTryAnotherInferenceAddress && !error.isBusy {
+                                throw error
+                            }
+                            // Uploading a reference never starts synthesis. An inline
+                            // reference is safe if the upload endpoint didn't respond.
+                        }
+                    }
+
+                    let body = ["text": text, "lang": lang, "reference_text": referenceText,
+                                refID == nil ? "reference_wav" : "reference_id": refID ?? refWav.base64EncodedString()]
+                    let remaining = max(0, ContinuousClock.now.duration(to: deadline).components.seconds)
+                    do {
+                        let data = try await rawData("/v1/clone", address: address, method: "POST",
+                                                     body: try JSONSerialization.data(withJSONObject: body),
+                                                     headers: ["X-Hear-Audio": "wav",
+                                                               "X-Hear-Clone-Timeout": String(remaining)],
+                                                     timeout: timeLimit, inferenceDeadline: deadline,
+                                                     retryConnection: retryConnection)
+                        return try Self.decodeClone(data)
+                    } catch let error as CloudError {
+                        if case .http(404, let message) = error, refID != nil, !refreshReference,
+                           message.contains("参考音频 id") {
+                            cloneReferences[key] = nil
+                            continue
+                        }
+                        throw error
+                    }
+                }
+            } catch {
+                try Task.checkCancellation()
+                guard let error = error as? CloudError, error.canTryAnotherInferenceAddress else { throw error }
+                lastError = error
             }
         }
         throw lastError
+    }
+
+    private static func decodeClone(_ data: Data) throws -> CloneAudio {
+        var wav = data
+        var rate = 0
+        if !data.starts(with: [0x52, 0x49, 0x46, 0x46]) {
+            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let encoded = obj["audio"] as? String, let decoded = Data(base64Encoded: encoded) else {
+                throw CloudError.badResponse("没有可播放的声音")
+            }
+            wav = decoded
+            rate = (obj["sample_rate"] as? Int) ?? 0
+        }
+        guard let decoded = Wav.decode(wav) else { throw CloudError.badResponse("返回的不是 wav 音频") }
+        return CloneAudio(samples: decoded.samples, sampleRate: rate > 0 ? rate : max(1, decoded.sampleRate))
     }
 
     /// 从开始到现在的秒数（一位小数）

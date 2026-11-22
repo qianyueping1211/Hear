@@ -15,6 +15,7 @@ actor SenseVoiceRecognizer {
     private var models: SenseVoiceModels?
     /// 每种语言一个 manager（语言在创建时定好；创建很便宜，模型是共用的）
     private var managers: [Int32: SenseVoiceManager] = [:]
+    private var decoding = false
 
     /// SenseVoice 能识别的语言（Whisper 语言代码）
     static let languageIDs: Set<String> = ["zh", "en", "ja", "ko"]
@@ -31,7 +32,30 @@ actor SenseVoiceRecognizer {
         managers.removeAll()
     }
 
-    func load(folder: URL) throws {
+    func load(folder: URL) async throws {
+        try await acquireEngine()
+        defer { decoding = false }
+        try loadModels(folder: folder)
+    }
+
+    private func acquireEngine() async throws {
+        while decoding {
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        try Task.checkCancellation()
+        decoding = true
+    }
+
+    var isDecoding: Bool { decoding }
+
+    func recover(folder: URL) async throws {
+        try await acquireEngine()
+        defer { decoding = false }
+        unload()
+        try loadModels(folder: folder)
+    }
+
+    private func loadModels(folder: URL) throws {
         let t0 = Date()
         // 下载的是 int8（约 240 MB）；导入的文件夹里只有 fp16 时就用 fp16
         let precision: SenseVoiceEncoderPrecision =
@@ -93,8 +117,11 @@ actor SenseVoiceRecognizer {
 
     /// 识别一句话。candidates 只有一种时（对话翻译模式）按这种语言识别，否则自动判断。
     /// 返回选定语言、文字和模型原始语言；没听到人说话时文字为空。
-    func recognize(_ samples: [Float], candidates: [String], fallback: String, preview: Bool)
+    func recognize(_ samples: [Float], candidates: [String], fallback: String, preview: Bool, confirmedSpeech: Bool = false)
         async throws -> (language: String, text: String, observed: String?) {
+        if preview, decoding { throw CancellationError() }
+        try await acquireEngine()
+        defer { decoding = false }
         let forced = candidates.count == 1 ? candidates.first : nil
         guard let m = manager(for: forced) else {
             // 模型不在了：报错，别静悄悄返回空字符串（会被当成"没说话"丢掉）
@@ -109,7 +136,8 @@ actor SenseVoiceRecognizer {
         var language = forced ?? SpeechTextFilter.resolveLanguage(text, detected: observed,
                                                                    candidates: candidates, fallback: fallback)
         if language == nil, !preview, SpeechTextFilter.isMeaningful(text),
-           let retry = SpeechTextFilter.retryLanguage(text, detected: observed, candidates: candidates),
+           let retry = SpeechTextFilter.retryLanguage(text, detected: observed, candidates: candidates,
+                                                        confirmedSpeech: confirmedSpeech),
            let retryManager = manager(for: retry) {
             do {
                 let retryResult = try await retryManager.transcribeDetailed(audio: samples)

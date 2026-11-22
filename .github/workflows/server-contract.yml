@@ -8,11 +8,13 @@ on:
     branches: [main]
     paths:
       - 'server/**'
+      - 'tests/audio/**'
       - 'start-hear-cloud.bat'
       - '.github/workflows/server-contract.yml'
   pull_request:
     paths:
       - 'server/**'
+      - 'tests/audio/**'
       - 'start-hear-cloud.bat'
       - '.github/workflows/server-contract.yml'
 
@@ -24,6 +26,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  sensevoice-audio:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/hear-audio-fixtures
+          key: hear-sensevoice-2365bae-audio-v1
+      - name: SenseVoice fixed-audio regression
+        env:
+          PYTHONUTF8: '1'
+        run: |
+          pip install sherpa-onnx==2.0.2 numpy==2.2.6
+          python tests/audio/sensevoice_regression.py --cache "$RUNNER_TEMP/hear-audio-fixtures" \
+            --baseline tests/audio/baseline.json --output "$RUNNER_TEMP/sensevoice-audio.json"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: sensevoice-audio
+          path: ${{ runner.temp }}/sensevoice-audio.json
+
   windows-launcher:
     runs-on: windows-latest
     timeout-minutes: 5

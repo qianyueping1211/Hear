@@ -86,6 +86,7 @@ jobs:
             Hear/Models/ZipVoiceArchive.swift Hear/Cloud/CloudModelReadiness.swift \
             Hear/Translate/PromptBuilder.swift Hear/Translate/TranslationOutput.swift Hear/Audio/Segmenter.swift Hear/Audio/CloneAudio.swift \
             Hear/Speech/SpeechTextFilter.swift Hear/Speech/Fillers.swift Hear/Cloud/CloudInferencePolicy.swift \
+            Hear/Audio/AudioInputBuffer.swift Hear/Cloud/CloudPairingAddress.swift Hear/App/SessionClonePipeline.swift Hear/App/SessionCloudRecovery.swift \
             Hear/Models/ConversationModels.swift Hear/Summary/SummaryTemplate.swift \
             tests/SessionJobQueueTests.swift -lbz2 -o "$RUNNER_TEMP/hear-session-tests"
           "$RUNNER_TEMP/hear-session-tests"

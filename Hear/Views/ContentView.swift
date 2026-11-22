@@ -779,7 +779,7 @@ struct ContextToggle: View {
             VStack(spacing: 4) {
                 Image(systemName: session.useContext ? "text.bubble.fill" : "text.bubble")
                     .font(.title2)
-                Text(session.useContext ? "上下文开" : "上下文关").font(.caption2)
+                Text(session.useContext ? "断词修复开" : "断词修复关").font(.caption2)
             }
             .frame(width: 70)
             .foregroundStyle(session.useContext ? Color.accentColor : Color.secondary)

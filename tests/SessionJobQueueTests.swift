@@ -40,12 +40,16 @@ struct SessionJobQueueTests {
         try testZipVoiceArchive()
         testCloudReadiness()
         try await testCloudInferencePolicy()
+        try testVerifiedAddress()
+        try await testRecoveryState()
         try testConversationBubbleSides()
         try testTranslationRevision()
         try testCurrentSegmentTranslation()
         testSpeechGating()
         testSegmentContinuity()
+        testBoundedAudioAndTimeline()
         testSpeechLanguageResolution()
+        testGlossaryAliases()
         testClonePlaybackSilence()
         testClonePlaybackGain()
         testChineseDisplayLanguage()
@@ -93,6 +97,12 @@ private func testCloudInferencePolicy() async throws {
     precondition(!CloudInferencePolicy.canTryAnotherAddress(after: .networkConnectionLost))
     precondition(CloudInferencePolicy.canTryAnotherAddress(afterHTTPStatus: 503))
     precondition(!CloudInferencePolicy.canTryAnotherAddress(afterHTTPStatus: 504))
+    precondition(CloudInferencePolicy.canRetryConnection(after: .cannotConnectToHost))
+    precondition(!CloudInferencePolicy.canRetryConnection(after: .notConnectedToInternet))
+    precondition(!CloudInferencePolicy.canRetryConnection(after: .networkConnectionLost))
+    precondition(!CloudInferencePolicy.canRetryConnection(after: .timedOut))
+    precondition(CloudInferencePolicy.cloneBudget(forCharacters: 25) == 35)
+    precondition(CloudInferencePolicy.cloneBudget(forCharacters: 500) == 90)
     let started = ContinuousClock.now
     let value = try await CloudInferencePolicy.before(started.advanced(by: .seconds(2))) { 42 }
     precondition(value == 42)
@@ -105,6 +115,70 @@ private func testCloudInferencePolicy() async throws {
     } catch let error as URLError where error.code == .timedOut {
         precondition(started.duration(to: .now) < .seconds(3), "The expired request kept the next job waiting")
     }
+}
+
+private func testVerifiedAddress() throws {
+    let fingerprint = String(repeating: "aF", count: 32)
+    let verified = try CloudPairingAddress.parse("https://192.168.1.30:8000/#hear-root=" + fingerprint)
+    precondition(verified?.address == "https://192.168.1.30:8000")
+    precondition(verified?.expectedRootSHA256 == fingerprint.lowercased())
+    let ordinary = try CloudPairingAddress.parse("192.168.1.30:8000")
+    precondition(ordinary == nil)
+    for input in ["http://192.168.1.30#hear-root=" + fingerprint,
+                  "https://example.com/path#hear-root=" + fingerprint,
+                  "https://192.168.1.30#hear-root=short"] {
+        do {
+            _ = try CloudPairingAddress.parse(input)
+            preconditionFailure("Accepted an invalid verified address")
+        } catch is CloudPairingAddress.InvalidAddress {}
+    }
+}
+
+@MainActor
+private func testRecoveryState() async throws {
+    let suite = "hear.recovery.tests." + UUID().uuidString
+    guard let defaults = UserDefaults(suiteName: suite) else { preconditionFailure("No test defaults") }
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let cloud = SessionCloudRecovery(defaults: defaults)
+    cloud.remember(asr: "cloud", mt: "cloud")
+    cloud.remember(asr: "apple", mt: "local")
+    cloud.applying {
+        precondition(cloud.isApplying)
+        cloud.restored(.asr)
+    }
+    precondition(cloud.preferred(.asr) == nil && cloud.preferred(.mt) == "cloud")
+    precondition(!cloud.isApplying)
+    cloud.clear()
+    precondition(!cloud.hasBackup)
+
+    let clones = SessionClonePipeline()
+    let id = UUID()
+    var oldToken: UUID?, newToken: UUID?
+    let old = clones.start(id) { token in
+        oldToken = token
+        return Task { try? await Task.sleep(for: .seconds(2)); return nil }
+    }
+    _ = clones.start(id) { _ in preconditionFailure("Duplicate clone should be reused") }
+    clones.cancel(id)
+    _ = clones.start(id) { token in
+        newToken = token
+        return Task { try? await Task.sleep(for: .seconds(2)); return nil }
+    }
+    _ = await old.value
+    await Task.yield()
+    precondition(oldToken != newToken && clones.isCurrent(id, token: newToken!))
+    clones.reset()
+    precondition(clones.existing(id) == nil)
+
+    let queue = SessionJobQueue<Int>(timeout: .seconds(5))
+    var timedOut = false
+    var nextRan = false
+    queue.submit(1, timeout: .milliseconds(65)) { _ in
+        try? await Task.sleep(for: .seconds(5))
+    } timedOut: { _ in timedOut = true }
+    queue.submit(2) { _ in nextRan = true } timedOut: { _ in preconditionFailure() }
+    await SessionJobQueueTests.until { queue.isIdle }
+    precondition(timedOut && nextRan)
 }
 
 private func testClonePlaybackSilence() {
@@ -218,7 +292,7 @@ private func testSegmentContinuity() {
         let segmenter = Segmenter()
         var results: [[Float]] = []
         segmenter.onEvent = {
-            if case .ended(_, let samples) = $0 { results.append(samples) }
+            if case .ended(_, let samples, _, _) = $0 { results.append(samples) }
         }
         for start in stride(from: 0, to: audio.count, by: 1_613) {
             segmenter.feed(Array(audio[start..<min(start + 1_613, audio.count)]))
@@ -240,6 +314,45 @@ private func testSegmentContinuity() {
     precondition(hardLimit.flatMap { $0 } == continuous, "The hard split changed the audio stream")
 }
 
+private func testBoundedAudioAndTimeline() {
+    var buffer = AudioInputBuffer<Int>(capacity: 8)
+    precondition(buffer.append(1, frames: 4).schedule)
+    precondition(!buffer.append(2, frames: 4).schedule)
+    precondition(buffer.append(3, frames: 4).dropped)
+    precondition(buffer.frames == 8 && buffer.pop() == 2 && buffer.pop() == 3 && buffer.pop() == nil)
+    precondition(buffer.append(4, frames: 8).schedule)
+    buffer.removePending()
+    precondition(buffer.frames == 0 && buffer.pop() == nil)
+
+    let segmenter = Segmenter()
+    var starts: [Int64] = []
+    var ends: [Int64] = []
+    var discarded = 0
+    segmenter.onEvent = {
+        switch $0 {
+        case .started(_, let start): starts.append(start)
+        case .ended(_, _, let end, _): ends.append(end)
+        case .discarded: discarded += 1
+        default: break
+        }
+    }
+    segmenter.feed(Array(repeating: 0.08, count: 9_600), startingAt: 0)
+    segmenter.feed(Array(repeating: 0.08, count: 9_600), startingAt: 32_000)
+    segmenter.flush()
+    precondition(starts == [0, 32_000] && ends == [41_600] && discarded == 1,
+                 "A dropped interval must not stitch two sides into one sentence")
+}
+
+private func testGlossaryAliases() {
+    let entries = PromptBuilder.parseGlossary("张伟|章伟|zhang wei=Zhang Wei\nAPI=接口\n旧术语=legacy")
+    let text = "章伟 rapid 旧术语"
+    let prompt = PromptBuilder.build(text: text, from: .find("zh"), to: .find("en"), glossary: entries)
+    precondition(prompt.contains("章伟 翻译成 Zhang Wei") && prompt.contains("旧术语 翻译成 legacy"))
+    precondition(!prompt.contains("API 翻译成") && prompt.hasSuffix("\n\n" + text))
+    let mixed = PromptBuilder.build(text: "讨论API", from: .find("zh"), to: .find("en"), glossary: entries)
+    precondition(mixed.contains("API 翻译成 接口"))
+}
+
 private func testSpeechLanguageResolution() {
     let pair = ["zh", "en"]
     precondition(SpeechTextFilter.resolveLanguage("明天 meeting 讨论 API design", detected: "en",
@@ -254,6 +367,9 @@ private func testSpeechLanguageResolution() {
                                                   candidates: ["ko", "en"], fallback: "en") == "ko")
     precondition(SpeechTextFilter.resolveLanguage("это не речь", detected: "zh", candidates: pair, fallback: "zh") == nil)
     precondition(SpeechTextFilter.retryLanguage("это не речь", detected: "zh", candidates: pair) == nil)
+    precondition(SpeechTextFilter.retryLanguage("робот API", detected: "ja", candidates: pair) == nil)
+    precondition(SpeechTextFilter.retryLanguage("робот API", detected: "ja", candidates: pair, confirmedSpeech: true) == "en")
+    precondition(SpeechTextFilter.retryLanguage("明天 到场 API", detected: "ja", candidates: pair, confirmedSpeech: true) == nil)
     precondition(!SpeechTextFilter.isMeaningful("嗯，嗯。"))
     precondition(!SpeechTextFilter.isMeaningful("Thank you for watching"))
 }

@@ -1,13 +1,74 @@
 """HTTP request routing and admission for the Hear inference gateway."""
 from contextlib import contextmanager
 from hmac import compare_digest
+from http.client import HTTPConnection, HTTPSConnection, HTTPException
 from http.server import BaseHTTPRequestHandler
+import socket
 import ssl
 import threading
 import time
 import traceback
 import urllib.error
 from urllib.parse import urlsplit
+
+
+def clone_upstream(url, payload, deadline, max_bytes):
+    """Bound the complete upstream response, including a backend trickling data."""
+    target = urlsplit(url)
+    if target.scheme not in ("http", "https") or target.hostname is None:
+        raise ValueError("invalid clone backend URL")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("clone deadline elapsed")
+    factory = HTTPSConnection if target.scheme == "https" else HTTPConnection
+    conn = factory(target.hostname, target.port, timeout=min(5, remaining))
+    timer = None
+    expired = threading.Event()
+    try:
+        conn.connect()
+        sock = conn.sock
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("clone deadline elapsed")
+        sock.settimeout(remaining)
+
+        def stop_waiting():
+            expired.set()
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        timer = threading.Timer(remaining, stop_waiting)
+        timer.daemon = True
+        timer.start()
+        path = target.path or "/"
+        if target.query:
+            path += "?" + target.query
+        conn.request("POST", path, body=payload, headers={"Content-Type": "application/json"})
+        with conn.getresponse() as response:
+            data = response.read(max_bytes + 1)
+            if expired.is_set() or time.monotonic() >= deadline:
+                raise TimeoutError("clone deadline elapsed")
+            if not 200 <= response.status < 300:
+                raise urllib.error.HTTPError(url, response.status, response.reason, response.headers, None)
+            if len(data) > max_bytes:
+                raise urllib.error.URLError("clone audio exceeds size limit")
+            if response.length not in (None, 0):
+                raise urllib.error.URLError("incomplete clone response")
+            return data
+    except TimeoutError:
+        raise
+    except (HTTPException, OSError) as error:
+        if isinstance(error, urllib.error.URLError):
+            raise
+        if expired.is_set() or time.monotonic() >= deadline:
+            raise TimeoutError("clone deadline elapsed") from error
+        raise urllib.error.URLError(error) from error
+    finally:
+        if timer is not None:
+            timer.cancel()
+        conn.close()
 
 
 class RequestPolicy:
@@ -147,7 +208,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         correction = route == "/v1/asr" and self.headers.get("X-ASR-Stage", "").strip() == "correct"
         revision = route == "/v1/translate" and self.headers.get("X-MT-Stage", "").strip() == "revision"
         background = preview is not None or correction or revision or route not in ("/v1/asr", "/v1/translate")
-        with policy.reserve(background=background, preview=preview) as admitted:
+        # One in-flight clone per gateway, independent of the live ASR/MT preview lanes.
+        exclusive = route if route == "/v1/clone" else preview
+        with policy.reserve(background=background, preview=exclusive) as admitted:
             if not admitted:
                 self._reject_without_reading("推理服务正忙，请稍后重试", 503)
                 return
@@ -160,7 +223,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             except TimeoutError:
                 self._backend_timeout(route)
             except urllib.error.HTTPError as error:
-                detail = error.read().decode("utf-8", "replace")[:500]
+                detail = error.read(500).decode("utf-8", "replace") if error.fp else ""
                 self._error("后端返回 %s：%s" % (error.code, detail), 502)
             except urllib.error.URLError as error:
                 if isinstance(error.reason, TimeoutError):

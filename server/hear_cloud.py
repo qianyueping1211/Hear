@@ -47,7 +47,7 @@ import struct
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 
-from hear_http import RequestHandler, RequestPolicy
+from hear_http import RequestHandler, RequestPolicy, clone_upstream
 from hear_speaker import SpeakerDetector
 
 HOST = os.environ.get("HEAR_HOST", "0.0.0.0")
@@ -95,8 +95,9 @@ _whisper_state = {"status": "未加载", "detail": ""}
 
 # 日志里要不要记用户说的话（识别出来的原文、译文）。
 # 内测期间默认记录，便于从这里直接排查识别和翻译问题。
-# 正式上线前应恢复默认关闭；需要临时关闭时设 HEAR_LOG_CONTENT=0。
-LOG_CONTENT = os.environ.get("HEAR_LOG_CONTENT", "1").strip().lower() in ("1", "true", "yes", "on")
+# 正式环境默认关闭。HEAR_LOG_CONTENT 仍可显式覆盖该默认值。
+DEPLOYMENT = os.environ.get("HEAR_DEPLOYMENT", "internal").strip().lower()
+LOG_CONTENT = os.environ.get("HEAR_LOG_CONTENT", "0" if DEPLOYMENT == "production" else "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 # 访问口令：开了以后，客户端必须带上 X-Hear-Token 才能用推理接口。
@@ -406,23 +407,25 @@ def sensevoice_transcribe(samples, rate):
         stream = rec.create_stream()
         stream.accept_waveform(16000, audio)
         rec.decode_stream(stream)
-        text = (stream.result.text or "").strip()
+        result = stream.result
+        text = (result.text or "").strip()
+        # Newer bindings expose language separately; older ones can embed it in text.
+        language_tag = (getattr(result, "lang", "") or "").strip("<|>").lower()
+        lang = {"yue": "zh"}.get(language_tag, language_tag)
+        if lang not in ("zh", "en", "ja", "ko"):
+            lang = ""
         # SenseVoice 的结果里带语言和情绪标记，例如 <|zh|><|NEUTRAL|><|zh|><|withitn|>你好
-        lang = ""
-        if "<|zh|>" in text or "<|yue|>" in text:
-            lang = "zh"
-        elif "<|en|>" in text:
-            lang = "en"
-        elif "<|ja|>" in text:
-            lang = "ja"
-        elif "<|ko|>" in text:
-            lang = "ko"
+        if not lang:
+            for code in ("zh", "yue", "en", "ja", "ko"):
+                if f"<|{code}|>" in text:
+                    lang = "zh" if code == "yue" else code
+                    break
         for tag in ("<|zh|>", "<|en|>", "<|ja|>", "<|ko|>", "<|yue|>",
                     "<|NEUTRAL|>", "<|HAPPY|>", "<|SAD|>", "<|ANGRY|>", "<|FEARFUL|>",
                     "<|DISGUSTED|>", "<|SURPRISED|>", "<|withitn|>", "<|woitn|>"):
             text = text.replace(tag, "")
         text = text.strip()
-        if "<|nospeech|>" in text or not text:
+        if language_tag == "nospeech" or "<|nospeech|>" in text or not text:
             return (lang, "")
         return (lang, text)
     except Exception as e:
@@ -1034,6 +1037,7 @@ a{color:#007aff;text-decoration:none}
         self._send_json({"id": rid})
 
     def clone(self, body):
+        started = time.monotonic()
         try:
             req = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -1079,10 +1083,12 @@ a{color:#007aff;text-decoration:none}
             log("！！克隆后端跑的不是 TTS 模型（%s）：出来的声音会是乱的。"
                 "多半是上一个窗口没关干净，端口上留着旧的 llama-server" % m)
         data = json.dumps(payload).encode("utf-8")
-        r = urllib.request.Request(CLONE_URL + "/tts", data=data,
-                                   headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(r, timeout=900) as resp:
-            wav = resp.read()
+        limit = min(85, 30 + len(payload.get("input", "")) * 0.2)
+        try:
+            limit = max(1, min(limit, int(self.headers.get("X-Hear-Clone-Timeout", ""))))
+        except ValueError:
+            pass
+        wav = clone_upstream(CLONE_URL + "/tts", data, started + limit, MAX_BODY)
         rate = wav_sample_rate(wav)
         log("克隆 结束 %.1fs：%d 字节，%d Hz" % (time.time() - t0, len(wav), rate))
         # 手机端在请求头里说明要原始 wav：直接发 wav（不用 base64，手机那边省内存）
@@ -1429,6 +1435,9 @@ def main():
     for ip in local_ips():
         if ctx is not None:
             log("手机访问：https://%s:%d/" % (ip, PORT))
+            if os.environ.get("HEAR_SHOW_VERIFIED_ADDRESS") == "1" and _pair.get("root_fingerprint"):
+                digest = _pair["root_fingerprint"].replace(":", "").lower()
+                log("App 专用服务地址：https://%s:%d#hear-root=%s" % (ip, PORT, digest))
         else:
             log("手机访问：http://%s:%d/" % (ip, PORT))
     if ctx is not None:

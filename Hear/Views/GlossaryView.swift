@@ -15,7 +15,7 @@ struct GlossaryView: View {
                 } header: {
                     Text("术语表")
                 } footer: {
-                    Text("每行一条，格式：原文=译文\n例如：张伟=Zhang Wei\n\n这里会作为后续行业热词和自定义术语的统一维护入口。")
+                    Text("每行一条，可用 | 添加识别别名。\n张伟|章伟=Zhang Wei")
                 }
             }
             .navigationTitle("术语配置")

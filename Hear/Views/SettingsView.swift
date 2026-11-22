@@ -218,7 +218,7 @@ struct SettingsView: View {
 
                 // MARK: 翻译与总结
                 Section {
-                    Toggle("结合上文翻译（更连贯）", isOn: $session.useContext)
+                    Toggle("修复断句处的词", isOn: $session.useContext)
                     Picker("灵动岛与锁屏显示", selection: $session.liveActivityOnlyTranslation) {
                         Text("展示译文").tag(true)
                         Text("展示原文和译文").tag(false)
@@ -838,6 +838,7 @@ struct CloudEditSheet: View {
     @State private var asrScheme = "sensevoice+whisper"
     @State private var status: String? = nil
     @State private var busy = false
+    @State private var verificationTask: Task<Void, Never>?
     /// 本地网络权限没开：弹提示告诉用户去哪儿开
     @State private var showLocalNetworkHelp = false
 
@@ -941,7 +942,10 @@ struct CloudEditSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { save(); dismiss() }
+                    Button("完成") {
+                        if !verifySpecialAddress(save: true) { save(); dismiss() }
+                    }
+                    .disabled(busy)
                 }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
@@ -970,6 +974,7 @@ struct CloudEditSheet: View {
             // 刷新完才知道电脑上有哪些方案：选中值要是不在里面就换掉
             .onChange(of: session.cloudASRSchemes) { _, _ in fixSchemeIfNeeded() }
             .onChange(of: session.cloudSenseVoiceState) { _, _ in fixSchemeIfNeeded() }
+            .onDisappear { verificationTask?.cancel() }
             .onChange(of: useDefault) { _, on in
                 // 从"默认"切到"自定义"：把通用服务地址填进去，用户直接改就行
                 guard !on, address.isEmpty else { return }
@@ -1059,6 +1064,7 @@ struct CloudEditSheet: View {
 
     /// 测一下这个地址通不通
     private func test() {
+        if verifySpecialAddress(save: false) { return }
         busy = true
         status = nil
         // 用户只填了 IP:端口 的话，这里自动补上 https://，
@@ -1131,6 +1137,42 @@ struct CloudEditSheet: View {
             // 本地网络权限没开：弹提示告诉用户去哪儿开（系统只问一次）
             if denied { showLocalNetworkHelp = true }
         }
+    }
+
+    private func verifySpecialAddress(save: Bool) -> Bool {
+        guard address.contains("#") else { return false }
+        let pairing: CloudPairingAddress
+        do {
+            guard case .service = target, let parsed = try CloudPairingAddress.parse(address) else {
+                throw CloudPairingAddress.InvalidAddress()
+            }
+            pairing = parsed
+        } catch {
+            status = error.localizedDescription
+            return true
+        }
+        guard !busy else { return true }
+        busy = true
+        status = nil
+        verificationTask = Task {
+            defer { busy = false }
+            do {
+                let root = try await CloudClient.verifyPairingAddress(pairing)
+                try Task.checkCancellation()
+                if save {
+                    session.connectVerifiedCloudAddress(pairing.address, root: root)
+                    Task { await session.refreshCloudStatus() }
+                    dismiss()
+                } else {
+                    status = "连接正常，已核验服务身份"
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                if !Task.isCancelled { status = error.localizedDescription }
+            }
+        }
+        return true
     }
 }
 

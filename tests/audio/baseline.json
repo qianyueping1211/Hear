@@ -1,0 +1,16 @@
+{
+  "zh-clean": {"error_rate": 0.0769},
+  "zh-quiet": {"error_rate": 0.0769},
+  "en-clean": {"error_rate": 0.0667},
+  "en-quiet": {"error_rate": 0.0667},
+  "ja-clean": {"error_rate": 0.0294},
+  "ja-quiet": {"error_rate": 0.0294},
+  "ko-clean": {"error_rate": 0.0},
+  "ko-quiet": {"error_rate": 0.0},
+  "no-speaker-silence": {"error_rate": null},
+  "no-speaker-noise": {"error_rate": null},
+  "en-noisy": {"error_rate": 0.0},
+  "zh-en-joined": {"error_rate": 0.0506},
+  "short-ko": {"error_rate": 0.0},
+  "en-long": {"error_rate": 0.3333}
+}

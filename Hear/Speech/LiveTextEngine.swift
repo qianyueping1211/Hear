@@ -17,10 +17,10 @@ protocol LiveTextEngine: AnyObject {
     func start(languageID: String, locale: String) async throws
     func stop() async
     /// 16kHz 单声道 Float 采样（音频线程调用）
-    func feed(_ samples: [Float])
+    func feed(_ block: AudioInputBlock)
     /// 断句检测到第 id 句开始 / 结束（用来把识别结果对到这一句上）
-    func markSegmentStart(_ id: Int)
-    func markSegmentEnd(_ id: Int)
+    func markSegmentStart(_ id: Int, frame: Int64)
+    func markSegmentEnd(_ id: Int, frame: Int64)
     /// 第 id 句目前识别到的文字，以及平均置信度（0~1）
     func segmentText(_ id: Int) -> (text: String, confidence: Double)
     func hasFinalText(_ id: Int) -> Bool
@@ -91,7 +91,8 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
     private var resultsTask: Task<Void, Never>?
     private var format: AVAudioFormat?
     private var converter: AVAudioConverter?
-    private var fedFrames: Int64 = 0                 // 已送入的 16kHz 采样数（用来对时间）
+    private var inputEndFrame: Int64?
+    private var analyzerEnd: CMTime?
     private var finals: [Piece] = []
     private var volatilePiece: Piece?
     private var segs: [Int: (start: Double, end: Double?)] = [:]
@@ -100,9 +101,9 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
     /// 还没启动好的时候收到的声音（先存着，等启动了补给它）
     /// 用户一开口就说的话，听写要下语言包、起引擎，那一下没收到就丢了
     private let inputQueue = DispatchQueue(label: "hear.apple-input")
-    private var pendingFeed: [Float] = []
-    private var discardedFrames: Int64 = 0
-    private var analyzerOffset: Double = 0
+    private var pendingFeed: [AudioInputBlock] = []
+    private var pendingFrames = 0
+    private var gaps: [Range<Int64>] = []
     private static let pendingFeedMax = 48_000      // 最多留 3 秒
 
     private let srcFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
@@ -135,7 +136,7 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         guard let fmt = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
             throw LiveTextError.noAudioFormat
         }
-        let (stream, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self)
+        let (stream, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self, bufferingPolicy: .bufferingOldest(24))
         let analyzer = SpeechAnalyzer(modules: [transcriber], options: nil)
         try await analyzer.start(inputSequence: stream)
 
@@ -147,19 +148,17 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
             input = continuation
             format = fmt
             converter = nil
-            fedFrames = discardedFrames
-            analyzerOffset = Double(discardedFrames) / 16_000
+            inputEndFrame = nil
+            analyzerEnd = nil
             finals.removeAll()
             volatilePiece = nil
             _languageID = languageID
             let preRoll = pendingFeed
             pendingFeed = []
-            discardedFrames = 0
+            pendingFrames = 0
             lock.unlock()
 
-            for start in stride(from: 0, to: preRoll.count, by: 4096) {
-                deliver(Array(preRoll[start..<min(start + 4096, preRoll.count)]))
-            }
+            for block in preRoll { deliver(block) }
             return current
         }
 
@@ -206,37 +205,50 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         let a = analyzer, c = input, t = resultsTask
         analyzer = nil; input = nil; resultsTask = nil; _languageID = nil
         generation += 1
+        inputEndFrame = nil
+        analyzerEnd = nil
+        if a != nil {
+            pendingFeed.removeAll()
+            pendingFrames = 0
+            gaps.removeAll()
+        }
         lock.unlock()
         c?.finish()
         if let a { try? await a.cancelAndFinishNow() }
         t?.cancel()
     }
 
-    private var now: Double {
-        Double(input == nil ? discardedFrames + Int64(pendingFeed.count) : fedFrames) / 16_000
-    }
-
-    func markSegmentStart(_ id: Int) {
+    func markSegmentStart(_ id: Int, frame: Int64) {
         lock.lock()
-        // 断句检测会晚一点（前置缓冲 + 判断时间），往前留 0.8 秒
-        segs[id] = (max(0, now - 0.8), nil)
-        for k in segs.keys where k < id - 20 { segs[k] = nil }
+        segs[id] = (Double(frame) / 16_000, nil)
+        for k in Array(segs.keys) where k < id - 20 { segs[k] = nil }
         lock.unlock()
     }
 
-    func markSegmentEnd(_ id: Int) {
+    func markSegmentEnd(_ id: Int, frame: Int64) {
         lock.lock()
-        if let s = segs[id] { segs[id] = (s.start, now) }
+        if let s = segs[id] { segs[id] = (s.start, Double(frame) / 16_000) }
         lock.unlock()
+    }
+
+    // A transcript that crosses the actual boundary is assigned to neither
+    // finished segment when it cannot be separated reliably.
+    private func belongs(_ piece: Piece, to segment: (start: Double, end: Double?)) -> Bool {
+        let middle = (piece.start + piece.end) / 2
+        return middle >= segment.start && middle < (segment.end ?? .infinity)
+            && piece.start >= segment.start - 0.12 && piece.end <= (segment.end ?? .infinity) + 0.12
+    }
+
+    private func hasGap(_ segment: (start: Double, end: Double?)) -> Bool {
+        gaps.contains { Double($0.upperBound) / 16_000 > segment.start
+                        && Double($0.lowerBound) / 16_000 < (segment.end ?? .infinity) }
     }
 
     func segmentText(_ id: Int) -> (text: String, confidence: Double) {
         lock.lock(); defer { lock.unlock() }
-        guard let seg = segs[id] else { return ("", 0) }
-        let lo = seg.start
-        let hi = (seg.end ?? .greatestFiniteMagnitude) + 0.4
-        var pieces = finals.filter { $0.end > lo && $0.start < hi }
-        if let v = volatilePiece, v.end > lo, v.start < hi { pieces.append(v) }
+        guard let seg = segs[id], !hasGap(seg) else { return ("", 0) }
+        var pieces = finals.filter { belongs($0, to: seg) }
+        if let v = volatilePiece, belongs(v, to: seg) { pieces.append(v) }
         let cjk = ["zh", "ja", "ko"].contains(_languageID ?? "")
         let joined = pieces.map { $0.text.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
@@ -255,30 +267,50 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
 
     func hasFinalText(_ id: Int) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard let segment = segs[id], let end = segment.end else { return false }
-        if let volatilePiece, volatilePiece.end > segment.start, volatilePiece.start < end {
+        guard let segment = segs[id], let end = segment.end, !hasGap(segment) else { return false }
+        if let volatilePiece, belongs(volatilePiece, to: segment) {
             return false
         }
         // VAD marks the end after its silence window, which is not part of the transcribed range.
-        return finals.contains { $0.end > segment.start && $0.start < end && $0.end >= end - 0.8 }
+        return finals.contains { belongs($0, to: segment) && $0.end >= end - 0.8 }
     }
 
-    func feed(_ samples: [Float]) {
-        inputQueue.sync { deliver(samples) }
+    func feed(_ block: AudioInputBlock) {
+        inputQueue.sync { deliver(block) }
     }
 
-    private func deliver(_ samples: [Float]) {
+    /// Caller holds lock. Merge adjacent losses and bound diagnostic state.
+    private func recordGap(_ range: Range<Int64>) {
+        guard !range.isEmpty else { return }
+        if let last = gaps.last, last.upperBound == range.lowerBound {
+            gaps[gaps.count - 1] = last.lowerBound..<range.upperBound
+        } else {
+            gaps.append(range)
+            if gaps.count > 32 { gaps.removeFirst() }
+        }
+    }
+
+    private func deliver(_ block: AudioInputBlock) {
+        let samples = block.samples
+        guard !samples.isEmpty else { return }
         lock.lock()
-        guard let cont = input, let fmt = format, !samples.isEmpty else {
-            // 还没准备好（语言包在下载、引擎在起）：先存着，
-            // 等准备好了补给它——不然用户开口的第一句就丢了
-            if !samples.isEmpty {
-                pendingFeed.append(contentsOf: samples)
-                if pendingFeed.count > Self.pendingFeedMax {
-                    let excess = pendingFeed.count - Self.pendingFeedMax
-                    pendingFeed.removeFirst(excess)
-                    discardedFrames += Int64(excess)
-                }
+        let expected = inputEndFrame
+        if let expected, block.startFrame > expected {
+            recordGap(expected..<block.startFrame)
+            converter = nil
+        } else if let expected, block.startFrame < expected {
+            // A previous capture's queued buffer arrived after a new generation.
+            lock.unlock()
+            return
+        }
+        inputEndFrame = block.endFrame
+        guard let cont = input, let fmt = format else {
+            pendingFeed.append(block)
+            pendingFrames += samples.count
+            while pendingFrames > Self.pendingFeedMax {
+                let dropped = pendingFeed.removeFirst()
+                pendingFrames -= dropped.samples.count
+                recordGap(dropped.startFrame..<dropped.endFrame)
             }
             lock.unlock()
             return
@@ -287,9 +319,29 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
             converter = AVAudioConverter(from: srcFormat, to: fmt)
         }
         let conv = converter
-        fedFrames += Int64(samples.count)
+        let generation = self.generation
+        let start = CMTime(value: block.startFrame, timescale: 16_000)
+        let timestamp = analyzerEnd.map { CMTimeMaximum($0, start) } ?? start
         lock.unlock()
 
+        var delivered = false
+        defer {
+            if !delivered {
+                lock.lock()
+                if generation == self.generation { recordGap(block.startFrame..<block.endFrame) }
+                lock.unlock()
+            }
+        }
+        func submit(_ buffer: AVAudioPCMBuffer) {
+            let duration = CMTime(value: Int64(buffer.frameLength),
+                                  timescale: Int32(buffer.format.sampleRate))
+            if case .enqueued = cont.yield(AnalyzerInput(buffer: buffer, bufferStartTime: timestamp)) {
+                lock.lock()
+                if generation == self.generation { analyzerEnd = CMTimeAdd(timestamp, duration) }
+                lock.unlock()
+                delivered = true
+            }
+        }
         guard let src = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: AVAudioFrameCount(samples.count)),
               let ch = src.floatChannelData else { return }
         src.frameLength = AVAudioFrameCount(samples.count)
@@ -297,7 +349,7 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
             ch[0].update(from: p.baseAddress!, count: samples.count)
         }
         guard let conv else {
-            cont.yield(AnalyzerInput(buffer: src))
+            submit(src)
             return
         }
         let ratio = fmt.sampleRate / srcFormat.sampleRate
@@ -312,20 +364,18 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
             return src
         }
         guard err == nil, out.frameLength > 0 else { return }
-        cont.yield(AnalyzerInput(buffer: out))
+        submit(out)
     }
 
     private func ingest(_ piece: Piece, isFinal: Bool, gen: Int) {
         lock.lock()
         guard gen == generation else { lock.unlock(); return }
-        let timedPiece = Piece(start: piece.start + analyzerOffset, end: piece.end + analyzerOffset,
-                               text: piece.text, conf: piece.conf)
         if isFinal {
-            finals.append(timedPiece)
+            finals.append(piece)
             if finals.count > 120 { finals.removeFirst(finals.count - 120) }
             volatilePiece = nil
         } else {
-            volatilePiece = piece.text.isEmpty ? nil : timedPiece
+            volatilePiece = piece.text.isEmpty ? nil : piece
         }
         let cb = onUpdate
         lock.unlock()

@@ -10,6 +10,7 @@ final class SessionJobQueue<Job> {
 
     private struct Entry {
         let job: Job
+        let timeout: Duration
         let process: @MainActor (Job) async -> Void
         let timedOut: @MainActor (Job) -> Void
     }
@@ -34,9 +35,9 @@ final class SessionJobQueue<Job> {
         pending.removeAll()
     }
 
-    func submit(_ job: Job, process: @escaping @MainActor (Job) async -> Void,
+    func submit(_ job: Job, timeout: Duration? = nil, process: @escaping @MainActor (Job) async -> Void,
                 timedOut: @escaping @MainActor (Job) -> Void) {
-        pending.append(Entry(job: job, process: process, timedOut: timedOut))
+        pending.append(Entry(job: job, timeout: timeout ?? self.timeout, process: process, timedOut: timedOut))
         guard worker == nil else { return }
         let round = generation
         worker = Task { [weak self] in
@@ -55,7 +56,7 @@ final class SessionJobQueue<Job> {
                 defer { completion.finished = true }
                 await entry.process(entry.job)
             }
-            let deadline = clock.now.advanced(by: timeout)
+            let deadline = clock.now.advanced(by: entry.timeout)
             while !completion.finished, clock.now < deadline, !Task.isCancelled {
                 do { try await Task.sleep(for: .milliseconds(50)) }
                 catch { break }

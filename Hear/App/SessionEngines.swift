@@ -5,7 +5,8 @@ enum SessionSpeechEngine {
     case cloud(CloudClient)
     case senseVoice(SenseVoiceRecognizer)
 
-    func recognize(_ samples: [Float], candidates: [String], fallback: String, preview: Bool = false)
+    func recognize(_ samples: [Float], candidates: [String], fallback: String, preview: Bool = false,
+                   confirmedSpeech: Bool = false)
         async throws -> (lang: String, text: String, correctionAddress: String?, speakerAddress: String?, observedLanguage: String?) {
         try Task.checkCancellation()
         switch self {
@@ -18,7 +19,8 @@ enum SessionSpeechEngine {
             let result = try await client.transcribe(samples: samples, candidates: candidates, fallback: fallback)
             return (result.lang, result.text, result.correctionAddress, result.speakerAddress, result.lang)
         case .senseVoice(let recognizer):
-            let result = try await recognizer.recognize(samples, candidates: candidates, fallback: fallback, preview: preview)
+            let result = try await recognizer.recognize(samples, candidates: candidates, fallback: fallback,
+                                                        preview: preview, confirmedSpeech: confirmedSpeech)
             return (result.language, result.text, nil, nil, result.observed)
         }
     }

@@ -31,14 +31,19 @@ enum SpeechTextFilter {
         return candidates.first { matchesLanguage(text, $0) }
     }
 
-    static func retryLanguage(_ text: String, detected: String?, candidates: [String]) -> String? {
-        guard let detected, candidates.contains(detected) else { return nil }
+    static func retryLanguage(_ text: String, detected: String?, candidates: [String],
+                              confirmedSpeech: Bool = false) -> String? {
+        guard let detected, detected != "nospeech" else { return nil }
         // Retry only when part of a plausibly spoken result supports the model's
         // label, even though the full text didn't pass the script check.
-        let count = text.unicodeScalars.lazy.filter {
-            $0.properties.isAlphabetic && inScript($0.value, detected)
-        }.prefix(2).count
-        return count == 2 ? detected : nil
+        func supports(_ language: String, minimum: Int) -> Bool {
+            text.unicodeScalars.lazy.filter { $0.properties.isAlphabetic && inScript($0.value, language) }
+                .prefix(minimum).count == minimum
+        }
+        if candidates.contains(detected) { return supports(detected, minimum: 2) ? detected : nil }
+        guard confirmedSpeech else { return nil }
+        let supported = candidates.filter { supports($0, minimum: 3) }
+        return supported.count == 1 ? supported.first : nil
     }
 
     static func matchesLanguage(_ text: String, _ lang: String) -> Bool {

@@ -1,6 +1,18 @@
 import Foundation
 
 enum CloudInferencePolicy {
+    static func canRetryConnection(after code: URLError.Code) -> Bool {
+        [.cannotConnectToHost, .cannotFindHost, .dnsLookupFailed].contains(code)
+    }
+
+    static func cloneBudget(forCharacters count: Int) -> Double {
+        min(90, 30 + Double(count) * 0.2)
+    }
+
+    static func asrBudget(forSamples count: Int) -> Double {
+        min(42, max(22, 12 + Double(count) / 8_000))
+    }
+
     // These failures say the connection couldn't be established. A timeout or
     // connection loss may come after the server has already received the POST.
     static func canTryAnotherAddress(after code: URLError.Code) -> Bool {

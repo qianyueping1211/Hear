@@ -22,8 +22,8 @@ final class AudioCapture {
     var voiceProcessing = true
 
     /// 同时把 16kHz 采样交给系统听写（音频线程调用；静音时给的是静音采样）
-    private var _onSamples: (([Float]) -> Void)?
-    var onSamples: (([Float]) -> Void)? {
+    private var _onSamples: ((AudioInputBlock) -> Void)?
+    var onSamples: ((AudioInputBlock) -> Void)? {
         get { lock.lock(); defer { lock.unlock() }; return _onSamples }
         set { lock.lock(); _onSamples = newValue; lock.unlock() }
     }
@@ -73,6 +73,8 @@ final class AudioCapture {
         guard !running, pendingStart == nil else { return nil }
         _gen += 1
         pendingStart = _gen
+        inputPosition = 0
+        speechFeed.removePending()
         return _gen
     }
 
@@ -115,19 +117,65 @@ final class AudioCapture {
     /// 送进识别队列、还没被消费的声音块数。
     /// 积压说明"麦克风是好的，但识别那边不消费了"——
     /// 这跟"麦克风断了"是两回事，不能混在一起说。
-    private var pendingFeed = 0
-    private var pendingSegments = 0
-    private var health: Health = .normal
-
-    private var pendingBlocks: (feed: Int, segments: Int) {
-        lock.lock(); defer { lock.unlock() }
-        return (pendingFeed, pendingSegments)
+    private struct CaptureBlock {
+        let audio: AudioInputBlock
+        let muted: Bool
     }
 
-    private func changePendingBlocks(by delta: Int, forFeed: Bool = false) {
-        lock.lock()
-        if forFeed { pendingFeed += delta } else { pendingSegments += delta }
-        lock.unlock()
+    private var inputPosition: Int64 = 0
+    private var speechFeed = AudioInputBuffer<(CaptureBlock, (AudioInputBlock) -> Void)>(capacity: 48_000)
+    private var segmentFeed = AudioInputBuffer<CaptureBlock>(capacity: 80_000)
+    private var lastOverflowAt: Date?
+    private var health: Health = .normal
+
+    private var isBacklogged: Bool {
+        lock.lock(); defer { lock.unlock() }
+        let recentlyDropped = lastOverflowAt.map { Date().timeIntervalSince($0) < 5 } ?? false
+        return recentlyDropped || speechFeed.frames > 32_000 || segmentFeed.frames > 64_000
+    }
+
+    private func enqueue(_ samples: [Float], round: Int) {
+        lock.lock(); defer { lock.unlock() }
+        guard _gen == round, running || pendingStart == round else { return }
+        let audio = AudioInputBlock(samples: samples, startFrame: inputPosition)
+        inputPosition = audio.endFrame
+        let block = CaptureBlock(audio: audio, muted: _muted)
+        var dropped = false
+        if let feed = _onSamples {
+            let result = speechFeed.append((block, feed), frames: samples.count)
+            dropped = result.dropped
+            if result.schedule { feedQueue.async { [weak self] in self?.drainSpeechFeed() } }
+        }
+        let result = segmentFeed.append(block, frames: samples.count)
+        if result.dropped || dropped { lastOverflowAt = Date() }
+        if result.schedule { queue.async { [weak self] in self?.drainSegmentFeed() } }
+    }
+
+    private func drainSpeechFeed() {
+        while true {
+            lock.lock()
+            let next = speechFeed.pop()
+            lock.unlock()
+            guard let (block, feed) = next else { return }
+            let audio = block.audio
+            if block.muted {
+                feed(AudioInputBlock(samples: Array(repeating: 0, count: audio.samples.count),
+                                     startFrame: audio.startFrame))
+            } else {
+                feed(audio)
+            }
+        }
+    }
+
+    private func drainSegmentFeed() {
+        while true {
+            lock.lock()
+            let next = segmentFeed.pop()
+            lock.unlock()
+            guard let block = next else { return }
+            if block.muted { segmenter.seek(to: block.audio.endFrame) }
+            else { segmenter.feed(block.audio.samples, startingAt: block.audio.startFrame) }
+        }
     }
 
     private func reportHealth(_ next: Health) {
@@ -365,7 +413,7 @@ final class AudioCapture {
         // format 传 nil：始终按麦克风当前的真实格式接收，路由变化后也不会错位
         input.installTap(onBus: 0, bufferSize: size, format: nil) { [weak self] buffer, _ in
             guard let self, self.acceptsAudio(for: round) else { return }
-            self.handle(buffer)
+            self.handle(buffer, round: round)
         }
         tapInstalled = true
         installedFormat = (inFormat.sampleRate, inFormat.channelCount)
@@ -484,10 +532,8 @@ final class AudioCapture {
         // 只看回调时间的话，后一种情况永远发现不了
         // 积压：声音送进去了，识别那边却不消费（后端卡住了）。
         // 这跟麦克风断了不是一回事：重接麦克风没有用，得让用户知道。
-        let backlog = pendingBlocks
-        if backlog.feed > 40 || backlog.segments > 40 {
-            hearLog("音频积压：听写 \(backlog.feed) 块，断句 \(backlog.segments) 块", .warning)
-        }
+        let backlog = isBacklogged
+        if backlog, health != .backlogged { hearLog("音频积压，部分录音可能未识别", .warning) }
         if Date().timeIntervalSince(lastSampleAt) > 4 || Date().timeIntervalSince(lastDeliveredAt) > 4 {
             silentTicks += 1
             reportHealth(.reconnecting)
@@ -499,13 +545,13 @@ final class AudioCapture {
             }
         } else {
             silentTicks = 0
-            reportHealth(backlog.feed > 40 || backlog.segments > 40 ? .backlogged : .normal)
+            reportHealth(backlog ? .backlogged : .normal)
         }
     }
 
     // MARK: - 收声音
 
-    private func handle(_ buffer: AVAudioPCMBuffer) {
+    private func handle(_ buffer: AVAudioPCMBuffer, round: Int) {
         // 收到声音了：看门狗靠这个判断麦克风还活着
         lastSampleAt = Date()
         // 按这一块声音的真实格式重采样（格式变了就重建转换器）
@@ -532,25 +578,6 @@ final class AudioCapture {
         // 真的转换出来了：更新"送到识别那边"的时间
         lastDeliveredAt = Date()
         let samples = Array(UnsafeBufferPointer(start: ch[0], count: Int(out.frameLength)))
-        let isMuted = muted
-        // 送样本的活儿放到后台线程做：
-        // 这个回调跑在音频线程上（实时线程），在这儿做转换、拷贝、
-        // 喂系统听写，哪一下没赶上就会漏音，听起来是「刺刺」的杂音。
-        if let feed = onSamples {
-            let input = isMuted ? [Float](repeating: 0, count: samples.count) : samples
-            changePendingBlocks(by: 1, forFeed: true)
-            feedQueue.async { [weak self] in
-                feed(input)
-                guard let self else { return }
-                self.changePendingBlocks(by: -1, forFeed: true)
-            }
-        }
-        changePendingBlocks(by: 1)
-        queue.async { [weak self, segmenter] in
-            defer { self?.changePendingBlocks(by: -1) }
-            // 正在朗读：这一段声音不要（免得把喇叭的声音又识别一遍），
-            // 但环境噪声的估计要留着，别让门限乱跳
-            if isMuted { segmenter.discardCurrent() } else { segmenter.feed(samples) }
-        }
+        enqueue(samples, round: round)
     }
 }
