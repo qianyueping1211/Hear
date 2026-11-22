@@ -44,6 +44,7 @@ struct SessionJobQueueTests {
         try await testRecoveryState()
         await testSenseVoiceRecovery()
         await testPreviewPipeline()
+        testPreviewCadence()
         try testConversationBubbleSides()
         try testTranslationRevision()
         try testCurrentSegmentTranslation()
@@ -146,6 +147,21 @@ private actor HeldInference {
         continuation?.resume()
         continuation = nil
     }
+}
+
+private func testPreviewCadence() {
+    var cadence = PreviewCadence()
+    let start = ContinuousClock.now
+    let firstEnd = start.advanced(by: .milliseconds(600))
+    precondition(cadence.waitUntil(segment: 1, now: start) == nil)
+    cadence.completed(segment: 1, started: start, ended: firstEnd)
+    precondition(cadence.waitUntil(segment: 1, now: firstEnd) == start.advanced(by: .milliseconds(900)))
+    precondition(cadence.waitUntil(segment: 2, now: firstEnd) == nil)
+    let slowEnd = start.advanced(by: .milliseconds(1400))
+    cadence.completed(segment: 1, started: start, ended: slowEnd)
+    precondition(cadence.waitUntil(segment: 1, now: slowEnd) == start.advanced(by: .milliseconds(1600)))
+    cadence.completed(segment: 1, started: start, ended: start.advanced(by: .milliseconds(50)))
+    precondition(cadence.waitUntil(segment: 1, now: start) == start.advanced(by: .milliseconds(400)))
 }
 
 @MainActor

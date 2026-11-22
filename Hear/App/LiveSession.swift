@@ -2344,13 +2344,21 @@ final class LiveSession: ObservableObject {
     /// 识别线：上一次识别一结束就拿最新的声音再识别，不等翻译
     private func cancelASRPreview() {
         previews.recognition.cancel()
+        previews.localRecognitionCadence = PreviewCadence()
     }
 
     private func previewLoop(_ generation: UUID) async {
-        while !Task.isCancelled, let job = previews.recognition.next(for: generation) {
-            let id = job.id
+        while !Task.isCancelled, let newest = previews.recognition.newest(for: generation) {
             // 正式识别优先。翻译队列不妨碍下一句的原文预览。
             let cloudPreview = usingCloudASR
+            if !cloudPreview,
+               let next = previews.localRecognitionCadence.waitUntil(segment: newest.id, now: .now) {
+                do { try await Task.sleep(until: next, clock: ContinuousClock()) } catch { return }
+                // While waiting the latest snapshot may have been replaced.
+                continue
+            }
+            guard let job = previews.recognition.next(for: generation) else { return }
+            let id = job.id
             guard phase == .ready, isRunning, !liveActive, asrBusyCount == 0, recognitionQueue.isIdle,
                   cloudPreview || (!senseRecovery.isActive && !senseRequiresRestart),
                   id == currentSeg, id > finishedSeg else { continue }
@@ -2364,7 +2372,7 @@ final class LiveSession: ObservableObject {
             let maxN = 16_000 * 10
             let clipped = job.samples.count > maxN
             let clip = clipped ? Array(job.samples.suffix(maxN)) : job.samples
-            let t0 = Date()
+            let started = ContinuousClock.now
             let r: (lang: String, text: String, correctionAddress: String?, speakerAddress: String?, observedLanguage: String?)
             do {
                 r = try await sentenceRecognizer.recognize(clip, candidates: cands, fallback: fallback, preview: true)
@@ -2379,10 +2387,14 @@ final class LiveSession: ObservableObject {
                 }
                 continue
             }
-            hearLogText("实时识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：",
+            guard !Task.isCancelled, previews.recognition.owns(generation), gen == runGen else { return }
+            let ended = ContinuousClock.now
+            if !cloudPreview { previews.localRecognitionCadence.completed(segment: id, started: started, ended: ended) }
+            let elapsed = started.duration(to: ended).components
+            let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+            hearLogText("实时识别 \(String(format: "%.1f", seconds))s：",
                         String(r.1.prefix(30)))
-            guard !Task.isCancelled, previews.recognition.owns(generation), gen == runGen,
-                  isRunning, id == currentSeg, id > finishedSeg, partialSeg == id,
+            guard isRunning, id == currentSeg, id > finishedSeg, partialSeg == id,
                   SpeechTextFilter.isMeaningful(r.text),
                   let language = forced?.id ?? SpeechTextFilter.resolveLanguage(r.text, detected: r.lang,
                                                                                  candidates: cands, fallback: fallback)

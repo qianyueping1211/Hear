@@ -26,6 +26,8 @@ final class LatestPreviewWork<Input> {
 
     func owns(_ id: UUID) -> Bool { owner == id }
 
+    func newest(for id: UUID) -> Input? { owns(id) ? pending : nil }
+
     func next(for id: UUID) -> Input? {
         guard owns(id) else { return nil }
         defer { pending = nil }
@@ -48,6 +50,7 @@ final class SessionPreviewPipeline {
     var translationRequest: UUID?
     var cloudRecognitionRetryAt: ContinuousClock.Instant?
     var cloudTranslationRetryAt: ContinuousClock.Instant?
+    var localRecognitionCadence = PreviewCadence()
 
     static func merge(_ old: String, _ new: String) -> String {
         if old.isEmpty { return new }
@@ -63,5 +66,22 @@ final class SessionPreviewPipeline {
         }
         // 实在对不上：标出来，别装作是一句完整的话
         return old + " … " + new
+    }
+}
+
+struct PreviewCadence {
+    private var segment: Int?
+    private var nextStart: ContinuousClock.Instant?
+
+    func waitUntil(segment: Int, now: ContinuousClock.Instant) -> ContinuousClock.Instant? {
+        guard self.segment == segment, let nextStart, now < nextStart else { return nil }
+        return nextStart
+    }
+
+    mutating func completed(segment: Int, started: ContinuousClock.Instant, ended: ContinuousClock.Instant) {
+        let elapsed = started.duration(to: ended)
+        let interval = min(.milliseconds(1600), max(.milliseconds(400), elapsed * 1.5))
+        self.segment = segment
+        nextStart = started.advanced(by: interval)
     }
 }
