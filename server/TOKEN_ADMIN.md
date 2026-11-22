@@ -29,6 +29,32 @@
 
 管理服务和内部 API 只应通过 VPN、专用内网或独立的管理入口访问，不要和 App 的公网入口共用同一个反向代理路由。网关 ID 由管理员在登记网关时指定，例如 `hear-home`。
 
+## 快速开始：管理服务和网关在同一台 Windows 上
+
+这是最常见的部署方式，不需要设置任何环境变量。
+
+1. 双击 `start-hear-cloud.bat` 一次，让它下载最新的服务文件。如果窗口里没出现“口令管理模式”，用完就可以关掉。
+2. 双击 `start-hear-token-admin.bat`。第一次运行时它会做三件事：
+   - 让你设置后台管理员 `admin` 的密码（输入时不显示）；
+   - 登记本机网关 `hear-home`，凭据保存在 `%LOCALAPPDATA%\Hear\secrets\`，这个目录只有当前 Windows 用户能读；
+   - 打开管理后台 **http://127.0.0.1:8443/admin/**。
+
+   在后台新增用户、签发 Token，再把 Token 填进 App 的「访问口令」。
+3. 以后只需双击 `start-hear-cloud.bat`。它发现本机已有网关凭据，就会自动进入 Token 管理模式，并在一个最小化窗口里把管理服务也启动起来。不想要这个最小化窗口，可以运行 `start-hear-token-admin.bat --autostart-on`，让管理服务在登录 Windows 时自动启动。
+
+`start-hear-token-admin.bat` 的其他用法：
+
+| 参数 | 作用 |
+| --- | --- |
+| （不带参数） | 启动管理服务并打开后台；服务已经在运行时只打开后台 |
+| `--backup` | 在线备份数据库，备份放在 `%LOCALAPPDATA%\Hear\backups\` |
+| `--autostart-on` / `--autostart-off` | 登录 Windows 后自动启动管理服务 / 取消自动启动 |
+| `--disable-managed` / `--enable-managed` | 临时切回旧的单口令 / 恢复 Token 管理 |
+
+数据库在 `%LOCALAPPDATA%\Hear\token-data\hear-tokens.db`，更新服务文件时不会被覆盖。
+
+下面第 3、4 节讲的是手动部署，适合管理服务放在另一台机器上的情况。
+
 ## 3. 启动管理服务
 
 管理服务可以和网关装在同一台 Windows 电脑上，也可以单独部署。以下命令在 `server` 目录下执行，Windows 上把 `python3` 换成 `python`。
