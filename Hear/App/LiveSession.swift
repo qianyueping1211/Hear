@@ -716,6 +716,17 @@ final class LiveSession: ObservableObject {
         // （切到别的软件以后，电脑那边的翻译和声音克隆服务还要接着调用，
         //   不然切一下 App 这段对话就断了）。
         // 只是喇叭停下来：用户不在跟前听，吵得慌。
+        translator.setGPUAllowed(UIApplication.shared.applicationState != .background)
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
+        ) { [translator] _ in
+            translator.setGPUAllowed(false)
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [translator] _ in
+            translator.setGPUAllowed(true)
+        }
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -3301,10 +3312,15 @@ final class LiveSession: ObservableObject {
     /// 否则连续改同一句时，会出现"新原文配旧译文"。
     private var itemVersions: [UUID: Int] = [:]
 
+    func retryTranslation(_ id: UUID) {
+        guard let item = items.first(where: { $0.id == id }), item.canRetryTranslation else { return }
+        editSource(id, to: item.sourceText)
+    }
+
     func editSource(_ id: UUID, to newText: String) {
         let text = newText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let i = items.firstIndex(where: { $0.id == id }), !text.isEmpty,
-              text != items[i].sourceText else { return }
+              text != items[i].sourceText || items[i].canRetryTranslation else { return }
         if readingID == id { stopReading() }
         let src = items[i].source, tgt = items[i].target
         // 记下是哪一页：用户可能已经切到别的对话去了，
@@ -3319,7 +3335,7 @@ final class LiveSession: ObservableObject {
         itemVersions[id] = (itemVersions[id] ?? 0) + 1
         let version = itemVersions[id] ?? 0
         persist()
-        hearLogText("修改原文并重新翻译：", String(text.prefix(40)))
+        hearLogText("重新翻译原文：", String(text.prefix(40)))
         let previous = previousSegment(before: i)
         Task {
             do {

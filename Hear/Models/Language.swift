@@ -117,6 +117,15 @@ struct TranslationItem: Identifiable, Equatable, Codable {
         displayedTranslationTarget == target && !translated.isEmpty && !translated.hasPrefix("（翻译失败")
     }
 
+    var canRetryTranslation: Bool {
+        guard done, translationError != nil else { return false }
+        let text = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch text {
+        case "", "…", "（没听清）", "（这段识别未完成）", "（识别失败，可长按修改）": return false
+        default: return true
+        }
+    }
+
     mutating func updateTranscript(_ text: String, source: Language, target: Language,
                                    side: SourceSide, recognizedLanguage: String?) {
         let previousTarget = displayedTranslationTarget

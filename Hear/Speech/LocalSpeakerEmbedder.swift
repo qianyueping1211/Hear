@@ -1,4 +1,5 @@
 import Foundation
+import CoreML
 import FluidAudio
 
 /// 本机说话人声纹：CAM++ 把一句话编码成 192 维向量。
@@ -52,14 +53,28 @@ actor LocalSpeakerEmbedder {
     }
 
     func embedding(samples: [Float], folder: URL) async throws -> [Float]? {
+        try Task.checkCancellation()
         let audio = Array(samples.prefix(160_000))       // 最多取 10 秒
         guard audio.count >= 22_400 else { return nil } // 至少约 1.4 秒
         if embedder == nil || loadedFolder?.standardizedFileURL != folder.standardizedFileURL {
-            let models = try CampPlusModels.load(from: folder)
+            // FluidAudio's default loads the CAM++ embedding model with CPU + GPU.
+            // Both stages must run while Hear is recording in the background.
+            let config = MLModelConfiguration()
+            config.computeUnits = .cpuOnly
+            let preprocessor = try MLModel(
+                contentsOf: folder.appendingPathComponent(ModelNames.CampPlus.preprocessorFile),
+                configuration: config)
+            let model = try MLModel(
+                contentsOf: folder.appendingPathComponent(ModelNames.CampPlus.modelFile),
+                configuration: config)
+            let models = CampPlusModels(preprocessor: preprocessor, model: model)
             embedder = CampPlusEmbedder(models: models)
             loadedFolder = folder
         }
+        try Task.checkCancellation()
         guard let embedder else { return nil }
-        return try await embedder.embed(audio: audio)
+        let result = try await embedder.embed(audio: audio)
+        try Task.checkCancellation()
+        return result
     }
 }

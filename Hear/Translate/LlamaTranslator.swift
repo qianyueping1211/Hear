@@ -2,12 +2,12 @@ import Foundation
 import llama
 
 enum TranslatorError: LocalizedError {
-    case notLoaded, loadFailed(String), decodeFailed, tooLong
+    case notLoaded, loadFailed(String), decodeFailed(stage: String, status: Int32? = nil), tooLong
     var errorDescription: String? {
         switch self {
         case .notLoaded: return "翻译模型尚未加载"
         case .loadFailed(let p): return "无法加载翻译模型：\(p)"
-        case .decodeFailed: return "翻译推理失败"
+        case .decodeFailed: return "本地模型未能完成这句"
         case .tooLong: return "句子太长"
         }
     }
@@ -30,10 +30,32 @@ final class EpochCounter: @unchecked Sendable {
     var value: Int { lock.lock(); defer { lock.unlock() }; return v }
 }
 
-/// 用 llama.cpp（Metal GPU）在本机运行 Hy-MT2 GGUF 翻译模型
+/// Changes synchronously on UIKit notifications, even while llama.cpp is decoding.
+private final class TranslationGPUAccess: @unchecked Sendable {
+    private let lock = NSLock()
+    private var allowed = true
+    private var generation = 0
+
+    func setAllowed(_ value: Bool) {
+        lock.withLock {
+            guard value != allowed else { return }
+            allowed = value
+            generation += 1
+        }
+    }
+
+    var epoch: Int? { lock.withLock { allowed ? generation : nil } }
+}
+
+/// Run Hy-MT2 with Metal in the foreground and with CPU-only inference in the background.
 actor LlamaTranslator {
+    private enum Backend: String { case cpu = "CPU", metal = "GPU" }
+    private struct GPUUnavailable: Error {}
     private let stopFlag = CancelFlag()
     private let previewEpoch = EpochCounter()
+    private let gpuAccess = TranslationGPUAccess()
+
+    nonisolated func setGPUAllowed(_ allowed: Bool) { gpuAccess.setAllowed(allowed) }
 
     /// 立刻停止正在进行的翻译（不用等 actor 空闲）
     nonisolated func cancelCurrent() { stopFlag.set() }
@@ -46,11 +68,13 @@ actor LlamaTranslator {
     private var ctx: OpaquePointer?
     private var vocab: OpaquePointer?
     private var sampler: UnsafeMutablePointer<llama_sampler>?
+    private var backend: Backend?
+    private var failedGPUEpoch: Int?
     // 句子级实时翻译不需要 4K 上下文。2K 上下文、256 批处理
     // 能明显降低 KV cache 和临时 batch 的内存峰值，仍足够容纳
     // 两段上下文、术语表和最多 512 个输出 token。
     private let nCtx: UInt32 = 2048
-    private(set) var loadedPath: String?
+    private var loadedPath: String?
 
     private static let backendOnce: Void = { LlamaBackend.ensureReady() }()
 
@@ -58,21 +82,85 @@ actor LlamaTranslator {
 
     func load(path: String) throws {
         _ = Self.backendOnce
-        if loadedPath == path, ctx != nil { return }
-        unload()
+        if loadedPath != path { unload() }
+        try withBackend(path: path) { _ in }
+        loadedPath = path
+    }
 
+    private func withBackend<T>(path: String, _ run: (Int?) throws -> T) throws -> T {
+        try Task.checkCancellation()
+        if let epoch = gpuAccess.epoch, epoch != failedGPUEpoch {
+            do {
+                try prepare(path: path, backend: .metal, gpuEpoch: epoch)
+                return try run(epoch)
+            } catch {
+                try Task.checkCancellation()
+                switch error {
+                case is GPUUnavailable:
+                    hearLog("本地翻译：切换到后台，改用 CPU 继续")
+                case let failure as TranslatorError:
+                    switch failure {
+                    case .loadFailed, .decodeFailed:
+                        hearLog("本地翻译：GPU 执行失败，改用 CPU 重试：\(failure)", .info)
+                    default:
+                        throw error
+                    }
+                default:
+                    throw error
+                }
+                failedGPUEpoch = epoch
+            }
+        }
+        try prepare(path: path, backend: .cpu, gpuEpoch: nil)
+        return try run(nil)
+    }
+
+    private func checkGPU(_ epoch: Int?) throws {
+        if let epoch, gpuAccess.epoch != epoch { throw GPUUnavailable() }
+    }
+
+    private func prepare(path: String, backend: Backend, gpuEpoch: Int?) throws {
+        try Task.checkCancellation()
+        try checkGPU(gpuEpoch)
+        if self.backend == backend, ctx != nil { return }
+        // Retain only one copy of the model and its context across mode changes.
+        releaseModel()
         var mp = llama_model_default_params()
-        mp.n_gpu_layers = 999               // 全部放到 GPU
-        guard let m = llama_model_load_from_file(path, mp) else {
+        mp.n_gpu_layers = backend == .metal ? 999 : 0
+        let loaded: OpaquePointer?
+        if backend == .metal {
+            loaded = llama_model_load_from_file(path, mp)
+        } else {
+            // A list containing only the terminator means no offload devices.
+            var noDevices: ggml_backend_dev_t? = nil
+            loaded = withUnsafeMutablePointer(to: &noDevices) { devices in
+                mp.devices = devices
+                return llama_model_load_from_file(path, mp)
+            }
+        }
+        guard let m = loaded else {
             throw TranslatorError.loadFailed((path as NSString).lastPathComponent)
         }
 
         var cp = llama_context_default_params()
         cp.n_ctx = nCtx
         cp.n_batch = 256
-        let threads = Int32(max(2, min(6, ProcessInfo.processInfo.activeProcessorCount - 1)))
+        if backend == .cpu {
+            cp.offload_kqv = false
+            cp.op_offload = false
+            cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED
+        }
+        let limit = backend == .cpu ? 3 : 6
+        let threads = Int32(max(2, min(limit, ProcessInfo.processInfo.activeProcessorCount - 1)))
         cp.n_threads = threads
         cp.n_threads_batch = threads
+        do {
+            try Task.checkCancellation()
+            try checkGPU(gpuEpoch)
+        } catch {
+            llama_model_free(m)
+            throw error
+        }
         guard let c = llama_init_from_model(m, cp) else {
             llama_model_free(m)
             throw TranslatorError.loadFailed("context")
@@ -89,14 +177,22 @@ actor LlamaTranslator {
         ctx = c
         vocab = llama_model_get_vocab(m)
         sampler = s
-        loadedPath = path
+        self.backend = backend
+        hearLog("本地翻译：已启用 \(backend.rawValue)")
     }
 
     func unload() {
+        releaseModel()
+        loadedPath = nil
+        failedGPUEpoch = nil
+    }
+
+    private func releaseModel() {
         if let sampler { llama_sampler_free(sampler) }
         if let ctx { llama_free(ctx) }
         if let model { llama_model_free(model) }
-        sampler = nil; ctx = nil; model = nil; vocab = nil; loadedPath = nil
+        sampler = nil; ctx = nil; model = nil; vocab = nil
+        backend = nil
     }
 
     deinit {
@@ -111,18 +207,40 @@ actor LlamaTranslator {
                    previewEpoch epoch: Int? = nil,
                    onUpdate: @escaping @Sendable (String) -> Void) throws -> String {
         try Task.checkCancellation()
-        guard let ctx, let vocab, let sampler else { throw TranslatorError.notLoaded }
+        if let epoch, epoch != previewEpoch.value { throw CancellationError() }
+        guard let path = loadedPath else { throw TranslatorError.notLoaded }
         stopFlag.reset()
+        var shown = ""
+        return try withBackend(path: path) { gpuEpoch in
+            try self.decode(userPrompt, maxNewTokens: maxNewTokens, previewEpoch: epoch, gpuEpoch: gpuEpoch) { text in
+                // If the CPU retries a sentence, keep the readable draft until it catches up.
+                guard text.count >= shown.count, text != shown else { return }
+                shown = text
+                onUpdate(text)
+            }
+        }
+    }
 
+    private func decode(_ userPrompt: String, maxNewTokens: Int, previewEpoch epoch: Int?,
+                        gpuEpoch: Int?, onUpdate: (String) -> Void) throws -> String {
+        guard let ctx, let vocab, let sampler else { throw TranslatorError.notLoaded }
+        func checkWork() throws {
+            try Task.checkCancellation()
+            if stopFlag.isSet { throw CancellationError() }
+            if let epoch, epoch != previewEpoch.value { throw CancellationError() }
+            try checkGPU(gpuEpoch)
+        }
         let prompt = applyChatTemplate(userPrompt)
-        var tokens = tokenize(prompt)
+        let tokens = tokenize(prompt)
+        guard !tokens.isEmpty else { throw TranslatorError.decodeFailed(stage: "tokenize") }
         if tokens.count + maxNewTokens > Int(nCtx) { throw TranslatorError.tooLong }
 
+        try checkWork()
         llama_memory_clear(llama_get_memory(ctx), true)
         llama_sampler_reset(sampler)
 
         // 用新的扩展批接口（llama_decode/llama_batch_get_one 已弃用）
-        guard let batch = llama_batch_ext_init(ctx) else { throw TranslatorError.decodeFailed }
+        guard let batch = llama_batch_ext_init(ctx) else { throw TranslatorError.decodeFailed(stage: "batch") }
         defer { llama_batch_ext_free(batch) }
 
         // 处理提示词：分批喂进去，最后一个 token 标记为要输出 logits
@@ -137,29 +255,30 @@ actor LlamaTranslator {
             var lastIdx = Int32(-1)
             for k in 0..<Int(n) {
                 let idx = llama_batch_ext_add_token(batch, 0, tokens[i + k])
-                if idx < 0 { throw TranslatorError.decodeFailed }
+                if idx < 0 { throw TranslatorError.decodeFailed(stage: "prompt token") }
                 var p = pos + llama_pos(k)
-                if !llama_batch_ext_set_pos(batch, idx, &p) { throw TranslatorError.decodeFailed }
+                if !llama_batch_ext_set_pos(batch, idx, &p) {
+                    throw TranslatorError.decodeFailed(stage: "prompt position")
+                }
                 lastIdx = idx
             }
             // 只有最后一批的最后一个 token 要 logits
             if i + Int(n) >= tokens.count {
                 llama_batch_ext_set_output_logits(batch, lastIdx, true)
             }
+            try checkWork()
             let rc = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch)
-            guard rc == 0 else { throw TranslatorError.decodeFailed }
+            try checkWork()
+            guard rc == 0 else { throw TranslatorError.decodeFailed(stage: "prompt", status: rc) }
             pos += n
             i += Int(n)
         }
 
         var output = ""
         var pending: [UInt8] = []
-        var nGenerated = 0
-
-        for _ in 0..<maxNewTokens {
-            if Task.isCancelled || stopFlag.isSet { break }
-            if let epoch, epoch != previewEpoch.value { break }
-            var tok = llama_sampler_sample(sampler, ctx, -1)
+        for index in 0..<maxNewTokens {
+            try checkWork()
+            let tok = llama_sampler_sample(sampler, ctx, -1)
             if llama_vocab_is_eog(vocab, tok) { break }
 
             pending += piece(tok)
@@ -168,23 +287,25 @@ actor LlamaTranslator {
                 pending.removeAll()
                 onUpdate(Self.clean(output))
             }
+            if index + 1 == maxNewTokens { break }
 
             // 把刚采样出来的 token 喂回去，继续生成下一个
             llama_batch_ext_clear(batch)
             let idx = llama_batch_ext_add_token(batch, 0, tok)
-            if idx < 0 { break }
+            if idx < 0 { throw TranslatorError.decodeFailed(stage: "output token") }
             var p = pos
-            if !llama_batch_ext_set_pos(batch, idx, &p) { break }
+            if !llama_batch_ext_set_pos(batch, idx, &p) {
+                throw TranslatorError.decodeFailed(stage: "output position")
+            }
             // 每生成一个 token 都要它的 logits，才能继续采样下一个
             llama_batch_ext_set_output_logits(batch, idx, true)
-            let r = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch)
+            try checkWork()
+            let rc = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch)
+            try checkWork()
+            guard rc == 0 else { throw TranslatorError.decodeFailed(stage: "output", status: rc) }
             pos += 1
-            nGenerated += 1
-            if r != 0 { break }
         }
-        try Task.checkCancellation()
-        if stopFlag.isSet { throw CancellationError() }
-        if let epoch, epoch != previewEpoch.value { throw CancellationError() }
+        try checkWork()
         return Self.clean(output)
     }
 

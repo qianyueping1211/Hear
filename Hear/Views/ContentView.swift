@@ -322,6 +322,7 @@ struct TranscriptView: View {
                                    preparing: session.cloneWorking[item.id] != nil,
                                    showIdleReadingIcon: session.showReadingIcon,
                                    onEdit: { if item.done { onEdit(item) } },
+                                   onRetry: item.canRetryTranslation ? { session.retryTranslation(item.id) } : nil,
                                    onSpeaker: item.speakerLabel == nil ? nil : { onSpeaker(item) }) {
                             session.tapRead(item)
                         }
@@ -402,6 +403,7 @@ struct BubbleView: View {
     var preparing: Bool = false
     var showIdleReadingIcon: Bool = true
     var onEdit: (() -> Void)? = nil      // 有值时：长按修改原文（对话页）；没有时：长按弹出复制菜单（历史页）
+    var onRetry: (() -> Void)? = nil
     var onSpeaker: (() -> Void)? = nil
     var onSpeak: () -> Void
 
@@ -486,13 +488,22 @@ struct BubbleView: View {
                     }
                 }
                 if let error = item.translationError {
-                    Text(item.translated.isEmpty ? error : "修正未完成 · 保留已显示译文")
+                    Text(item.translated.isEmpty ? error : "翻译未完成 · 保留已显示译文")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else if item.translationPending == true, !item.translated.isEmpty {
-                    Text("正在修正译文…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if let onRetry {
+                        Button("重试翻译", action: onRetry)
+                            .buttonStyle(.borderless)
+                            .font(.caption.weight(.semibold))
+                    }
+                } else if item.translationPending == true {
+                    if !item.translated.isEmpty {
+                        Text("正在修正译文…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if item.done {
+                        ProgressView().controlSize(.small)
+                    }
                 }
             }
             .multilineTextAlignment(leading ? .leading : .trailing)
