@@ -15,9 +15,21 @@ final class HearLiveActivityController {
     private var lastSentAt = Date.distantPast
 
     private init() {
-        let previous = Activity<HearLiveActivityAttributes>.activities
-        Task {
-            for activity in previous { await activity.end(nil, dismissalPolicy: .immediate) }
+        dismissAll()
+    }
+
+    /// Clear activity tokens still owned by iOS, including those from a previous process.
+    func dismissAll() {
+        pendingTask?.cancel()
+        pendingTask = nil
+        latestState = nil
+        current = nil
+        let activities = Activity<HearLiveActivityAttributes>.activities
+        guard !activities.isEmpty else { return }
+        Task.detached {
+            for activity in activities {
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
         }
     }
 
@@ -75,5 +87,6 @@ final class HearLiveActivityController {
     func start(_ state: HearLiveActivityAttributes.ContentState) {}
     func update(_ state: HearLiveActivityAttributes.ContentState) {}
     func end(_ state: HearLiveActivityAttributes.ContentState?) {}
+    func dismissAll() {}
 #endif
 }

@@ -602,6 +602,8 @@ final class LiveSession: ObservableObject {
         speaker.onPlaybackFinished = { [weak self] in
             Task { @MainActor in self?.releaseMicrophoneIfIdle() }
         }
+        // Instantiate the controller at app startup so iOS activities from an earlier process are removed.
+        _ = HearLiveActivityController.shared
         // 采集层要停音频会话的时候，问一下"现在有没有在出声"
         // （判断完到真正停掉之间，可能刚好开始播下一句）
         capture.isSpeakingNow = { [weak self] in
@@ -709,6 +711,13 @@ final class LiveSession: ObservableObject {
                 self.inBackground = false
                 // 回到前台：把后台攒下的译文接着读出来
                 self.kickReader()
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                HearLiveActivityController.shared.dismissAll()
             }
         }
 
