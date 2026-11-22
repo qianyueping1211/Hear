@@ -1,2 +1,3 @@
 # Keep the Windows launcher executable when downloaded directly from GitHub.
 /start-hear-cloud.bat -text whitespace=cr-at-eol
+/start-hear-token-admin.bat -text whitespace=cr-at-eol
