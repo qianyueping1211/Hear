@@ -71,10 +71,14 @@ actor CloneCache {
         try? wav.write(to: url, options: .atomic)
     }
 
-    /// 清空缓存
-    func clear() {
+    func evictMemory() {
         memory.removeAll()
         order.removeAll()
+    }
+
+    /// 清空缓存
+    func clear() {
+        evictMemory()
         let items = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
         for i in items { try? FileManager.default.removeItem(at: i) }
     }

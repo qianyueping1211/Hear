@@ -92,8 +92,9 @@ actor SenseVoiceRecognizer {
     }
 
     /// 识别一句话。candidates 只有一种时（对话翻译模式）按这种语言识别，否则自动判断。
-    /// 返回 (语言代码, 文字)；没听到人说话时文字为空
-    func recognize(_ samples: [Float], candidates: [String], fallback: String) async throws -> (String, String) {
+    /// 返回选定语言、文字和模型原始语言；没听到人说话时文字为空。
+    func recognize(_ samples: [Float], candidates: [String], fallback: String, preview: Bool)
+        async throws -> (language: String, text: String, observed: String?) {
         let forced = candidates.count == 1 ? candidates.first : nil
         guard let m = manager(for: forced) else {
             // 模型不在了：报错，别静悄悄返回空字符串（会被当成"没说话"丢掉）
@@ -101,15 +102,34 @@ actor SenseVoiceRecognizer {
                 "SenseVoice 模型不在了（可能被内存不足卸载了），请重新开始一次"])
         }
         let r = try await m.transcribeDetailed(audio: samples)
-        var lang = r.language ?? ""
-        if lang == "yue" { lang = "zh" }                 // 粤语按中文处理
-        if lang == "nospeech" { return (forced ?? fallback, "") }
-        let detected = forced ?? (candidates.contains(lang) ? lang : fallback)
-        var text = r.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if detected == "zh" {
+        try Task.checkCancellation()
+        let observed = r.language == "yue" ? "zh" : r.language
+        if observed == "nospeech" { return (forced ?? fallback, "", nil) }
+        var text = Fillers.clean(r.text.trimmingCharacters(in: .whitespacesAndNewlines))
+        var language = forced ?? SpeechTextFilter.resolveLanguage(text, detected: observed,
+                                                                   candidates: candidates, fallback: fallback)
+        if language == nil, !preview, SpeechTextFilter.isMeaningful(text),
+           let retry = SpeechTextFilter.retryLanguage(text, detected: observed, candidates: candidates),
+           let retryManager = manager(for: retry) {
+            do {
+                let retryResult = try await retryManager.transcribeDetailed(audio: samples)
+                try Task.checkCancellation()
+                let retryText = Fillers.clean(retryResult.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                if retryResult.language != "nospeech", SpeechTextFilter.isMeaningful(retryText),
+                   SpeechTextFilter.resolveLanguage(retryText, detected: retry,
+                                                     candidates: candidates, fallback: fallback) == retry {
+                    language = retry
+                    text = retryText
+                }
+            } catch {
+                try Task.checkCancellation()
+                hearLog("SenseVoice：语种复核失败，保留原识别结果。", .info)
+            }
+        }
+        if language == "zh" {
             text = text.applyingTransform(StringTransform("Hant-Hans"), reverse: false) ?? text
         }
-        return (detected, Fillers.clean(text))
+        return (language ?? observed ?? fallback, text, observed)
     }
 
     // MARK: - 模型文件（下载 / 导入 / 删除）

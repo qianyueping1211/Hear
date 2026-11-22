@@ -40,7 +40,12 @@ final class AudioCapture {
     private let engineQueue = DispatchQueue(label: "hear.audio.engine", qos: .userInitiated)
     private let lock = NSLock()
     private var _muted = false
-    private(set) var isRunning = false
+    private var running = false
+    private var pendingStart: Int?
+    var isRunning: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return running
+    }
     private var configObserver: NSObjectProtocol?
 
     // MARK: - 麦克风"活着"的自我检测（下面这些都只在 engineQueue 上读写）
@@ -63,7 +68,41 @@ final class AudioCapture {
     private var _gen = 0
     /// 每开一次麦换一个号：收尾的时候好知道"这一轮已经有人接手了"
     private var gen: Int { lock.lock(); defer { lock.unlock() }; return _gen }
-    private func bumpGen() { lock.lock(); _gen += 1; lock.unlock() }
+    private func requestStart() -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        guard !running, pendingStart == nil else { return nil }
+        _gen += 1
+        pendingStart = _gen
+        return _gen
+    }
+
+    private func finishStart(_ round: Int, running: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard pendingStart == round else { return false }
+        pendingStart = nil
+        self.running = running
+        return true
+    }
+
+    private func requestStop() -> (wasRunning: Bool, round: Int)? {
+        lock.lock(); defer { lock.unlock() }
+        guard running || pendingStart != nil else { return nil }
+        let wasRunning = running
+        if pendingStart != nil { _gen += 1 }
+        pendingStart = nil
+        running = false
+        return (wasRunning, _gen)
+    }
+
+    private var hasCaptureIntent: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return running || pendingStart != nil
+    }
+
+    private func acceptsAudio(for round: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _gen == round && (running || pendingStart == round)
+    }
 
     private var _lastSample = Date()
     /// 最近一次收到声音的时间（看门狗用它判断麦克风是不是哑了）
@@ -151,66 +190,66 @@ final class AudioCapture {
         queue.async { [segmenter] in segmenter.config = c }
     }
 
-    func start() throws {
+    @MainActor
+    func start() async throws {
         // 已经在跑就别再开一次：AVAudioEngine 一个输入只能挂一个 tap，
         // 重复挂会直接崩（"required condition is false: !engine.isRunning"）。
         if isRunning { return }
-        // 换一轮号：上一轮的收尾看到号不一样，就不会再去动音频会话
-        bumpGen()
-        // 先把断句器清干净（连环境噪声的估计一起清）。
-        // 必须在起引擎之前清：引擎一起来就会往里灌声音，
-        // 晚一步清的话，头一小段声音会被 reset 抹掉。
-        var lastError: Error?
-        // 所有动引擎的活儿都在 engineQueue 上做，和 stop()/重新接麦克风串行
-        engineQueue.sync {
-            // The preceding stop flushes on this queue before the new capture can reset VAD.
-            let detector = speechDetector
-            queue.sync { [segmenter] in
-                segmenter.speechDetector = detector
-                segmenter.reset()
-            }
-            do {
-                try prepareAndStart()
-                lastError = nil
-            } catch {
-                lastError = error
+        try Task.checkCancellation()
+        guard let round = requestStart() else { throw CancellationError() }
+        let processing = voiceProcessing
+        try await withCheckedThrowingContinuation { (completion: CheckedContinuation<Void, Error>) in
+            engineQueue.async { [self] in
+                do {
+                    guard gen == round else { throw CancellationError() }
+                    // A preceding stop flushes here before we reset the detector.
+                    let detector = speechDetector
+                    queue.sync { [segmenter] in
+                        segmenter.speechDetector = detector
+                        segmenter.reset()
+                    }
+                    try prepareAndStart(round: round, voiceProcessing: processing)
+                    guard finishStart(round, running: true) else { throw CancellationError() }
+                    startWatchdog()
+                    let f = engine.inputNode.outputFormat(forBus: 0)
+                    hearLog("麦克风已启动：\(Int(f.sampleRate)) Hz，\(f.channelCount) 声道，语音增强\(engine.inputNode.isVoiceProcessingEnabled ? "开" : "关")")
+                    completion.resume()
+                } catch {
+                    removeTap()
+                    engine.stop()
+                    AudioRoute.capturing = false
+                    try? AudioRoute.updateSession()
+                    let current = finishStart(round, running: false)
+                    completion.resume(throwing: current ? error : CancellationError())
+                }
             }
         }
-        if let lastError {
-            // 起不来就别占着麦克风
-            AudioRoute.capturing = false
-            try? AudioRoute.updateSession()
-            throw lastError
-        }
-        isRunning = true
-        startWatchdog()
-        let f = engine.inputNode.outputFormat(forBus: 0)
-        hearLog("麦克风已启动：\(Int(f.sampleRate)) Hz，\(f.channelCount) 声道，语音增强\(engine.inputNode.isVoiceProcessingEnabled ? "开" : "关")")
     }
 
+    @MainActor
     func stop(onFlushed: (() -> Void)? = nil) {
-        guard isRunning else {
+        guard let stopped = requestStop() else {
             if let onFlushed {
                 engineQueue.async { DispatchQueue.main.async { onFlushed() } }
             }
             return
         }
-        isRunning = false
         stopWatchdog()
-        let g = gen
-        let engine = self.engine
         engineQueue.async { [weak self] in
             guard let self else { return }
             self.removeTap()
-            engine.stop()
+            self.engine.stop()
             // 引擎停了再把最后一句交出去，后面不会再有声音进来
-            self.queue.sync { self.segmenter.flush() }
+            self.queue.sync {
+                if stopped.wasRunning { self.segmenter.flush() }
+                else { self.segmenter.reset() }
+            }
             if let onFlushed { DispatchQueue.main.async { onFlushed() } }
             // 引擎真的停了，才告诉音频会话"不收音了"。
             // 早一步改类别（.playAndRecord → .playback）会把还在跑的引擎的输入抽走，
             // 系统重新配置引擎，麦克风就断在半路上（以后再也没有声音进来）。
             // 这期间要是已经又开了一轮新的收音，就别动会话了，交给 start() 处理。
-            guard self.gen == g else { return }
+            guard self.gen == stopped.round else { return }
             AudioRoute.capturing = false
             try? AudioRoute.updateSession()
         }
@@ -225,7 +264,7 @@ final class AudioCapture {
             // 真正要停会话这一刻再核对一遍：
             // 判断"没在出声"到现在，可能刚好开始播下一句——
             // 那就不能停（会把声音切断）。
-            if self?.isRunning == true { return }
+            if self?.hasCaptureIntent == true { return }
             if self?.isSpeakingNow?() == true { return }
             AudioRoute.deactivate()
         }
@@ -237,7 +276,7 @@ final class AudioCapture {
     // MARK: - 打开麦克风（一定在 engineQueue 上跑）
 
     /// 语音增强 → 音频会话 → 挂 tap → 起引擎
-    private func prepareAndStart() throws {
+    private func prepareAndStart(round: Int, voiceProcessing: Bool) throws {
         let input = engine.inputNode
 
         // 语音增强：系统的语音处理单元，改它之前必须先把音频会话停掉（Apple 的要求）。
@@ -269,10 +308,13 @@ final class AudioCapture {
         // 硬件会拒绝启动（'nope'），重新激活一次音频会话通常就能恢复。
         var lastError: Error?
         for attempt in 1...3 {
+            guard gen == round else { throw CancellationError() }
             do {
-                try installTapAndStart()
+                try installTapAndStart(round: round)
                 lastError = nil
                 break
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 lastError = error
                 hearLog("麦克风启动失败（第 \(attempt)/3 次）：\(error)", .warning)
@@ -294,7 +336,7 @@ final class AudioCapture {
         }
     }
 
-    private func installTapAndStart() throws {
+    private func installTapAndStart(round: Int) throws {
         let input = engine.inputNode
         // 刚激活音频会话时，硬件有时还没准备好，输入格式会短暂地是 0×0。
         // 这时候直接报错就"麦克风起不来"了，用户看着像是整个实时翻译坏了。
@@ -302,6 +344,7 @@ final class AudioCapture {
         var inFormat = input.outputFormat(forBus: 0)
         var waited = 0
         while inFormat.sampleRate <= 0 || inFormat.channelCount <= 0, waited < 10 {
+            guard acceptsAudio(for: round) else { throw CancellationError() }
             Thread.sleep(forTimeInterval: 0.05)
             inFormat = input.outputFormat(forBus: 0)
             waited += 1
@@ -321,13 +364,15 @@ final class AudioCapture {
         tapInstalled = false
         // format 传 nil：始终按麦克风当前的真实格式接收，路由变化后也不会错位
         input.installTap(onBus: 0, bufferSize: size, format: nil) { [weak self] buffer, _ in
-            self?.handle(buffer)
+            guard let self, self.acceptsAudio(for: round) else { return }
+            self.handle(buffer)
         }
         tapInstalled = true
         installedFormat = (inFormat.sampleRate, inFormat.channelCount)
         lastSampleAt = Date()
         lastDeliveredAt = Date()
         engine.prepare()
+        guard acceptsAudio(for: round) else { throw CancellationError() }
         try engine.start()
     }
 
@@ -373,10 +418,14 @@ final class AudioCapture {
         hearLog("重新连接麦克风（\(reason)）", .warning)
         engine.stop()
         removeTap()
+        let round = gen
         for attempt in 1...3 {
             do {
-                try installTapAndStart()
+                try installTapAndStart(round: round)
                 silentTicks = 0
+                return
+            } catch is CancellationError {
+                removeTap()
                 return
             } catch {
                 hearLog("重新连接麦克风失败（第 \(attempt)/3 次）：\(error)", .error)
@@ -396,7 +445,7 @@ final class AudioCapture {
     private func startWatchdog() {
         engineQueue.async { [weak self] in
             guard let self else { return }
-            guard self.watchdog == nil else { return }
+            guard self.isRunning, self.watchdog == nil else { return }
             let t = DispatchSource.makeTimerSource(queue: self.engineQueue)
             t.schedule(deadline: .now() + 3, repeating: 3)
             t.setEventHandler { [weak self] in self?.checkMicAlive() }

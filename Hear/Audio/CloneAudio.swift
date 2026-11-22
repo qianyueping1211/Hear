@@ -4,6 +4,42 @@ struct CloneAudio: Sendable {
     var samples: [Float]
     var sampleRate: Int
 
+    /// Estimate speech loudness from active 10 ms windows so pauses don't drive gain up.
+    func playbackGain() -> (gain: Float, peak: Float)? {
+        guard (8_000...96_000).contains(sampleRate), !samples.isEmpty else { return nil }
+        let window = sampleRate / 100
+        var peak: Float = 0
+        var activePower: Double = 0
+        var activeSamples = 0
+        var previousActive: Int?
+        var hasSustainedSignal = false
+        for start in stride(from: 0, to: samples.count, by: window) {
+            let end = min(start + window, samples.count)
+            var sum: Double = 0
+            var power: Double = 0
+            for sample in samples[start..<end] {
+                guard sample.isFinite else { return nil }
+                peak = max(peak, abs(sample))
+                let amplitude = Double(sample)
+                sum += amplitude
+                power += amplitude * amplitude
+            }
+            let count = end - start
+            let centeredPower = max(0, power - sum * sum / Double(count))
+            guard centeredPower / Double(count) >= 0.0005 * 0.0005 else { continue }
+            if let previousActive, start - previousActive <= window * 2 {
+                hasSustainedSignal = true
+            }
+            previousActive = start
+            activePower += centeredPower
+            activeSamples += count
+        }
+        guard hasSustainedSignal else { return nil }
+        let rms = Float(sqrt(activePower / Double(activeSamples)))
+        let boost = max(1, min(8, 0.08 / rms))
+        return (min(boost, 0.85 / peak), peak)
+    }
+
     /// Keep a little room around speech and leave every pause inside the sentence intact.
     func trimmingEdgeSilence() -> (audio: CloneAudio, leading: Int, trailing: Int)? {
         guard (8_000...96_000).contains(sampleRate), !samples.isEmpty else { return nil }

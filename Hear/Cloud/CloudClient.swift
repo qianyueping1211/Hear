@@ -272,6 +272,9 @@ actor CloudClient {
         case http(Int, String)
         case badResponse(String)
         case net(String)          // 网络不通，说清楚为什么
+        case inferenceConnection(String)
+        case inferenceInterrupted(String)
+        case inferenceTimeout
 
         var isBusy: Bool {
             if case .http(let status, _) = self { return status == 429 || status == 503 }
@@ -279,8 +282,19 @@ actor CloudClient {
         }
 
         var shouldKeepConfiguredEngine: Bool {
-            if case .http(let status, _) = self { return [401, 403, 429, 503].contains(status) }
-            return false
+            switch self {
+            case .http(let status, _): return [401, 403, 429, 503, 504].contains(status)
+            case .inferenceConnection, .inferenceInterrupted, .inferenceTimeout: return true
+            default: return false
+            }
+        }
+
+        var canTryAnotherInferenceAddress: Bool {
+            switch self {
+            case .http(let status, _): return CloudInferencePolicy.canTryAnotherAddress(afterHTTPStatus: status)
+            case .inferenceConnection, .notConfigured, .badURL: return true
+            default: return false
+            }
         }
 
         var errorDescription: String? {
@@ -289,7 +303,8 @@ actor CloudClient {
             case .badURL: return "云端模型地址格式不对"
             case .http(let code, let msg): return "云端服务返回 \(code)：\(msg)"
             case .badResponse(let msg): return "云端服务返回的内容看不懂：\(msg)"
-            case .net(let msg): return msg
+            case .net(let msg), .inferenceConnection(let msg), .inferenceInterrupted(let msg): return msg
+            case .inferenceTimeout: return "等待云端推理超时"
             }
         }
     }
@@ -369,10 +384,11 @@ actor CloudClient {
 
     /// 这个地址上跑的是哪种服务
     /// （探测失败时不缓存：可能只是暂时连不上，下次还要再问一次）
-    func kind(of address: String, timeout: TimeInterval = 5) async -> ServiceKind {
+    func kind(of address: String, timeout: TimeInterval = 5,
+              deadline: ContinuousClock.Instant? = nil) async -> ServiceKind {
         let a = Self.cleanURL(address)
         if let k = kinds[a] { return k }
-        if let info = await Self.probe(address: a, timeout: timeout) {
+        if let info = await Self.probe(address: a, timeout: timeout, deadline: deadline) {
             kinds[a] = info.kind
             return info.kind
         }
@@ -426,7 +442,7 @@ actor CloudClient {
         let p = primary.trimmingCharacters(in: .whitespacesAndNewlines)
         if !p.isEmpty { out.append(p) }
         let s = sharedAddress
-        if !s.isEmpty && !out.contains(s) { out.append(s) }
+        if !s.isEmpty && Self.cleanURL(s) != Self.cleanURL(p) { out.append(s) }
         return out
     }
 
@@ -479,14 +495,15 @@ actor CloudClient {
     }
 
     /// Retries are bounded by the caller. A timeout may already be running inference.
-    private func sendWithRetry(_ req: URLRequest, path: String, retries: Int = 3) async throws -> (Data, HTTPURLResponse?) {
+    private func sendWithRetry(_ req: URLRequest, path: String, retries: Int = 3,
+                               inferenceDeadline: ContinuousClock.Instant? = nil) async throws -> (Data, HTTPURLResponse?) {
         try await withBackgroundTime {
             let tries = max(1, retries)
             let busyDelays: [Double] = [1, 2.5, 4]
             for attempt in 0..<tries {
                 try Task.checkCancellation()
                 do {
-                    let (data, resp) = try await CloudClient.session.data(for: req)
+                    let (data, resp) = try await Self.requestData(req, deadline: inferenceDeadline)
                     try Task.checkCancellation()
                     let response = resp as? HTTPURLResponse
                     let code = response?.statusCode ?? 0
@@ -495,6 +512,9 @@ actor CloudClient {
                         let header = response?.value(forHTTPHeaderField: "Retry-After") ?? ""
                         let suggested = Int(header) ?? 0
                         let wait = max(backoff, Double(min(suggested, 4)))
+                        if let inferenceDeadline, ContinuousClock.now.advanced(by: .seconds(wait)) >= inferenceDeadline {
+                            return (data, response)
+                        }
                         hearLog("云端忙（HTTP \(code)），等 \(wait) 秒重试：\(path)")
                         try await Task.sleep(for: .seconds(wait))
                         continue
@@ -505,7 +525,15 @@ actor CloudClient {
                     if Self.isLocalNetworkDenied(e) {
                         hearLog("本地网络权限被拒绝：\(path)", .warning)
                         NotificationCenter.default.post(name: .hearLocalNetworkDenied, object: nil)
+                        if inferenceDeadline != nil { throw CloudError.inferenceInterrupted(Self.friendlyError(e)) }
                         throw CloudError.net(Self.friendlyError(e))
+                    }
+                    if inferenceDeadline != nil {
+                        if e.code == .timedOut { throw CloudError.inferenceTimeout }
+                        if CloudInferencePolicy.canTryAnotherAddress(after: e.code) {
+                            throw CloudError.inferenceConnection(Self.friendlyError(e))
+                        }
+                        throw CloudError.inferenceInterrupted(Self.friendlyError(e))
                     }
                     if Self.isTransientNetworkError(e), attempt < tries - 1 {
                         let wait = attempt == 0 ? 1.5 : 4.0
@@ -517,6 +545,14 @@ actor CloudClient {
                 }
             }
             throw CloudError.notConfigured
+        }
+    }
+
+    private static func requestData(_ request: URLRequest, deadline: ContinuousClock.Instant?)
+        async throws -> (Data, URLResponse) {
+        guard let deadline else { return try await session.data(for: request) }
+        return try await CloudInferencePolicy.before(deadline) {
+            try await session.data(for: request)
         }
     }
 
@@ -536,10 +572,11 @@ actor CloudClient {
     private func json(_ path: String, address: String, method: String = "GET", body: Data? = nil,
                       contentType: String = "application/json",
                       timeout: TimeInterval = 60, retries: Int = 3,
-                      headers: [String: String] = [:]) async throws -> [String: Any] {
+                      headers: [String: String] = [:],
+                      inferenceDeadline: ContinuousClock.Instant? = nil) async throws -> [String: Any] {
         var req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
         for (name, value) in headers { req.setValue(value, forHTTPHeaderField: name) }
-        let (data, resp) = try await sendWithRetry(req, path: path, retries: retries)
+        let (data, resp) = try await sendWithRetry(req, path: path, retries: retries, inferenceDeadline: inferenceDeadline)
         let code = resp?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             let msg = String(data: data.prefix(400), encoding: .utf8) ?? ""
@@ -618,12 +655,14 @@ actor CloudClient {
     }
 
     /// 顺便看一下这个地址上跑的是哪种服务
-    static func probe(address: String, timeout: TimeInterval = 5) async -> ProbeResult? {
+    static func probe(address: String, timeout: TimeInterval = 5,
+                      deadline: ContinuousClock.Instant? = nil) async -> ProbeResult? {
         let s = cleanURL(address)
         guard !s.isEmpty, let url = URL(string: s + "/health") else { return nil }
         var req = URLRequest(url: url)
         req.timeoutInterval = timeout
-        guard let (data, resp) = try? await CloudClient.session.data(for: req),
+        let probeDeadline = deadline.map { min($0, ContinuousClock.now.advanced(by: .seconds(timeout))) }
+        guard let (data, resp) = try? await requestData(req, deadline: probeDeadline),
               let code = (resp as? HTTPURLResponse)?.statusCode else { return nil }
         return probeResult(data: data, code: code)
     }
@@ -869,30 +908,24 @@ actor CloudClient {
         var busyError: CloudError?
         var sawOnlyModelService = false
         var attempted = false
-        // 预览只有一个总时限：探测、回退、加起来都不能超过它。
-        // （以前每个地址各等 12 秒，两个地址就是 24 秒——
-        //   屏幕上还是省略号，用户早就等不下去了。）
-        let deadline = preview ? Date().addingTimeInterval(12) : nil
+        // 探测、请求、退避和备用地址共享截止时间。
+        let seconds = Double(samples.count) / 16_000
+        let timeLimit = preview ? 12 : min(42, max(22, 12 + seconds * 2))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeLimit))
+        let wav = Wav.encode(samples: samples, sampleRate: 16_000)
         for addr in candidateAddresses(asrAddress) {
-            // 总时限到了就别再试下一个地址了
-            if let d = deadline, Date() >= d { break }
+            try Task.checkCancellation()
+            if ContinuousClock.now >= deadline { throw CloudError.inferenceTimeout }
             // 单独的 llama-server 没有识别接口，识别只能用 8000 的总服务
-            let probeBudget = deadline.map { min(5, max(0.05, $0.timeIntervalSinceNow)) } ?? 5
-            if await kind(of: addr, timeout: probeBudget) == .llamaServer {
+            if await kind(of: addr, timeout: preview ? 2 : 4, deadline: deadline) == .llamaServer {
                 sawOnlyModelService = true
                 continue
             }
-            if let deadline, Date() >= deadline { break }
             try Task.checkCancellation()
             attempted = true
             do {
-                let wav = Wav.encode(samples: samples, sampleRate: 16_000)
-                // 预览要快：给个短超时，而且不重试
-                // （整句那种慢请求要是排在这里，后面的原文预览就都被它堵住了）
-                // 这一次请求最多只能用"总时限里还剩下的时间"
-                let budget: TimeInterval = deadline.map { max(0.05, $0.timeIntervalSinceNow) } ?? 120
                 var req = try makeRequest("/v1/asr", address: addr, method: "POST", body: wav,
-                                          contentType: "audio/wav", timeout: preview ? budget : 120)
+                                          contentType: "audio/wav", timeout: timeLimit)
                 req.setValue(candidates.joined(separator: ","), forHTTPHeaderField: "X-Languages")
                 req.setValue(fallback, forHTTPHeaderField: "X-Fallback-Language")
                 // 告诉服务端用哪个识别方案
@@ -900,7 +933,8 @@ actor CloudClient {
                 // 预览只要快，不要修正
                 if preview { req.setValue("1", forHTTPHeaderField: "X-ASR-Preview") }
                 else { req.setValue("first", forHTTPHeaderField: "X-ASR-Stage") }
-                let (data, resp) = try await sendWithRetry(req, path: "/v1/asr", retries: preview ? 1 : 4)
+                let (data, resp) = try await sendWithRetry(req, path: "/v1/asr", retries: preview ? 1 : 3,
+                                                         inferenceDeadline: deadline)
                 let code = resp?.statusCode ?? 0
                 guard (200..<300).contains(code) else {
                     throw CloudError.http(code, String(data: data.prefix(400), encoding: .utf8) ?? "")
@@ -915,9 +949,9 @@ actor CloudClient {
                 return (lang, text, correctionAddress, speakerAddress)
             } catch {
                 try Task.checkCancellation()
-                if error is CancellationError { throw error }
+                guard let cloudError = error as? CloudError, cloudError.canTryAnotherInferenceAddress else { throw error }
                 lastError = error
-                if let busy = error as? CloudError, busy.isBusy { busyError = busy }
+                if cloudError.isBusy { busyError = cloudError }
             }
         }
         if !attempted && sawOnlyModelService {
@@ -950,8 +984,9 @@ actor CloudClient {
         var lastError: Error = CloudError.notConfigured
         var busyError: CloudError?
         let preview = stage == .preview
-        let deadline = preview ? Date().addingTimeInterval(5) : nil
-        let retries = stage == .final ? 4 : 1
+        let timeLimit: TimeInterval = preview ? 5 : (stage == .revision ? 25 : 35)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(timeLimit))
+        let retries = stage == .final ? 3 : 1
         let headers: [String: String]
         switch stage {
         case .preview: headers = ["X-MT-Preview": "1"]
@@ -960,13 +995,11 @@ actor CloudClient {
         }
         for addr in candidateAddresses(mtAddress) {
             try Task.checkCancellation()
-            if let deadline, deadline.timeIntervalSinceNow <= 0 { break }
+            if ContinuousClock.now >= deadline { throw CloudError.inferenceTimeout }
             do {
                 // 地址上跑的是单独的 llama-server（8081 那种）时，用 OpenAI 那套接口
-                let service = await kind(of: addr, timeout: preview ? 1.0 : 5.0)
+                let service = await kind(of: addr, timeout: preview ? 1 : 4, deadline: deadline)
                 try Task.checkCancellation()
-                let budget = deadline?.timeIntervalSinceNow ?? 120
-                if budget <= 0 { break }
                 if service == .llamaServer {
                     let body: [String: Any] = [
                         "messages": [["role": "user", "content": prompt]],
@@ -977,7 +1010,8 @@ actor CloudClient {
                         "temperature": 0.7,
                     ]
                     let obj = try await json("/v1/chat/completions", address: addr, method: "POST",
-                                             body: try JSONSerialization.data(withJSONObject: body), timeout: budget, retries: retries)
+                                             body: try JSONSerialization.data(withJSONObject: body), timeout: timeLimit,
+                                             retries: retries, inferenceDeadline: deadline)
                     if let choices = obj["choices"] as? [[String: Any]],
                        let msg = choices.first?["message"] as? [String: Any],
                        let text = msg["content"] as? String, !text.isEmpty {
@@ -987,17 +1021,17 @@ actor CloudClient {
                 }
                 let body: [String: Any] = ["prompt": prompt, "src": src, "dst": dst]
                 let obj = try await json("/v1/translate", address: addr, method: "POST",
-                                         body: try JSONSerialization.data(withJSONObject: body), timeout: budget, retries: retries,
-                                         headers: headers)
+                                         body: try JSONSerialization.data(withJSONObject: body), timeout: timeLimit, retries: retries,
+                                         headers: headers, inferenceDeadline: deadline)
                 guard let text = obj["text"] as? String else {
                     throw CloudError.badResponse("没有 text 字段")
                 }
                 return text
             } catch {
                 try Task.checkCancellation()
-                if error is CancellationError { throw error }
+                guard let cloudError = error as? CloudError, cloudError.canTryAnotherInferenceAddress else { throw error }
                 lastError = error
-                if let busy = error as? CloudError, busy.isBusy { busyError = busy }
+                if cloudError.isBusy { busyError = cloudError }
             }
         }
         throw busyError.map { $0 as Error } ?? lastError

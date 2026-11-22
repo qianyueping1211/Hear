@@ -126,7 +126,11 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
     /// 返回 .failed 表示没能播出来（引擎起不来之类），调用方可以退回系统声音；
     /// 返回 .cancelled 表示这次是被停掉的——这时候千万别再出声。
     func play(samples: [Float], sampleRate: Double, pan: Float) async -> PlayOutcome {
-        guard !samples.isEmpty else { return .failed }
+        let sr = (8_000...96_000).contains(sampleRate) ? sampleRate : 24_000
+        guard let level = CloneAudio(samples: samples, sampleRate: Int(sr)).playbackGain() else {
+            hearLog("朗读：克隆音频没有持续可用的声音", .warning)
+            return .failed
+        }
         stop()
         // 重新激活音频会话会把"输出到哪"重置掉（setCategory 会清掉 override），
         // 这里再应用一次，保证声音真的从耳机出来
@@ -135,19 +139,8 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         // 收音的时候不动会话：会话一改，正在跑的麦克风会被打断
         if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         AudioRoute.apply(AudioRoute.lastOutput)
-        // 采样率是 0 的话下面算时长会除出无穷大，Dispatch 会直接崩，这里兜一下
-        let sr = sampleRate > 0 ? sampleRate : 24_000
-
-        // 音量过小的话听起来像没声音，放大到能听见的水平
-        var boosted = samples
-        var pk: Float = 0
-        for v in boosted { let a = abs(v); if a > pk { pk = a } }
-        if pk > 0.0005, pk < 0.5 {
-            let g = 0.85 / pk
-            for i in boosted.indices { boosted[i] *= g }
-        }
-        let out = boosted
-        let peak = pk
+        let out = level.gain == 1 ? samples : samples.map { $0 * level.gain }
+        let peak = level.peak
 
         let gen: Int = queue.sync {
             generation += 1

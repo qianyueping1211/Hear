@@ -280,7 +280,7 @@ final class LiveSession: ObservableObject {
             guard asrEngine != oldValue else { return }
             hearLog("识别引擎改为 \(asrEngine)")
             enforceLanguages()
-            if isRunning && !inEngineFallback { stop(readAfter: false) }
+            if (isRunning || microphoneStartToken != nil) && !inEngineFallback { stop(readAfter: false) }
             Task { await reloadIfLocal() }       // 加载新引擎需要的模型，不用的卸掉省内存
         }
     }
@@ -294,7 +294,7 @@ final class LiveSession: ObservableObject {
             }
             guard translationEngine != oldValue else { return }
             hearLog("翻译引擎改为 \(translationEngine)")
-            if isRunning && !inEngineFallback { stop(readAfter: false) }
+            if (isRunning || microphoneStartToken != nil) && !inEngineFallback { stop(readAfter: false) }
             if translationEngine == "apple" { Task { await translator.unload() } }   // 用不到本地翻译了，省内存
             Task { await reloadIfLocal() }
         }
@@ -401,14 +401,22 @@ final class LiveSession: ObservableObject {
     private func restartCapture() {
         hearLog("重开麦克风（语音增强\(voiceProcessing ? "开" : "关")）")
         capture.stop()
-        do {
-            try capture.start()
-            AudioRoute.apply(outputMode)
-        } catch {
-            hearLog("重开麦克风失败：\(error)", .error)
-            stop(readAfter: false)
-            activity = "收音已停止，请重新开始"
-            showToast("麦克风未能重新连接", seconds: 5)
+        let intent = startToken
+        Task { [weak self] in
+            guard let self, self.isRunning, self.startToken == intent else { return }
+            do {
+                try await self.capture.start()
+                guard self.isRunning, self.startToken == intent else { return }
+                AudioRoute.apply(self.outputMode)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.isRunning, self.startToken == intent else { return }
+                hearLog("重开麦克风失败：\(error)", .error)
+                self.stop(readAfter: false)
+                self.activity = "收音已停止，请重新开始"
+                self.showToast("麦克风未能重新连接", seconds: 5)
+            }
         }
     }
 
@@ -509,6 +517,7 @@ final class LiveSession: ObservableObject {
             startToken = UUID()                 // 正在等待的"开始收音"作废
             conversationInputLanguage = nil
             if isRunning { Task { await finishRecording(readAfter: false) } }
+            else if microphoneStartToken != nil { capture.stop() }
         }
     }
     @Published private(set) var conversationInputLanguage: Language?
@@ -695,28 +704,7 @@ final class LiveSession: ObservableObject {
         NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                hearLog("收到内存不足警告：可用内存 \(Self.freeMB()) MB，先卸掉本地模型", .warning)
-                CrashGuard.shared.updateMarker(memoryWarning: true)
-                let usesLocal = Self.isLocalEngine(self.asrEngine) || self.translationEngine == "local"
-                self.cloneLoadTask?.cancel()
-                self.clearCloneTasks()
-                if usesLocal {
-                    self.stop(readAfter: false)
-                    self.phase = .checking
-                    self.showToast("内存不足，已暂停本地识别和翻译", seconds: 6)
-                }
-                await self.sense.unload()
-                await self.localSpeaker.unload()
-                await self.translator.unload()
-                await self.cloner.unload()
-                hearLog("已卸载本地模型，可用内存 \(Self.freeMB()) MB")
-                if usesLocal {
-                    self.needsMemoryRecovery = true
-                    self.phase = .ready
-                }
-            }
+            Task { @MainActor in await self?.reclaimMemory() }
         }
 
         // 切到别的 App：别在后台继续出声，但别的照旧。
@@ -1449,6 +1437,7 @@ final class LiveSession: ObservableObject {
             guard gen == loadGen, !Task.isCancelled else { return }
             if needSV, let sf {
                 if mtLoaded { await translator.unload() }
+                guard gen == loadGen, !Task.isCancelled else { return }
                 try await sense.load(folder: sf)
                 guard gen == loadGen, !Task.isCancelled else { return }
             }
@@ -1563,6 +1552,12 @@ final class LiveSession: ObservableObject {
         guard !talkMode else { return }
         dismissToast()
         if isRunning { await finishRecording(); return }
+        if microphoneStartToken == startToken {
+            startToken = UUID()
+            capture.stop()
+            activity = ""
+            return
+        }
         _ = await beginListening(feedback: true)
     }
 
@@ -1597,6 +1592,7 @@ final class LiveSession: ObservableObject {
         let token = UUID()
         startToken = token
         guard isRunning else {
+            capture.stop()
             finishConversationReading(intent: token)
             return
         }
@@ -1645,17 +1641,27 @@ final class LiveSession: ObservableObject {
     /// 用户在等待（要麦克风权限、等模型加载）期间又点了暂停、切模式了，
     /// 令牌就变了，这一次启动自动作废——不会莫名其妙开始录音。
     private var startToken = UUID()
+    private var microphoneStartToken: UUID?
 
     /// 打开麦克风开始收音（实时翻译和对话翻译共用）
     private var needsMemoryRecovery = false
+    private var reclaimingMemory = false
+    private var repeatedMemoryWarning = false
+    private var lastMemoryWarning: ContinuousClock.Instant?
+    private var localOptionalWorkPaused = false
     private var inputFinishToken: UUID?
     private var switchingConversation = false
 
     private func beginListening(intent: UUID? = nil, feedback: Bool = false) async -> Bool {
-        guard inputFinishToken == nil, !switchingConversation else { return false }
+        guard inputFinishToken == nil, !switchingConversation, !reclaimingMemory,
+              microphoneStartToken != startToken else { return false }
         let token = intent ?? UUID()
         if intent == nil { startToken = token }
         guard token == startToken else { return false }
+        microphoneStartToken = token
+        defer { if microphoneStartToken == token { microphoneStartToken = nil } }
+        let resumeOptionalWork = localOptionalWorkPaused && Self.freeMB() >= 850
+        if resumeOptionalWork { localOptionalWorkPaused = false }
         if needsMemoryRecovery {
             needsMemoryRecovery = false
             await loadModels()
@@ -1687,7 +1693,11 @@ final class LiveSession: ObservableObject {
             hearLog("开始收音：等待期间启动请求已取消", .info)
             return false
         }
-        guard token == startToken else { return false }
+        if resumeOptionalWork, needsLocalVoiceClone, !(await cloner.isLoaded) {
+            guard token == startToken, !reclaimingMemory else { return false }
+            await loadClonerIfNeeded()
+        }
+        guard token == startToken, !reclaimingMemory else { return false }
         // 已经插着耳机就用耳机朗读（除非用户手动选了扬声器）；耳机已拔掉就改回扬声器
         // 注意：这里不强制改输出路由，避免开始聆听时麦克风被重新配置
         // 音频会话也先不碰：capture.start() 会按"要麦克风"把会话设成 .playAndRecord。
@@ -1704,9 +1714,13 @@ final class LiveSession: ObservableObject {
         // 扬声器模式：聆听期间完全不播放、不改输出路由，停止后再从没读的那句开始读
         if outputMode == .speaker { stopReading() }
         if feedback { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+        activity = "正在打开麦克风…"
         do {
-            try capture.start()
+            try await capture.start()
+        } catch is CancellationError {
+            return false
         } catch {
+            guard token == startToken else { return false }
             // 刚加载完声音克隆模型时，内存紧张会让麦克风起不来（硬件直接拒绝启动）：
             // 先把声音克隆模型卸掉再试一次，麦克风通常就能正常起来
             if await cloner.isLoaded {
@@ -1714,8 +1728,11 @@ final class LiveSession: ObservableObject {
                 await cloner.unload()
                 guard token == startToken else { return false }
                 do {
-                    try capture.start()
+                    try await capture.start()
+                } catch is CancellationError {
+                    return false
                 } catch {
+                    guard token == startToken else { return false }
                     hearLog("麦克风启动失败：\(error)", .error)
                     activity = "麦克风启动失败：\(error.localizedDescription)"
                     showToast("麦克风启动失败，请看日志", seconds: 4)
@@ -1728,6 +1745,7 @@ final class LiveSession: ObservableObject {
                 return false
             }
         }
+        guard token == startToken else { return false }
         AudioRoute.apply(outputMode)
         isRunning = true
         if !talkMode {
@@ -1796,6 +1814,43 @@ final class LiveSession: ObservableObject {
         // 那就不能把会话停掉（会把声音切断）
         if speaker.isPlaying { return }
         capture.releaseSession()
+    }
+
+    private func reclaimMemory() async {
+        let now = ContinuousClock.now
+        let repeated = lastMemoryWarning.map { $0.duration(to: now) <= .seconds(8) } ?? false
+        lastMemoryWarning = now
+        if reclaimingMemory {
+            repeatedMemoryWarning = true
+            return
+        }
+        reclaimingMemory = true
+        repeatedMemoryWarning = repeated
+        defer { reclaimingMemory = false }
+        hearLog("收到内存不足警告：可用内存 \(Self.freeMB()) MB", .warning)
+        CrashGuard.shared.updateMarker(memoryWarning: true)
+        localOptionalWorkPaused = true
+        cloneLoadTask?.cancel()
+        if !usingCloudClone { clearCloneTasks() }
+        if !usingCloudASR { speakerQueue.cancel() }
+        await CloneCache.shared.evictMemory()
+        await cloner.unload()
+        await localSpeaker.unload()
+        let free = Self.freeMB()
+        let usesLocalCore = useSense || translationEngine == "local"
+        guard usesLocalCore, !needsMemoryRecovery, repeatedMemoryWarning || free < 450 else {
+            hearLog("已释放本机声音克隆和说话人资源，可用内存 \(free) MB")
+            return
+        }
+        loadGen += 1
+        stop(readAfter: false)
+        phase = .checking
+        await sense.unload()
+        await translator.unload()
+        needsMemoryRecovery = true
+        phase = .ready
+        showToast("内存仍不足，已暂停翻译。可以重新开始。", seconds: 6)
+        hearLog("内存压力持续，已暂停并卸载本机识别和翻译", .warning)
     }
 
     /// 延后一点再放开麦克风。
@@ -2029,6 +2084,7 @@ final class LiveSession: ObservableObject {
     func newConversation(summarize: Bool, resumeListening: Bool = false) {
         guard !switchingConversation, inputFinishToken == nil else { return }
         switchingConversation = true
+        if microphoneStartToken != nil, !isRunning { capture.stop() }
         startToken = UUID()
         Task { [weak self] in
             guard let self else { return }
@@ -2292,9 +2348,9 @@ final class LiveSession: ObservableObject {
         while !Task.isCancelled, generation == asrPreviewGeneration, let job = previewSamples {
             previewSamples = nil
             let id = job.id
-            // 云端正式识别优先。翻译慢时，仍继续显示新句的预览。
+            // 正式识别优先。翻译队列不妨碍下一句的原文预览。
             let cloudPreview = usingCloudASR
-            guard phase == .ready, isRunning, !liveActive, !cloudPreview || asrBusyCount == 0,
+            guard phase == .ready, isRunning, !liveActive, asrBusyCount == 0, recognitionQueue.isIdle,
                   id == currentSeg, id > finishedSeg else { continue }
             if cloudPreview, let retryAt = cloudASRPreviewRetryAt, previewClock.now < retryAt { continue }
             let gen = runGen
@@ -2307,7 +2363,7 @@ final class LiveSession: ObservableObject {
             let clipped = job.samples.count > maxN
             let clip = clipped ? Array(job.samples.suffix(maxN)) : job.samples
             let t0 = Date()
-            let r: (lang: String, text: String, correctionAddress: String?, speakerAddress: String?)
+            let r: (lang: String, text: String, correctionAddress: String?, speakerAddress: String?, observedLanguage: String?)
             do {
                 r = try await sentenceRecognizer.recognize(clip, candidates: cands, fallback: fallback, preview: true)
             } catch {
@@ -2323,16 +2379,13 @@ final class LiveSession: ObservableObject {
             }
             hearLogText("实时识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：",
                         String(r.1.prefix(30)))
-            var src = forced ?? ((r.0 == b.id) ? b : a)
-            // 按已经出来的字马上判断语言：字是英文就放英文侧，是汉字就放中文侧，不等整句
-            if forced == nil, !SpeechTextFilter.matchesLanguage(r.1, src.id) {
-                let other = src == a ? b : a
-                if SpeechTextFilter.matchesLanguage(r.1, other.id) { src = other }
-            }
             guard !Task.isCancelled, generation == asrPreviewGeneration, gen == runGen,
                   isRunning, id == currentSeg, id > finishedSeg, partialSeg == id,
-                  SpeechTextFilter.isMeaningful(r.1),
-                  forced != nil || SpeechTextFilter.matchesLanguage(r.1, src.id) else { continue }
+                  SpeechTextFilter.isMeaningful(r.text),
+                  let language = forced?.id ?? SpeechTextFilter.resolveLanguage(r.text, detected: r.lang,
+                                                                                 candidates: cands, fallback: fallback)
+            else { continue }
+            let src = language == b.id ? b : a
             partialSource = src
             // 长句：预览窗口只留最近 10 秒，开头会被切掉。
             // 已经认出来的开头别让它消失：
@@ -2736,11 +2789,13 @@ final class LiveSession: ObservableObject {
         let cands = languages.map(\.id)
         do {
             guard await sense.isLoaded else { return nil }
-            let r = try await sense.recognize(samples, candidates: cands, fallback: fallbackLang.id)
-            guard SpeechTextFilter.isMeaningful(r.1) else { return nil }
-            let lang = languages.first { $0.id == r.0 } ?? fallbackLang
-            hearLogText("系统听写没出字，本地补认成功：", String(r.1.prefix(30)))
-            return (r.1, lang)
+            let r = try await sense.recognize(samples, candidates: cands, fallback: fallbackLang.id, preview: false)
+            guard SpeechTextFilter.isMeaningful(r.text),
+                  let language = SpeechTextFilter.resolveLanguage(r.text, detected: r.language,
+                                                                  candidates: cands, fallback: fallbackLang.id),
+                  let lang = languages.first(where: { $0.id == language }) else { return nil }
+            hearLogText("系统听写没出字，本地补认成功：", String(r.text.prefix(30)))
+            return (r.text, lang)
         } catch {
             return nil
         }
@@ -2897,6 +2952,7 @@ final class LiveSession: ObservableObject {
         let correctionAddress: String?
         let speakerAddress: String?
         let detected: String
+        let observedLanguage: String?
         let text: String
         let t0 = Date()
         do {
@@ -2906,6 +2962,7 @@ final class LiveSession: ObservableObject {
             let engine = sentenceRecognizer
             let result = try await engine.recognize(samples, candidates: cands, fallback: fallback)
             detected = result.lang
+            observedLanguage = result.observedLanguage
             text = result.text
             correctionAddress = result.correctionAddress
             speakerAddress = result.speakerAddress
@@ -2943,20 +3000,13 @@ final class LiveSession: ObservableObject {
         }
         guard gen == runGen else { return }              // 已经停止：结果丢弃
         guard isCurrentJob(itemID, token: token) else { return }   // 这一句已经被放弃/顶掉
-        var src = forced ?? ((detected == b.id) ? b : a)
-        // Whisper 判断的语言和文字对不上（例如说英文却判成中文）：按文字改成另一种语言
-        if forced == nil, !SpeechTextFilter.matchesLanguage(text, src.id) {
-            let other = src == a ? b : a
-            if SpeechTextFilter.matchesLanguage(text, other.id) { src = other }
-        }
-        let tgt = (src == a) ? b : a
-        if a == langA && b == langB { lastLangID = src.id }
-
-        // 没意义的、或者文字和语言对不上的（例如说中文却出来俄文）都当成噪声丢掉
+        // 语种与预览用同一规则，识别失败时已有译文仍可读。
         guard SpeechTextFilter.isMeaningful(text),
-              forced != nil || SpeechTextFilter.matchesLanguage(text, src.id) else {
+              let language = forced?.id ?? SpeechTextFilter.resolveLanguage(text, detected: detected,
+                                                                            candidates: cands, fallback: fallback)
+        else {
             if !text.isEmpty {
-                hearLogText("丢弃可疑识别结果（\(src.name)）：", String(text.prefix(30)), .warning)
+                hearLogText("丢弃可疑识别结果（\(detected)）：", String(text.prefix(30)), .warning)
             }
             if !isCurrentJob(itemID, token: token) { return }
             if items.first(where: { $0.id == itemID })?.translated.isEmpty == false {
@@ -2971,11 +3021,20 @@ final class LiveSession: ObservableObject {
             return
         }
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
+        let src = language == b.id ? b : a
+        let tgt = src == a ? b : a
+        if a == langA && b == langB { lastLangID = src.id }
+        // 保存可验证的第三方语种，方便之后切换语言时把历史气泡移到正确的一侧。
+        let recognizedLanguage = observedLanguage.flatMap { observed -> String? in
+            guard !cands.contains(observed), Language.all.contains(where: { $0.id == observed }),
+                  SpeechTextFilter.matchesLanguage(text, observed) else { return nil }
+            return observed
+        } ?? src.id
         var item = items[idx]
         item.updateTranscript(text, source: src, target: tgt, side: src == a ? .left : .right,
-                              recognizedLanguage: Language.all.first { $0.id == detected }?.id)
+                              recognizedLanguage: recognizedLanguage)
         let localSpeakerFolder: URL? = {
-            guard speakerTrackingEnabled, !usingCloudASR,
+            guard speakerTrackingEnabled, !usingCloudASR, !localOptionalWorkPaused,
                   let folder = SenseVoiceRecognizer.installedFolder(),
                   LocalSpeakerEmbedder.isInstalled(in: folder) else { return nil }
             return folder
@@ -3901,7 +3960,8 @@ final class LiveSession: ObservableObject {
     }
 
     private func loadClonerIfNeeded(allowDuringModelLoading: Bool = false) async {
-        guard !Task.isCancelled, voiceClone, !voiceCloneCloud, cloneInstalled, !cloneLoading else { return }
+        guard !Task.isCancelled, !localOptionalWorkPaused, voiceClone, !voiceCloneCloud,
+              cloneInstalled, !cloneLoading else { return }
         if isLoadingPhase, !allowDuringModelLoading { return }
         cloneLoading = true
         defer {
@@ -3909,7 +3969,7 @@ final class LiveSession: ObservableObject {
             modelsRevision += 1
         }
         if await cloner.isLoaded { return }
-        guard !Task.isCancelled, voiceClone, !voiceCloneCloud else { return }
+        guard !Task.isCancelled, !localOptionalWorkPaused, voiceClone, !voiceCloneCloud else { return }
         let free = Self.freeMB()
         let modelMB = Int(ModelManager.folderSize(ZipVoiceModel.directory) / 1_048_576)
         let required = max(modelMB + 300, 500)
@@ -4035,7 +4095,7 @@ final class LiveSession: ObservableObject {
 
     /// 在后台准备克隆声音。已有任务直接复用，避免同一句发出重复请求。
     private func prepareClone(_ id: UUID) -> Task<CloneAudio?, Never>? {
-        guard voiceClone else { return nil }
+        guard voiceClone, usingCloudClone || !localOptionalWorkPaused else { return nil }
         // 合并同一句的在途请求，成功结果保存在音频缓存，失败允许重试。
         if let existing = cloneTasks[id] { return existing }
         guard let item = items.first(where: { $0.id == id }),

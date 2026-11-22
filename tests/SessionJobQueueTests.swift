@@ -39,11 +39,15 @@ struct SessionJobQueueTests {
         try testSpeakers()
         try testZipVoiceArchive()
         testCloudReadiness()
+        try await testCloudInferencePolicy()
         try testConversationBubbleSides()
         try testTranslationRevision()
         try testCurrentSegmentTranslation()
         testSpeechGating()
+        testSegmentContinuity()
+        testSpeechLanguageResolution()
         testClonePlaybackSilence()
+        testClonePlaybackGain()
         testChineseDisplayLanguage()
         testConversationMerge()
         print("Session queue regressions passed")
@@ -83,6 +87,26 @@ struct SessionJobQueueTests {
     }
 }
 
+private func testCloudInferencePolicy() async throws {
+    precondition(CloudInferencePolicy.canTryAnotherAddress(after: .cannotConnectToHost))
+    precondition(!CloudInferencePolicy.canTryAnotherAddress(after: .timedOut))
+    precondition(!CloudInferencePolicy.canTryAnotherAddress(after: .networkConnectionLost))
+    precondition(CloudInferencePolicy.canTryAnotherAddress(afterHTTPStatus: 503))
+    precondition(!CloudInferencePolicy.canTryAnotherAddress(afterHTTPStatus: 504))
+    let started = ContinuousClock.now
+    let value = try await CloudInferencePolicy.before(started.advanced(by: .seconds(2))) { 42 }
+    precondition(value == 42)
+    do {
+        _ = try await CloudInferencePolicy.before(ContinuousClock.now.advanced(by: .milliseconds(50))) {
+            try await Task.sleep(for: .seconds(5))
+            return 42
+        }
+        preconditionFailure("A slow request completed after its deadline")
+    } catch let error as URLError where error.code == .timedOut {
+        precondition(started.duration(to: .now) < .seconds(3), "The expired request kept the next job waiting")
+    }
+}
+
 private func testClonePlaybackSilence() {
     let rate = 24_000
     let tone = (0..<(rate / 2)).map { Float(sin(Double($0) * 2 * .pi * 210 / Double(rate))) * 0.12 }
@@ -104,6 +128,24 @@ private func testClonePlaybackSilence() {
     precondition(CloneAudio(samples: [.nan] + tone, sampleRate: rate).trimmingEdgeSilence() == nil)
     let short = CloneAudio(samples: tone, sampleRate: rate).trimmingEdgeSilence()
     precondition(short?.audio.samples == tone && short?.leading == 0 && short?.trailing == 0)
+}
+
+private func testClonePlaybackGain() {
+    let rate = 24_000
+    let quiet = (0..<4_800).map { $0.isMultiple(of: 2) ? Float(0.002) : -0.002 }
+    guard let level = CloneAudio(samples: quiet, sampleRate: rate).playbackGain() else {
+        preconditionFailure("Rejected a quiet recording with sustained signal")
+    }
+    precondition(level.gain == 8)
+    let silence = [Float](repeating: 0, count: quiet.count)
+    var click = silence
+    click[450] = 0.6
+    precondition(CloneAudio(samples: silence, sampleRate: rate).playbackGain() == nil)
+    precondition(CloneAudio(samples: click, sampleRate: rate).playbackGain() == nil)
+    precondition(CloneAudio(samples: [.infinity] + quiet, sampleRate: rate).playbackGain() == nil)
+    let loud = quiet.map { $0 * 500 }
+    let peak = CloneAudio(samples: loud, sampleRate: rate).playbackGain()
+    precondition(peak.map { $0.gain * $0.peak <= 0.85 } == true)
 }
 
 private func testChineseDisplayLanguage() {
@@ -169,6 +211,51 @@ private func testSpeechGating() {
     detector.detectsSpeech = false
     segmenter.feed(Array(repeating: 0.05, count: 16_000))
     precondition(started == 1 && ended == 1, "Short speech followed by noise should be kept and finalized")
+}
+
+private func testSegmentContinuity() {
+    func segments(for audio: [Float]) -> [[Float]] {
+        let segmenter = Segmenter()
+        var results: [[Float]] = []
+        segmenter.onEvent = {
+            if case .ended(_, let samples) = $0 { results.append(samples) }
+        }
+        for start in stride(from: 0, to: audio.count, by: 1_613) {
+            segmenter.feed(Array(audio[start..<min(start + 1_613, audio.count)]))
+        }
+        segmenter.flush()
+        return results
+    }
+    let rate = 16_000
+    let first = (0..<(rate * 12)).map { 0.04 + Float($0) / Float(rate * 1_000) }
+    let pause = [Float](repeating: 0, count: 6 * 480)
+    let second = [Float](repeating: 0.07, count: rate + 97)
+    let natural = segments(for: first + pause + second)
+    precondition(natural.count == 2 && natural[0] == first + pause && natural[1] == second,
+                 "A natural pause near the limit should split without dropping or reusing audio")
+    let continuous = (0..<(rate * 15 + 6 * 480 + 29)).map { 0.04 + Float($0) / Float(rate * 1_000) }
+    let hardLimit = segments(for: continuous)
+    precondition(hardLimit.count == 2 && hardLimit[0].count == rate * 15,
+                 "Continuous speech should keep a short remainder after the hard limit")
+    precondition(hardLimit.flatMap { $0 } == continuous, "The hard split changed the audio stream")
+}
+
+private func testSpeechLanguageResolution() {
+    let pair = ["zh", "en"]
+    precondition(SpeechTextFilter.resolveLanguage("明天 meeting 讨论 API design", detected: "en",
+                                                  candidates: pair, fallback: "en") == "zh")
+    precondition(SpeechTextFilter.resolveLanguage("Schedule the API meeting", detected: "zh",
+                                                  candidates: pair, fallback: "zh") == "en")
+    precondition(SpeechTextFilter.resolveLanguage("今天開會", detected: "zh",
+                                                  candidates: ["ja", "en"], fallback: "en") == "ja")
+    precondition(SpeechTextFilter.resolveLanguage("今日は API を使います", detected: "zh",
+                                                  candidates: ["zh", "ja"], fallback: "zh") == "ja")
+    precondition(SpeechTextFilter.resolveLanguage("오늘 API를 봅니다", detected: "en",
+                                                  candidates: ["ko", "en"], fallback: "en") == "ko")
+    precondition(SpeechTextFilter.resolveLanguage("это не речь", detected: "zh", candidates: pair, fallback: "zh") == nil)
+    precondition(SpeechTextFilter.retryLanguage("это не речь", detected: "zh", candidates: pair) == nil)
+    precondition(!SpeechTextFilter.isMeaningful("嗯，嗯。"))
+    precondition(!SpeechTextFilter.isMeaningful("Thank you for watching"))
 }
 
 private func testTranslationRevision() throws {

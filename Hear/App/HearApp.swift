@@ -5,8 +5,6 @@ struct HearApp: App {
     @StateObject private var session = LiveSession()
 
     init() {
-        // 崩溃/被杀掉的诊断：越早装上越好
-        CrashGuard.shared.install()
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
         let revision = Bundle.main.infoDictionary?["HearSourceRevision"] as? String ?? "-"
         AppLog.appendDirect("启动版本：构建 \(build)，提交 \(revision)", .info)

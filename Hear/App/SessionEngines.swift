@@ -6,19 +6,20 @@ enum SessionSpeechEngine {
     case senseVoice(SenseVoiceRecognizer)
 
     func recognize(_ samples: [Float], candidates: [String], fallback: String, preview: Bool = false)
-        async throws -> (lang: String, text: String, correctionAddress: String?, speakerAddress: String?) {
+        async throws -> (lang: String, text: String, correctionAddress: String?, speakerAddress: String?, observedLanguage: String?) {
         try Task.checkCancellation()
         switch self {
         case .cloud(let client):
             if preview {
                 let (lang, text) = try await client.transcribePreview(
                     samples: samples, candidates: candidates, fallback: fallback)
-                return (lang, text, nil, nil)
+                return (lang, text, nil, nil, lang)
             }
-            return try await client.transcribe(samples: samples, candidates: candidates, fallback: fallback)
+            let result = try await client.transcribe(samples: samples, candidates: candidates, fallback: fallback)
+            return (result.lang, result.text, result.correctionAddress, result.speakerAddress, result.lang)
         case .senseVoice(let recognizer):
-            let (lang, text) = try await recognizer.recognize(samples, candidates: candidates, fallback: fallback)
-            return (lang, text, nil, nil)
+            let result = try await recognizer.recognize(samples, candidates: candidates, fallback: fallback, preview: preview)
+            return (result.language, result.text, nil, nil, result.observed)
         }
     }
 }

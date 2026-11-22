@@ -8,9 +8,7 @@ import os
 ///   · 崩溃（Swift 运行时错误、NSException，比如音频引擎的"required condition is false"）
 ///   · 内存不够被系统杀掉（jetsam）
 ///   · 卡死被系统杀掉（watchdog）
-/// 这里做两件事：
-///   1. 装上异常/信号的处理程序，崩之前把原因写进日志文件（同步写，来不及走队列也得写进去）
-///   2. 留一个"标记文件"：正常退出会删掉它，下次打开发现还在，就知道上次是不正常结束的
+/// 崩溃交给系统生成诊断。这里保留内存标记，并在升级后读取旧版写下的崩溃记录。
 final class CrashGuard {
     static let shared = CrashGuard()
 
@@ -24,13 +22,7 @@ final class CrashGuard {
     private let crashURL: URL
     private let queue = DispatchQueue(label: "hear.crashguard")
 
-    /// 日志文件的位置（跟 AppLog 写的是同一个文件）
-    private static var logFileURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("hear-log.txt")
-    }
-
-    /// 现在还能用多少内存（MB）。信号处理程序里也能安全调用
+    /// 现在还能用多少内存（MB）。
     private static var freeMBNow: Int { Int(os_proc_available_memory() / 1_048_576) }
 
     /// 上次退出前记录的状态（写进标记文件，下次打开时读出来告诉用户）
@@ -45,75 +37,6 @@ final class CrashGuard {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         markerURL = docs.appendingPathComponent("hear-running.json")
         crashURL = docs.appendingPathComponent("hear-crash.txt")
-    }
-
-    // MARK: - 装上处理器
-
-    /// 在 App 一启动就装上（越早越好，崩了才抓得到）
-    func install() {
-        installExceptionHandler()
-        installSignalHandlers()
-    }
-
-    /// ObjC 异常（比如音频引擎的 precondition 失败）走这里
-    private func installExceptionHandler() {
-        // NSSetUncaughtExceptionHandler 的返回值在 Swift 里是 Void，
-        // 接不上系统原来那个处理程序，所以这里只负责把原因写进日志。
-        // 处理程序返回后，系统照样会终止 App（只是没有系统的崩溃报告文件），
-        // 我们自己的日志里有完整的调用栈，够查了。
-        NSSetUncaughtExceptionHandler { exception in
-            let reason = exception.reason ?? "没有原因"
-            let name = exception.name.rawValue
-            let trace = exception.callStackSymbols.prefix(15).joined(separator: "\n")
-            let text = "崩溃：\(name)\n原因：\(reason)\n调用栈：\n\(trace)\n"
-            CrashGuard.shared.record(text)
-        }
-    }
-
-    /// Swift 运行时的错误（数组越界、强制解包 nil 等）会发 SIGILL/SIGTRAP
-    /// 内存访问错误发 SIGSEGV/SIGBUS，主动退出发 SIGABRT
-    private func installSignalHandlers() {
-        let signals: [Int32] = [SIGABRT, SIGSEGV, SIGILL, SIGTRAP, SIGFPE, SIGBUS]
-        for sig in signals {
-            signal(sig) { signo in
-                // 信号处理程序里只能做异步信号安全的操作：写一个固定内容的小文件
-                CrashGuard.shared.recordSignal(signo)
-                // 恢复默认行为，让系统照常生成崩溃报告
-                signal(signo, SIG_DFL)
-                raise(signo)
-            }
-        }
-    }
-
-    // MARK: - 写记录
-
-    /// 崩溃信息：直接同步写文件（崩溃时不能再走 AppLog 的队列）
-    private func record(_ text: String) {
-        queue.sync {
-            let line = "[\(Date())] \(text)\n"
-            append(line, to: crashURL)
-            append(line, to: Self.logFileURL)
-        }
-    }
-
-    /// 信号处理程序里直接写文件，不走 queue：
-    /// 万一信号正好在 queue.sync 里来，再 sync 一次就死等不动了
-    private func recordSignal(_ signo: Int32) {
-        let line = "[\(Date())] 收到信号 \(signo)（崩溃）\n"
-        append(line, to: crashURL)
-        append(line, to: Self.logFileURL)
-    }
-
-    private func append(_ line: String, to url: URL) {
-        guard let data = line.data(using: .utf8) else { return }
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-        if let h = try? FileHandle(forWritingTo: url) {
-            h.seekToEndOfFile()
-            h.write(data)
-            try? h.close()
-        }
     }
 
     // MARK: - 标记文件

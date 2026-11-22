@@ -1,6 +1,46 @@
 import Foundation
 
 enum SpeechTextFilter {
+    /// Model labels break ties when the writing systems overlap. Kana and Hangul
+    /// identify their own languages; Latin product names can be part of Chinese.
+    static func resolveLanguage(_ text: String, detected: String?, candidates: [String],
+                                fallback: String) -> String? {
+        let scalars = text.unicodeScalars
+        if candidates.contains("ja"), scalars.contains(where: { $0.properties.isAlphabetic && isKana($0.value) }) {
+            return "ja"
+        }
+        if candidates.contains("ko"), scalars.contains(where: { $0.properties.isAlphabetic && inScript($0.value, "ko") }) {
+            return "ko"
+        }
+
+        if candidates.contains("zh"), candidates.contains("en") {
+            var han = 0
+            var latinRuns = 0
+            var inLatin = false
+            for scalar in scalars {
+                if inScript(scalar.value, "zh") { han += 1 }
+                let latin = scalar.properties.isAlphabetic && isLatin(scalar.value)
+                if latin && !inLatin { latinRuns += 1 }
+                inLatin = latin
+            }
+            if han >= 2, latinRuns > 0, han >= latinRuns || detected == "zh" { return "zh" }
+        }
+
+        if let detected, candidates.contains(detected), matchesLanguage(text, detected) { return detected }
+        if candidates.contains(fallback), matchesLanguage(text, fallback) { return fallback }
+        return candidates.first { matchesLanguage(text, $0) }
+    }
+
+    static func retryLanguage(_ text: String, detected: String?, candidates: [String]) -> String? {
+        guard let detected, candidates.contains(detected) else { return nil }
+        // Retry only when part of a plausibly spoken result supports the model's
+        // label, even though the full text didn't pass the script check.
+        let count = text.unicodeScalars.lazy.filter {
+            $0.properties.isAlphabetic && inScript($0.value, detected)
+        }.prefix(2).count
+        return count == 2 ? detected : nil
+    }
+
     static func matchesLanguage(_ text: String, _ lang: String) -> Bool {
         var total = 0, hit = 0
         var inLatinRun = false
@@ -30,11 +70,15 @@ enum SpeechTextFilter {
         (0xC0...0x24F).contains(v) || (0x1E00...0x1EFF).contains(v)
     }
 
+    private static func isKana(_ v: UInt32) -> Bool {
+        (0x3040...0x30FF).contains(v)
+    }
+
     private static func inScript(_ v: UInt32, _ lang: String) -> Bool {
         let han = (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v)
         switch lang {
         case "zh": return han
-        case "ja": return han || (0x3040...0x30FF).contains(v)
+        case "ja": return han || isKana(v)
         case "ko": return (0xAC00...0xD7AF).contains(v) || (0x1100...0x11FF).contains(v) || (0x3130...0x318F).contains(v)
         case "ru": return (0x0400...0x04FF).contains(v)
         case "ar": return (0x0600...0x06FF).contains(v) || (0x0750...0x077F).contains(v)
