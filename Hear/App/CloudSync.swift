@@ -11,6 +11,7 @@ import UniformTypeIdentifiers
 /// - 每次同步自动判断方向：哪边更新用哪边。对话按每一页的修改时间比较；删掉的对话两边都删。
 /// - 设置：只有 iCloud 那边改过、这台手机没改过时才用 iCloud 的；两边都改过时以这台手机为准。
 /// - 大模型 API Key 存在钥匙串里，不同步（恢复后需要重新填一次 Key）。
+/// - 在线模型的访问口令跟设置一起同步（重装或换手机后不用再填；泄露时到 Token 管理后台撤销）。
 /// - 免费账号自签的 App 用不了 CloudKit，所以用“iCloud 云盘里的文件夹”这种方式，第一次打开时选一次文件夹。
 extension Notification.Name {
     /// iCloud 把设置同步过来了：App 里的设置要立刻换新的（不用重开）
@@ -56,6 +57,9 @@ final class CloudSync: ObservableObject {
     private static let addedSettingKeys = [
         "logContentEnabled", PerformanceLog.enabledKey,
         ChineseDisplayLanguage.preferenceKey, "speakerTrackingEnabled", "manualSpeakerOutput",
+        // 在线模型的访问口令：重装 App 或换手机后不用再手动填。
+        // 它会和其他设置一起写进 iCloud 云盘「听见」文件夹；口令泄露时到 Token 管理后台撤销即可。
+        "cloudAccessToken",
     ]
     private static let settingKeys = legacySettingKeys + addedSettingKeys
 
@@ -604,6 +608,10 @@ final class CloudSync: ObservableObject {
         let d = UserDefaults.standard
         for k in Self.settingKeys { if let v = s[k] { d.set(v, forKey: k) } }
         d.set(hash ?? Self.settingsHash(Self.localSettings()), forKey: Keys.settingsHash)
+        // 访问口令马上交给网络层：运行中打开 iCloud 同步时，不用重开 App 就能用上
+        if let token = s["cloudAccessToken"] as? String {
+            CloudClient.accessToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         // 告诉 App：新设置已经写好了，直接换上，不用重开
         NotificationCenter.default.post(name: .hearCloudSettingsApplied, object: nil)
         // UserDefaults 的变动通知是异步发的，稍后再恢复监听
