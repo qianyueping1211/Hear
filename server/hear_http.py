@@ -103,11 +103,15 @@ class RequestPolicy:
             return "managed"
         return "legacy" if self.access_token is not None else "off"
 
-    def authorize(self, connection, peer_host, token):
-        """推理接口和 /v1/auth/check 共用的鉴权。只看内存，不访问数据库或管理服务。"""
+    def transport_ok(self, connection, peer_host):
+        """这条连接能不能承载带口令的请求：TLS，或显式允许的本机明文回源。"""
         # Use the real TCP peer. Forwarded headers cannot authorize plaintext.
         local_proxy = self.allow_loopback_http and peer_host in ("127.0.0.1", "::1")
-        secure = isinstance(connection, ssl.SSLSocket) or local_proxy
+        return isinstance(connection, ssl.SSLSocket) or local_proxy
+
+    def authorize(self, connection, peer_host, token):
+        """推理接口和 /v1/auth/check 共用的鉴权。只看内存，不访问数据库或管理服务。"""
+        secure = self.transport_ok(connection, peer_host)
         if self.authenticator is not None:
             if not secure:
                 return AuthResult.deny("HTTPS_REQUIRED", 403)
@@ -185,7 +189,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         route = urlsplit(self.path).path
         try:
             if route == "/health":
-                self._send_json(self.health())
+                body = self.health()
+                policy = getattr(self.server, "request_policy", None)
+                if policy is not None and isinstance(body, dict):
+                    # 告诉客户端：这条线路上带口令的推理会不会因为明文 HTTP 被拒（HTTPS_REQUIRED）
+                    body = dict(body)
+                    body["transport_ready"] = policy.transport_ok(self.connection, self.client_address[0])
+                self._send_json(body)
             elif route == "/v1/pair":
                 self._send_json(self.pairing_info())
             elif route == "/ping":
