@@ -181,10 +181,12 @@ fn build_server_command() -> Result<Command, String> {
         }
     }
 
-    // 开发期回退：查找同仓库的 ../server/hear_cloud.py
+    // 开发期回退：查找同仓库的 server/hear_cloud.py（兼容 apps/desktop/ 与仓库根目录启动）
     let candidates = [
-        PathBuf::from("../server/hear_cloud.py"),
         PathBuf::from("../../server/hear_cloud.py"),
+        PathBuf::from("../../../server/hear_cloud.py"),
+        PathBuf::from("../../../../server/hear_cloud.py"),
+        PathBuf::from("../server/hear_cloud.py"),
         PathBuf::from("server/hear_cloud.py"),
     ];
     for script in candidates {

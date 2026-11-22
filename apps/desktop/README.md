@@ -19,16 +19,16 @@
 1. 安装 [Node.js 20 LTS](https://nodejs.org/) 与 [Rustup (MSVC)](https://rustup.rs/)（Visual Studio 需勾选「使用 C++ 的桌面开发」）。
 2. 安装前端依赖并启动开发模式（开发期自动调用同仓库 `../server/hear_cloud.py`）：
    ```powershell
-   cd desktop
+   cd apps\desktop
    npm install
    npm run tauri dev
    ```
 3. 运行 Rust 核心单元测试（断句器与流式 WAV 录音器）：
    ```powershell
-   cd desktop\src-tauri
+   cd apps\desktop\src-tauri
    cargo test
    ```
 4. 也可直接推送到 GitHub，通过 `.github/workflows/build-windows.yml` 在 `windows-latest` 自动构建并发布 Windows 安装包：
-   - 版本号独立管理于 `desktop/VERSION`（如 `0.1.0`）
+   - 版本号独立管理于 `apps/desktop/VERSION`（如 `0.1.1`）
    - GitHub Release 标题：`听见 Windows 0.1.0`（Tag：`win-v0.1.0`）
    - 安装包文件名：`Hear-Win-0.1.0.exe`（NSIS 单文件安装程序，内置 `hear-server` Sidecar）

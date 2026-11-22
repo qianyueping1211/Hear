@@ -5,7 +5,7 @@
 | 当前平台 | 版本 | 下载与说明 |
 | --- | --- | --- |
 | iPhone（iOS 18+） | 0.4.86 | [下载 iOS 安装包](https://github.com/qianyueping1211/Hear/releases/tag/v0.4.86) |
-| Windows x64 | 0.1.0 预览版 | [下载 Windows 安装程序](https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0) · [桌面端说明](desktop/README.md) |
+| Windows x64 | 0.1.0 预览版 | [下载 Windows 安装程序](https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0) · [桌面端说明](apps/desktop/README.md) |
 
 iPad、Android、鸿蒙和 macOS 客户端尚未发布；仓库中的 Android、鸿蒙目录目前只是预留。
 
@@ -21,13 +21,13 @@ iPad、Android、鸿蒙和 macOS 客户端尚未发布；仓库中的 Android、
 📄 产品与技术介绍（两个平台的定位、iPhone 功能架构、服务接口）：**[docs/index.html](docs/index.html)**
 （下载后用浏览器打开就行）
 
-🪟 Windows 桌面程序见 **[desktop/README.md](desktop/README.md)**。如果只想用 Windows 电脑为 iPhone 提供模型服务，见 **[docs/windows-deploy.md](docs/windows-deploy.md)**。
+🪟 Windows 桌面程序见 **[apps/desktop/README.md](apps/desktop/README.md)**。如果只想用 Windows 电脑为 iPhone 提供模型服务，见 **[docs/windows-deploy.md](docs/windows-deploy.md)**。
 
 ---
 
 ## Windows 桌面端
 
-从 [Windows 0.1.0 预览版](https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0) 下载 `Hear-Win-0.1.0.exe` 并安装。桌面程序可以连接已有的模型服务，也包含本机模型服务入口；首次使用本机模型需要准备模型。功能与开发说明见 [desktop/README.md](desktop/README.md)。
+从 [Windows 0.1.0 预览版](https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0) 下载 `Hear-Win-0.1.0.exe` 并安装。桌面程序可以连接已有的模型服务，也包含本机模型服务入口；首次使用本机模型需要准备模型。功能与开发说明见 [apps/desktop/README.md](apps/desktop/README.md)。
 
 `start-hear-cloud.bat` 是单独启动模型服务的脚本，适合让 iPhone 连接电脑上的模型；它不是 Windows 桌面程序的安装包。
 
@@ -135,7 +135,7 @@ apps/ios/                       iPhone App 与实时活动扩展
 ├── tests/                      iOS 会话回归测试
 ├── project.yml                 XcodeGen 工程描述
 └── VERSION                     iOS 独立版本号
-desktop/                        Windows 桌面端及未来 macOS 桌面端
+apps/desktop/                   Windows 桌面端及未来 macOS 桌面端
 server/                         桌面端与移动端共用的模型服务
 branding/                       两端共用的图标源文件
 setup.sh                        Mac 一键生成 iOS 工程
@@ -152,7 +152,7 @@ scripts/fetch_llama.sh          下载 llama.cpp 的 iOS 框架
 - **llama.cpp 新版本改了接口导致编译错误**：可以固定版本。在 workflow 的 `env` 里加 `LLAMA_TAG: b7xxx`（填一个能用的版本号）。
 - **打包显示 “The job was not acquired by Runner” 或 “Internal server error”**：这是 GitHub 自己的服务器临时出问题，和代码无关。进入这次打包，点右上角 **Re-run all jobs** 重新打包即可。
 - **免费账号限制**：同时最多 3 个自签 App；每 7 天需要重签。
-- **版本号**：三位数字，iOS 写在 `apps/ios/VERSION`（例如 `1.0.0`），Windows 写在 `desktop/VERSION`。iOS 安装包按平台和版本号命名，例如 `Hear-iOS-1.0.0.ipa`。
+- **版本号**：三位数字，iOS 写在 `apps/ios/VERSION`（例如 `1.0.0`），Windows 写在 `apps/desktop/VERSION`。iOS 安装包按平台和版本号命名，例如 `Hear-iOS-1.0.0.ipa`。
 
 
 ## 声音克隆引擎

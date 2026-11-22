@@ -1,6 +1,6 @@
 # Windows 部署清单
 
-本文介绍在 Windows 上运行**模型服务**，供 iPhone App 连接。Windows 桌面程序另见 [桌面端说明](../desktop/README.md) 和 [安装包发布页](https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0)。
+本文介绍在 Windows 上运行**模型服务**，供 iPhone App 连接。Windows 桌面程序另见 [桌面端说明](../apps/desktop/README.md) 和 [安装包发布页](https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0)。
 
 在 Windows 上把「听见」的云端服务（模型跑在电脑上，手机连过来）装起来、
 跑起来、验证能用，按这份清单走。踩过的坑都写在下面了。

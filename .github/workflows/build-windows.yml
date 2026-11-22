@@ -4,23 +4,19 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    # 与 iOS 完全解耦：仅当 desktop/、共用 server 核心文件或本工作流变更时触发
+    # 与 iOS 完全解耦：仅当 apps/desktop/、共用 server 核心文件或本工作流变更时触发
     paths:
-      - 'desktop/**'
+      - 'apps/desktop/**'
       - 'server/hear_cloud.py'
       - 'server/hear_http.py'
       - 'server/hear_auth.py'
       - 'server/hear_speaker.py'
       - 'server/requirements.txt'
-      - 'scripts/prepare_desktop_icons.py'
-      - 'scripts/sync_desktop_version.py'
       - '.github/workflows/build-windows.yml'
   pull_request:
     paths:
-      - 'desktop/**'
+      - 'apps/desktop/**'
       - 'server/**'
-      - 'scripts/prepare_desktop_icons.py'
-      - 'scripts/sync_desktop_version.py'
       - '.github/workflows/build-windows.yml'
 
 permissions:
@@ -86,14 +82,14 @@ jobs:
           Write-Host "OK: 未检测到证书/私钥文件"
           exit 0
 
-      # Windows 版本号独立写在 desktop/VERSION（例如 0.1.0），每次发布前提高该文件
+      # Windows 版本号独立写在 apps/desktop/VERSION（例如 0.1.1），每次发布前提高该文件
       - name: Version
         id: version
         shell: pwsh
         run: |
-          $ver = (Get-Content -Raw desktop/VERSION).Trim()
+          $ver = (Get-Content -Raw apps/desktop/VERSION).Trim()
           if ($ver -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
-            Write-Error "desktop/VERSION 格式不对：$ver（应为 0.1.0 这样的三位版本号）"
+            Write-Error "apps/desktop/VERSION 格式不对：$ver（应为 0.1.0 这样的三位版本号）"
             exit 1
           }
           $tag = "win-v$ver"
@@ -108,7 +104,7 @@ jobs:
                 $releaseCommit = (git ls-remote --tags origin "refs/tags/$tag" | ForEach-Object { ($_ -split "`t")[0] })
               }
               if ($releaseCommit -and $releaseCommit -ne $env:GITHUB_SHA) {
-                Write-Error "$tag 已对应另一个源码提交，请提高 desktop/VERSION 再发布。"
+                Write-Error "$tag 已对应另一个源码提交，请提高 apps/desktop/VERSION 再发布。"
                 exit 1
               }
             }
@@ -130,7 +126,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: 'desktop/src-tauri -> target'
+          workspaces: 'apps/desktop/src-tauri -> target'
 
       - uses: actions/setup-python@v5
         with:
@@ -138,9 +134,9 @@ jobs:
           cache: 'pip'
           cache-dependency-path: server/requirements.txt
 
-      - name: Sync desktop/VERSION into package.json, Cargo.toml, tauri.conf.json
+      - name: Sync apps/desktop/VERSION into package.json, Cargo.toml, tauri.conf.json
         shell: pwsh
-        run: python scripts/sync_desktop_version.py
+        run: python apps/desktop/scripts/sync_desktop_version.py
 
       - name: Build Python Sidecar (hear-server-x86_64-pc-windows-msvc.exe)
         shell: pwsh
@@ -152,25 +148,25 @@ jobs:
             --hidden-import hear_auth `
             --hidden-import hear_speaker `
             server/hear_cloud.py
-          New-Item -ItemType Directory -Force -Path desktop/src-tauri/binaries | Out-Null
-          Copy-Item dist/hear-server-x86_64-pc-windows-msvc.exe desktop/src-tauri/binaries/hear-server-x86_64-pc-windows-msvc.exe -Force
+          New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries | Out-Null
+          Copy-Item dist/hear-server-x86_64-pc-windows-msvc.exe apps/desktop/src-tauri/binaries/hear-server-x86_64-pc-windows-msvc.exe -Force
 
       - name: Prepare desktop icons & build frontend
-        working-directory: desktop
+        working-directory: apps/desktop
         shell: pwsh
         run: |
-          python ../scripts/prepare_desktop_icons.py
+          python scripts/prepare_desktop_icons.py
           npm install
           npx tauri icon src-tauri/icons/icon.png
           npm run build
 
       - name: Run Rust unit tests
-        working-directory: desktop/src-tauri
+        working-directory: apps/desktop/src-tauri
         shell: pwsh
         run: cargo test
 
       - name: Build Windows x64 NSIS installer (.exe)
-        working-directory: desktop
+        working-directory: apps/desktop
         shell: pwsh
         run: npx tauri build --target x86_64-pc-windows-msvc --bundles nsis
 
@@ -178,7 +174,7 @@ jobs:
         shell: pwsh
         run: |
           $asset = "${{ steps.version.outputs.asset }}"
-          $nsisDir = "desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          $nsisDir = "apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
           $exe = Get-ChildItem -Path $nsisDir -Filter "*-setup.exe" | Select-Object -First 1
           if (-not $exe) {
             Write-Error "未在 $nsisDir 找到 NSIS 安装包 (.exe)"
