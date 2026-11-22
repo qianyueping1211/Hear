@@ -431,7 +431,7 @@ actor CloudClient {
               deadline: ContinuousClock.Instant? = nil) async -> ServiceKind {
         let a = Self.cleanURL(address)
         if let k = kinds[a] { return k }
-        if let info = await Self.probe(address: a, timeout: timeout, deadline: deadline) {
+        if let info = await Self.probe(address: a, timeout: timeout, deadline: deadline, checkInference: false) {
             kinds[a] = info.kind
             return info.kind
         }
@@ -739,8 +739,13 @@ actor CloudClient {
     }
 
     /// 顺便看一下这个地址上跑的是哪种服务
+    ///
+    /// checkInference = true（默认，在线模型状态就是用它刷新的）：/health 通了还不够，
+    /// 推理一定会被拒的地址（线路是明文、口令不对）当作不可用，返回 nil，界面显示"异常"。
+    /// 推理途中只想知道服务类型时传 false，不多发请求。
     static func probe(address: String, timeout: TimeInterval = 5,
-                      deadline: ContinuousClock.Instant? = nil) async -> ProbeResult? {
+                      deadline: ContinuousClock.Instant? = nil,
+                      checkInference: Bool = true) async -> ProbeResult? {
         let s = cleanURL(address)
         guard !s.isEmpty, let url = URL(string: s + "/health") else { return nil }
         var req = URLRequest(url: url)
@@ -748,7 +753,26 @@ actor CloudClient {
         let probeDeadline = deadline.map { min($0, ContinuousClock.now.advanced(by: .seconds(timeout))) }
         guard let (data, resp) = try? await requestData(req, deadline: probeDeadline),
               let code = (resp as? HTTPURLResponse)?.statusCode else { return nil }
-        return probeResult(data: data, code: code)
+        guard let result = probeResult(data: data, code: code) else { return nil }
+        if checkInference, result.kind == .aggregator,
+           case .blocked(let why) = await inferenceCheck(address: s, health: result.health) {
+            noteBlocked(s, why)
+            return nil
+        }
+        noteBlocked(s, nil)
+        return result
+    }
+
+    /// 能连通、但推理会被拒的地址：原因变了才写一次日志
+    private static let blockedLock = NSLock()
+    private static var blockedReasons: [String: String] = [:]
+
+    private static func noteBlocked(_ address: String, _ why: String?) {
+        blockedLock.lock()
+        let changed = blockedReasons[address] != why
+        blockedReasons[address] = why
+        blockedLock.unlock()
+        if changed, let why { hearLog("云端地址能连通，但推理会被拒：\(address)：\(why)", .warning) }
     }
 
     private static func probeResult(data: Data, code: Int) -> ProbeResult? {
@@ -845,47 +869,71 @@ actor CloudClient {
         return r
     }
 
-    /// 连通以后再确认推理会不会被拒：
-    ///  - 服务开着口令校验、但请求是以明文 HTTP 到达的（比如 Cloudflare Tunnel 回源到 http://），
-    ///    推理一定返回 HTTPS_REQUIRED
-    ///  - 托管口令模式下，用 /v1/auth/check 检查填的口令（不调用模型）
+    /// 连通以后再确认推理会不会被拒（测试连接用）
     private static func checkAuthorization(_ r: Diagnosis, address s: String,
                                            session: URLSession) async -> Diagnosis {
-        guard let health = r.service?.health, let mode = health["auth_mode"], mode != "off" else { return r }
-        if health["transport_ready"] == "false" {
-            return Diagnosis(text: "连上了，但请求是以明文 HTTP 到达电脑上的服务，识别和翻译会被拒绝（HTTPS_REQUIRED）。多半是 Cloudflare Tunnel 回源用了 http://：在电脑上用 start-hear-cloud.bat --cloudflare-local-http 启动，或者把 Tunnel 回源改成 https://localhost:8000。",
-                             service: r.service)
+        guard let health = r.service?.health else { return r }
+        // 正在测试的地址可能还没保存成通用服务地址：这时不带口令，只检查线路
+        switch await inferenceCheck(address: s, health: health, session: session, otherAddressBlocks: false) {
+        case .usable: return r
+        case .tokenValid: return Diagnosis(text: r.text + "，访问口令有效", service: r.service)
+        case .blocked(let why): return Diagnosis(text: "连上了，但" + why, service: r.service)
         }
-        guard mode == "managed" else { return r }
+    }
+
+    enum InferenceCheck: Equatable {
+        /// 没发现会被拒的原因（不校验口令的服务、旧的单口令模式没法提前验口令）
+        case usable
+        /// 托管口令模式：口令已用 /v1/auth/check 验过
+        case tokenValid
+        /// 推理一定会被拒，附上给用户看的原因
+        case blocked(String)
+    }
+
+    /// /health 通了不代表能识别。再看两件事（都不调用模型）：
+    ///  - 服务开着口令校验、但请求是以明文 HTTP 到达的（比如 Cloudflare Tunnel 回源到局域网 IP），
+    ///    推理一定返回 HTTPS_REQUIRED
+    ///  - 托管口令模式下，用 /v1/auth/check 检查填的口令
+    /// otherAddressBlocks：托管模式下，不是通用服务地址的地址（App 不会给它带口令）算不算不可用。
+    static func inferenceCheck(address: String, health: [String: String],
+                               session: URLSession? = nil,
+                               otherAddressBlocks: Bool = true) async -> InferenceCheck {
+        let s = cleanURL(address)
+        guard let mode = health["auth_mode"], mode != "off" else { return .usable }
+        if health["transport_ready"] == "false" {
+            return .blocked("请求是以明文 HTTP 到达电脑上的服务，识别和翻译会被拒绝（HTTPS_REQUIRED）。如果用的是 Cloudflare Tunnel：回源写 http://localhost:8000（不要写局域网 IP），并在同一台电脑上运行 cloudflared；或者用 start-hear-cloud.bat --cloudflare-local-http 启动。")
+        }
+        guard mode == "managed" else { return .usable }
         // 口令只发给通用服务地址，别的地址不带
         let owner = tokenAddress
-        guard !owner.isEmpty, cleanURL(owner) == s else { return r }
+        guard !owner.isEmpty, cleanURL(owner) == s else {
+            guard otherAddressBlocks else { return .usable }
+            return .blocked("这个地址只接受管理后台签发的 Token，但 App 只把访问口令发给「通用服务地址」：请把它填成通用服务地址，或者改用通用服务地址。")
+        }
         let token = accessToken.trimmingCharacters(in: .whitespacesAndNewlines)
         if token.isEmpty {
-            return Diagnosis(text: "连上了，但还没填访问口令：电脑上的服务只接受管理后台签发的 Token，识别和翻译会被拒绝。",
-                             service: r.service)
+            return .blocked("还没填访问口令：电脑上的服务只接受管理后台签发的 Token，识别和翻译会被拒绝。")
         }
-        guard let url = URL(string: s + "/v1/auth/check") else { return r }
+        guard let url = URL(string: s + "/v1/auth/check") else { return .usable }
         var req = URLRequest(url: url)
-        req.timeoutInterval = 15
+        req.timeoutInterval = 10
         req.setValue(token, forHTTPHeaderField: "X-Hear-Token")
-        guard let (data, resp) = try? await session.data(for: req),
-              let code = (resp as? HTTPURLResponse)?.statusCode else { return r }
-        if (200..<300).contains(code) {
-            return Diagnosis(text: r.text + "，访问口令有效", service: r.service)
-        }
+        let client = session ?? Self.session
+        // 检查请求本身没回来（网络抖动）时不下结论
+        guard let (data, resp) = try? await client.data(for: req),
+              let code = (resp as? HTTPURLResponse)?.statusCode else { return .usable }
+        if (200..<300).contains(code) { return .tokenValid }
         let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        let why: String
         switch body?["code"] as? String ?? "" {
-        case "TOKEN_REQUIRED", "TOKEN_INVALID": why = "访问口令不对，请到管理后台核对或重新签发"
-        case "TOKEN_NOT_STARTED": why = "访问口令还没到生效时间"
-        case "TOKEN_EXPIRED": why = "访问口令已过期"
-        case "TOKEN_REVOKED": why = "访问口令已被撤销"
-        case "AUTH_SERVICE_UNAVAILABLE": why = "电脑上的口令服务还没就绪（Token 管理服务没开或同步失败），请稍后再试"
-        case "HTTPS_REQUIRED": why = "请求是以明文 HTTP 到达电脑上的服务，识别和翻译会被拒绝"
-        default: why = "口令检查返回 \(code)"
+        case "TOKEN_REQUIRED", "TOKEN_INVALID": return .blocked("访问口令不对，请到管理后台核对或重新签发")
+        case "TOKEN_NOT_STARTED": return .blocked("访问口令还没到生效时间")
+        case "TOKEN_EXPIRED": return .blocked("访问口令已过期")
+        case "TOKEN_REVOKED": return .blocked("访问口令已被撤销")
+        case "AUTH_SERVICE_UNAVAILABLE":
+            return .blocked("电脑上的口令服务还没就绪（Token 管理服务没开或同步失败），请稍后再试")
+        case "HTTPS_REQUIRED": return .blocked("请求是以明文 HTTP 到达电脑上的服务，识别和翻译会被拒绝")
+        default: return .blocked("口令检查返回 \(code)")
         }
-        return Diagnosis(text: "连上了，但" + why, service: r.service)
     }
 
     /// 这段话是不是表示连上了
