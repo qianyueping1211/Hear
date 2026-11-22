@@ -1,10 +1,5 @@
 import Foundation
 
-struct CloneAudio: Sendable {
-    var samples: [Float]
-    var sampleRate: Int
-}
-
 /// 用 llama.cpp 跑 Qwen3-TTS 的声音克隆。
 enum CloudVoiceReference {
     static let languageNames: [String: String] = [

@@ -3230,10 +3230,10 @@ final class LiveSession: ObservableObject {
         if voiceClone, cloned == nil {
             if cloneAsked {
                 // 请求发出去了但没等到声音：服务不可用
-                hearLog("声音克隆服务不可用，改用系统声音朗读", .warning)
+                hearLog("未取得可播放的克隆声音，改用系统声音朗读", .warning)
                 if !cloneUnavailableNotified {
                     cloneUnavailableNotified = true
-                    showToast("声音克隆服务不可用，已改用系统声音朗读", seconds: 4)
+                    showToast("克隆声音暂不可用，已改用系统声音朗读", seconds: 4)
                 }
             } else {
                 // 连请求都没发：说清楚是什么原因（说得太短、太长、开关当时关着……）
@@ -4089,8 +4089,7 @@ final class LiveSession: ObservableObject {
                         return nil
                     }
                     hearLogNow("声音克隆（云端）：结束，生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
-                    await CloneCache.shared.put(key, out)
-                    return out
+                    return await CloneCache.shared.put(key, out)
                 }
                 guard await cloner.isLoaded else { return nil }
                 hearLogNow("声音克隆（本地）：开始生成")
@@ -4098,8 +4097,7 @@ final class LiveSession: ObservableObject {
                                                       reference: ref.samples, referenceText: refText)
                 hearLogNow("声音克隆（本地）：结束，生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
                 // 存进缓存，下次同一句话直接播放
-                await CloneCache.shared.put(key, out)
-                return out
+                return await CloneCache.shared.put(key, out)
             } catch {
                 hearLog("声音克隆生成失败：\(error)", .error)
                 return nil

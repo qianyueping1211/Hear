@@ -35,15 +35,38 @@ actor CloneCache {
         let url = dir.appendingPathComponent(fileName(key))
         guard let data = try? Data(contentsOf: url),
               let w = Wav.decode(data), !w.samples.isEmpty else { return nil }
-        let a = CloneAudio(samples: w.samples, sampleRate: w.sampleRate)
-        remember(key, a)
-        return a
+        guard let trimmed = checked(CloneAudio(samples: w.samples, sampleRate: w.sampleRate)) else {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
+        if trimmed.leading > 0 || trimmed.trailing > 0 { write(trimmed.audio, to: url) }
+        remember(key, trimmed.audio)
+        return trimmed.audio
     }
 
     /// 存起来
-    func put(_ key: String, _ audio: CloneAudio) {
-        remember(key, audio)
-        let url = dir.appendingPathComponent(fileName(key))
+    func put(_ key: String, _ audio: CloneAudio) -> CloneAudio? {
+        guard let trimmed = checked(audio) else { return nil }
+        remember(key, trimmed.audio)
+        write(trimmed.audio, to: dir.appendingPathComponent(fileName(key)))
+        return trimmed.audio
+    }
+
+    private func checked(_ audio: CloneAudio) -> (audio: CloneAudio, leading: Int, trailing: Int)? {
+        guard let trimmed = audio.trimmingEdgeSilence() else {
+            hearLog("声音克隆：音频为空、近似静音或格式无效", .warning)
+            return nil
+        }
+        if trimmed.leading > 0 || trimmed.trailing > 0 {
+            let rate = Double(audio.sampleRate)
+            let leading = String(format: "%.2f", Double(trimmed.leading) / rate)
+            let trailing = String(format: "%.2f", Double(trimmed.trailing) / rate)
+            hearLog("声音克隆：裁掉开头 \(leading) 秒、结尾 \(trailing) 秒静音")
+        }
+        return trimmed
+    }
+
+    private func write(_ audio: CloneAudio, to url: URL) {
         let wav = Wav.encode(samples: audio.samples, sampleRate: audio.sampleRate)
         try? wav.write(to: url, options: .atomic)
     }

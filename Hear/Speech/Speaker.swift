@@ -159,11 +159,10 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
             timedOutGen = nil
             return generation
         }
-        let limit = 5 + Double(samples.count) / sr * 1.5
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-            queue.sync { continuation = c }
             queue.async { [self] in
-                guard gen == generation else { return }
+                guard gen == generation else { c.resume(); return }
+                continuation = c
                 // 一定要按硬件当前的输出格式来播：耳机是 44.1k、手机是 48k，
                 // 蓝牙通话模式还是单声道。格式对不上，引擎就起不来（一片安静）。
                 guard let hw = ensureEngine() else {
@@ -176,41 +175,88 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
                     self.resume(gen)
                     return
                 }
-                self.playStarted = true
-                scheduled = 1
                 player.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
                     self?.queue.async {
-                        guard let self, gen == self.generation else { return }
-                        self.played += 1
-                        self.checkDone(gen)
+                        guard let self, gen == self.generation, self.continuation != nil else { return }
+                        if self.playStarted || (self.engine.isRunning && self.player.isPlaying) {
+                            self.finishClonePlayback(gen)
+                        } else {
+                            self.failClonePlayback(gen, reason: "音频输出未启动")
+                        }
                     }
                 }
                 if !player.isPlaying { player.play() }
-                emittingAudio = player.isPlaying
-            }
-            queue.asyncAfter(deadline: .now() + limit) { [weak self] in
-                guard let self, gen == self.generation, self.continuation != nil else { return }
-                hearLog("朗读：克隆声音播放超时，自动跳过", .warning)
-                self.resume(gen)                 // 先叫醒等待方
-                self.stopPlayback(gen: gen, timedOut: true)   // 声音也要停
+                let session = AVAudioSession.sharedInstance()
+                let tailLatency = max(0.05, session.outputLatency + session.ioBufferDuration * 2 + 0.05)
+                observeClonePlayback(gen, frames: AVAudioFramePosition(buf.frameLength), tailLatency: tailLatency,
+                                     lastFrame: 0, lastProgress: .now)
             }
         }
         // 结果分三种：正常播了 / 超时或起不来（失败，可以退回系统声音）/
         // 被人中途停掉（取消，千万别再出声）
         let outcome: PlayOutcome = queue.sync {
-            if timedOutGen == gen { return .failed }        // 超时
-            if gen != generation { return .cancelled }     // 被人停了
+            if timedOutGen == gen {
+                AudioRoute.speaking = false
+                return .failed
+            }
+            if gen != generation { return .cancelled }
+            AudioRoute.speaking = false
             return playStarted ? .played : .failed
         }
         let started = outcome == .played
         if started {
             hearLog("朗读：克隆声音 \(String(format: "%.1f", Double(samples.count) / sr)) 秒，\(Int(sr)) Hz，峰值 \(String(format: "%.2f", peak))")
         }
-        AudioRoute.speaking = false
-        if !AudioRoute.capturing { try? AudioRoute.updateSession() }
-        stopEngineIfIdle()
-        onPlaybackFinished?()
+        if outcome != .cancelled {
+            if !AudioRoute.capturing { try? AudioRoute.updateSession() }
+            stopEngineIfIdle()
+            onPlaybackFinished?()
+        }
         return outcome
+    }
+
+    /// Observe the player timeline; isPlaying alone only means it has been commanded to start.
+    /// Only the speaker queue calls this method.
+    private func observeClonePlayback(_ gen: Int, frames: AVAudioFramePosition, tailLatency: TimeInterval,
+                                      lastFrame: AVAudioFramePosition, lastProgress: ContinuousClock.Instant) {
+        guard gen == generation, continuation != nil else { return }
+        let now = ContinuousClock.now
+        let time = player.lastRenderTime.flatMap { player.playerTime(forNodeTime: $0) }
+        let frame = time.flatMap { $0.isSampleTimeValid ? $0.sampleTime : nil } ?? 0
+        let advanced = frame > lastFrame
+        if advanced && !playStarted {
+            playStarted = true
+            emittingAudio = true
+        }
+        if frame >= frames {
+            // Prefer the device completion callback. Use the route's presentation latency
+            // as a fallback when the buffer rendered but its callback is late or missing.
+            queue.asyncAfter(deadline: .now() + tailLatency) { [weak self] in
+                self?.finishClonePlayback(gen)
+            }
+            return
+        }
+        if !advanced, lastProgress.duration(to: now) > .seconds(1.2 + tailLatency) {
+            failClonePlayback(gen, reason: playStarted ? "音频输出已停滞" : "音频输出未启动")
+            return
+        }
+        queue.asyncAfter(deadline: .now() + .milliseconds(20)) { [weak self] in
+            self?.observeClonePlayback(gen, frames: frames, tailLatency: tailLatency,
+                                       lastFrame: max(frame, lastFrame), lastProgress: advanced ? now : lastProgress)
+        }
+    }
+
+    private func finishClonePlayback(_ gen: Int) {
+        guard gen == generation, continuation != nil else { return }
+        playStarted = true
+        resume(gen)
+        player.stop()
+    }
+
+    private func failClonePlayback(_ gen: Int, reason: String) {
+        hearLog("朗读：克隆声音\(reason)，尝试使用系统声音", .warning)
+        resume(gen)
+        stopPlayback(gen: gen, timedOut: true)
     }
 
     /// 现在有没有在出声（用来判断能不能放开麦克风）
@@ -221,11 +267,11 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
 
     /// 立即停止当前朗读
     func stop() {
-        if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
-        player.stop()
         queue.sync {
             generation += 1
             current = nil
+            if synth.isSpeaking { synth.stopSpeaking(at: .immediate) }
+            player.stop()
             emittingAudio = false
             let c = continuation
             continuation = nil

@@ -43,6 +43,7 @@ struct SessionJobQueueTests {
         try testTranslationRevision()
         try testCurrentSegmentTranslation()
         testSpeechGating()
+        testClonePlaybackSilence()
         testChineseDisplayLanguage()
         testConversationMerge()
         print("Session queue regressions passed")
@@ -80,6 +81,29 @@ struct SessionJobQueueTests {
         let decoded = try JSONDecoder().decode([TranslationItem].self, from: data)
         precondition(decoded == items, "Speaker edits should survive persistence")
     }
+}
+
+private func testClonePlaybackSilence() {
+    let rate = 24_000
+    let tone = (0..<(rate / 2)).map { Float(sin(Double($0) * 2 * .pi * 210 / Double(rate))) * 0.12 }
+    let pause = [Float](repeating: 0, count: rate / 4)
+    let speech = tone + pause + tone
+    let quiet = (0..<(rate * 5)).map { $0.isMultiple(of: 2) ? Float(0.00015) : -0.00015 }
+    var leading = quiet
+    leading[rate] = 0.9
+    let clip = CloneAudio(samples: leading + speech + quiet, sampleRate: rate)
+    guard let trimmed = clip.trimmingEdgeSilence() else { preconditionFailure("Rejected a sentence with silent edges") }
+    precondition(trimmed.leading == rate * 5 - rate * 8 / 100)
+    precondition(trimmed.trailing == rate * 5 - rate / 10)
+    let voicedStart = leading.count - trimmed.leading
+    precondition(Array(trimmed.audio.samples[voicedStart..<(voicedStart + speech.count)]) == speech,
+                 "Trimming edges changed speech or its internal pause")
+    let cached = trimmed.audio.trimmingEdgeSilence()
+    precondition(cached?.leading == 0 && cached?.trailing == 0, "Reopening prepared audio changed its length")
+    precondition(CloneAudio(samples: quiet, sampleRate: rate).trimmingEdgeSilence() == nil)
+    precondition(CloneAudio(samples: [.nan] + tone, sampleRate: rate).trimmingEdgeSilence() == nil)
+    let short = CloneAudio(samples: tone, sampleRate: rate).trimmingEdgeSilence()
+    precondition(short?.audio.samples == tone && short?.leading == 0 && short?.trailing == 0)
 }
 
 private func testChineseDisplayLanguage() {

@@ -104,7 +104,7 @@ jobs:
           swiftc -parse-as-library -import-objc-header Hear/Models/ModelArchive-Bridging-Header.h \
             Hear/App/SessionJobQueue.swift Hear/App/SpeakerTracker.swift Hear/Models/Language.swift \
             Hear/Models/ZipVoiceArchive.swift Hear/Cloud/CloudModelReadiness.swift \
-            Hear/Translate/PromptBuilder.swift Hear/Translate/TranslationOutput.swift Hear/Audio/Segmenter.swift \
+            Hear/Translate/PromptBuilder.swift Hear/Translate/TranslationOutput.swift Hear/Audio/Segmenter.swift Hear/Audio/CloneAudio.swift \
             Hear/Models/ConversationModels.swift Hear/Summary/SummaryTemplate.swift \
             tests/SessionJobQueueTests.swift -lbz2 -o "$RUNNER_TEMP/hear-session-tests"
           "$RUNNER_TEMP/hear-session-tests"
