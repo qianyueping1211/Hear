@@ -2246,6 +2246,15 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 流水线
 
+    private struct PreviewTiming {
+        let segment: Int
+        let start: ContinuousClock.Instant
+        var loggedSource = false
+        var loggedTranslation = false
+    }
+
+    private var previewTiming: PreviewTiming?
+
     private func handle(_ e: Segmenter.Event) {
         // 已经停止：停止前还没送到的断句事件一律丢弃
         // （最后那句的"结束"要接住：它带着这段声音，声音克隆要用）
@@ -2263,13 +2272,14 @@ final class LiveSession: ObservableObject {
             cancelMTPreview()
             currentSeg = id
             currentSegStartFrame = startFrame
+            previewTiming = PerformanceLog.isEnabled ? PreviewTiming(segment: id, start: .now) : nil
             partialSeg = id
             partial = "…"; partialTranslation = ""; partialTranslationTarget = nil; partialSource = forcedLang
             live?.markSegmentStart(id, frame: startFrame)
             for eng in appleEngines { eng.markSegmentStart(id, frame: startFrame) }
             hearLog("断句：检测到说话（第 \(id) 句）")
         case .partial(let id, let samples):
-            // 系统听写在工作时由它出原文；否则用 Whisper 不停地识别最新的声音
+            // 系统听写在工作时由它出原文；否则用当前引擎识别最新的声音
             guard !liveActive, appleEngines.isEmpty else { return }
             previews.recognition.submit((id, samples)) { [weak self] generation in
                 await self?.previewLoop(generation)
@@ -2450,6 +2460,16 @@ final class LiveSession: ObservableObject {
 
     /// 翻译线：只翻最新的原文，翻完一次再拿最新的，不断修正译文
     private func requestPreviewTranslation(id: Int, text: String, src: Language, tgt: Language) {
+        if let timing = previewTiming, timing.segment == id, !timing.loggedSource {
+            previewTiming?.loggedSource = true
+            let engine: String
+            if liveActive || !appleEngines.isEmpty {
+                engine = "Apple 听写"
+            } else {
+                engine = usingCloudASR ? "云端·\(Self.cloudSchemeName(cloudASRScheme))" : "SenseVoice"
+            }
+            PerformanceLog.record("首条预览原文", engine: engine, since: timing.start)
+        }
         previews.translation.submit((id, text, src, tgt)) { [weak self] loop in
             await self?.previewTranslateLoop(loop)
         }
@@ -2466,6 +2486,7 @@ final class LiveSession: ObservableObject {
             guard isRunning, id == currentSeg, id > finishedSeg else { continue }
             let gen = runGen
             let request = UUID()
+            let engine = translationEngine
             previews.translationRequest = request
             let source = TranslationSource.currentSegment(p.text, language: p.src,
                                                           after: useContext ? previousSegment() : nil)
@@ -2479,6 +2500,10 @@ final class LiveSession: ObservableObject {
                 if !final, value.count < self.partialTranslation.count { return }
                 self.partialTranslationTarget = p.tgt
                 self.partialTranslation = value
+                if let timing = self.previewTiming, timing.segment == id, !timing.loggedTranslation {
+                    self.previewTiming?.loggedTranslation = true
+                    PerformanceLog.record("首条预览译文", engine: engine, since: timing.start)
+                }
                 self.publishLiveActivity()
             }
             if usingAppleTranslation {
@@ -2745,6 +2770,7 @@ final class LiveSession: ObservableObject {
         let (samples, itemID, segID, gen, token) = (job.samples, job.itemID, job.segID, job.generation, job.token)
         let languages = [job.left, job.right]
         activity = "识别中…"
+        let started = PerformanceLog.isEnabled ? ContinuousClock.now : nil
         // 等系统听写把这句话定稿（最多 2.5 秒）
         await waitAppleFinal(segID)
         guard !Task.isCancelled, gen == runGen else { return }
@@ -2765,6 +2791,7 @@ final class LiveSession: ObservableObject {
                 spoken = r.text
                 src = r.lang
             } else {
+                PerformanceLog.record("整句识别", engine: "Apple 听写", since: started, outcome: "无结果")
                 hearLog("系统听写：这一段没听清，留着让用户改", .warning)
                 if let i = items.firstIndex(where: { $0.id == itemID }) {
                     jobTokens[itemID] = nil
@@ -2780,6 +2807,7 @@ final class LiveSession: ObservableObject {
         let leading = src == job.left
         let tgt = leading ? job.right : job.left
         if job.left == langA && job.right == langB { lastLangID = src.id }
+        PerformanceLog.record("整句识别", engine: "Apple 听写", since: started)
         hearLogText("系统听写（\(src.name)）：", String(spoken.prefix(40)))
 
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
@@ -2825,11 +2853,14 @@ final class LiveSession: ObservableObject {
         /// 这一句是不是系统听写来的（翻译失败时的处理不一样）
         let isApple: Bool
         var correctionAddress: String? = nil
+        var queuedAt: ContinuousClock.Instant? = nil
     }
 
     private func enqueueTranslation(_ job: MTJob) {
         let page = conversationID
-        translations.submit(job, item: job.itemID, page: page) { [weak self] job in
+        var request = job
+        if PerformanceLog.isEnabled { request.queuedAt = .now }
+        translations.submit(request, item: job.itemID, page: page) { [weak self] job in
             await self?.translateItem(job, conversation: page)
         } timedOut: { [weak self] job in
             guard let self, self.isCurrentJob(job.itemID, token: job.token) else { return }
@@ -2859,6 +2890,11 @@ final class LiveSession: ObservableObject {
             activity = "翻译中…"
         }
         translator.cancelPreview()
+        let engine = translationEngine
+        let started = PerformanceLog.isEnabled ? ContinuousClock.now : nil
+        if let queuedAt = job.queuedAt {
+            PerformanceLog.record("整句翻译排队", engine: engine, since: queuedAt)
+        }
         let result: String
         do {
             result = try await translateFinal(job.text, from: job.src, to: job.tgt, previous: previous) { part in
@@ -2870,6 +2906,7 @@ final class LiveSession: ObservableObject {
             }
         } catch {
             guard !Task.isCancelled, isCurrentJob(id, token: token) else { return }
+            PerformanceLog.record("整句翻译", engine: engine, since: started, outcome: "失败")
             hearLog("翻译失败：\(error)", .error)
             completeTranslation(job, "（翻译失败：\(error.localizedDescription)）", conversation: conversation)
             if job.isApple, conversation == conversationID {
@@ -2878,6 +2915,7 @@ final class LiveSession: ObservableObject {
             return
         }
         guard !Task.isCancelled, isCurrentJob(id, token: token) else { return }
+        PerformanceLog.record("整句翻译", engine: engine, since: started)
         completeTranslation(job, result, conversation: conversation)
         // 只对正在收音的同一页进行后台校正。
         if isRunning, conversation == conversationID, job.gen == runGen,
@@ -2993,7 +3031,8 @@ final class LiveSession: ObservableObject {
         let detected: String
         let observedLanguage: String?
         let text: String
-        let t0 = Date()
+        let t0 = ContinuousClock.now
+        let engineName = usingCloudASR ? "云端·\(Self.cloudSchemeName(cloudASRScheme))" : "SenseVoice"
         do {
             // 识别中，实时预览先让路。
             let use = recognition.beginFinal()
@@ -3006,17 +3045,13 @@ final class LiveSession: ObservableObject {
             text = result.text
             correctionAddress = result.correctionAddress
             speakerAddress = result.speakerAddress
-            // 日志里写清楚这次用的是哪个引擎（云端就写"云端"和用的哪个方案）
-            let engineName: String
-            if usingCloudASR {
-                engineName = "云端·\(Self.cloudSchemeName(cloudASRScheme))"
-            } else {
-                engineName = "SenseVoice"
-            }
-            hearLogText("整句识别（\(engineName)）\(String(format: "%.1f", Date().timeIntervalSince(t0)))s：",
+            PerformanceLog.record("整句识别", engine: engineName, since: t0)
+            let seconds = Double(PerformanceLog.milliseconds(since: t0)) / 1_000
+            hearLogText("整句识别（\(engineName)）\(String(format: "%.1f", seconds))s：",
                     String(text.prefix(40)))
         } catch {
             guard !Task.isCancelled, gen == runGen, isCurrentJob(itemID, token: token) else { return }
+            PerformanceLog.record("整句识别", engine: engineName, since: t0, outcome: "失败")
             hearLog("识别失败：\(error)", .error)
             let cloudError = error as? CloudClient.CloudError
             let keepEngine = cloudError?.shouldKeepConfiguredEngine ?? false

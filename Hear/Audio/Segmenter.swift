@@ -32,7 +32,12 @@ final class Segmenter {
     var speechDetector: SpeechPresenceDetector?
 
     private let sr = 16_000
-    private let frame = 480               // 30ms
+    private let frame = 480               // 30ms at 16 kHz
+
+    private func frames(forMilliseconds milliseconds: Int) -> Int {
+        let samplesTimes1000 = max(0, milliseconds) * sr
+        return (samplesTimes1000 + frame * 1_000 - 1) / (frame * 1_000)
+    }
     private var carry: [Float] = []
     private var preroll: [Float] = []
     private var speech: [Float] = []
@@ -127,7 +132,7 @@ final class Segmenter {
         let db = 20 * log10(max(rms, 1e-7))
 
         frameCounter += 1
-        if frameCounter % 2 == 0 {
+        if frameCounter % frames(forMilliseconds: 60) == 0 {
             onEvent?(.level(min(1, max(0, (db + 60) / 50))))
         }
 
@@ -137,7 +142,7 @@ final class Segmenter {
         // 说话声可能只有 -55 dB，钉在 -50 就永远够不着门限，
         // 于是“停一会儿再说话”那一句就再也断不出来了。
         let threshold = max(noise + config.sensitivityDB, -68)
-        if frameCounter % 167 == 0 { onEvent?(.noise(noise, threshold)) }   // 约 5 秒一次
+        if frameCounter % frames(forMilliseconds: 5_000) == 0 { onEvent?(.noise(noise, threshold)) }   // 约 5 秒一次
 
         if !inSpeech, humanSpeech != true {
             updateNoise(db, threshold: threshold, knownBackground: humanSpeech == false)
@@ -161,7 +166,8 @@ final class Segmenter {
             // "好""是"这种一两百毫秒的回答也得收进来。
             let continuing = continuationFramesLeft > 0
             if continuing { continuationFramesLeft -= 1 }
-            let triggerFrames = continuing || humanSpeech != nil ? 2 : (config.holdMode ? 3 : 5)
+            let triggerMs = continuing || humanSpeech != nil ? 60 : (config.holdMode ? 90 : 150)
+            let triggerFrames = frames(forMilliseconds: triggerMs)
             if voicedRun >= triggerFrames {
                 inSpeech = true
                 continuingSpeech = continuing
@@ -173,7 +179,7 @@ final class Segmenter {
                 silentRun = 0
                 // The detector confirms speech after its first windows. Those
                 // samples are already in the preroll for short replies.
-                voicedFrames = voicedRun + (humanSpeech == true ? 2 : 0)
+                voicedFrames = voicedRun + (humanSpeech == true ? frames(forMilliseconds: 60) : 0)
                 voicedLevel = db
                 lastPartialAt = speech.count
                 onEvent?(.started(segID, startFrame))
@@ -193,7 +199,6 @@ final class Segmenter {
             }
             let definitePause = humanSpeech == false && db <= noise + config.sensitivityDB * 0.5
             definitePauseFrames = definitePause ? definitePauseFrames + 1 : 0
-            let silentMs = silentRun * 30
             let seconds = Double(speech.count) / Double(sr)
             // Finish at a short natural pause in the last three seconds. Cut at
             // the live boundary so a preview can't contain the next sentence's words.
@@ -201,14 +206,15 @@ final class Segmenter {
             let pauseMs = nearingLimit ? min(config.silenceMs, 180) : config.silenceMs
             // VAD and the noise floor agreeing is a stronger boundary than
             // the quietest sample in a window. Commit it before sending a draft.
-            if silentMs >= pauseMs || (nearingLimit && definitePauseFrames >= 4) {
+            if silentRun >= frames(forMilliseconds: pauseMs)
+                || (nearingLimit && definitePauseFrames >= frames(forMilliseconds: 120)) {
                 finish()
             } else if seconds >= config.maxSeconds {
-                let cutDuringSpeech = silentRun < 2
+                let cutDuringSpeech = silentRun < frames(forMilliseconds: 60)
                 finish(trimTail: false)
                 // With no usable pause, the next samples may complete the cut word.
-                continuationFramesLeft = cutDuringSpeech ? 10 : 0
-            } else if voicedFrames * 30 >= minimumSpeechMs,
+                continuationFramesLeft = cutDuringSpeech ? frames(forMilliseconds: 300) : 0
+            } else if voicedFrames >= frames(forMilliseconds: minimumSpeechMs),
                       speech.count - lastPartialAt >= Int(config.partialEvery * Double(sr)) {
                 lastPartialAt = speech.count
                 onEvent?(.partial(segID, speech))
@@ -235,12 +241,12 @@ final class Segmenter {
 
     private func finish(trimTail: Bool = true) {
         // 去掉尾部大部分静音，只留 ~200ms
-        let tailFrames = trimTail ? max(0, silentRun - 7) : 0
+        let tailFrames = trimTail ? max(0, silentRun - frames(forMilliseconds: 210)) : 0
         let cut = min(speech.count, tailFrames * frame)
         let audio = Array(speech.prefix(speech.count - cut))
-        if voicedFrames * 30 >= minimumSpeechMs {
+        if voicedFrames >= frames(forMilliseconds: minimumSpeechMs) {
             onEvent?(.ended(segID, audio, endFrame: startFrame + Int64(audio.count),
-                            confirmedSpeech: confirmedFrames >= 5))
+                            confirmedSpeech: confirmedFrames >= frames(forMilliseconds: 150)))
         } else {
             onEvent?(.discarded(segID))
         }

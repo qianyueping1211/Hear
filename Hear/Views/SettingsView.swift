@@ -14,6 +14,7 @@ struct SettingsView: View {
     /// 配置窗口里选了什么（下载 / 本地导入）
     @State private var localEditAction: LocalEditAction?
     @ObservedObject private var log = AppLog.shared
+    @AppStorage(PerformanceLog.enabledKey) private var performanceLogEnabled = false
     @ObservedObject private var llm = LLMSettings.shared
     @ObservedObject private var cloud = CloudSync.shared
     @State private var showCloudPicker = false
@@ -276,6 +277,8 @@ struct SettingsView: View {
                     .accessibilityHint("控制中文识别原文和译文的简繁显示")
                     Toggle("开启日志", isOn: $log.enabled)
                     Toggle("记录对话内容（排查问题时用）", isOn: $log.contentEnabled)
+                    Toggle("记录推理耗时", isOn: $performanceLogEnabled)
+                        .disabled(!log.enabled)
                     Picker("最大日志文件大小", selection: $log.maxMB) {
                         ForEach(AppLog.sizeOptions, id: \.self) { mb in
                             Text("\(mb) MB").tag(mb)

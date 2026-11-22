@@ -51,6 +51,7 @@ struct SessionJobQueueTests {
         try testCurrentSegmentTranslation()
         testSpeechGating()
         testSegmentContinuity()
+        testSegmentTimingBoundaries()
         testPrerollComparison()
         testBoundedAudioAndTimeline()
         testSpeechLanguageResolution()
@@ -420,6 +421,35 @@ private func testSpeechGating() {
     detector.detectsSpeech = false
     segmenter.feed(Array(repeating: 0.05, count: 16_000))
     precondition(started == 1 && ended == 1, "Short speech followed by noise should be kept and finalized")
+}
+
+private func testSegmentTimingBoundaries() {
+    func feed(frames: Int, amplitude: Float, to segmenter: Segmenter) {
+        segmenter.feed(Array(repeating: amplitude, count: frames * 480))
+    }
+
+    let segmenter = Segmenter()
+    var ended = false
+    segmenter.onEvent = {
+        if case .ended(_, let audio, _, _) = $0 {
+            ended = true
+            precondition(audio.count == (14 + 7) * 480, "The retained tail must still be 210 ms")
+        }
+    }
+    feed(frames: 14, amplitude: 0.25, to: segmenter)
+    feed(frames: 23, amplitude: 0, to: segmenter)
+    precondition(!ended, "690 ms must not meet the 700 ms pause threshold")
+    feed(frames: 1, amplitude: 0, to: segmenter)
+    precondition(ended, "420 ms of speech must qualify at the next full pause frame")
+
+    let short = Segmenter()
+    var discarded = false
+    short.onEvent = {
+        if case .discarded = $0 { discarded = true }
+    }
+    feed(frames: 13, amplitude: 0.25, to: short)
+    feed(frames: 24, amplitude: 0, to: short)
+    precondition(discarded, "390 ms must not meet the 400 ms speech threshold")
 }
 
 private func testSegmentContinuity() {

@@ -372,7 +372,7 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>文档对应版本</dt><dd>0.4.80</dd></div>
+        <div><dt>文档对应版本</dt><dd>0.4.81</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
         <div><dt>本机模型</dt><dd>SenseVoice · Hy-MT2 · ZipVoice</dd></div>
         <div><dt>云端模型</dt><dd>SenseVoice + Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
@@ -599,7 +599,7 @@ section.band{scroll-margin-top:62px}
           <li><b>语音识别</b>　选择手机或耳机麦克风，并调整语音增强、说话灵敏度与断句停顿。</li>
           <li><b>翻译与总结</b>　配置上下文、灵动岛与锁屏显示和大模型总结服务。</li>
           <li><b>朗读</b>　管理声音输出位置、左右耳、声音克隆及声音图标。</li>
-          <li><b>语言和日志</b>　「显示语言」可选简体或繁体中文，应用内呈现的中文原文与译文按该设置显示。可查看日志并控制是否记录对话内容。</li>
+          <li><b>语言和日志</b>　「显示语言」可选简体或繁体中文，应用内呈现的中文原文与译文按该设置显示。可查看日志并控制是否记录对话内容。「记录推理耗时」默认关闭，开启后可查看首条预览、整句识别和整句翻译的计时。收到 iOS 崩溃报告后，可从运行日志菜单导出。</li>
         </ul>
       </div>
 
@@ -710,7 +710,7 @@ section.band{scroll-margin-top:62px}
       <div class="key">
         <div class="term"><span class="tag">VAD</span><h4>自动断句算法</h4></div>
         <div class="detail">
-          <p><code>Segmenter</code> 按帧估计音量与停顿，同时参考内置 Silero 人声检测。判断为非语音时会抑制起句和识别请求。检测器不可用时使用音量阈值。</p>
+          <p><code>Segmenter</code> 按帧估计音量与停顿，同时参考内置 Silero 人声检测。判断为非语音时会抑制起句和识别请求。检测器不可用时使用音量阈值。断句时长按采样率和帧长换算。</p>
           <p>起句保留前置音频，收尾清理多余静音。对话模式允许较短的回答。识别后还会过滤无意义文本和与语种不符的结果。</p>
         </div>
       </div>
@@ -1235,7 +1235,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>文档对应 0.4.80</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>文档对应 0.4.81</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>

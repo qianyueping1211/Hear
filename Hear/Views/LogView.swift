@@ -69,6 +69,11 @@ struct LogView: View {
                         UIPasteboard.general.string = shown.map(\.line).joined(separator: "\n")
                         copiedHint = "已复制 \(shown.count) 条"
                     } label: { Label("复制当前显示的日志", systemImage: "doc.on.doc") }
+                    if FileManager.default.fileExists(atPath: SystemDiagnostics.crashReportURL.path) {
+                        ShareLink(item: SystemDiagnostics.crashReportURL) {
+                            Label("导出最近的系统崩溃报告", systemImage: "square.and.arrow.up")
+                        }
+                    }
                     Button(role: .destructive) {
                         log.clear()
                         copiedHint = ""
