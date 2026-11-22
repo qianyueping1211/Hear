@@ -313,6 +313,13 @@ actor CloudClient {
             return false
         }
 
+        var isInferenceTimeout: Bool {
+            switch self {
+            case .inferenceTimeout, .http(504, _): return true
+            default: return false
+            }
+        }
+
         var shouldKeepConfiguredEngine: Bool {
             switch self {
             case .http(let status, _): return [401, 403, 429, 503, 504].contains(status)

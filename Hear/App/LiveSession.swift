@@ -2201,6 +2201,7 @@ final class LiveSession: ObservableObject {
     func tapRead(_ item: TranslationItem) {
         guard let i = items.firstIndex(where: { $0.id == item.id }) else { replay(item); return }
         if readingID == item.id { stopReading(); return }
+        clonePipeline.allowRetry(item.id)
         stopReading()
         readIndex = i
         // 扬声器模式 + 正在聆听：不出声，只记住从这句开始，停止实时翻译后再读
@@ -2581,6 +2582,7 @@ final class LiveSession: ObservableObject {
             }
         }
         guard let live else { return }
+        live.onAudioLoss = { [weak capture] in capture?.noteSpeechInputLoss() }
         capture.onSamples = { [weak live] s in live?.feed(s) }
         let lang = (lastLangID == langB.id) ? langB : langA
         runLiveEngine(live, lang)
@@ -2627,6 +2629,7 @@ final class LiveSession: ObservableObject {
         let langs = forcedLang.map { [$0] } ?? [langA, langB]
         for lang in langs {
             guard let e = LiveTextEngineFactory.make() else { continue }
+            e.onAudioLoss = { [weak capture] in capture?.noteSpeechInputLoss() }
             e.onUpdate = { [weak self] in
                 Task { @MainActor in self?.appleUpdated() }
             }
@@ -2921,6 +2924,9 @@ final class LiveSession: ObservableObject {
     private func markJobFailed(_ itemID: UUID, token: UUID, reason: String = "这一句等太久了") {
         guard isCurrentJob(itemID, token: token) else { return }
         jobTokens[itemID] = nil
+        if let index = items.firstIndex(where: { $0.id == itemID }), !Self.hasRealText(items[index].sourceText) {
+            items[index].sourceText = "（未取得原文，可长按修改）"
+        }
         // 一定要有终态：
         // 不然这条一直"翻译中"，朗读队列碰到第一句没做完的就停了
         // （后面的话一句都读不出来）。
@@ -2987,9 +2993,16 @@ final class LiveSession: ObservableObject {
             markJobFailed(itemID, token: token)
             return
         }
-        if useSense, senseRecoveryTask != nil {
-            markJobFailed(itemID, token: token, reason: "本机识别正在恢复")
-            return
+        if useSense {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while senseRecoveryTask != nil, ContinuousClock.now < deadline {
+                do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+            }
+            guard gen == runGen, isCurrentJob(itemID, token: token), !Task.isCancelled else { return }
+            if senseRecoveryTask != nil {
+                markJobFailed(itemID, token: token, reason: "本机识别正在恢复")
+                return
+            }
         }
         let a = job.left, b = job.right
         activity = usingCloudASR ? "云端识别中…" : "SenseVoice 识别中…"
@@ -3972,6 +3985,7 @@ final class LiveSession: ObservableObject {
     /// 这句为什么没能用克隆声音（写进日志，别只说一句"没有样本"）
     private func cloneMissingReason(_ item: TranslationItem) -> (String, LogLevel) {
         if !voiceClone { return ("声音克隆开关没有打开", .info) }
+        if clonePipeline.didTimeOut(item.id) { return ("这句的云端克隆已超时", .info) }
         if item.translated.isEmpty { return ("这句还没有译文", .warning) }
         if item.translated.hasPrefix("（翻译失败") { return ("这句翻译失败了", .warning) }
         // 克隆模型只会说这几门语言（说译文那门语言，样本是源语言的，这是跨语言克隆）
@@ -4020,7 +4034,7 @@ final class LiveSession: ObservableObject {
 
     /// 在后台准备克隆声音。已有任务直接复用，避免同一句发出重复请求。
     private func prepareClone(_ id: UUID) -> Task<CloneAudio?, Never>? {
-        guard voiceClone, usingCloudClone || !localOptionalWorkPaused else { return nil }
+        guard voiceClone, usingCloudClone || !localOptionalWorkPaused, !clonePipeline.didTimeOut(id) else { return nil }
         // 合并同一句的在途请求，成功结果保存在音频缓存，失败允许重试。
         if let existing = clonePipeline.existing(id) { return existing }
         guard let item = items.first(where: { $0.id == id }),
@@ -4060,7 +4074,11 @@ final class LiveSession: ObservableObject {
                             out = try await cloud.clone(text: text, lang: cloudLang,
                                                         reference: refSamples, referenceText: refText)
                         } catch {
-                            let keepEngine = (error as? CloudClient.CloudError)?.shouldKeepConfiguredEngine ?? false
+                            let cloudError = error as? CloudClient.CloudError
+                            if cloudError?.isInferenceTimeout == true, !Task.isCancelled {
+                                await MainActor.run { self?.clonePipeline.markTimedOut(id, token: jobID) }
+                            }
+                            let keepEngine = cloudError?.shouldKeepConfiguredEngine ?? false
                             if !Task.isCancelled, !keepEngine {
                                 let why = error.localizedDescription
                                 await MainActor.run {

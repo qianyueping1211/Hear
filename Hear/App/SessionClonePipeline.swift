@@ -9,6 +9,7 @@ final class SessionClonePipeline {
     private var referenceOrder: [UUID] = []
     private var issues: [UUID: String] = [:]
     private var pending: [UUID: (token: UUID, task: Work)] = [:]
+    private var timedOut: Set<UUID> = []
     var onWorkChanged: (([UUID: UUID]) -> Void)?
 
     func remember(_ id: UUID, samples: [Float], text: String, enabled: Bool) {
@@ -50,6 +51,14 @@ final class SessionClonePipeline {
 
     func isCurrent(_ id: UUID, token: UUID) -> Bool { pending[id]?.token == token }
 
+    func didTimeOut(_ id: UUID) -> Bool { timedOut.contains(id) }
+
+    func markTimedOut(_ id: UUID, token: UUID) {
+        if isCurrent(id, token: token) { timedOut.insert(id) }
+    }
+
+    func allowRetry(_ id: UUID) { timedOut.remove(id) }
+
     func start(_ id: UUID, makeTask: (UUID) -> Work) -> Work {
         if let existing = existing(id) { return existing }
         let token = UUID()
@@ -66,12 +75,14 @@ final class SessionClonePipeline {
     }
 
     func cancel(_ id: UUID) {
+        allowRetry(id)
         guard let removed = pending.removeValue(forKey: id) else { return }
         removed.task.cancel()
         notify()
     }
 
     func cancelAll() {
+        timedOut.removeAll()
         guard !pending.isEmpty else { return }
         for entry in pending.values { entry.task.cancel() }
         pending.removeAll()

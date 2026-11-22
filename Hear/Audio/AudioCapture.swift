@@ -73,8 +73,8 @@ final class AudioCapture {
         guard !running, pendingStart == nil else { return nil }
         _gen += 1
         pendingStart = _gen
-        inputPosition = 0
         speechFeed.removePending()
+        lastOverflowAt = nil
         return _gen
     }
 
@@ -122,6 +122,8 @@ final class AudioCapture {
         let muted: Bool
     }
 
+    // Keep one timeline across route restarts. A live speech analyzer can
+    // outlive an AVAudioEngine restart in the same conversation.
     private var inputPosition: Int64 = 0
     private var speechFeed = AudioInputBuffer<(CaptureBlock, (AudioInputBlock) -> Void)>(capacity: 48_000)
     private var segmentFeed = AudioInputBuffer<CaptureBlock>(capacity: 80_000)
@@ -132,6 +134,12 @@ final class AudioCapture {
         lock.lock(); defer { lock.unlock() }
         let recentlyDropped = lastOverflowAt.map { Date().timeIntervalSince($0) < 5 } ?? false
         return recentlyDropped || speechFeed.frames > 32_000 || segmentFeed.frames > 64_000
+    }
+
+    func noteSpeechInputLoss() {
+        lock.lock()
+        lastOverflowAt = Date()
+        lock.unlock()
     }
 
     private func enqueue(_ samples: [Float], round: Int) {

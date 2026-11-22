@@ -11,6 +11,7 @@ protocol LiveTextEngine: AnyObject {
     /// 听写自己出错了（结果流断了之类）：上层要知道，
     /// 不然界面一直等着没反应，用户以为是自己说错了
     var onFailure: ((String) -> Void)? { get set }
+    var onAudioLoss: (() -> Void)? { get set }
     /// 正在听的语言（Whisper 语言代码，例如 "zh"）
     var languageID: String? { get }
     /// 按某种语言开始听写；第一次使用某种语言时系统会先下载语言包
@@ -77,6 +78,7 @@ enum LiveTextError: LocalizedError {
 @available(iOS 26.0, *)
 final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
     var onUpdate: (() -> Void)?
+    var onAudioLoss: (() -> Void)?
 
     private struct Piece {
         var start: Double
@@ -295,8 +297,8 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         guard !samples.isEmpty else { return }
         lock.lock()
         let expected = inputEndFrame
-        if let expected, block.startFrame > expected {
-            recordGap(expected..<block.startFrame)
+        if block.startFrame > (expected ?? 0) {
+            recordGap((expected ?? 0)..<block.startFrame)
             converter = nil
         } else if let expected, block.startFrame < expected {
             // A previous capture's queued buffer arrived after a new generation.
@@ -329,7 +331,9 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
             if !delivered {
                 lock.lock()
                 if generation == self.generation { recordGap(block.startFrame..<block.endFrame) }
+                let stillActive = generation == self.generation
                 lock.unlock()
+                if stillActive { onAudioLoss?() }
             }
         }
         func submit(_ buffer: AVAudioPCMBuffer) {

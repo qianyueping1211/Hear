@@ -167,6 +167,12 @@ private func testRecoveryState() async throws {
     _ = await old.value
     await Task.yield()
     precondition(oldToken != newToken && clones.isCurrent(id, token: newToken!))
+    clones.markTimedOut(id, token: oldToken!)
+    precondition(!clones.didTimeOut(id))
+    clones.markTimedOut(id, token: newToken!)
+    precondition(clones.didTimeOut(id))
+    clones.allowRetry(id)
+    precondition(!clones.didTimeOut(id))
     clones.reset()
     precondition(clones.existing(id) == nil)
 
