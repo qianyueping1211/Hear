@@ -64,11 +64,15 @@ struct TranslationItem: Identifiable, Equatable, Codable {
     enum SourceSide: String, Codable { case left, right }
 
     var id = UUID()
-    let source: Language
-    let target: Language
+    var source: Language
+    var target: Language
     var sourceText: String
     var translated: String = ""
     var done = false
+    var translationPending: Bool? = nil
+    var translationBaseline: String? = nil
+    var translationError: String? = nil
+    var previewTarget: Language? = nil
     var speakerF0: Float? = nil   // 说话人音高（Hz），用于“接近说话人音色”
     var corrected: Bool? = nil    // SenseVoice 的结果被 Whisper 校正过
     var speakerID: Int? = nil
@@ -81,7 +85,47 @@ struct TranslationItem: Identifiable, Equatable, Codable {
 
     var defaultSpeakerLanguage: String { recognizedLanguage ?? source.id }
 
-    var canReadAloud: Bool { !translated.isEmpty && !translated.hasPrefix("（翻译失败") }
+    var displayedTranslationTarget: Language { previewTarget ?? target }
+    var canReadAloud: Bool {
+        displayedTranslationTarget == target && !translated.isEmpty && !translated.hasPrefix("（翻译失败")
+    }
+
+    mutating func updateTranscript(_ text: String, source: Language, target: Language,
+                                   side: SourceSide, recognizedLanguage: String?) {
+        let previousTarget = displayedTranslationTarget
+        self.source = source
+        self.target = target
+        sourceText = text
+        sourceSide = side
+        self.recognizedLanguage = recognizedLanguage
+        previewTarget = translated.isEmpty || previousTarget == target ? nil : previousTarget
+    }
+
+    mutating func beginTranslationRevision() {
+        translationPending = true
+        translationError = nil
+    }
+
+    mutating func applyTranslation(_ text: String, done: Bool) {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !done {
+            guard !self.done, !value.isEmpty else { return }
+            translated = value
+            translationPending = true
+            return
+        }
+        self.done = true
+        translationPending = nil
+        if value.isEmpty || value.hasPrefix("（翻译失败") {
+            translationError = value.isEmpty ? "（翻译失败：模型未返回译文）" : value
+            translationBaseline = nil
+            return
+        }
+        translationBaseline = translated.isEmpty || value == translated || !canReadAloud ? nil : translated
+        translated = value
+        previewTarget = nil
+        translationError = nil
+    }
 
     func isLeading(left: Language, right: Language) -> Bool {
         displayedSide(left: left, right: right) == .left

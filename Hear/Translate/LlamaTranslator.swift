@@ -110,6 +110,7 @@ actor LlamaTranslator {
                    maxNewTokens: Int = 512,
                    previewEpoch epoch: Int? = nil,
                    onUpdate: @escaping @Sendable (String) -> Void) throws -> String {
+        try Task.checkCancellation()
         guard let ctx, let vocab, let sampler else { throw TranslatorError.notLoaded }
         stopFlag.reset()
 
@@ -181,6 +182,9 @@ actor LlamaTranslator {
             nGenerated += 1
             if r != 0 { break }
         }
+        try Task.checkCancellation()
+        if stopFlag.isSet { throw CancellationError() }
+        if let epoch, epoch != previewEpoch.value { throw CancellationError() }
         return Self.clean(output)
     }
 

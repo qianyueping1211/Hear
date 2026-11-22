@@ -40,6 +40,8 @@ struct SessionJobQueueTests {
         try testZipVoiceArchive()
         testCloudReadiness()
         try testConversationBubbleSides()
+        try testTranslationRevision()
+        try testCurrentSegmentTranslation()
         print("Session queue regressions passed")
     }
 
@@ -75,6 +77,50 @@ struct SessionJobQueueTests {
         let decoded = try JSONDecoder().decode([TranslationItem].self, from: data)
         precondition(decoded == items, "Speaker edits should survive persistence")
     }
+}
+
+private func testTranslationRevision() throws {
+    let english = Language.find("en"), chinese = Language.find("zh")
+    var item = TranslationItem(source: english, target: chinese, sourceText: "The mayor has arrived.")
+    item.applyTranslation("市长刚刚到达。", done: false)
+    item.beginTranslationRevision()
+    item.applyTranslation(" ", done: false)
+    precondition(item.translated == "市长刚刚到达。" && item.translationPending == true)
+    item.applyTranslation("", done: true)
+    precondition(item.translated == "市长刚刚到达。" && item.translationError != nil && item.done)
+    item.beginTranslationRevision()
+    item.applyTranslation("市长已经到达。", done: true)
+    precondition(item.translationBaseline == "市长刚刚到达。" && item.translationPending == nil && item.translationError == nil)
+    let chineseChanges = TranslationRevision.changes(from: item.translationBaseline!, to: item.translated)
+    precondition(chineseChanges.filter { $0.changed }.map { $0.text }.joined() == "已经")
+    let englishChanges = TranslationRevision.changes(from: "The bus left 👩🏽‍💻.", to: "The train left 👩🏽‍💻.")
+    precondition(englishChanges.map { $0.text }.joined() == "The train left 👩🏽‍💻.")
+    precondition(englishChanges.filter { $0.changed }.map { $0.text }.joined() == "train")
+    item.updateTranscript("市长到了。", source: chinese, target: english, side: .left, recognizedLanguage: "zh")
+    precondition(item.translated == "市长已经到达。" && item.displayedTranslationTarget == chinese && !item.canReadAloud)
+    item.applyTranslation("The mayor has arrived.", done: true)
+    precondition(item.displayedTranslationTarget == english && item.translationBaseline == nil && item.canReadAloud)
+}
+
+private func testCurrentSegmentTranslation() throws {
+    let english = Language.find("en"), chinese = Language.find("zh")
+    let priorSource = "The United States had been assessing the damage caused by severe storms and tornadoes, at least 21 people are now known to have died as the storms ripped through the south and the mid,"
+    let priorTranslation = "美国正在评估严重风暴和龙卷风造成的损失。目前已知有至少21人因这些风暴袭击南部和中部地区而丧生。"
+    let source = "west leaving a trail of devastation hardest hit were Tennessee Arkansas and Indiana in Illinois one person was killed when a theater roof collapsed in Chicago"
+    let spill = "美国正在评估严重风暴和龙卷风造成的破坏。目前已知至少有21人丧生，风暴袭击了南部和中部地区。"
+    let translation = "西部地区遭受严重破坏。田纳西州、阿肯色州和印第安纳州受灾最严重。芝加哥一座剧院的屋顶倒塌，造成一人死亡。"
+    let prior = TranslationItem(source: english, target: chinese, sourceText: priorSource,
+                                translated: priorTranslation, done: true)
+    let scope = TranslationOutput(source: source, target: chinese, previous: [prior])
+    precondition(!scope.acceptsPartial("美国正在评估"))
+    precondition((try? scope.validated(spill + translation)) == nil, "The corrected paragraph must not repeat the previous paragraph")
+    precondition((try? scope.validated(translation)) == translation)
+    let repetition = TranslationOutput(source: priorSource, target: chinese, previous: [prior])
+    precondition((try? repetition.validated(priorTranslation)) == priorTranslation, "A real repetition in the source is valid")
+    let prompt = PromptBuilder.build(text: source, from: english, to: chinese, context: [priorSource], glossary: [])
+    precondition(prompt.contains("参考上文") && prompt.hasSuffix("\n\n" + source))
+    let retry = PromptBuilder.build(text: source, from: english, to: chinese, context: [], glossary: [], strict: true)
+    precondition(!retry.contains(priorSource) && retry.hasSuffix("\n\n" + source))
 }
 
 private func testConversationBubbleSides() throws {

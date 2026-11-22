@@ -27,8 +27,7 @@ extension ConversationStore {
               var conversation = load(conversationID),
               let index = conversation.items.firstIndex(where: { $0.id == itemID }),
               conversation.items[index].sourceText == expectedSource else { return false }
-        conversation.items[index].translated = translation
-        conversation.items[index].done = done
+        conversation.items[index].applyTranslation(translation, done: done)
         save(conversation)
         return true
     }

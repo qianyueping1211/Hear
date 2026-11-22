@@ -66,7 +66,7 @@ struct ContentView: View {
             .overlay {
                 if let id = editingID, let item = session.items.first(where: { $0.id == id }) {
                     SourceEditor(text: $draft, flag: item.source.flag,
-                                 translation: item.translated, targetFlag: item.target.flag) {
+                                 translation: item.translated, targetFlag: item.displayedTranslationTarget.flag) {
                         session.editSource(id, to: draft)
                         editingID = nil
                     }
@@ -321,7 +321,7 @@ struct TranscriptView: View {
                 }
                 .padding()
             }
-            .onChange(of: session.items) { _, _ in
+            .onChange(of: session.items.last) { _, _ in
                 withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: session.partial) { _, _ in
@@ -401,6 +401,16 @@ struct BubbleView: View {
         leading ? Text("\(flag) \(text)") : Text("\(text) \(flag)")
     }
 
+    private var translatedText: Text {
+        let flag = item.displayedTranslationTarget.flag
+        guard let baseline = item.translationBaseline else { return flagged(flag, item.translated) }
+        let revised = TranslationRevision.changes(from: baseline, to: item.translated)
+            .reduce(Text("")) { rendered, part in
+                rendered + (part.changed ? Text(part.text).bold().foregroundColor(.accentColor) : Text(part.text))
+            }
+        return leading ? Text("\(flag) ") + revised : revised + Text(" \(flag)")
+    }
+
     @ViewBuilder
     private var readingIcon: some View {
         if preparing && !playing {
@@ -451,10 +461,19 @@ struct BubbleView: View {
                 } else {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         if showsReadingIcon && !leading { readingIcon }
-                        flagged(item.target.flag, item.translated)
+                        translatedText
                             .font(.title3.weight(.medium))
                         if showsReadingIcon && leading { readingIcon }
                     }
+                }
+                if let error = item.translationError {
+                    Text(item.translated.isEmpty ? error : "修正未完成 · 保留已显示译文")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if item.translationPending == true, !item.translated.isEmpty {
+                    Text("正在修正译文…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .multilineTextAlignment(leading ? .leading : .trailing)

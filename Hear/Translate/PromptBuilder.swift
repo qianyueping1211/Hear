@@ -6,7 +6,8 @@ enum PromptBuilder {
                       from src: Language,
                       to tgt: Language,
                       context: [String],
-                      glossary: [(String, String)]) -> String {
+                      glossary: [(String, String)],
+                      strict: Bool = false) -> String {
         let terms = glossary.filter { text.localizedCaseInsensitiveContains($0.0) }
         let involvesChinese = src.id == "zh" || tgt.id == "zh"
         var p = ""
@@ -17,11 +18,13 @@ enum PromptBuilder {
                 p += terms.map { "\($0.0) 翻译成 \($0.1)" }.joined(separator: "\n")
                 p += "\n\n"
             }
-            if context.isEmpty {
+            if context.isEmpty && !strict {
                 p += "将以下文本翻译为\(tgt.zhName)，注意只需要输出翻译后的结果，不要额外解释：\n\n\(text)"
             } else {
-                p += context.joined(separator: "\n")
-                p += "\n参考上面的信息，把下面的文本翻译成\(tgt.zhName)，注意不需要翻译上文，也不要额外解释：\n\(text)"
+                if !context.isEmpty {
+                    p += "参考上文（仅用于判断术语、语义和指代）：\n\(context.joined(separator: "\n"))\n\n"
+                }
+                p += "只将下方本段原文翻译成\(tgt.zhName)。只输出本段译文，不复述、翻译或补写上文，即使本段从半句话开始：\n\n\(text)"
             }
         } else {
             if !terms.isEmpty {
@@ -29,11 +32,13 @@ enum PromptBuilder {
                 p += terms.map { "\($0.0) translates to \($0.1)" }.joined(separator: "\n")
                 p += "\n\n"
             }
-            if context.isEmpty {
+            if context.isEmpty && !strict {
                 p += "Translate the following segment into \(tgt.enName), without additional explanation.\n\n\(text)"
             } else {
-                p += context.joined(separator: "\n")
-                p += "\nUsing the information above as context, translate the following segment into \(tgt.enName). Do not translate the context and do not add any explanation:\n\(text)"
+                if !context.isEmpty {
+                    p += "Earlier text (for terminology, meaning, and references only):\n\(context.joined(separator: "\n"))\n\n"
+                }
+                p += "Translate only the current segment below into \(tgt.enName). Output only its translation. Do not repeat, translate, or complete earlier text, even if this segment starts mid-sentence:\n\n\(text)"
             }
         }
         return p
