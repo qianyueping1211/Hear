@@ -85,6 +85,9 @@ jobs:
       - name: Contract test
         run: python3 server/test_contract.py
 
+      - name: Token service and managed gateway auth test
+        run: python3 server/test_token_auth.py
+
       # 顺便用给 Windows 用的那个自测脚本测一下 /health（翻译要模型，CI 里没有，所以只测健康检查）
       - name: Start service
         env:

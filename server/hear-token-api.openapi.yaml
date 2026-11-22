@@ -1,0 +1,915 @@
+openapi: 3.1.0
+info:
+  title: 听见 Token 管理与网关鉴权 API
+  version: 1.0.0
+  description: |
+    三组接口，各自独立鉴权：
+
+    | 接口 | Base URL | 鉴权 | 谁调用 |
+    | --- | --- | --- | --- |
+    | 管理 API | `https://<管理服务>/admin/api/v1` | 管理员登录会话 Cookie `hear_admin_sid` + 写操作 `X-CSRF-Token` | 浏览器管理后台、运维脚本 |
+    | 网关清单 | `https://<管理服务>/internal/v1` | `Authorization: Bearer <gateway_credential>`，凭据绑定 `gateway_id` | Windows 网关（hear_cloud.py） |
+    | 网关检查 | `https://hear.yueping1211.asia` 或内网 `https://<Windows IP>:8000` | `X-Hear-Token: <user_token>` | App、`start-hear-cloud.bat --check-token`、验收工具 |
+
+    - 时间：请求接受带时区的 ISO 8601，响应统一输出 UTC（`Z`）。有效条件 `starts_at <= now < expires_at`。
+    - ID 都是字符串。列表分页用 `limit`（1–200，默认 50）和 `cursor`，返回 `items` 与 `next_cursor`（没有下一页时为 null）。
+    - 所有响应都带 `Cache-Control: no-store`。错误体统一为 `Error`；网关错误另带现有 App 读取的 `error` 字段。
+    - 用户 Token 原文只在签发成功的 201 响应里出现一次；列表、审计、清单都只含元数据或 SHA-256 摘要。
+  license:
+    name: Proprietary
+servers:
+  - url: https://127.0.0.1:8443
+    description: Token 管理服务（本机示例；生产经 VPN / 内网 / 独立管理入口访问）
+  - url: https://hear.yueping1211.asia
+    description: Windows 网关公网入口（仅 /health 与 /v1/auth/check）
+tags:
+  - name: session
+    description: 管理员登录会话
+  - name: users
+  - name: tokens
+  - name: audit
+  - name: gateways
+    description: 网关登记与凭据
+  - name: internal
+    description: 网关拉取 Token 清单
+  - name: gateway
+    description: Windows 网关上的健康与口令检查
+
+paths:
+  /admin/api/v1/session:
+    post:
+      tags: [session]
+      summary: 管理员登录
+      description: 成功后设置 `hear_admin_sid` Cookie（HttpOnly、SameSite=Strict、HTTPS 下 Secure）。同一来源 + 用户名 15 分钟内失败 5 次锁定 15 分钟。
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              additionalProperties: false
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '201':
+          description: 已登录
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              example: hear_admin_sid=...; Path=/admin; HttpOnly; SameSite=Strict; Max-Age=28800; Secure
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429':
+          description: 登录失败次数过多（RATE_LIMITED）
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      tags: [session]
+      summary: 当前会话（含 CSRF token）
+      operationId: getSession
+      security: [{ adminSession: [] }]
+      responses:
+        '200':
+          description: 当前管理员
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [session]
+      summary: 退出登录
+      operationId: logout
+      security: [{ adminSession: [], csrf: [] }]
+      responses:
+        '204': { description: 已退出 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/api/v1/users:
+    get:
+      tags: [users]
+      summary: 用户列表
+      operationId: listUsers
+      security: [{ adminSession: [] }]
+      parameters:
+        - name: search
+          in: query
+          description: 按用户名或显示名称模糊查找
+          schema: { type: string }
+        - name: status
+          in: query
+          description: 不填时不含已删除；`all` 包含全部
+          schema: { type: string, enum: [active, disabled, deleted, all] }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: 一页用户
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - properties:
+                      items: { type: array, items: { $ref: '#/components/schemas/User' } }
+              example:
+                items:
+                  - user_id: usr_5f1c2a9be0d34a71
+                    username: bob
+                    display_name: Bob
+                    notes: iPhone 15
+                    status: active
+                    token_count: 3
+                    active_token_count: 1
+                    scheduled_token_count: 1
+                    created_at: '2027-01-15T07:00:00Z'
+                    updated_at: '2027-01-15T07:00:00Z'
+                    disabled_at: null
+                    deleted_at: null
+                next_cursor: WzEyXQ
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+    post:
+      tags: [users]
+      summary: 新增用户
+      operationId: createUser
+      security: [{ adminSession: [], csrf: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserCreate' }
+      responses:
+        '201':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /admin/api/v1/users/{user_id}:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [users]
+      summary: 用户资料、状态及相关时间（已删除的用户仍可查询）
+      operationId: getUser
+      security: [{ adminSession: [] }]
+      responses:
+        '200':
+          description: 用户
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [users]
+      summary: 修改用户，或停用 / 重新启用
+      description: |
+        `status: disabled` 在同一事务里撤销该用户所有可用和未生效的 Token（`revocation_reason=user_disabled`），并提升相关网关修订号。
+        重新启用不会恢复旧 Token，需要重新签发。
+      operationId: updateUser
+      security: [{ adminSession: [], csrf: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserUpdate' }
+      responses:
+        '200':
+          description: 修改后的用户
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+    delete:
+      tags: [users]
+      summary: 逻辑删除用户
+      description: 在同一事务里撤销该用户可用和未生效的 Token（`user_deleted`）。保留操作记录；用户名可再次使用。重复删除返回 204。
+      operationId: deleteUser
+      security: [{ adminSession: [], csrf: [] }]
+      responses:
+        '204': { description: 已删除 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/api/v1/users/{user_id}/tokens:
+    parameters:
+      - $ref: '#/components/parameters/UserId'
+    get:
+      tags: [tokens]
+      summary: 用户的 Token 列表
+      operationId: listUserTokens
+      security: [{ adminSession: [] }]
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/TokenStatus' }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: 一页 Token 元数据（不含原文）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - properties:
+                      items: { type: array, items: { $ref: '#/components/schemas/Token' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+    post:
+      tags: [tokens]
+      summary: 签发 Token
+      description: |
+        Token 原文为 `hear_ut_` + 43 个 URL-safe 字符（256 位随机熵），只在本响应出现一次。服务端只保存 SHA-256 和末 6 位。
+        创建失败时不发放 Token。签发与网关修订号提升在同一事务里提交。
+      operationId: issueToken
+      security: [{ adminSession: [], csrf: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TokenCreate' }
+            example:
+              label: iPhone 15
+              gateway_id: hear-home
+              starts_at: '2027-01-15T15:00:00+08:00'
+              expires_at: '2027-02-15T15:00:00+08:00'
+      responses:
+        '201':
+          description: 已签发
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssuedToken' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /admin/api/v1/tokens/{token_id}:
+    parameters:
+      - $ref: '#/components/parameters/TokenId'
+    get:
+      tags: [tokens]
+      summary: 某条 Token 的元数据和当前状态
+      operationId: getToken
+      security: [{ adminSession: [] }]
+      responses:
+        '200':
+          description: Token 元数据
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Token' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [tokens]
+      summary: 修改标签或有效期
+      description: 已到期或已撤销的 Token 不能修改（409 TOKEN_NOT_EDITABLE）。有效期变化时同一事务提升网关修订号，下一轮同步（≤30 秒）后网关生效。
+      operationId: updateToken
+      security: [{ adminSession: [], csrf: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TokenUpdate' }
+      responses:
+        '200':
+          description: 修改后的 Token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Token' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /admin/api/v1/tokens/{token_id}/revoke:
+    parameters:
+      - $ref: '#/components/parameters/TokenId'
+    post:
+      tags: [tokens]
+      summary: 撤销 Token
+      description: 立即在数据库中撤销并提升网关修订号。重复撤销、或撤销已到期 Token 都返回 204，保持原有历史状态。
+      operationId: revokeToken
+      security: [{ adminSession: [], csrf: [] }]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason: { type: string, maxLength: 200, description: 不填时记为 admin_revoked }
+      responses:
+        '204': { description: 已撤销 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /admin/api/v1/audit-events:
+    get:
+      tags: [audit]
+      summary: 操作审计
+      operationId: listAuditEvents
+      security: [{ adminSession: [] }]
+      parameters:
+        - { name: action, in: query, schema: { type: string, examples: [token.revoke] } }
+        - { name: user_id, in: query, schema: { type: string } }
+        - { name: token_id, in: query, schema: { type: string } }
+        - { name: actor_id, in: query, schema: { type: string } }
+        - { name: since, in: query, description: 含, schema: { type: string, format: date-time } }
+        - { name: until, in: query, description: 不含, schema: { type: string, format: date-time } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: 一页审计事件（新的在前）
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - properties:
+                      items: { type: array, items: { $ref: '#/components/schemas/AuditEvent' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /admin/api/v1/gateways:
+    get:
+      tags: [gateways]
+      summary: 网关列表、修订号和清单请求计数
+      operationId: listGateways
+      security: [{ adminSession: [] }]
+      responses:
+        '200':
+          description: 全部网关
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Page'
+                  - properties:
+                      items: { type: array, items: { $ref: '#/components/schemas/Gateway' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [gateways]
+      summary: 登记网关（凭据只返回一次）
+      operationId: createGateway
+      security: [{ adminSession: [], csrf: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [gateway_id]
+              additionalProperties: false
+              properties:
+                gateway_id: { $ref: '#/components/schemas/GatewayId' }
+                name: { type: string, maxLength: 100 }
+      responses:
+        '201':
+          description: 已登记
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatewayWithCredential' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /admin/api/v1/gateways/{gateway_id}/rotate-credential:
+    parameters:
+      - $ref: '#/components/parameters/GatewayIdPath'
+    post:
+      tags: [gateways]
+      summary: 轮换网关凭据（旧凭据立即失效）
+      operationId: rotateGatewayCredential
+      security: [{ adminSession: [], csrf: [] }]
+      responses:
+        '200':
+          description: 新凭据只返回一次
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatewayWithCredential' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /internal/v1/gateways/{gateway_id}/token-snapshot:
+    parameters:
+      - $ref: '#/components/parameters/GatewayIdPath'
+    get:
+      tags: [internal]
+      summary: 网关 Token 清单（完整快照）
+      description: |
+        修订号与 Token 记录在同一个数据库事务里读取。包含尚未生效、可用，以及近 90 天内到期或撤销的记录。
+        `ETag` 由修订号和清单内容计算；只有内容未变时才返回 304。网关按快照整体替换内存清单。
+      operationId: getTokenSnapshot
+      security: [{ gatewayCredential: [] }]
+      parameters:
+        - name: If-None-Match
+          in: header
+          schema: { type: string }
+      responses:
+        '200':
+          description: 完整清单
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenSnapshot' }
+        '304':
+          description: 内容未变（网关据此刷新同步时间）
+          headers:
+            ETag: { schema: { type: string } }
+        '401':
+          description: 缺少或无效的网关凭据（GATEWAY_UNAUTHORIZED）；用户 Token 也会得到 401
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '403':
+          description: 凭据属于另一个网关（GATEWAY_FORBIDDEN）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /health:
+    get:
+      tags: [gateway]
+      summary: 网关健康（不需要口令）
+      description: 200 只表示网关可达。`auth_ready=false` 时连接正常，但需要鉴权的请求返回 503。
+      operationId: gatewayHealth
+      servers:
+        - url: https://hear.yueping1211.asia
+        - url: https://{lan_ip}:8000
+          variables:
+            lan_ip: { default: 192.168.1.10 }
+      security: []
+      responses:
+        '200':
+          description: 网关状态
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatewayHealth' }
+
+  /v1/auth/check:
+    get:
+      tags: [gateway]
+      summary: 用网关内存清单检查一串访问口令
+      description: |
+        不调用模型，不访问管理服务或数据库。只在 HTTPS 上可用（或显式开启的本机 HTTP 回源）。
+        未接入托管鉴权的网关返回 404 `AUTH_NOT_MANAGED`。
+      operationId: checkToken
+      servers:
+        - url: https://hear.yueping1211.asia
+        - url: https://{lan_ip}:8000
+          variables:
+            lan_ip: { default: 192.168.1.10 }
+      security: [{ userToken: [] }]
+      responses:
+        '200':
+          description: 口令可用
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenCheck' }
+              example:
+                active: true
+                status: active
+                starts_at: '2027-01-15T07:00:00Z'
+                expires_at: '2027-02-15T07:00:00Z'
+                effective_expires_at: '2027-02-15T07:00:00Z'
+                invalidated_at: null
+                server_time: '2027-01-15T08:00:00Z'
+        '401':
+          description: TOKEN_REQUIRED / TOKEN_INVALID / TOKEN_NOT_STARTED / TOKEN_EXPIRED / TOKEN_REVOKED
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatewayError' }
+              examples:
+                expired:
+                  value:
+                    code: TOKEN_EXPIRED
+                    message: 访问口令已到期
+                    error: 访问口令已到期
+                    request_id: req_3f9a1c0d2b7e4a55
+                    status: expired
+                    starts_at: '2027-01-15T07:00:00Z'
+                    expires_at: '2027-02-15T07:00:00Z'
+                    effective_expires_at: '2027-02-15T07:00:00Z'
+                    invalidated_at: '2027-02-15T07:00:00Z'
+                    server_time: '2027-02-16T01:00:00Z'
+                invalid:
+                  value: { code: TOKEN_INVALID, message: 访问口令无效，请核对, error: 访问口令无效，请核对, request_id: req_9d2e }
+        '403':
+          description: 明文 HTTP（HTTPS_REQUIRED）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatewayError' }
+        '404':
+          description: 网关未接入托管鉴权（AUTH_NOT_MANAGED）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatewayError' }
+        '503':
+          description: 清单未加载或超过 60 秒没有成功同步（AUTH_SERVICE_UNAVAILABLE）
+          headers:
+            Retry-After: { schema: { type: integer } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatewayError' }
+
+  /v1/asr:
+    post:
+      tags: [gateway]
+      summary: 语音识别（现有接口，鉴权规则同 /v1/auth/check）
+      description: 同样适用于 `/v1/translate`、`/v1/speaker`、`/v1/clone/reference`、`/v1/clone`。请求结构不变；鉴权失败返回与 /v1/auth/check 相同的错误体。
+      operationId: asr
+      servers:
+        - url: https://hear.yueping1211.asia
+      security: [{ userToken: [] }]
+      requestBody:
+        required: true
+        content:
+          audio/wav:
+            schema: { type: string, contentMediaType: audio/wav }
+      responses:
+        '200':
+          description: 识别结果（见 server/README.md）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  text: { type: string }
+                  lang: { type: string }
+        '401':
+          description: 口令问题
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatewayError' }
+        '403':
+          description: HTTPS_REQUIRED
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatewayError' }
+        '503':
+          description: AUTH_SERVICE_UNAVAILABLE 或 SERVICE_BUSY
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatewayError' }
+
+components:
+  securitySchemes:
+    adminSession:
+      type: apiKey
+      in: cookie
+      name: hear_admin_sid
+      description: POST /admin/api/v1/session 登录后获得。会话 8 小时绝对过期、1 小时无操作过期。
+    csrf:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: 登录响应或 GET /session 返回的 csrf_token；所有写操作必须携带，并且 Origin 必须同源。
+    gatewayCredential:
+      type: http
+      scheme: bearer
+      description: 网关凭据（`hear_gw_...`），绑定单个 gateway_id，只能读取该网关的清单。
+    userToken:
+      type: apiKey
+      in: header
+      name: X-Hear-Token
+      description: 管理后台签发给用户的 Token（`hear_ut_...`）。
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Cursor:
+      name: cursor
+      in: query
+      description: 上一页返回的 next_cursor（不透明字符串）
+      schema: { type: string }
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema: { type: string, examples: [usr_5f1c2a9be0d34a71] }
+    TokenId:
+      name: token_id
+      in: path
+      required: true
+      schema: { type: string, examples: [tok_8c41d0e2a9f3b7c6] }
+    GatewayIdPath:
+      name: gateway_id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/GatewayId' }
+
+  responses:
+    Unauthorized:
+      description: 未登录或凭据无效（UNAUTHENTICATED / INVALID_CREDENTIALS）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: CSRF_FAILED 或 FORBIDDEN（只读角色）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: NOT_FOUND
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: 业务冲突：USERNAME_TAKEN / USER_NOT_ACTIVE / USER_DELETED / TOKEN_NOT_EDITABLE / GATEWAY_EXISTS
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: TOKEN_NOT_EDITABLE, message: 已失效的 Token 不能修改，请签发新 Token, request_id: req_51e0 }
+    ValidationFailed:
+      description: 字段不合规则（VALIDATION_FAILED），field 指出哪个字段
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: VALIDATION_FAILED, message: 结束时间需要晚于开始时间, field: expires_at, request_id: req_7a2b }
+
+  schemas:
+    Timestamp:
+      type: string
+      format: date-time
+      description: 输出总是 UTC，例如 2027-01-15T08:00:00Z
+    NullableTimestamp:
+      type: [string, 'null']
+      format: date-time
+    GatewayId:
+      type: string
+      pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$'
+      examples: [hear-home]
+    TokenStatus:
+      type: string
+      enum: [scheduled, active, expired, revoked]
+    Error:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          examples: [VALIDATION_FAILED, USERNAME_TAKEN, UNAUTHENTICATED, CSRF_FAILED, NOT_FOUND]
+        message: { type: string }
+        request_id: { type: string }
+        field: { type: string, description: 422 时出错的字段 }
+    GatewayError:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [error]
+          properties:
+            code:
+              type: string
+              enum: [TOKEN_REQUIRED, TOKEN_INVALID, TOKEN_NOT_STARTED, TOKEN_EXPIRED, TOKEN_REVOKED,
+                     AUTH_SERVICE_UNAVAILABLE, HTTPS_REQUIRED, AUTH_NOT_MANAGED, SERVICE_BUSY, BAD_REQUEST,
+                     NOT_FOUND, PAYLOAD_TOO_LARGE, REQUEST_TIMEOUT, BAD_GATEWAY, GATEWAY_TIMEOUT, INTERNAL_ERROR]
+            error: { type: string, description: 与 message 相同，兼容现有 App }
+            status: { $ref: '#/components/schemas/TokenStatus' }
+            starts_at: { $ref: '#/components/schemas/Timestamp' }
+            expires_at: { $ref: '#/components/schemas/Timestamp' }
+            effective_expires_at: { $ref: '#/components/schemas/Timestamp' }
+            invalidated_at: { $ref: '#/components/schemas/NullableTimestamp' }
+            server_time: { $ref: '#/components/schemas/Timestamp' }
+    Page:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: { type: array }
+        next_cursor: { type: [string, 'null'] }
+    Admin:
+      type: object
+      required: [admin_id, username, role]
+      properties:
+        admin_id: { type: string }
+        username: { type: string }
+        role: { type: string, enum: [admin, viewer] }
+    Session:
+      type: object
+      required: [admin, csrf_token]
+      properties:
+        admin: { $ref: '#/components/schemas/Admin' }
+        csrf_token: { type: string }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+    UserCreate:
+      type: object
+      required: [username]
+      additionalProperties: false
+      properties:
+        username: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$', description: 不区分大小写唯一（已删除用户除外） }
+        display_name: { type: string, maxLength: 100 }
+        notes: { type: string, maxLength: 2000 }
+    UserUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        username: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$' }
+        display_name: { type: string, maxLength: 100 }
+        notes: { type: string, maxLength: 2000 }
+        status: { type: string, enum: [active, disabled] }
+    User:
+      type: object
+      required: [user_id, username, display_name, notes, status, token_count, active_token_count, created_at, updated_at]
+      properties:
+        user_id: { type: string }
+        username: { type: string }
+        display_name: { type: string }
+        notes: { type: string }
+        status: { type: string, enum: [active, disabled, deleted] }
+        token_count: { type: integer }
+        active_token_count: { type: integer }
+        scheduled_token_count: { type: integer }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+        disabled_at: { $ref: '#/components/schemas/NullableTimestamp' }
+        deleted_at: { $ref: '#/components/schemas/NullableTimestamp' }
+    TokenCreate:
+      type: object
+      required: [label, gateway_id, expires_at]
+      additionalProperties: false
+      properties:
+        label: { type: string, minLength: 1, maxLength: 100 }
+        gateway_id: { $ref: '#/components/schemas/GatewayId' }
+        starts_at: { type: string, format: date-time, description: 必须带时区；不填为当前时间（含） }
+        expires_at: { type: string, format: date-time, description: 必须带时区；必须晚于开始时间和当前时间（不含） }
+    TokenUpdate:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        label: { type: string, minLength: 1, maxLength: 100 }
+        starts_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+    Token:
+      type: object
+      required: [token_id, user_id, gateway_id, label, token_suffix, status, starts_at, expires_at,
+                 effective_expires_at, invalidated_at, revocation_reason, created_at, updated_at]
+      properties:
+        token_id: { type: string }
+        user_id: { type: string }
+        gateway_id: { $ref: '#/components/schemas/GatewayId' }
+        label: { type: string }
+        token_suffix: { type: string, description: Token 原文末 6 位，仅供辨认 }
+        status: { $ref: '#/components/schemas/TokenStatus' }
+        starts_at: { $ref: '#/components/schemas/Timestamp' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        effective_expires_at: { $ref: '#/components/schemas/Timestamp' }
+        invalidated_at: { $ref: '#/components/schemas/NullableTimestamp' }
+        revocation_reason: { type: [string, 'null'], examples: [admin_revoked, user_disabled, user_deleted] }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    IssuedToken:
+      allOf:
+        - $ref: '#/components/schemas/Token'
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              pattern: '^hear_ut_[A-Za-z0-9_-]{43}$'
+              description: Token 原文，只在签发成功时返回这一次
+    AuditEvent:
+      type: object
+      required: [event_id, occurred_at, actor, action, target_type, target_id]
+      properties:
+        event_id: { type: string }
+        occurred_at: { $ref: '#/components/schemas/Timestamp' }
+        actor:
+          type: object
+          properties:
+            type: { type: string, enum: [admin, cli] }
+            id: { type: string }
+            username: { type: string }
+        action:
+          type: string
+          examples: [user.create, user.update, user.disable, user.enable, user.delete, token.issue, token.update,
+                     token.revoke, gateway.create, gateway.rotate_credential, admin.login, admin.logout]
+        target_type: { type: string, enum: [user, token, gateway, admin] }
+        target_id: { type: string }
+        user_id: { type: [string, 'null'] }
+        token_id: { type: [string, 'null'] }
+        gateway_id: { type: [string, 'null'] }
+        before: { type: [object, 'null'], description: 变更前的元数据（不含原文） }
+        after: { type: [object, 'null'], description: 变更后的元数据（不含原文） }
+        request_id: { type: [string, 'null'] }
+    Gateway:
+      type: object
+      required: [gateway_id, name, revision, snapshot_requests]
+      properties:
+        gateway_id: { $ref: '#/components/schemas/GatewayId' }
+        name: { type: string }
+        revision: { type: integer, minimum: 0 }
+        snapshot_requests: { type: integer, description: 管理服务收到的清单请求累计次数 }
+        last_snapshot_at: { $ref: '#/components/schemas/NullableTimestamp' }
+        credential_rotated_at: { $ref: '#/components/schemas/Timestamp' }
+        created_at: { $ref: '#/components/schemas/Timestamp' }
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+    GatewayWithCredential:
+      allOf:
+        - $ref: '#/components/schemas/Gateway'
+        - type: object
+          required: [credential]
+          properties:
+            credential: { type: string, pattern: '^hear_gw_', description: 只返回这一次 }
+    TokenSnapshot:
+      type: object
+      required: [gateway_id, revision, generated_at, digest_algorithm, tokens]
+      properties:
+        gateway_id: { $ref: '#/components/schemas/GatewayId' }
+        revision: { type: integer, minimum: 0 }
+        generated_at: { $ref: '#/components/schemas/Timestamp' }
+        digest_algorithm: { type: string, const: sha256 }
+        tokens:
+          type: array
+          items:
+            type: object
+            required: [token_id, user_id, sha256, starts_at, expires_at, revoked_at]
+            properties:
+              token_id: { type: string }
+              user_id: { type: string }
+              sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+              starts_at: { $ref: '#/components/schemas/Timestamp' }
+              expires_at: { $ref: '#/components/schemas/Timestamp' }
+              revoked_at: { $ref: '#/components/schemas/NullableTimestamp' }
+      example:
+        gateway_id: hear-home
+        revision: 42
+        generated_at: '2027-01-15T08:00:00Z'
+        digest_algorithm: sha256
+        tokens:
+          - token_id: tok_01
+            user_id: usr_01
+            sha256: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+            starts_at: '2027-01-15T07:00:00Z'
+            expires_at: '2027-02-15T07:00:00Z'
+            revoked_at: null
+    TokenCheck:
+      type: object
+      required: [active, status, starts_at, expires_at, effective_expires_at, invalidated_at, server_time]
+      properties:
+        active: { type: boolean, const: true }
+        status: { type: string, const: active }
+        starts_at: { $ref: '#/components/schemas/Timestamp' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+        effective_expires_at: { $ref: '#/components/schemas/Timestamp' }
+        invalidated_at: { type: 'null' }
+        server_time: { $ref: '#/components/schemas/Timestamp' }
+    GatewayHealth:
+      type: object
+      required: [asr, mt, clone, asr_ready, mt_ready, clone_ready, auth_mode, auth_ready]
+      properties:
+        asr: { type: string }
+        mt: { type: string }
+        clone: { type: string }
+        asr_ready: { type: boolean }
+        mt_ready: { type: boolean }
+        clone_ready: { type: boolean }
+        speaker_ready: { type: boolean }
+        auth_mode:
+          type: string
+          enum: [managed, legacy, off]
+          description: managed = 托管 Token；legacy = 旧的单口令；off = 不校验
+        auth_ready: { type: boolean, description: 托管模式下清单已加载且 60 秒内同步成功 }
+        auth_detail: { type: string, description: auth_ready=false 时的简短说明 }
+      additionalProperties: true

@@ -828,6 +828,37 @@ if (-not (Test-Path $certFile)) {
     Step "已有证书 certs\cert.pem"
 }
 
+function Get-HearHealth {
+    try {
+        $json = & curl.exe -s -k --max-time 5 "https://127.0.0.1:$Port/health"
+        if ($LASTEXITCODE -eq 0 -and $json) { return ($json | ConvertFrom-Json) }
+    } catch { }
+    return $null
+}
+
+# 口令管理模式：网关自己拉取口令清单，这里只轮询本机 /health，等 auth_ready=true。
+# 清单没加载好时网关照常运行，但所有推理请求都返回 503（不会退回无口令）。
+function Wait-AuthReady($seconds) {
+    if ($env:HEAR_AUTH_MODE -ne "managed") { return $true }
+    Say "等待口令清单加载（网关 $($env:HEAR_GATEWAY_ID)）"
+    $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $cloud.Refresh()
+        if ($cloud.HasExited) {
+            Die "云端服务退出了（退出码 $($cloud.ExitCode)）：多半是口令管理配置不对，看上面的报错"
+        }
+        $h = Get-HearHealth
+        if ($h -and $h.auth_mode -eq "managed" -and $h.auth_ready -eq $true) {
+            Say "口令服务已就绪：只接受管理后台签发的 Token"
+            return $true
+        }
+        Start-Sleep -Seconds 1
+    }
+    Write-Host "!! 口令服务 $seconds 秒内没有就绪：网关已启动，但推理请求会返回 503，直到清单同步成功。" -ForegroundColor Red
+    Write-Host "   检查 HEAR_AUTH_API_URL（$($env:HEAR_AUTH_API_URL)）能否访问、网关凭据是否正确；网关每 5 秒自动重试。" -ForegroundColor Red
+    return $false
+}
+
 $cloud = Start-Process -FilePath $venvPy -ArgumentList "`"$cloudScript`"" `
             -PassThru -NoNewWindow
 Add-ProcessToHearJob $cloud
@@ -837,6 +868,7 @@ Say "云端服务已启动（端口 $Port），模型还在准备中"
 Write-Host "    电脑浏览器打开 https://127.0.0.1:$Port/ 看看服务在不在（自签证书，浏览器会提示不安全，点继续就行）" -ForegroundColor Cyan
 Write-Host "    手机浏览器打开下面打印的地址，能打开就说明手机到电脑是通的" -ForegroundColor Cyan
 Show-LanInfo $Port
+[void](Wait-AuthReady 45)
 
 # ---------------------------------------------------------------- 模型
 function Get-Model($repo, $file) {
@@ -1052,6 +1084,7 @@ Write-Host ""
 
 # 问总服务要真实状态：三个接口到底哪几个能用（不能一口咬定"都能用"）
 $asrTxt = "未知"; $mtTxt = "未知"; $cloneTxt = "未知"
+$authModeNow = $null; $authReadyNow = $false
 try {
     $json = & curl.exe -s -k --max-time 15 "https://127.0.0.1:$Port/health"
     if ($json) {
@@ -1063,6 +1096,7 @@ try {
         if ($null -ne $o.asr_ready)   { $asrOk       = [bool]$o.asr_ready }
         if ($null -ne $o.mt_ready)    { $mtOkNow     = [bool]$o.mt_ready }
         if ($null -ne $o.clone_ready) { $cloneOkNow  = [bool]$o.clone_ready }
+        if ($null -ne $o.auth_mode)   { $authModeNow = "$($o.auth_mode)"; $authReadyNow = [bool]$o.auth_ready }
     }
 } catch { }
 # 老服务没有布尔字段，才退回看文字（"外部服务连不上"不能算就绪）
@@ -1080,6 +1114,18 @@ if ($asrOk -and $mtOkNow -and $cloneOkNow) {
     Write-Host "    克隆：$cloneTxt" -ForegroundColor DarkGray
     Write-Host "    识别模型第一次要现下（几百 MB），下完自己就好了，不用重跑。" -ForegroundColor DarkGray
     Write-Host "    翻译/克隆起不来的话看 server\mt.log 和 server\clone.log。" -ForegroundColor DarkGray
+}
+if ($authModeNow -eq "managed") {
+    if ($authReadyNow) {
+        Write-Host "  口令服务：管理模式已就绪（网关 $($env:HEAR_GATEWAY_ID)）。" -ForegroundColor Green
+    } else {
+        Write-Host "  口令服务：管理模式未就绪，推理请求会返回 503；同步恢复后自动可用。" -ForegroundColor Red
+    }
+    Write-Host "    检查某个口令：start-hear-cloud.bat --check-token" -ForegroundColor DarkGray
+} elseif ($authModeNow -eq "legacy") {
+    Write-Host "  访问口令：旧的单口令方式（certs\access-token.txt）。" -ForegroundColor DarkGray
+} elseif ($authModeNow -eq "off") {
+    Write-Host "  访问口令：本次未启用。" -ForegroundColor Yellow
 }
 Write-Host ""
 

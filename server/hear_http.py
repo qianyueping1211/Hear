@@ -3,6 +3,8 @@ from contextlib import contextmanager
 from hmac import compare_digest
 from http.client import HTTPConnection, HTTPSConnection, HTTPException
 from http.server import BaseHTTPRequestHandler
+import re
+import secrets
 import socket
 import ssl
 import threading
@@ -10,6 +12,16 @@ import time
 import traceback
 import urllib.error
 from urllib.parse import urlsplit
+
+from hear_auth import AuthResult
+
+LEGACY_DENIED = "访问口令不对，或请求未使用允许的连接方式"
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+ERROR_CODES = {
+    400: "BAD_REQUEST", 401: "UNAUTHORIZED", 403: "FORBIDDEN", 404: "NOT_FOUND",
+    408: "REQUEST_TIMEOUT", 413: "PAYLOAD_TOO_LARGE", 500: "INTERNAL_ERROR",
+    502: "BAD_GATEWAY", 503: "SERVICE_BUSY", 504: "GATEWAY_TIMEOUT",
+}
 
 
 def clone_upstream(url, payload, deadline, max_bytes):
@@ -72,24 +84,46 @@ def clone_upstream(url, payload, deadline, max_bytes):
 
 
 class RequestPolicy:
-    def __init__(self, max_body, max_inflight, access_token=None, *, allow_loopback_http=False):
+    def __init__(self, max_body, max_inflight, access_token=None, *, allow_loopback_http=False,
+                 authenticator=None):
         self.max_body = max_body
         self.access_token = access_token
         self.allow_loopback_http = allow_loopback_http
+        # 管理模式：只认 Token 管理服务签发的口令，旧的共享口令不作为后备
+        self.authenticator = authenticator
         self.max_inflight = max_inflight
         self.lock = threading.Lock()
         self.inflight = 0
         self.background_inflight = 0
         self.previews = set()
 
-    def permits(self, connection, peer_host, token):
-        if self.access_token is None:
-            return True
+    @property
+    def auth_mode(self):
+        if self.authenticator is not None:
+            return "managed"
+        return "legacy" if self.access_token is not None else "off"
+
+    def authorize(self, connection, peer_host, token):
+        """推理接口和 /v1/auth/check 共用的鉴权。只看内存，不访问数据库或管理服务。"""
         # Use the real TCP peer. Forwarded headers cannot authorize plaintext.
         local_proxy = self.allow_loopback_http and peer_host in ("127.0.0.1", "::1")
-        if not isinstance(connection, ssl.SSLSocket) and not local_proxy:
-            return False
-        return compare_digest(token.encode("utf-8"), self.access_token.encode("utf-8"))
+        secure = isinstance(connection, ssl.SSLSocket) or local_proxy
+        if self.authenticator is not None:
+            if not secure:
+                return AuthResult.deny("HTTPS_REQUIRED", 403)
+            return self.authenticator.verify(token)
+        if self.access_token is None:
+            return AuthResult.allow()
+        if not secure:
+            return AuthResult.deny("HTTPS_REQUIRED", 401, message=LEGACY_DENIED)
+        if not token:
+            return AuthResult.deny("TOKEN_REQUIRED", 401, message=LEGACY_DENIED)
+        if compare_digest(token.encode("utf-8"), self.access_token.encode("utf-8")):
+            return AuthResult.allow()
+        return AuthResult.deny("TOKEN_INVALID", 401, message=LEGACY_DENIED)
+
+    def permits(self, connection, peer_host, token):
+        return self.authorize(connection, peer_host, token).ok
 
     @contextmanager
     def reserve(self, *, background=False, preview=None):
@@ -118,6 +152,7 @@ class RequestPolicy:
 
 class RequestHandler(BaseHTTPRequestHandler):
     def handle_one_request(self):
+        self._request_id = None
         # Check the buffered reader so a reused TLS connection can go idle
         # without being reported as a failed request.
         try:
@@ -128,6 +163,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         super().handle_one_request()
+
+    @property
+    def request_id(self):
+        if getattr(self, "_request_id", None) is None:
+            headers = getattr(self, "headers", None)
+            incoming = ((headers.get("X-Request-Id") if headers is not None else "") or "").strip()
+            self._request_id = incoming if REQUEST_ID_RE.match(incoming) else "req_" + secrets.token_hex(8)
+        return self._request_id
 
     def log_error(self, fmt, *args):
         if fmt == "Request timed out: %r" and args and isinstance(args[0], TimeoutError):
@@ -147,12 +190,37 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json(self.pairing_info())
             elif route == "/ping":
                 self._send_json({"pong": True, "time": time.time()})
+            elif route == "/v1/auth/check":
+                self.auth_check()
             elif route.startswith("/v1/"):
                 self._error("没有这个接口", 404)
             else:
                 self._send_html(self.test_page())
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def _auth_denied(self, result, route):
+        body = {"code": result.code, "message": result.message, "error": result.message,
+                "request_id": self.request_id}
+        for key in ("status", "starts_at", "expires_at", "effective_expires_at", "invalidated_at", "server_time"):
+            if key in result.details:
+                body[key] = result.details[key]
+        # 不记录口令本身，只记录结果和请求 ID
+        self.log_notice("口令校验未通过（%s，%s，request_id=%s）" % (route, result.code, self.request_id))
+        self._send_json(body, result.http_status)
+
+    def auth_check(self):
+        """用网关内存里的清单检查一串口令，不调用模型，也不访问管理服务。"""
+        policy = self.server.request_policy
+        if policy.authenticator is None:
+            self._error("目标服务未接入托管鉴权", 404, "AUTH_NOT_MANAGED")
+            return
+        result = policy.authorize(self.connection, self.client_address[0],
+                                  (self.headers.get("X-Hear-Token") or "").strip())
+        if result.ok:
+            self._send_json(dict(result.details))
+        else:
+            self._auth_denied(result, "/v1/auth/check")
 
     def _reject_without_reading(self, message, code):
         # The request body is unread. Do not reuse the connection for another request.
@@ -191,8 +259,11 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         policy = self.server.request_policy
         token = (self.headers.get("X-Hear-Token") or "").strip()
-        if not policy.permits(self.connection, self.client_address[0], token):
-            self._reject_without_reading("访问口令不对，或请求未使用允许的连接方式", 401)
+        auth = policy.authorize(self.connection, self.client_address[0], token)
+        if not auth.ok:
+            # The request body is unread. Do not reuse the connection for another request.
+            self.close_connection = True
+            self._auth_denied(auth, route)
             return
 
         try:
