@@ -541,7 +541,8 @@ final class LiveSession: ObservableObject {
         // init 里属性还没初始化完，只能用局部变量，不能直接读 self.cloudAddress
         let cloudAddr = d.string(forKey: "cloudAddress") ?? ""
         cloudAddress = cloudAddr
-        cloudASRScheme = d.string(forKey: "cloudASRScheme") ?? "sensevoice+whisper"
+        let initialASRScheme = d.string(forKey: "cloudASRScheme") ?? "sensevoice+whisper"
+        cloudASRScheme = initialASRScheme
         // 先放到局部变量里：init 还没结束，读 self 的属性编译不过
         let accessTok = d.string(forKey: "cloudAccessToken") ?? ""
         cloudAccessToken = accessTok
@@ -549,7 +550,6 @@ final class LiveSession: ObservableObject {
         let cloudOwn = d.object(forKey: "cloudModelAddress") as? [String: String] ?? [:]
         cloudModelAddress = cloudOwn
         let cloudClient = cloud
-        let initialASRScheme = cloudASRScheme
         Task {
             await cloudClient.setAddresses(
                 asr: Self.effectiveAddress(fallback: cloudAddr, own: cloudOwn[CloudModel.asr.rawValue] ?? ""),
