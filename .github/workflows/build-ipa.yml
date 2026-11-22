@@ -4,9 +4,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    # 只改“旧版本号改名”工作流时不打包
+    # 只改发布命名等工作流配置时不重新打包 App
     # 只改电脑上的服务端脚本（server/）时也不用重新打包 App
     paths-ignore:
+      - .github/workflows/build-ipa.yml
       - .github/workflows/rename-releases.yml
       - .github/workflows/server-contract.yml
       - start-hear-cloud.bat
@@ -144,9 +145,9 @@ jobs:
           test -s build/Build/Products/Release-iphoneos/Hear.app/silero_vad.onnx
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/Hear.app Payload/
-          # 文件名带上版本号，例如 Hear-1.0.0.ipa
-          zip -qry "Hear-${VER}.ipa" Payload
-          ls -lh "Hear-${VER}.ipa"
+          # 文件名带上平台和版本号，例如 Hear-iOS-1.0.0.ipa
+          zip -qry "Hear-iOS-${VER}.ipa" Payload
+          ls -lh "Hear-iOS-${VER}.ipa"
 
       # 相同版本只重试同一个源码提交。
       - name: Publish release
@@ -156,7 +157,7 @@ jobs:
         run: |
           TAG="v${VER}"
           {
-            echo "## 听见 ${VER}"
+            echo "## 听见 iOS ${VER}"
             echo ""
             echo "**更新内容：** $(printf '%s' "${COMMIT_MSG:-手动打包}" | head -1)"
             echo ""
@@ -165,7 +166,7 @@ jobs:
             echo "llama.cpp：$(cat Frameworks/LLAMA_VERSION)"
             echo ""
             echo "### 安装"
-            echo "1. 下载下面的 \`Hear-${VER}.ipa\`"
+            echo "1. 下载下面的 \`Hear-iOS-${VER}.ipa\`"
             echo "2. 用 [Sideloadly](https://sideloadly.io) + 你的 Apple ID 安装到 iPhone"
             echo "3. 已安装过的直接覆盖安装，模型不用重新下载"
           } > notes.md
@@ -173,11 +174,11 @@ jobs:
           # 同一版本重新构建时只覆盖 IPA 与说明，不再生成 -build.N 小版本。
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" \
-              --title "听见 ${VER}" --notes-file notes.md --latest
-            gh release upload "$TAG" "Hear-$VER.ipa" --clobber
+              --title "听见 iOS ${VER}" --notes-file notes.md --latest
+            gh release upload "$TAG" "Hear-iOS-$VER.ipa" --clobber
           else
-            gh release create "$TAG" "Hear-$VER.ipa" --target "$GITHUB_SHA" \
-              --title "听见 ${VER}" --notes-file notes.md --latest
+            gh release create "$TAG" "Hear-iOS-$VER.ipa" --target "$GITHUB_SHA" \
+              --title "听见 iOS ${VER}" --notes-file notes.md --latest
           fi
 
       # 只在失败时上传编译日志，方便排查；安装包只发布到 Releases

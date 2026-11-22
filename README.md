@@ -23,7 +23,7 @@ iPhone 上的**完全本地**实时语音翻译。不联网、不上传，说话
 
 ### 方法 A：直接下载安装包 + Sideloadly 安装（不用学 Xcode，Windows 也行）
 
-1. 打开本仓库右侧的 **Releases（发行版）**，进入最新版本，下载 `Hear-版本号.ipa`（例如 `Hear-1.0.0.ipa`）。不用登录。
+1. 打开本仓库右侧的 **Releases（发行版）**，进入最新 iOS 版本，下载 `Hear-iOS-版本号.ipa`（例如 `Hear-iOS-1.0.0.ipa`）。不用登录。
    （每次更新代码后，GitHub 会自动打包并发布一个新版本，大约 3～15 分钟。）
 2. 如果想手动重新打包：**Actions** → **Build IPA (unsigned)** → **Run workflow**。
 3. 在电脑上安装 [Sideloadly](https://sideloadly.io)（Mac / Windows 都有）。Windows 还需要装 iTunes 和 iCloud 的官网版本。
@@ -140,7 +140,7 @@ server/                          云端模型服务（WSL2 上跑，README 在�
 - **llama.cpp 新版本改了接口导致编译错误**：可以固定版本。在 workflow 的 `env` 里加 `LLAMA_TAG: b7xxx`（填一个能用的版本号）。
 - **打包显示 “The job was not acquired by Runner” 或 “Internal server error”**：这是 GitHub 自己的服务器临时出问题，和代码无关。进入这次打包，点右上角 **Re-run all jobs** 重新打包即可。
 - **免费账号限制**：同时最多 3 个自签 App；每 7 天需要重签。
-- **版本号**：三位数字，写在仓库根目录的 `VERSION` 文件里（例如 `1.0.0`），打包时用它命名安装包，例如 `Hear-1.0.0.ipa`。之前的版本已改为 0.x.y（例如 4.3 → 0.4.3）。
+- **版本号**：三位数字，写在仓库根目录的 `VERSION` 文件里（例如 `1.0.0`），iOS 安装包按平台和版本号命名，例如 `Hear-iOS-1.0.0.ipa`。之前的版本已改为 0.x.y（例如 4.3 → 0.4.3）。
 
 
 ## 声音克隆引擎
