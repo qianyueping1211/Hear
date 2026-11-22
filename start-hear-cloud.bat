@@ -64,12 +64,25 @@ function Read-AccessMode {
     return $true
 }
 
+# 本机 Token 管理服务（start-hear-token-admin.bat）的默认位置：数据和凭据在当前用户目录里
+$tokenPort = if ($env:HEAR_TOKEN_SERVICE_PORT) { $env:HEAR_TOKEN_SERVICE_PORT.Trim() } else { '8443' }
+$tokenGateway = if ($env:HEAR_GATEWAY_ID) { $env:HEAR_GATEWAY_ID.Trim() } else { 'hear-home' }
+$tokenDb = Join-Path $env:LOCALAPPDATA 'Hear\token-data\hear-tokens.db'
+$tokenCred = Join-Path $env:LOCALAPPDATA ('Hear\secrets\' + $tokenGateway + '.cred')
+
 # 口令管理模式：HEAR_AUTH_MODE=managed，或已配置管理服务三项时默认进入。
+# 用 start-hear-token-admin.bat 在本机设置过 Token 管理后，不用再配环境变量，默认直接进入管理模式。
 # 网关凭据只通过 HEAR_GATEWAY_CREDENTIAL_FILE 指向的文件提供，这里只检查文件，不读取内容。
 function Resolve-AuthMode {
     $names = @('HEAR_AUTH_API_URL', 'HEAR_GATEWAY_ID', 'HEAR_GATEWAY_CREDENTIAL_FILE')
     $present = @($names | Where-Object { [Environment]::GetEnvironmentVariable($_) })
     $requested = ([string]$env:HEAR_AUTH_MODE).Trim().ToLowerInvariant()
+    if ($requested -eq '' -and $present.Count -eq 0 -and (Test-Path -LiteralPath $tokenCred -PathType Leaf)) {
+        $env:HEAR_AUTH_API_URL = "http://127.0.0.1:$tokenPort"
+        $env:HEAR_GATEWAY_ID = $tokenGateway
+        $env:HEAR_GATEWAY_CREDENTIAL_FILE = $tokenCred
+        $present = $names
+    }
     if ($requested -eq '' -and $present.Count -gt 0) { $requested = 'managed' }
     if ($requested -eq '' -or $requested -eq 'legacy') { return 'legacy' }
     if ($requested -eq 'off') { return 'off' }
@@ -98,6 +111,34 @@ function Find-LauncherPython {
     }
     if (Get-Command 'py' -ErrorAction SilentlyContinue) { return @('py', '-3') }
     return @()
+}
+
+# 管理服务在本机（http://127.0.0.1:端口）但还没运行时，在另一个最小化窗口里把它启动起来。
+# 这个窗口独立于云端服务：关掉云端服务窗口不会停掉它。
+function Start-LocalTokenService {
+    if ($env:HEAR_AUTH_API_URL -notmatch '^http://127\.0\.0\.1:(\d+)/?$') { return }
+    $port = $Matches[1]
+    try {
+        if ((Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 2).StatusCode -eq 200) {
+            Write-Host "Token 管理服务已在运行：http://127.0.0.1:$port/admin/" -ForegroundColor DarkGray
+            return
+        }
+    } catch { }
+    $service = Join-Path $serverDir 'hear_token_service.py'
+    if (-not (Test-Path -LiteralPath $tokenDb) -or -not (Test-Path -LiteralPath $service)) {
+        Write-Warning '本机 Token 管理服务还没设置：先双击 start-hear-token-admin.bat。'
+        return
+    }
+    $python = @(Find-LauncherPython)
+    if ($python.Count -eq 0) { throw 'Python 3 was not found.' }
+    $arguments = @()
+    if ($python.Count -gt 1) { $arguments += $python[1..($python.Count - 1)] }
+    $arguments += @($service, '--db', $tokenDb, 'serve', '--host', '127.0.0.1', '--port', $port)
+    # Windows PowerShell 5 不会给带空格的参数加引号，这里逐个加上
+    $quoted = $arguments | ForEach-Object { '"' + $_ + '"' }
+    $env:PYTHONUTF8 = '1'
+    Start-Process -FilePath $python[0] -ArgumentList $quoted -WindowStyle Minimized | Out-Null
+    Write-Host "已在另一个窗口启动 Token 管理服务：http://127.0.0.1:$port/admin/" -ForegroundColor Cyan
 }
 
 function Update-ServerFiles {
@@ -162,7 +203,8 @@ try {
         Write-Host 'start-hear-cloud.bat --check-token [https://host:port]    Check the gateway and one access token (hidden input).'
         Write-Host '    Exit codes: 0 valid, 2 network/TLS, 3 missing/invalid, 4 not started, 5 expired, 6 revoked, 7 auth unavailable.'
         Write-Host 'start-hear-cloud.bat --cloudflare-local-http    Allow authenticated HTTP only from a local Tunnel connector.'
-        Write-Host 'Managed tokens: set HEAR_AUTH_MODE=managed, HEAR_AUTH_API_URL, HEAR_GATEWAY_ID, HEAR_GATEWAY_CREDENTIAL_FILE.'
+        Write-Host 'Managed tokens: run start-hear-token-admin.bat once; this launcher then uses them automatically.'
+        Write-Host 'Remote token service: set HEAR_AUTH_MODE=managed, HEAR_AUTH_API_URL, HEAR_GATEWAY_ID, HEAR_GATEWAY_CREDENTIAL_FILE.'
         Write-Host 'HEAR_SERVER_REF accepts main, a release tag, or a full commit SHA.'
         exit 0
     }
@@ -206,6 +248,7 @@ try {
         $env:HEAR_AUTH_MODE = 'managed'
         $env:HEAR_REQUIRE_TOKEN = '0'
         Write-Host "口令管理模式：网关 $($env:HEAR_GATEWAY_ID)，管理服务 $($env:HEAR_AUTH_API_URL)" -ForegroundColor Cyan
+        Start-LocalTokenService
         Write-Host '  口令清单加载完成前，推理请求会被拒绝（503）。' -ForegroundColor DarkGray
     } elseif ($authMode -eq 'off') {
         $env:HEAR_AUTH_MODE = 'off'
