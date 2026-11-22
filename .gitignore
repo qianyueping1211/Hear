@@ -2,12 +2,12 @@
 build/
 DerivedData/
 *.xcodeproj/
-Hear/Info.plist
-Frameworks/llama.xcframework/
-Frameworks/LLAMA_VERSION
+apps/ios/Hear/Info.plist
+apps/ios/Frameworks/llama.xcframework/
+apps/ios/Frameworks/LLAMA_VERSION
 *.ipa
 Payload/
-Hear/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+apps/ios/Hear/Assets.xcassets/AppIcon.appiconset/AppIcon.png
 
 # 本地调试用的构建日志
 joblog*.txt

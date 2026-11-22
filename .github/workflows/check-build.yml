@@ -8,11 +8,9 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Hear/**'
+      - 'apps/ios/**'
       - 'tests/**'
-      - 'project.yml'
       - 'scripts/**'
-      - 'Frameworks/LLAMA_VERSION'
       - '.github/workflows/check-build.yml'
 
 permissions:
@@ -76,21 +74,21 @@ jobs:
         run: |
           # 打印一下关键代码，确认编译的是最新的（之前出现过编译到旧代码的情况）
           echo "--- HEAD: $(git log -1 --format='%H %s') ---"
-          sed -n '125,145p' Hear/Translate/LlamaTranslator.swift
-          xcodegen generate
+          sed -n '125,145p' apps/ios/Hear/Translate/LlamaTranslator.swift
+          xcodegen generate --spec apps/ios/project.yml
 
       - name: Session regression tests
         run: |
-          swiftc -parse-as-library -import-objc-header Hear/Models/ModelArchive-Bridging-Header.h \
-            Hear/App/SessionJobQueue.swift Hear/App/SpeakerTracker.swift Hear/Models/Language.swift \
-            Hear/Models/ZipVoiceArchive.swift Hear/Cloud/CloudModelReadiness.swift \
-            Hear/Translate/PromptBuilder.swift Hear/Translate/TranslationOutput.swift Hear/Audio/Segmenter.swift Hear/Audio/CloneAudio.swift \
-            Hear/Speech/SpeechTextFilter.swift Hear/Speech/Fillers.swift Hear/Cloud/CloudInferencePolicy.swift \
-            Hear/Audio/AudioInputBuffer.swift Hear/Cloud/CloudPairingAddress.swift Hear/App/SessionClonePipeline.swift Hear/App/SessionCloudRecovery.swift \
-            Hear/App/SessionPreviewPipeline.swift Hear/App/SenseVoiceRecovery.swift Hear/App/CloudSettingsSyncPolicy.swift \
-            Hear/App/SessionRecognitionPipeline.swift Hear/App/SessionTranslationPipeline.swift \
-            Hear/Models/ConversationModels.swift Hear/Summary/SummaryTemplate.swift \
-            tests/SessionJobQueueTests.swift -lbz2 -o "$RUNNER_TEMP/hear-session-tests"
+          swiftc -parse-as-library -import-objc-header apps/ios/Hear/Models/ModelArchive-Bridging-Header.h \
+            apps/ios/Hear/App/SessionJobQueue.swift apps/ios/Hear/App/SpeakerTracker.swift apps/ios/Hear/Models/Language.swift \
+            apps/ios/Hear/Models/ZipVoiceArchive.swift apps/ios/Hear/Cloud/CloudModelReadiness.swift \
+            apps/ios/Hear/Translate/PromptBuilder.swift apps/ios/Hear/Translate/TranslationOutput.swift apps/ios/Hear/Audio/Segmenter.swift apps/ios/Hear/Audio/CloneAudio.swift \
+            apps/ios/Hear/Speech/SpeechTextFilter.swift apps/ios/Hear/Speech/Fillers.swift apps/ios/Hear/Cloud/CloudInferencePolicy.swift \
+            apps/ios/Hear/Audio/AudioInputBuffer.swift apps/ios/Hear/Cloud/CloudPairingAddress.swift apps/ios/Hear/App/SessionClonePipeline.swift apps/ios/Hear/App/SessionCloudRecovery.swift \
+            apps/ios/Hear/App/SessionPreviewPipeline.swift apps/ios/Hear/App/SenseVoiceRecovery.swift apps/ios/Hear/App/CloudSettingsSyncPolicy.swift \
+            apps/ios/Hear/App/SessionRecognitionPipeline.swift apps/ios/Hear/App/SessionTranslationPipeline.swift \
+            apps/ios/Hear/Models/ConversationModels.swift apps/ios/Hear/Summary/SummaryTemplate.swift \
+            apps/ios/tests/SessionJobQueueTests.swift -lbz2 -o "$RUNNER_TEMP/hear-session-tests"
           "$RUNNER_TEMP/hear-session-tests"
 
       - name: Build
@@ -100,7 +98,7 @@ jobs:
           # 只能靠"产物在不在"来判断——有的失败场景会误判成成功。
           RC=0
           xcodebuild \
-            -project Hear.xcodeproj \
+            -project apps/ios/Hear.xcodeproj \
             -scheme Hear \
             -configuration Release \
             -sdk iphoneos \
@@ -114,7 +112,7 @@ jobs:
           grep -E "error:|BUILD" build.log | tail -30 || true
           if [ "$RC" -ne 0 ] || ! test -f build/Build/Products/Release-iphoneos/Hear.app/Hear; then
             echo "::error::编译失败（xcodebuild 退出码 $RC），错误如下："
-            grep -E "error:" build.log | sed 's|.*/Hear/Hear/||' | sort -u | head -40
+            grep -E "error:" build.log | sed 's|.*/apps/ios/Hear/||' | sort -u | head -40
             exit 1
           fi
           echo "✅ 编译通过"

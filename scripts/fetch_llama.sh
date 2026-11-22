@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 下载 llama.cpp 官方编译好的 iOS 框架（llama.xcframework）到 Frameworks/
+# 下载 llama.cpp 官方编译好的 iOS 框架到 apps/ios/Frameworks/
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,9 +36,9 @@ unzip -q "$ZIP" -d "$TMP/x"
 XC=$(find "$TMP/x" -type d -name 'llama.xcframework' | head -1)
 [ -n "$XC" ] || { echo "❌ 压缩包里没找到 llama.xcframework"; exit 1; }
 
-rm -rf Frameworks/llama.xcframework
-mkdir -p Frameworks
-cp -R "$XC" Frameworks/
-echo "$TAG" > Frameworks/LLAMA_VERSION
+rm -rf apps/ios/Frameworks/llama.xcframework
+mkdir -p apps/ios/Frameworks
+cp -R "$XC" apps/ios/Frameworks/
+echo "$TAG" > apps/ios/Frameworks/LLAMA_VERSION
 rm -rf "$TMP"
-echo "✅ Frameworks/llama.xcframework（llama.cpp ${TAG}）"
+echo "✅ apps/ios/Frameworks/llama.xcframework（llama.cpp ${TAG}）"

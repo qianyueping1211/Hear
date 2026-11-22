@@ -90,7 +90,7 @@ def fixtures(root):
 
 def make_vad():
     config = sherpa_onnx.VadModelConfig()
-    config.silero_vad.model = str(ROOT / "Hear/Resources/silero_vad.onnx")
+    config.silero_vad.model = str(ROOT / "apps/ios/Hear/Resources/silero_vad.onnx")
     config.silero_vad.threshold = 0.5
     config.sample_rate = RATE
     return sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=32)

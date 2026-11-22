@@ -114,25 +114,23 @@ WSL2 里访问不到 NPU，所以想用满硬件就别装 WSL。完整说明（�
 ## 项目结构
 
 ```
-Hear/
-├── App/LiveSession.swift        整体流程：断句 → 识别 → 翻译 → 朗读
-├── Audio/AudioCapture.swift     麦克风采集、重采样到 16kHz
-├── Audio/Segmenter.swift        自动断句（不用一直按着）
-├── Speech/SenseVoiceRecognizer.swift  本机 SenseVoice 语音识别
-├── Speech/Speaker.swift         系统朗读
-├── Translate/LlamaTranslator.swift  llama.cpp 运行 Hy-MT2
-├── Translate/PromptBuilder.swift    官方提示词格式（上下文、术语）
-├── Models/                      语言列表、模型下载与管理
-├── Cloud/CloudClient.swift      云端模型服务客户端（识别/翻译/克隆三个接口）
-├── Audio/Wav.swift              wav 编解码（传声音用）
-└── Views/                       界面
-project.yml                      XcodeGen 工程描述
-setup.sh                         Mac 一键生成工程
-start-hear-cloud.bat             Windows 一键启动（下载代码 + 装依赖 + 起服务）
-scripts/fetch_llama.sh           下载 llama.cpp 的 iOS 框架
-server/                          云端模型服务（WSL2 上跑，README 在里面）
-.github/workflows/build-ipa.yml  GitHub 自动打包 ipa
+apps/ios/                       iPhone App 与实时活动扩展
+├── Hear/                       采集、识别、翻译、朗读及界面
+├── HearLiveActivity/           灵动岛与锁屏界面
+├── Frameworks/                 构建时下载的 iOS 框架
+├── tests/                      iOS 会话回归测试
+├── project.yml                 XcodeGen 工程描述
+└── VERSION                     iOS 独立版本号
+desktop/                        Windows 桌面端及未来 macOS 桌面端
+server/                         桌面端与移动端共用的模型服务
+branding/                       两端共用的图标源文件
+setup.sh                        Mac 一键生成 iOS 工程
+start-hear-cloud.bat            Windows 一键启动模型服务
+scripts/fetch_llama.sh          下载 llama.cpp 的 iOS 框架
+.github/workflows/build-ipa.yml GitHub 自动打包 iOS IPA
 ```
+
+未来 Android 和鸿蒙手机、平板客户端可分别加入 `apps/android/`、`apps/harmony/`；同一平台在一个工程内适配不同屏幕。当前 iOS 工程仍只面向 iPhone，尚未开启 iPad 构建目标。
 
 ## 常见问题
 
@@ -140,7 +138,7 @@ server/                          云端模型服务（WSL2 上跑，README 在�
 - **llama.cpp 新版本改了接口导致编译错误**：可以固定版本。在 workflow 的 `env` 里加 `LLAMA_TAG: b7xxx`（填一个能用的版本号）。
 - **打包显示 “The job was not acquired by Runner” 或 “Internal server error”**：这是 GitHub 自己的服务器临时出问题，和代码无关。进入这次打包，点右上角 **Re-run all jobs** 重新打包即可。
 - **免费账号限制**：同时最多 3 个自签 App；每 7 天需要重签。
-- **版本号**：三位数字，写在仓库根目录的 `VERSION` 文件里（例如 `1.0.0`），iOS 安装包按平台和版本号命名，例如 `Hear-iOS-1.0.0.ipa`。之前的版本已改为 0.x.y（例如 4.3 → 0.4.3）。
+- **版本号**：三位数字，iOS 写在 `apps/ios/VERSION`（例如 `1.0.0`），Windows 写在 `desktop/VERSION`。iOS 安装包按平台和版本号命名，例如 `Hear-iOS-1.0.0.ipa`。
 
 
 ## 声音克隆引擎

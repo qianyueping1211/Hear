@@ -647,7 +647,7 @@ section.band{scroll-margin-top:62px}
           <tr><td>翻译</td><td class="mono">Translation 框架</td><td class="mono">iOS 26+</td><td>系统翻译兜底</td></tr>
           <tr><td>朗读</td><td class="mono">AVSpeechSynthesizer / AVAudioPlayerNode</td><td class="mono">系统</td><td>译文朗读与左右耳空间定位</td></tr>
           <tr><td>网络</td><td class="mono">URLSession</td><td class="mono">系统</td><td>云端模型服务调用、模型下载（续传）、大模型 API</td></tr>
-          <tr><td>工程</td><td class="mono">XcodeGen（project.yml）</td><td class="mono">—</td><td>声明式生成 Xcode 工程，无需手工维护 .xcodeproj</td></tr>
+          <tr><td>工程</td><td class="mono">XcodeGen（apps/ios/project.yml）</td><td class="mono">—</td><td>声明式生成 Xcode 工程，无需手工维护 .xcodeproj</td></tr>
           <tr><td>构建</td><td class="mono">GitHub Actions（macos-15）</td><td class="mono">—</td><td>拉取 llama.cpp → 生成工程 → xcodebuild → 打包 ipa → 发布 Release</td></tr>
           <tr><td>云端</td><td class="mono">Python 标准库 + faster-whisper + sherpa-onnx</td><td class="mono">—</td><td>局域网模型服务（详见第 3 节）</td></tr>
         </tbody>

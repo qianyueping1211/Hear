@@ -17,7 +17,7 @@ if ! command -v xcodegen >/dev/null 2>&1; then
   brew install xcodegen
 fi
 
-[ -d Frameworks/llama.xcframework ] || bash scripts/fetch_llama.sh
+[ -d apps/ios/Frameworks/llama.xcframework ] || bash scripts/fetch_llama.sh
 bash scripts/prepare_assets.sh
 
 # 免费 Apple ID 要求 Bundle ID 全球唯一，这里用你的 Mac 用户名生成一个
@@ -25,8 +25,8 @@ USER_SAFE=$(echo "${USER:-me}" | tr -cd 'a-zA-Z0-9' | tr 'A-Z' 'a-z')
 export BUNDLE_ID="${BUNDLE_ID:-com.${USER_SAFE}.hear}"
 export TEAM_ID="${TEAM_ID:-}"
 
-xcodegen generate
+xcodegen generate --spec apps/ios/project.yml
 echo ""
 echo "✅ 工程已生成，Bundle ID：$BUNDLE_ID"
 echo "接下来在 Xcode 里：选左侧 Hear → Signing & Capabilities → Team 选你的 Apple ID → 连上 iPhone → 点 ▶"
-open Hear.xcodeproj
+open apps/ios/Hear.xcodeproj
