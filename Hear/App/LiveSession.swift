@@ -55,7 +55,7 @@ final class LiveSession: ObservableObject {
         guard isRunning else { return activity }
         if captureHealth == .reconnecting { return "正在恢复麦克风连接…" }
         if captureHealth == .backlogged { return "音频积压，部分录音可能未识别…" }
-        let count = recognitionQueue.pendingCount
+        let count = recognition.queue.pendingCount
         return count > 1 ? "收音正常，\(count) 句等待识别…" : activity
     }
     enum ToastPlacement { case controls, modelStatus }
@@ -441,13 +441,12 @@ final class LiveSession: ObservableObject {
         let fallback: Language
         let confirmedSpeech: Bool
     }
-    private let recognitionQueue = SessionJobQueue<ASRJob>()
-    private let translationQueue = SessionJobQueue<MTJob>()
+    private let recognition = SessionRecognitionPipeline<ASRJob>()
+    private let translations = SessionTranslationPipeline<MTJob>()
     /// itemID → 当前有效的任务令牌
     private var jobTokens: [UUID: UUID] = [:]
-    private var queuedTranslationPages: [UUID: UUID] = [:]
     private var runGen = 0                // 每次停止 +1：停止前排队/进行中的识别和翻译全部作废
-    private var working: Bool { !recognitionQueue.isIdle }
+    private var working: Bool { !recognition.queue.isIdle }
     private var currentSeg = 0
     private var currentSegStartFrame: Int64 = 0
     private var partialSeg = 0            // 实时气泡（partial）属于第几句
@@ -470,11 +469,6 @@ final class LiveSession: ObservableObject {
     @Published private(set) var readingID: UUID?
     /// 每句正在执行的生成任务。旧任务结束时不能清掉新任务的等待状态。
     @Published private(set) var cloneWorking: [UUID: UUID] = [:]
-    /// 现在有几个识别正在进行。
-    /// 只有"正在识别"才算忙——翻译慢的时候不算：
-    /// 否则上一句翻译要几十秒，后面那句的实时原文也跟着一起卡住，
-    /// 用户看到的就是一直只有省略号。
-    private var asrBusyCount = 0
     /// 真正在出声的那一条（喇叭显示成绿色）。
     /// 只是"轮到它读了"不算：声音还在生成、或者还没开始播，喇叭都还是转圈。
     @Published private(set) var speakingID: UUID?
@@ -1625,7 +1619,6 @@ final class LiveSession: ObservableObject {
     private var repeatedMemoryWarning = false
     private var lastMemoryWarning: ContinuousClock.Instant?
     private var localOptionalWorkPaused = false
-    private let senseRecovery = SenseVoiceRecovery()
     private var senseRequiresRestart = false
     private static let senseRestartMessage = "本机识别未能恢复，请关闭后重新打开听见。"
 #if DEBUG
@@ -1633,8 +1626,8 @@ final class LiveSession: ObservableObject {
 
     func runSpeechRegression(progress: @escaping @MainActor (String) -> Void) async throws -> URL {
         guard !runningSpeechRegression, !isRunning, !finishingInput, microphoneStartToken == nil,
-              recognitionQueue.isIdle, !isAnyModelLoading, !reclaimingMemory,
-              !senseRecovery.isActive, !senseRequiresRestart else {
+              recognition.queue.isIdle, !isAnyModelLoading, !reclaimingMemory,
+              !recognition.isRecovering, !senseRequiresRestart else {
             throw NSError(domain: "Hear.SpeechRegression", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "请先结束录音并等待模型就绪，再运行回归。",
             ])
@@ -1910,7 +1903,7 @@ final class LiveSession: ObservableObject {
         scheduleMicrophoneRelease()
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(12))
-        while !recognitionQueue.isIdle, clock.now < deadline,
+        while !recognition.queue.isIdle, clock.now < deadline,
               inputFinishToken == token {
             do { try await Task.sleep(for: .milliseconds(50)) }
             catch { break }
@@ -1941,22 +1934,19 @@ final class LiveSession: ObservableObject {
         activity = ""
         UIApplication.shared.isIdleTimerDisabled = false
         runGen += 1
-        recognitionQueue.cancel()
-        senseRecovery.cancel()
-        asrBusyCount = 0
-        correctionTask?.cancel()
+        recognition.cancel()
+        translations.cancelCorrection()
         if keepTranslations {
             // 正常停录让已提交的译文继续；作废尚未交给翻译线的旧识别任务。
-            jobTokens = jobTokens.filter { queuedTranslationPages[$0.key] != nil }
+            jobTokens = jobTokens.filter { translations.submitted($0.key) }
         } else {
-            translationQueue.cancel()
             let store = ConversationStore.shared
-            for (id, page) in queuedTranslationPages where page != conversationID {
+            for (id, page) in translations.pendingPages where page != conversationID {
                 guard let item = store.load(page)?.items.first(where: { $0.id == id }) else { continue }
                 store.commitTranslation(conversationID: page, itemID: id, expectedSource: item.sourceText,
                                         translation: "（翻译失败：收尾任务已中断）", done: true)
             }
-            queuedTranslationPages.removeAll()
+            translations.cancelTranslations()
             jobTokens.removeAll()
             translator.cancelCurrent()
         }
@@ -2009,7 +1999,7 @@ final class LiveSession: ObservableObject {
     private func finishUnfinished() {
         for index in items.indices where !items[index].done {
             let item = items[index]
-            guard queuedTranslationPages[item.id] == nil else { continue }
+            guard !translations.submitted(item.id) else { continue }
             guard Self.hasRealText(item.sourceText) else {
                 items[index].sourceText = "（这段识别未完成）"
                 items[index].applyTranslation("（翻译失败：没有可用原文）", done: true)
@@ -2345,7 +2335,7 @@ final class LiveSession: ObservableObject {
             let seconds = Double(samples.count) / 16_000
             let timeout = usingCloudASR ? CloudInferencePolicy.asrBudget(forSamples: samples.count) + 5
                 : min(28, 8 + seconds + (usingAppleASR ? 3 : 0))
-            recognitionQueue.submit(job, timeout: .seconds(timeout), onOverflow: { [weak self] job in
+            recognition.queue.submit(job, timeout: .seconds(timeout), onOverflow: { [weak self] job in
                 self?.markJobFailed(job.itemID, token: job.token, reason: "识别恢复期间音频已积满")
             }) { [weak self] job in
                 guard let self, self.runGen == job.generation else { return }
@@ -2357,9 +2347,9 @@ final class LiveSession: ObservableObject {
             } timedOut: { [weak self] job in
                 guard let self, self.isCurrentJob(job.itemID, token: job.token) else { return }
                 self.markJobFailed(job.itemID, token: job.token, reason: "识别超时")
-                if local, self.useSense, !self.senseRecovery.isActive { self.recoverSenseVoice() }
+                if local, self.useSense, !self.recognition.isRecovering { self.recoverSenseVoice() }
             }
-            if senseRecovery.isActive { recognitionQueue.keepPending(SenseVoiceRecovery.bufferedSegments) }
+            recognition.keepRecoveryBuffer()
         case .discarded(let id):
             finishedSeg = max(finishedSeg, id)
             if partialSeg == id {
@@ -2392,8 +2382,8 @@ final class LiveSession: ObservableObject {
             }
             guard let job = previews.recognition.next(for: generation) else { return }
             let id = job.id
-            guard phase == .ready, isRunning, !liveActive, asrBusyCount == 0, recognitionQueue.isIdle,
-                  cloudPreview || (!senseRecovery.isActive && !senseRequiresRestart),
+            guard phase == .ready, isRunning, !liveActive, recognition.canPreview,
+                  cloudPreview || (!recognition.isRecovering && !senseRequiresRestart),
                   id == currentSeg, id > finishedSeg else { continue }
             if cloudPreview, let retryAt = previews.cloudRecognitionRetryAt, ContinuousClock.now < retryAt { continue }
             let gen = runGen
@@ -2806,7 +2796,7 @@ final class LiveSession: ObservableObject {
     /// （认出来了就保住这句话；认不出来也不删，标成"没听清"）
     private func localRecover(samples: [Float], fallbackLang: Language,
                               languages: [Language]) async -> (text: String, lang: Language)? {
-        guard !senseRequiresRestart, !senseRecovery.isActive else { return nil }
+        guard !senseRequiresRestart, !recognition.isRecovering else { return nil }
         let cands = languages.map(\.id)
         do {
             guard await sense.isLoaded else { return nil }
@@ -2824,8 +2814,6 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 整句识别和翻译
 
-    private var correctionTask: Task<Void, Never>?
-
     private struct MTJob {
         let itemID: UUID
         let token: UUID
@@ -2841,15 +2829,14 @@ final class LiveSession: ObservableObject {
 
     private func enqueueTranslation(_ job: MTJob) {
         let page = conversationID
-        queuedTranslationPages[job.itemID] = page
-        translationQueue.submit(job) { [weak self] job in
+        translations.submit(job, item: job.itemID, page: page) { [weak self] job in
             await self?.translateItem(job, conversation: page)
         } timedOut: { [weak self] job in
             guard let self, self.isCurrentJob(job.itemID, token: job.token) else { return }
             self.applyTranslation(job.itemID, "（翻译失败：这一句等太久了）", done: true,
                                   conversation: page, expectedSource: job.text)
             self.jobTokens[job.itemID] = nil
-            self.queuedTranslationPages[job.itemID] = nil
+            self.translations.finished(job.itemID)
             self.activity = self.isRunning ? "正在聆听" : ""
             self.kickReader()
         }
@@ -2862,7 +2849,7 @@ final class LiveSession: ObservableObject {
         let rows = conversation == conversationID ? items : (ConversationStore.shared.load(conversation)?.items ?? [])
         guard let index = rows.firstIndex(where: { $0.id == id && $0.sourceText == job.text }) else {
             jobTokens[id] = nil
-            queuedTranslationPages[id] = nil
+            translations.finished(id)
             return
         }
         let hasPreview = !rows[index].translated.isEmpty
@@ -2893,12 +2880,11 @@ final class LiveSession: ObservableObject {
         guard !Task.isCancelled, isCurrentJob(id, token: token) else { return }
         completeTranslation(job, result, conversation: conversation)
         // 只对正在收音的同一页进行后台校正。
-        if isRunning, conversation == conversationID, job.gen == runGen, correctionTask == nil,
-           !recognitionQueue.hasPendingJobs, let address = job.correctionAddress {
+        if isRunning, conversation == conversationID, job.gen == runGen,
+           !recognition.queue.hasPendingJobs, let address = job.correctionAddress {
             let revision = itemVersions[id] ?? 0
-            correctionTask = Task { [weak self] in
+            translations.startCorrection { [weak self] in
                 guard let self else { return }
-                defer { self.correctionTask = nil }
                 await self.whisperCorrect(id: id, samples: job.samples, src: job.src,
                                           oldText: job.text, gen: job.gen, revision: revision,
                                           cloudAddress: address)
@@ -2908,7 +2894,7 @@ final class LiveSession: ObservableObject {
 
     private func completeTranslation(_ job: MTJob, _ result: String, conversation: UUID) {
         jobTokens[job.itemID] = nil
-        queuedTranslationPages[job.itemID] = nil
+        translations.finished(job.itemID)
         applyTranslation(job.itemID, result, done: true, conversation: conversation, expectedSource: job.text)
         if conversation == conversationID {
             activity = isRunning ? "正在聆听" : ""
@@ -2939,20 +2925,19 @@ final class LiveSession: ObservableObject {
         // 不然这条一直"翻译中"，朗读队列碰到第一句没做完的就停了
         // （后面的话一句都读不出来）。
         update(itemID, "（翻译失败：\(reason)）", done: true)
-        activity = senseRecovery.isActive ? "正在恢复本机识别…" : (isRunning ? "正在聆听" : "")
+        activity = recognition.isRecovering ? "正在恢复本机识别…" : (isRunning ? "正在聆听" : "")
         persist()
         kickReader()
     }
 
     private func recoverSenseVoice() {
-        guard !senseRecovery.isActive else { return }
+        guard !recognition.isRecovering else { return }
         guard let folder = SenseVoiceRecognizer.installedFolder() else {
             stopAfterSenseFailure(.failed)
             return
         }
-        recognitionQueue.pause()
         activity = "正在恢复本机识别…"
-        senseRecovery.start(repair: { [sense] in
+        recognition.recover(repair: { [sense] in
             try await sense.recover(folder: folder)
         }) { [weak self] outcome in
             guard let self else { return }
@@ -2960,12 +2945,10 @@ final class LiveSession: ObservableObject {
             case .recovered:
                 hearLog("SenseVoice：超时恢复完成")
                 self.activity = self.isRunning ? "正在聆听" : ""
-                self.recognitionQueue.resume()
             case .failed, .timedOut:
                 self.stopAfterSenseFailure(outcome)
             }
         }
-        recognitionQueue.keepPending(SenseVoiceRecovery.bufferedSegments)
     }
 
     private func stopAfterSenseFailure(_ outcome: SenseVoiceRecovery.Outcome) {
@@ -3013,8 +2996,8 @@ final class LiveSession: ObservableObject {
         let t0 = Date()
         do {
             // 识别中，实时预览先让路。
-            asrBusyCount += 1
-            defer { if gen == runGen { asrBusyCount = max(0, asrBusyCount - 1) } }
+            let use = recognition.beginFinal()
+            defer { recognition.endFinal(use) }
             let engine = sentenceRecognizer
             let result = try await engine.recognize(samples, candidates: cands, fallback: fallback,
                                                      confirmedSpeech: job.confirmedSpeech)
@@ -3222,7 +3205,7 @@ final class LiveSession: ObservableObject {
             hearLog("Whisper 校正 \(secs)s：基本一致")
             return
         }
-        guard translationQueue.isIdle, let i = items.firstIndex(where: { $0.id == id }) else { return }
+        guard translations.isIdle, let i = items.firstIndex(where: { $0.id == id }) else { return }
         // 用户手改过这一句的话，就别再自动改写了：
         // 手改的版本才是用户要的（"我改的" 优先于 "机器觉得更准"）。
         if items[i].sourceText != oldText {
@@ -3419,7 +3402,7 @@ final class LiveSession: ObservableObject {
         let convID = conversationID
         items[i].sourceText = text
         jobTokens[id] = nil
-        queuedTranslationPages[id] = nil
+        translations.finished(id)
         items[i].done = true
         items[i].beginTranslationRevision()
         // 版本号 +1：前一次翻译回来的时候版本对不上，就不要了
@@ -3826,7 +3809,7 @@ final class LiveSession: ObservableObject {
         var stillWaiting = false
         cloudRecovery.applying {
             if asrWasCloud {
-                if betweenSegments, recognitionQueue.isIdle,
+                if betweenSegments, recognition.queue.isIdle,
                    status[CloudModel.asr.rawValue]?.hasPrefix(Self.cloudStatusOK) == true {
                     stopLiveEngine()
                     stopAppleASR()

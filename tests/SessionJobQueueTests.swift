@@ -44,6 +44,7 @@ struct SessionJobQueueTests {
         try await testRecoveryState()
         await testSenseVoiceRecovery()
         await testPreviewPipeline()
+        await testFinalPipelines()
         testPreviewCadence()
         try testConversationBubbleSides()
         try testTranslationRevision()
@@ -163,6 +164,38 @@ private func testPreviewCadence() {
     precondition(cadence.waitUntil(segment: 1, now: slowEnd) == start.advanced(by: .milliseconds(1600)))
     cadence.completed(segment: 1, started: start, ended: start.advanced(by: .milliseconds(50)))
     precondition(cadence.waitUntil(segment: 1, now: start) == start.advanced(by: .milliseconds(400)))
+}
+
+@MainActor
+private func testFinalPipelines() async {
+    let recognition = SessionRecognitionPipeline<Int>()
+    let stale = recognition.beginFinal()
+    precondition(!recognition.canPreview)
+    recognition.cancel()
+    let current = recognition.beginFinal()
+    recognition.endFinal(stale)
+    precondition(!recognition.canPreview)
+    recognition.endFinal(current)
+    precondition(recognition.canPreview)
+
+    let translation = SessionTranslationPipeline<Int>()
+    let item = UUID(), page = UUID()
+    translation.submit(1, item: item, page: page) { _ in
+        translation.finished(item)
+    } timedOut: { _ in preconditionFailure() }
+    precondition(translation.pendingPages[item] == page && !translation.isIdle)
+    await SessionJobQueueTests.until { translation.isIdle }
+    precondition(!translation.submitted(item))
+    let engine = HeldInference()
+    var beganCorrection = false
+    translation.startCorrection {
+        beganCorrection = true
+        await engine.wait()
+    }
+    await SessionJobQueueTests.until { beganCorrection }
+    translation.startCorrection { preconditionFailure("Two corrections ran together") }
+    translation.cancelCorrection()
+    await engine.complete()
 }
 
 @MainActor
