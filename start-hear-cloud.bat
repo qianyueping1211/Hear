@@ -29,6 +29,38 @@ function Test-ServerFiles($directory) {
     return $true
 }
 
+function Read-AccessMode {
+    if ([Console]::IsInputRedirected) { return $true }
+
+    Write-Host ''
+    Write-Host '  服务访问口令（5 秒后默认启用，内网和公网都需要）' -ForegroundColor Cyan
+    Write-Host '    1) 启用访问口令（默认）'
+    Write-Host '    2) 仅本次关闭访问口令（选 2 后按 Enter 确认）'
+    $requireToken = $true
+
+    try {
+        [Console]::Out.Flush()
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        while ($timer.Elapsed.TotalSeconds -lt 5) {
+            if (-not [Console]::KeyAvailable) {
+                Start-Sleep -Milliseconds 50
+                continue
+            }
+            $key = [Console]::ReadKey($true)
+            if ($key.Key -eq [ConsoleKey]::Enter) { return $requireToken }
+            if ($key.KeyChar -eq '2') {
+                $requireToken = $false
+                Write-Host '    按 Enter 确认仅本次关闭访问口令。' -ForegroundColor Yellow
+            } elseif ($key.KeyChar -eq '1' -or $key.Key -eq [ConsoleKey]::Backspace) {
+                $requireToken = $true
+            }
+        }
+    } catch {
+        # Some hosts do not provide a readable console. Use the secure default.
+    }
+    return $true
+}
+
 function Update-ServerFiles {
     $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
     $stage = Join-Path $tempRoot ('hear-launcher-' + [guid]::NewGuid().ToString('N'))
@@ -86,6 +118,7 @@ try {
         Write-Host 'SenseVoice produces the first transcript; Whisper applies corrections.'
         Write-Host 'The startup menu selects Whisper base / small / medium / large-v3. Press Enter for small on first launch.'
         Write-Host 'Connect the phone app to this cloud service; Whisper is managed on the computer.'
+        Write-Host 'Both LAN and internet access require a token by default. The startup choice times out after 5 seconds.'
         Write-Host 'start-hear-cloud.bat --check    Check required server files'
         Write-Host 'HEAR_SERVER_REF accepts main, a release tag, or a full commit SHA.'
         exit 0
@@ -103,6 +136,13 @@ try {
         }
     }
     if (-not (Test-ServerFiles $serverDir)) { throw "Incomplete server folder: $serverDir" }
+    if (Read-AccessMode) {
+        $env:HEAR_REQUIRE_TOKEN = '1'
+        Write-Host '访问口令已启用。' -ForegroundColor Cyan
+    } else {
+        $env:HEAR_REQUIRE_TOKEN = '0'
+        Write-Host '本次启动已关闭访问口令。' -ForegroundColor Yellow
+    }
     $script = Join-Path $serverDir 'start-windows.ps1'
     # Read the UTF-8 source explicitly for Windows PowerShell 5, without rewriting the checkout.
     $source = [IO.File]::ReadAllText($script, [Text.Encoding]::UTF8)
