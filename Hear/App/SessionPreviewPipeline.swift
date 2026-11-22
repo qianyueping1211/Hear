@@ -80,7 +80,7 @@ struct PreviewCadence {
 
     mutating func completed(segment: Int, started: ContinuousClock.Instant, ended: ContinuousClock.Instant) {
         let elapsed = started.duration(to: ended)
-        let interval = min(.milliseconds(1600), max(.milliseconds(400), elapsed * 1.5))
+        let interval = min(.milliseconds(1600), max(.milliseconds(400), elapsed + elapsed / 2))
         self.segment = segment
         nextStart = started.advanced(by: interval)
     }

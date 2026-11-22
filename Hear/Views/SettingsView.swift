@@ -287,6 +287,13 @@ struct SettingsView: View {
                     } label: {
                         Label("查看日志", systemImage: "doc.text.magnifyingglass")
                     }
+#if DEBUG
+                    NavigationLink {
+                        SpeechRegressionView()
+                    } label: {
+                        Label("本机语音回归测试", systemImage: "waveform.badge.magnifyingglass")
+                    }
+#endif
                 } header: {
                     Text("语言和日志")
                 }

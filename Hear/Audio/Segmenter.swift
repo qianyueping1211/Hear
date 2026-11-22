@@ -13,6 +13,7 @@ final class Segmenter {
         var silenceMs: Int = 700          // 停顿多久算一句话结束
         var maxSeconds: Double = 15       // 单句最长时长
         var partialEvery: Double = 0.4    // 说话中每隔多久给一次中间结果（秒）
+        var prerollMs = 300
         var minSpeechMs: Int = 400        // 太短的声音忽略（咳嗽、碰撞声等）
         var holdMode: Bool = false         // 按住说话：门槛放低（短回答也要认出来）
     }
@@ -144,7 +145,7 @@ final class Segmenter {
 
         if !inSpeech {
             preroll.append(contentsOf: f)
-            let keep = sr * 3 / 10        // 保留说话前 300ms
+            let keep = sr * config.prerollMs / 1_000
             if preroll.count > keep { preroll.removeFirst(preroll.count - keep) }
 
             let speechFloor = humanSpeech == nil ? threshold : max(noise + config.sensitivityDB * 0.35, -70)

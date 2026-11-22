@@ -50,6 +50,7 @@ struct SessionJobQueueTests {
         try testCurrentSegmentTranslation()
         testSpeechGating()
         testSegmentContinuity()
+        testPrerollComparison()
         testBoundedAudioAndTimeline()
         testSpeechLanguageResolution()
         testGlossaryAliases()
@@ -442,6 +443,31 @@ private func testBoundedAudioAndTimeline() {
     segmenter.flush()
     precondition(starts == [0, 32_000] && ends == [41_600] && discarded == 1,
                  "A dropped interval must not stitch two sides into one sentence")
+}
+
+private func testPrerollComparison() {
+    func boundaries(preroll: Int) -> (start: Int64?, end: Int64?, preview: Int64?) {
+        let segmenter = Segmenter()
+        segmenter.config.prerollMs = preroll
+        var start: Int64?, end: Int64?, preview: Int64?
+        segmenter.onEvent = { event in
+            switch event {
+            case .started(_, let position): start = position
+            case .partial(_, let samples):
+                if preview == nil, let start { preview = start + Int64(samples.count) }
+            case .ended(_, _, let position, _): end = position
+            default: break
+            }
+        }
+        segmenter.feed(Array(repeating: 0, count: 16_320))
+        segmenter.feed(Array(repeating: 0.08, count: 16_320))
+        segmenter.flush()
+        return (start, end, preview)
+    }
+    let regular = boundaries(preroll: 300), longer = boundaries(preroll: 450)
+    precondition(regular.start != nil && longer.start != nil && regular.start! - longer.start! == 2_400)
+    precondition(regular.end == 32_640 && longer.end == regular.end)
+    precondition(regular.preview != nil && longer.preview == regular.preview)
 }
 
 private func testGlossaryAliases() {

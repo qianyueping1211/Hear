@@ -1628,10 +1628,43 @@ final class LiveSession: ObservableObject {
     private let senseRecovery = SenseVoiceRecovery()
     private var senseRequiresRestart = false
     private static let senseRestartMessage = "本机识别未能恢复，请关闭后重新打开听见。"
+#if DEBUG
+    private var runningSpeechRegression = false
+
+    func runSpeechRegression(progress: @escaping @MainActor (String) -> Void) async throws -> URL {
+        guard !runningSpeechRegression, !isRunning, !finishingInput, microphoneStartToken == nil,
+              recognitionQueue.isIdle, !isAnyModelLoading, !reclaimingMemory,
+              !senseRecovery.isActive, !senseRequiresRestart else {
+            throw NSError(domain: "Hear.SpeechRegression", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "请先结束录音并等待模型就绪，再运行回归。",
+            ])
+        }
+        guard let folder = SenseVoiceRecognizer.installedFolder() else {
+            throw NSError(domain: "Hear.SpeechRegression", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "请先安装本机 SenseVoice。",
+            ])
+        }
+        runningSpeechRegression = true
+        defer { runningSpeechRegression = false }
+        let wasLoaded = await sense.isLoaded
+        let result: Result<URL, Error>
+        do {
+            result = .success(try await SpeechRegression.run(sense: sense, folder: folder, config: segmenterConfig(),
+                                                              reportProgress: progress))
+        } catch {
+            result = .failure(error)
+        }
+        if !wasLoaded, !useSense { await sense.unload() }
+        return try result.get()
+    }
+#endif
     private var inputFinishToken: UUID?
     private var switchingConversation = false
 
     private func beginListening(intent: UUID? = nil, feedback: Bool = false) async -> Bool {
+#if DEBUG
+        guard !runningSpeechRegression else { return false }
+#endif
         guard inputFinishToken == nil, !switchingConversation, !reclaimingMemory,
               microphoneStartToken != startToken else { return false }
         let token = intent ?? UUID()
@@ -4127,7 +4160,7 @@ final class LiveSession: ObservableObject {
         previews.textBySegment.removeAll()
     }
 
-    private func pushConfig() {
+    private func segmenterConfig() -> Segmenter.Config {
         var c = Segmenter.Config()
         c.sensitivityDB = Float(sensitivity)
         c.silenceMs = Int(silenceMs)
@@ -4135,7 +4168,11 @@ final class LiveSession: ObservableObject {
         // 门槛比实时翻译低（400ms → 200ms）
         c.minSpeechMs = talkMode ? 200 : 400
         c.holdMode = talkMode
-        capture.updateConfig(c)
+        return c
+    }
+
+    private func pushConfig() {
+        capture.updateConfig(segmenterConfig())
     }
 
     private func save(_ key: String, _ value: Any) {
