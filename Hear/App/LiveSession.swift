@@ -1621,7 +1621,7 @@ final class LiveSession: ObservableObject {
     private var localOptionalWorkPaused = false
     private var senseRequiresRestart = false
     private static let senseRestartMessage = "本机识别未能恢复，请关闭后重新打开听见。"
-#if DEBUG
+#if DEBUG || HEAR_SPEECH_REGRESSION
     private var runningSpeechRegression = false
 
     func runSpeechRegression(progress: @escaping @MainActor (String) -> Void) async throws -> URL {
@@ -1655,7 +1655,7 @@ final class LiveSession: ObservableObject {
     private var switchingConversation = false
 
     private func beginListening(intent: UUID? = nil, feedback: Bool = false) async -> Bool {
-#if DEBUG
+#if DEBUG || HEAR_SPEECH_REGRESSION
         guard !runningSpeechRegression else { return false }
 #endif
         guard inputFinishToken == nil, !switchingConversation, !reclaimingMemory,

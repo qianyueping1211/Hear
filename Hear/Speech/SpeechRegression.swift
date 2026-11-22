@@ -1,4 +1,4 @@
-#if DEBUG
+#if DEBUG || HEAR_SPEECH_REGRESSION
 import CryptoKit
 import Foundation
 import UIKit

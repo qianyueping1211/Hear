@@ -287,7 +287,7 @@ struct SettingsView: View {
                     } label: {
                         Label("查看日志", systemImage: "doc.text.magnifyingglass")
                     }
-#if DEBUG
+#if DEBUG || HEAR_SPEECH_REGRESSION
                     NavigationLink {
                         SpeechRegressionView()
                     } label: {

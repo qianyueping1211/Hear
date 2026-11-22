@@ -10,7 +10,7 @@ GitHub 的 Server contract test 工作流通过 CPU 跑 Silero 和 SenseVoice ON
 
 ## iPhone 对照
 
-在 GitHub 的 Check build 工作流下载 `Hear-Speech-Regression`，解压后按日常方式签名安装 IPA。安装本机 SenseVoice，结束录音，然后打开「功能设置 → 语言和日志 → 本机语音回归测试」。运行后可分享 JSON。首次运行会下载四段固定来源的公开录音并派生变体。噪声变体在 iPhone 和服务端使用各自固定的生成方式，适合同设备前后比较。
+在 GitHub 的 Check build 工作流下载 `Hear-Speech-Regression`，解压后按日常方式签名安装 IPA。该验收包使用与普通包相同的优化级别，以便对比推理耗时。安装本机 SenseVoice，结束录音，然后打开「功能设置 → 语言和日志 → 本机语音回归测试」。运行后可分享 JSON。首次运行会下载四段固定来源的公开录音并派生变体。噪声变体在 iPhone 和服务端使用各自固定的生成方式，适合同设备前后比较。
 
 报告记录模型重载耗时、重载后首次推理、每个片段实际的识别耗时、字词错误率和采样边界。断句测试使用 App 的 Silero 和 Segmenter，对同一组输入分别运行 300 ms 和 450 ms 前置缓冲。`firstPreviewAtMs` 是固定录音内首次触发预览的位置，`firstPreviewInferenceMs` 是该快照的推理耗时。实际开麦到首字仍通过真机实时翻译测量。
 

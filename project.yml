@@ -62,6 +62,7 @@ targets:
         CURRENT_PROJECT_VERSION: "1"      # 内部构建号：打包时自动递增
         HEAR_SOURCE_REVISION: "local"
         SWIFT_VERSION: "5.0"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) $(HEAR_DEVICE_REGRESSION)"
         SWIFT_OBJC_BRIDGING_HEADER: Hear/Models/ModelArchive-Bridging-Header.h
         TARGETED_DEVICE_FAMILY: "1"
         CODE_SIGN_STYLE: Automatic

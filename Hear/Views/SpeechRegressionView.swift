@@ -1,4 +1,4 @@
-#if DEBUG
+#if DEBUG || HEAR_SPEECH_REGRESSION
 import SwiftUI
 
 struct SpeechRegressionView: View {

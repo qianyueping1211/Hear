@@ -1,6 +1,6 @@
 name: Check build (compile only)
 
-# Debug 编译和真机回归包。正式安装包由 build-ipa.yml 构建。
+# 仅对 Hear target 打开真机回归入口，保留 Release 优化级别以便比较耗时。
 on:
   workflow_dispatch:
   pull_request:
@@ -102,17 +102,17 @@ jobs:
           xcodebuild \
             -project Hear.xcodeproj \
             -scheme Hear \
-            -configuration Debug \
+            -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             -skipPackagePluginValidation \
             -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG HEAR_SOURCE_REVISION="$GITHUB_SHA" \
+            HEAR_DEVICE_REGRESSION=HEAR_SPEECH_REGRESSION HEAR_SOURCE_REVISION="$GITHUB_SHA" \
             build > build.log 2>&1 || RC=$?
           grep -E "error:|BUILD" build.log | tail -30 || true
-          if [ "$RC" -ne 0 ] || ! test -f build/Build/Products/Debug-iphoneos/Hear.app/Hear; then
+          if [ "$RC" -ne 0 ] || ! test -f build/Build/Products/Release-iphoneos/Hear.app/Hear; then
             echo "::error::编译失败（xcodebuild 退出码 $RC），错误如下："
             grep -E "error:" build.log | sed 's|.*/Hear/Hear/||' | sort -u | head -40
             exit 1
@@ -121,8 +121,11 @@ jobs:
 
       - name: Package device regression build
         run: |
+          APP=build/Build/Products/Release-iphoneos/Hear.app
+          test -s "$APP/silero_vad.onnx"
+          strings "$APP/Hear" | grep -F "Hear-Speech-Regression-" >/dev/null
           mkdir -p Payload
-          cp -R build/Build/Products/Debug-iphoneos/Hear.app Payload/
+          cp -R "$APP" Payload/
           zip -qry "Hear-Speech-Regression.ipa" Payload
 
       - uses: actions/upload-artifact@v6
