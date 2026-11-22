@@ -693,6 +693,18 @@ function Clear-HearPorts {
     }
 }
 
+# ---------------------------------------------------------------- Cloudflare Tunnel
+# cloudflared 把公网 HTTPS 转成本机的 http://127.0.0.1:8000 回源时，网关看到的是明文 HTTP，
+# 带口令的推理会被拒（HTTPS_REQUIRED）。检测到本机在跑 cloudflared、并且口令校验是开着的，
+# 就只放行"来自本机 127.0.0.1 / ::1 的明文连接"，口令照样要校验；局域网明文仍然拒绝。
+# 不想要的话设 HEAR_ALLOW_LOOPBACK_HTTP=0。
+if (-not $env:HEAR_ALLOW_LOOPBACK_HTTP -and
+    ($env:HEAR_AUTH_MODE -eq "managed" -or $env:HEAR_REQUIRE_TOKEN -eq "1") -and
+    (Get-Process -Name cloudflared -ErrorAction SilentlyContinue)) {
+    $env:HEAR_ALLOW_LOOPBACK_HTTP = "1"
+    Say "检测到 cloudflared：允许 Tunnel 从本机用 HTTP 回源（仍然校验口令）"
+}
+
 # ---------------------------------------------------------------- 先起个临时服务
 # hear_cloud.py 只用标准库就能跑（识别模型是懒加载的），
 # 所以先用系统 Python 把它起起来，几秒钟后就能在手机浏览器上测网络了，
