@@ -696,6 +696,7 @@ final class LiveSession: ObservableObject {
                 self.inBackground = true
                 self.playbackToken = UUID()      // 还没播的请求全部作废
                 self.stopReading()
+                if !self.isRunning { self.endLiveActivity() }
                 self.persist()
                 hearLog("切到后台：停止朗读（翻译和云端服务继续跑）", .info)
             }
@@ -1788,6 +1789,7 @@ final class LiveSession: ObservableObject {
         startToken = UUID()
         holdReleasing = true
         isRunning = false
+        endLiveActivity()
         meter.level = 0
         UIApplication.shared.isIdleTimerDisabled = false
         await withCheckedContinuation { (completion: CheckedContinuation<Void, Never>) in
@@ -1822,9 +1824,7 @@ final class LiveSession: ObservableObject {
         capture.stop()
         capture.muted = false
         isRunning = false
-        liveActivityHeartbeat?.cancel()
-        liveActivityHeartbeat = nil
-        HearLiveActivityController.shared.end(liveActivityState(isLive: false))
+        endLiveActivity()
         meter.level = 0
         activity = ""
         UIApplication.shared.isIdleTimerDisabled = false
@@ -3310,7 +3310,7 @@ final class LiveSession: ObservableObject {
 
     private var liveActivityHeartbeat: Task<Void, Never>?
 
-    private func liveActivityState(isLive: Bool = true) -> HearLiveActivityAttributes.ContentState {
+    private func liveActivityState() -> HearLiveActivityAttributes.ContentState {
         let hasLiveTranslation = !partial.isEmpty && !partialTranslation.isEmpty
         let item = hasLiveTranslation ? nil : (items.last { !$0.translated.isEmpty } ?? items.last)
         let namedSpeaker: String? = {
@@ -3330,13 +3330,19 @@ final class LiveSession: ObservableObject {
             speaker: namedSpeaker,
             speakerGender: item?.speakerDetails?.gender?.rawValue,
             translationOnly: liveActivityOnlyTranslation,
-            isLive: isLive,
+            isLive: isRunning,
             updatedAt: Date())
     }
 
     private func publishLiveActivity() {
         guard isRunning, !talkMode else { return }
         HearLiveActivityController.shared.update(liveActivityState())
+    }
+
+    private func endLiveActivity() {
+        liveActivityHeartbeat?.cancel()
+        liveActivityHeartbeat = nil
+        HearLiveActivityController.shared.end(liveActivityState())
     }
 
     // MARK: - 声音克隆

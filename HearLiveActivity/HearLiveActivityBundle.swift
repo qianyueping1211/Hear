@@ -9,66 +9,72 @@ struct HearLiveActivityBundle: WidgetBundle {
 }
 
 struct HearLiveActivityWidget: Widget {
+    private let pausedLabel = "翻译暂停中"
+
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: HearLiveActivityAttributes.self) { context in
-            lockScreen(context.state)
+            lockScreen(context.state, paused: !context.state.isLive || context.isStale)
                 .activityBackgroundTint(Color.black.opacity(0.82))
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
-            DynamicIsland {
+            let paused = !context.state.isLive || context.isStale
+            return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     Label("听见", systemImage: "waveform")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.cyan)
                 }
                 DynamicIslandExpandedRegion(.center) {
-                    expandedText(context.state)
+                    activityText(context.state, paused: paused, sourceLines: 2, translationLines: 3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } compactLeading: {
                 Image(systemName: "waveform")
                     .foregroundStyle(.cyan)
             } compactTrailing: {
-                Text(context.state.isLive ? "实时翻译中" : "已完成")
+                Text(paused ? pausedLabel : "实时翻译中")
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             } minimal: {
-                Image(systemName: "waveform")
+                Image(systemName: paused ? "pause.fill" : "waveform")
                     .foregroundStyle(.cyan)
+                    .accessibilityLabel(paused ? pausedLabel : "实时翻译中")
             }
             .keylineTint(.cyan)
         }
     }
 
-    private func lockScreen(_ state: HearLiveActivityAttributes.ContentState) -> some View {
+    private func lockScreen(_ state: HearLiveActivityAttributes.ContentState, paused: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label("听见 · 实时翻译", systemImage: "waveform")
+                Label(paused ? "听见" : "听见 · 实时翻译", systemImage: "waveform")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.cyan)
                 Spacer()
             }
-            if !state.translationOnly, !state.sourceText.isEmpty {
-                (speakerPrefix(state.speaker) + Text(state.sourceText))
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-            }
-            translatedRow(state, lineLimit: 4, size: .title2)
+            activityText(state, paused: paused, sourceLines: 3, translationLines: 4)
         }
         .padding(14)
     }
 
-    private func expandedText(_ state: HearLiveActivityAttributes.ContentState) -> some View {
+    private func activityText(_ state: HearLiveActivityAttributes.ContentState, paused: Bool,
+                              sourceLines: Int, translationLines: Int) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            if !state.translationOnly, !state.sourceText.isEmpty {
-                (speakerPrefix(state.speaker) + Text(state.sourceText))
-                    .font(.footnote.weight(.medium))
+            if paused {
+                Text(pausedLabel)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+            } else {
+                if !state.translationOnly, !state.sourceText.isEmpty {
+                    (speakerPrefix(state.speaker) + Text(state.sourceText))
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(sourceLines)
+                }
+                translatedRow(state, lineLimit: translationLines)
             }
-            translatedRow(state, lineLimit: 3, size: .title2)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func speakerPrefix(_ speaker: String?) -> Text {
@@ -78,7 +84,7 @@ struct HearLiveActivityWidget: Widget {
 
     @ViewBuilder
     private func translatedRow(_ state: HearLiveActivityAttributes.ContentState,
-                               lineLimit: Int, size: Font) -> some View {
+                               lineLimit: Int) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             if state.translationOnly,
                let speaker = state.speaker,
@@ -89,7 +95,7 @@ struct HearLiveActivityWidget: Widget {
                     .fontWeight(.semibold)
             }
             Text(state.translatedText.isEmpty ? "正在等待译文…" : state.translatedText)
-                .font(size.weight(.semibold))
+                .font(.title2.weight(.semibold))
                 .lineLimit(lineLimit)
         }
     }
