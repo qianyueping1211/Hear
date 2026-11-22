@@ -2,17 +2,17 @@ use crate::state::{AudioCaptureMode, AudioSourceOption};
 use tauri::WebviewWindow;
 
 #[cfg(target_os = "windows")]
-mod windows;
+pub mod windows;
 #[cfg(target_os = "windows")]
 pub use windows as os;
 
 #[cfg(target_os = "macos")]
-mod macos;
+pub mod macos;
 #[cfg(target_os = "macos")]
 pub use macos as os;
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-mod fallback {
+pub mod fallback {
     use tauri::WebviewWindow;
 
     pub struct ChildProcessGuard;

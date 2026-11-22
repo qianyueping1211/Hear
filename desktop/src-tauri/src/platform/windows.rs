@@ -1,5 +1,6 @@
 use std::mem::size_of;
 use tauri::WebviewWindow;
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -23,7 +24,7 @@ unsafe impl Sync for ChildProcessGuard {}
 impl ChildProcessGuard {
     pub fn new() -> Self {
         unsafe {
-            let Ok(job) = CreateJobObjectW(None, None) else {
+            let Ok(job) = CreateJobObjectW(None, PCWSTR::null()) else {
                 return Self { job: None };
             };
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
