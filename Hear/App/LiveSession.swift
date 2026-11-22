@@ -1679,18 +1679,21 @@ final class LiveSession: ObservableObject {
             // 按钮上方本来就显示"正在准备模型 · N 秒"，不用再弹一次提示
             return false
         }
-        guard await allSelectedLocalModelsLoaded() else {
+        let selectedModelsLoaded = await allSelectedLocalModelsLoaded()
+        guard token == startToken else { return false }
+        guard selectedModelsLoaded else {
             showToast("还有本地模型没有加载完成，请稍候", seconds: 3)
             return false
         }
         guard phase == .ready else { return false }
-        guard await AudioCapture.requestPermission() else {
-            activity = "请在 设置 → 听见 里允许使用麦克风"
-            return false
-        }
+        let permissionGranted = await AudioCapture.requestPermission()
         // 等权限的时候用户已经松手/停了：这一次启动作废
         guard token == startToken else {
             hearLog("开始收音：等待期间启动请求已取消", .info)
+            return false
+        }
+        guard permissionGranted else {
+            activity = "请在 设置 → 听见 里允许使用麦克风"
             return false
         }
         if resumeOptionalWork, needsLocalVoiceClone, !(await cloner.isLoaded) {
@@ -1723,7 +1726,9 @@ final class LiveSession: ObservableObject {
             guard token == startToken else { return false }
             // 刚加载完声音克隆模型时，内存紧张会让麦克风起不来（硬件直接拒绝启动）：
             // 先把声音克隆模型卸掉再试一次，麦克风通常就能正常起来
-            if await cloner.isLoaded {
+            let clonerLoaded = await cloner.isLoaded
+            guard token == startToken else { return false }
+            if clonerLoaded {
                 hearLog("麦克风启动失败，先卸载声音克隆模型再试一次", .warning)
                 await cloner.unload()
                 guard token == startToken else { return false }
