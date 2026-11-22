@@ -85,12 +85,14 @@ def clone_upstream(url, payload, deadline, max_bytes):
 
 class RequestPolicy:
     def __init__(self, max_body, max_inflight, access_token=None, *, allow_loopback_http=False,
-                 authenticator=None):
+                 authenticator=None, local_secret=None):
         self.max_body = max_body
         self.access_token = access_token
         self.allow_loopback_http = allow_loopback_http
         # 管理模式：只认 Token 管理服务签发的口令，旧的共享口令不作为后备
         self.authenticator = authenticator
+        # 桌面端托管仅本机模式使用的随机会话密钥（仅 127.0.0.1 / ::1 生效）
+        self.local_secret = local_secret or None
         self.max_inflight = max_inflight
         self.lock = threading.Lock()
         self.inflight = 0
@@ -109,8 +111,16 @@ class RequestPolicy:
         local_proxy = self.allow_loopback_http and peer_host in ("127.0.0.1", "::1")
         return isinstance(connection, ssl.SSLSocket) or local_proxy
 
-    def authorize(self, connection, peer_host, token):
+    def authorize(self, connection, peer_host, token, local_secret=""):
         """推理接口和 /v1/auth/check 共用的鉴权。只看内存，不访问数据库或管理服务。"""
+        is_loopback = peer_host in ("127.0.0.1", "::1")
+        if self.local_secret is not None:
+            if is_loopback and local_secret and compare_digest(
+                local_secret.encode("utf-8"), self.local_secret.encode("utf-8")
+            ):
+                return AuthResult.allow()
+            if self.authenticator is None and self.access_token is None:
+                return AuthResult.deny("LOCAL_SECRET_REQUIRED", 401, message="仅允许本机桌面端使用授权密钥访问")
         secure = self.transport_ok(connection, peer_host)
         if self.authenticator is not None:
             if not secure:
@@ -161,7 +171,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         # without being reported as a failed request.
         try:
             has_request = bool(self.rfile.peek(1))
-        except (TimeoutError, ConnectionError, ssl.SSLEOFError):
+        except (TimeoutError, ConnectionError, ssl.SSLError):
             has_request = False
         if not has_request:
             self.close_connection = True
@@ -202,11 +212,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json({"pong": True, "time": time.time()})
             elif route == "/v1/auth/check":
                 self.auth_check()
-            elif route.startswith("/v1/"):
-                self._error("没有这个接口", 404)
-            else:
+            elif route == "/favicon.ico":
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif route in ("/", "/index.html"):
                 self._send_html(self.test_page())
-        except (BrokenPipeError, ConnectionResetError):
+            else:
+                self._error("没有这个接口", 404)
+        except (ConnectionError, ssl.SSLError):
             pass
 
     def _auth_denied(self, result, route):
@@ -269,7 +283,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         policy = self.server.request_policy
         token = (self.headers.get("X-Hear-Token") or "").strip()
-        auth = policy.authorize(self.connection, self.client_address[0], token)
+        local_secret = (self.headers.get("X-Hear-Local-Secret") or "").strip()
+        auth = policy.authorize(self.connection, self.client_address[0], token, local_secret=local_secret)
         if not auth.ok:
             # The request body is unread. Do not reuse the connection for another request.
             self.close_connection = True
@@ -291,11 +306,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         is_asr_preview = route == "/v1/asr" and self.headers.get("X-ASR-Preview", "").strip() == "1"
         is_mt_preview = route == "/v1/translate" and self.headers.get("X-MT-Preview", "").strip() == "1"
         preview = route if is_asr_preview or is_mt_preview else None
+        device_id = (self.headers.get("X-Hear-Device-Id") or "").strip()[:64]
+        preview_key = (device_id, route) if (preview is not None and device_id) else preview
         correction = route == "/v1/asr" and self.headers.get("X-ASR-Stage", "").strip() == "correct"
         revision = route == "/v1/translate" and self.headers.get("X-MT-Stage", "").strip() == "revision"
         background = preview is not None or correction or revision or route not in ("/v1/asr", "/v1/translate")
-        # One in-flight clone per gateway, independent of the live ASR/MT preview lanes.
-        exclusive = route if route == "/v1/clone" else preview
+        # One in-flight clone per gateway, independent of per-device live ASR/MT preview lanes.
+        exclusive = route if route == "/v1/clone" else preview_key
         with policy.reserve(background=background, preview=exclusive) as admitted:
             if not admitted:
                 self._reject_without_reading("推理服务正忙，请稍后重试", 503)
@@ -304,7 +321,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 body = self._read_body(route, length)
                 if body is not None:
                     handler(body)
-            except (BrokenPipeError, ConnectionResetError):
+            except (ConnectionError, ssl.SSLError):
                 self.close_connection = True
             except TimeoutError:
                 self._backend_timeout(route)

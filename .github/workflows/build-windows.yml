@@ -1,0 +1,227 @@
+name: Build Windows x64 Installer (.exe)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # 与 iOS 完全解耦：仅当 desktop/、共用 server 核心文件或本工作流变更时触发
+    paths:
+      - 'desktop/**'
+      - 'server/hear_cloud.py'
+      - 'server/hear_http.py'
+      - 'server/hear_auth.py'
+      - 'server/hear_speaker.py'
+      - 'server/requirements.txt'
+      - 'scripts/prepare_desktop_icons.py'
+      - 'scripts/sync_desktop_version.py'
+      - '.github/workflows/build-windows.yml'
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - 'server/**'
+      - 'scripts/prepare_desktop_icons.py'
+      - 'scripts/sync_desktop_version.py'
+      - '.github/workflows/build-windows.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-tests:
+    name: Server Regression & Desktop Extensions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install minimal test dependencies
+        run: pip install cryptography numpy
+      - name: Run desktop server extension tests
+        run: python -u server/test_desktop_extensions.py
+      - name: Run token auth regression tests
+        run: python -u server/test_token_auth.py
+
+  build:
+    name: Build Windows x64 (.exe)
+    runs-on: windows-latest
+    needs: server-tests
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      ver: ${{ steps.version.outputs.ver }}
+      tag: ${{ steps.version.outputs.tag }}
+      asset: ${{ steps.version.outputs.asset }}
+      publish_release: ${{ steps.version.outputs.publish_release }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PUBLISH_RELEASE: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && !contains(github.event.head_commit.message, '[no release]')) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard against committed secrets
+        shell: pwsh
+        run: |
+          $bad = git ls-files | Select-String -Pattern '\.(pem|key|p12|pfx|jks|p8|cred|db)$|access-token\.txt$'
+          if ($bad) {
+            Write-Error "仓库包含敏感证书/私钥/数据库文件，请移除并加入 .gitignore：`n$($bad -join "`n")"
+            exit 1
+          }
+          $pat = "PRIVATE " + "KEY"
+          $hits = git grep -Il -e $pat -- .
+          if ($hits) {
+            Write-Error "仓库包含私钥内容，禁止提交：`n$($hits -join "`n")"
+            exit 1
+          }
+          Write-Host "OK: 未检测到证书/私钥文件"
+
+      # Windows 版本号独立写在 desktop/VERSION（例如 0.1.0），每次发布前提高该文件
+      - name: Version
+        id: version
+        shell: pwsh
+        run: |
+          $ver = (Get-Content -Raw desktop/VERSION).Trim()
+          if ($ver -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+            Write-Error "desktop/VERSION 格式不对：$ver（应为 0.1.0 这样的三位版本号）"
+            exit 1
+          }
+          $tag = "win-v$ver"
+          $asset = "Hear-Win-$ver.exe"
+          if ($env:PUBLISH_RELEASE -eq "true") {
+            gh release view $tag 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+              $releaseCommit = (git ls-remote --tags origin "refs/tags/$tag^{}" | ForEach-Object { ($_ -split "`t")[0] })
+              if (-not $releaseCommit) {
+                $releaseCommit = (git ls-remote --tags origin "refs/tags/$tag" | ForEach-Object { ($_ -split "`t")[0] })
+              }
+              if ($releaseCommit -and $releaseCommit -ne $env:GITHUB_SHA) {
+                Write-Error "$tag 已对应另一个源码提交，请提高 desktop/VERSION 再发布。"
+                exit 1
+              }
+            }
+          }
+          "ver=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "asset=$asset" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "publish_release=$env:PUBLISH_RELEASE" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Windows 版本号：$ver（标签：$tag，安装包：$asset）"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Sync desktop/VERSION into package.json, Cargo.toml, tauri.conf.json
+        shell: pwsh
+        run: python scripts/sync_desktop_version.py
+
+      - name: Build Python Sidecar (hear-server-x86_64-pc-windows-msvc.exe)
+        shell: pwsh
+        run: |
+          pip install pyinstaller cryptography numpy
+          pyinstaller --onefile --name hear-server-x86_64-pc-windows-msvc `
+            --paths server `
+            --hidden-import hear_http `
+            --hidden-import hear_auth `
+            --hidden-import hear_speaker `
+            server/hear_cloud.py
+          New-Item -ItemType Directory -Force -Path desktop/src-tauri/binaries | Out-Null
+          Copy-Item dist/hear-server-x86_64-pc-windows-msvc.exe desktop/src-tauri/binaries/hear-server-x86_64-pc-windows-msvc.exe -Force
+
+      - name: Prepare desktop icons & build frontend
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          python ../scripts/prepare_desktop_icons.py
+          npm install
+          npx tauri icon src-tauri/icons/icon.png
+          npm run build
+
+      - name: Run Rust unit tests
+        working-directory: desktop/src-tauri
+        shell: pwsh
+        run: cargo test
+
+      - name: Build Windows x64 NSIS installer (.exe)
+        working-directory: desktop
+        shell: pwsh
+        run: npx tauri build --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Rename installer to Hear-Win-<VERSION>.exe
+        shell: pwsh
+        run: |
+          $asset = "${{ steps.version.outputs.asset }}"
+          $nsisDir = "desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          $exe = Get-ChildItem -Path $nsisDir -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "未在 $nsisDir 找到 NSIS 安装包 (.exe)"
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path release-out | Out-Null
+          Copy-Item $exe.FullName "release-out/$asset" -Force
+          Get-Item "release-out/$asset" | Format-List Name, Length
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.asset }}
+          path: release-out/${{ steps.version.outputs.asset }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release (听见 Windows)
+    runs-on: ubuntu-latest
+    needs: build
+    if: needs.build.outputs.publish_release == 'true'
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VER: ${{ needs.build.outputs.ver }}
+      TAG: ${{ needs.build.outputs.tag }}
+      ASSET: ${{ needs.build.outputs.asset }}
+      COMMIT_MSG: ${{ github.event.head_commit.message }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: release-out
+      - name: Create or update Release
+        run: |
+          TITLE="听见 Windows ${VER}"
+          {
+            echo "## ${TITLE}"
+            echo ""
+            echo "**更新内容：** $(printf '%s' "${COMMIT_MSG:-手动打包}" | head -1)"
+            echo ""
+            echo "源代码提交：$(git rev-parse HEAD)"
+            echo "构建号：${GITHUB_RUN_NUMBER}"
+            echo "架构：Windows x64（Tauri v2 + 内置 hear-server Sidecar）"
+            echo ""
+            echo "### 安装"
+            echo "1. 下载下面的 \`${ASSET}\` 并双击安装（支持当前用户无管理员权限安装）"
+            echo "2. 安装后默认仅启用本机回环服务（\`127.0.0.1\`），如需供 iPhone 局域网共用，可在设置中开启「共享给 iPhone」开关"
+            echo "3. 后续更新直接覆盖安装即可，已下载的模型与配置会保留"
+          } > notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "${TITLE}" --notes-file notes.md
+            gh release upload "$TAG" "release-out/${ASSET}" --clobber
+          else
+            gh release create "$TAG" "release-out/${ASSET}" --target "$GITHUB_SHA" \
+              --title "${TITLE}" --notes-file notes.md
+          fi

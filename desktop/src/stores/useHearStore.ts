@@ -1,0 +1,373 @@
+import { create } from "zustand";
+import type {
+  AppSnapshot,
+  AudioCaptureMode,
+  AudioSourceOption,
+  RecordingPlaybackState,
+  ServerSwitches,
+  ServiceStatus,
+  SessionMode,
+  SubtitleSegment,
+  SubtitleStyle,
+  SummaryTemplateOption,
+  TtsOutputSettings,
+} from "../types/hear";
+
+const isTauriRuntime = () =>
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+async function tauriInvoke<T>(
+  cmd: string,
+  args?: Record<string, unknown>
+): Promise<T | null> {
+  if (!isTauriRuntime()) return null;
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<T>(cmd, args);
+}
+
+export const SUMMARY_TEMPLATES: SummaryTemplateOption[] = [
+  {
+    id: "meeting",
+    title: "会议纪要（带时间锚点）",
+    description: "提炼核心议题、关键结论与行动项，附带可点击 [mm:ss] 时间戳",
+  },
+  {
+    id: "bilingual",
+    title: "双语核心要点",
+    description: "按主题整理中英对照摘要，适合外语讲座与技术分享复盘",
+  },
+  {
+    id: "qa",
+    title: "问答与待办清单",
+    description: "抽取提问、回答与负责人/截止日期",
+  },
+];
+
+const DEFAULT_STYLE: SubtitleStyle = {
+  visible: true,
+  clickThrough: false,
+  excludeFromCapture: true,
+  layout: "bilingual",
+  fontSize: 22,
+  maxLines: 2,
+  backgroundOpacity: 0.72,
+  textStroke: true,
+  autoFadeSeconds: 0,
+  traditionalChinese: false,
+  syncWithPlayback: true,
+};
+
+const DEFAULT_SWITCHES: ServerSwitches = {
+  localServerEnabled: true,
+  lanShareEnabled: false,
+  asrSource: "local",
+  mtSource: "local",
+  cloneSource: "local",
+  remoteCloudAddress: "",
+  remoteAccessToken: "",
+  remoteStrictFingerprint: "",
+};
+
+const DEFAULT_SERVICE_STATUS: ServiceStatus = {
+  running: false,
+  bindHost: "127.0.0.1",
+  port: 8000,
+  lanShared: false,
+  lanAddresses: [],
+  pairingAddress: "",
+  accessTokenMasked: "",
+  asrReady: false,
+  asrDetail: "未启动",
+  mtReady: false,
+  mtDetail: "未启动",
+  cloneReady: false,
+  cloneDetail: "未启动",
+  streamingMt: true,
+};
+
+const DEFAULT_TTS: TtsOutputSettings = {
+  enabled: false,
+  useVoiceClone: false,
+  outputDeviceId: "default",
+  duckOriginalAudio: true,
+  duckRatio: 0.25,
+};
+
+const DEFAULT_PLAYBACK: RecordingPlaybackState = {
+  hasAudio: false,
+  durationMs: 0,
+  positionMs: 0,
+  isPlaying: false,
+  speed: 1.0,
+  systemVolume: 1.0,
+  micVolume: 1.0,
+  peaks: [],
+};
+
+interface HearStoreState extends AppSnapshot {
+  audioSources: AudioSourceOption[];
+  audioLevel: number;
+  searchQuery: string;
+  summaryOpen: boolean;
+  summaryTemplateId: string;
+  summaryMarkdown: string;
+  summaryGenerating: boolean;
+  settingsOpen: boolean;
+  activeSettingsTab: "server" | "subtitle" | "audio" | "general";
+
+  hydrate: () => Promise<void>;
+  setSearchQuery: (q: string) => void;
+  setSummaryOpen: (open: boolean) => void;
+  setSummaryTemplateId: (id: string) => void;
+  setSettingsOpen: (open: boolean, tab?: HearStoreState["activeSettingsTab"]) => void;
+
+  setLanguagePair: (src: string, dst: string, lockSrc: boolean) => Promise<void>;
+  setCaptureMode: (mode: AudioCaptureMode, appPid?: number) => Promise<void>;
+  toggleRecording: () => Promise<void>;
+  clearRecording: () => Promise<void>;
+
+  seekPlayback: (ms: number, autoPlay?: boolean) => Promise<void>;
+  togglePlayback: () => Promise<void>;
+  setPlaybackSpeed: (speed: number) => void;
+  setTrackVolumes: (systemVolume: number, micVolume: number) => void;
+
+  updateSubtitleStyle: (patch: Partial<SubtitleStyle>) => Promise<void>;
+  toggleSubtitleVisible: () => Promise<void>;
+  updateSwitches: (patch: Partial<ServerSwitches>) => Promise<void>;
+  startLocalServer: () => Promise<void>;
+  stopLocalServer: () => Promise<void>;
+  probeHealth: () => Promise<void>;
+  updateTtsSettings: (patch: Partial<TtsOutputSettings>) => void;
+  setGlossary: (text: string) => void;
+
+  editSegmentSource: (id: string, newSource: string) => Promise<void>;
+  generateSummary: () => Promise<void>;
+  importMediaFile: () => Promise<void>;
+}
+
+export const useHearStore = create<HearStoreState>((set, get) => ({
+  mode: "idle" as SessionMode,
+  sourceLang: "en",
+  targetLang: "zh",
+  lockSourceLang: false,
+  captureMode: "system_loopback",
+  segments: [],
+  livePartialSource: "",
+  livePartialTranslation: "",
+  subtitleStyle: DEFAULT_STYLE,
+  switches: DEFAULT_SWITCHES,
+  serviceStatus: DEFAULT_SERVICE_STATUS,
+  ttsSettings: DEFAULT_TTS,
+  playback: DEFAULT_PLAYBACK,
+  glossary: "",
+
+  audioSources: [
+    { id: "sys", label: "系统声音内录（自动排除听见自身）", kind: "system_loopback" },
+    { id: "mic", label: "默认麦克风", kind: "microphone" },
+    { id: "dual", label: "双路混合（系统声=对方 / 麦克风=我）", kind: "dual_mix" },
+  ],
+  audioLevel: 0,
+  searchQuery: "",
+  summaryOpen: true,
+  summaryTemplateId: "meeting",
+  summaryMarkdown: "",
+  summaryGenerating: false,
+  settingsOpen: false,
+  activeSettingsTab: "server",
+
+  hydrate: async () => {
+    const snap = await tauriInvoke<AppSnapshot>("get_snapshot");
+    if (snap) {
+      set({ ...snap });
+    }
+    const sources = await tauriInvoke<AudioSourceOption[]>("list_audio_sources");
+    if (sources && sources.length > 0) {
+      set({ audioSources: sources });
+    }
+    if (isTauriRuntime()) {
+      const { listen } = await import("@tauri-apps/api/event");
+      await listen<SubtitleSegment>("segment:upsert", (ev) => {
+        set((state) => {
+          const idx = state.segments.findIndex((s) => s.id === ev.payload.id);
+          if (idx >= 0) {
+            const next = state.segments.slice();
+            next[idx] = ev.payload;
+            return { segments: next };
+          }
+          return { segments: [...state.segments, ev.payload] };
+        });
+      });
+      await listen<{ source: string; translation: string }>("subtitle:partial", (ev) => {
+        set({
+          livePartialSource: ev.payload.source,
+          livePartialTranslation: ev.payload.translation,
+        });
+      });
+      await listen<{ positionMs: number; durationMs: number; isPlaying: boolean }>(
+        "playback:tick",
+        (ev) => {
+          set((state) => ({
+            playback: {
+              ...state.playback,
+              positionMs: ev.payload.positionMs,
+              durationMs: ev.payload.durationMs,
+              isPlaying: ev.payload.isPlaying,
+            },
+          }));
+        }
+      );
+      await listen<ServiceStatus>("service:status", (ev) => {
+        set({ serviceStatus: ev.payload });
+      });
+      await listen<SubtitleStyle>("subtitle:style", (ev) => {
+        set({ subtitleStyle: ev.payload });
+      });
+      await listen<number>("audio:level", (ev) => {
+        set({ audioLevel: ev.payload });
+      });
+    }
+  },
+
+  setSearchQuery: (searchQuery) => set({ searchQuery }),
+  setSummaryOpen: (summaryOpen) => set({ summaryOpen }),
+  setSummaryTemplateId: (summaryTemplateId) => set({ summaryTemplateId }),
+  setSettingsOpen: (settingsOpen, tab) =>
+    set((s) => ({ settingsOpen, activeSettingsTab: tab ?? s.activeSettingsTab })),
+
+  setLanguagePair: async (sourceLang, targetLang, lockSourceLang) => {
+    set({ sourceLang, targetLang, lockSourceLang });
+    await tauriInvoke("set_language_pair", { sourceLang, targetLang, lockSourceLang });
+  },
+
+  setCaptureMode: async (captureMode, selectedAppPid) => {
+    set({ captureMode, selectedAppPid });
+    await tauriInvoke("set_capture_mode", { captureMode, selectedAppPid });
+  },
+
+  toggleRecording: async () => {
+    const nextMode: SessionMode = get().mode === "recording" ? "idle" : "recording";
+    set({ mode: nextMode });
+    await tauriInvoke("toggle_recording");
+  },
+
+  clearRecording: async () => {
+    set({
+      segments: [],
+      livePartialSource: "",
+      livePartialTranslation: "",
+      summaryMarkdown: "",
+      playback: DEFAULT_PLAYBACK,
+    });
+    await tauriInvoke("clear_recording");
+  },
+
+  seekPlayback: async (ms, autoPlay = true) => {
+    set((s) => ({
+      playback: {
+        ...s.playback,
+        positionMs: Math.max(0, Math.min(ms, s.playback.durationMs || ms)),
+        isPlaying: autoPlay ? true : s.playback.isPlaying,
+      },
+    }));
+    await tauriInvoke("seek_playback", { positionMs: Math.floor(ms), autoPlay });
+  },
+
+  togglePlayback: async () => {
+    const playing = !get().playback.isPlaying;
+    set((s) => ({ playback: { ...s.playback, isPlaying: playing } }));
+    await tauriInvoke("set_playback_playing", { playing });
+  },
+
+  setPlaybackSpeed: (speed) => {
+    set((s) => ({ playback: { ...s.playback, speed } }));
+    void tauriInvoke("set_playback_speed", { speed });
+  },
+
+  setTrackVolumes: (systemVolume, micVolume) => {
+    set((s) => ({ playback: { ...s.playback, systemVolume, micVolume } }));
+    void tauriInvoke("set_track_volumes", { systemVolume, micVolume });
+  },
+
+  updateSubtitleStyle: async (patch) => {
+    const next = { ...get().subtitleStyle, ...patch };
+    set({ subtitleStyle: next });
+    await tauriInvoke("set_subtitle_style", { style: next });
+  },
+
+  toggleSubtitleVisible: async () => {
+    const next = !get().subtitleStyle.visible;
+    await get().updateSubtitleStyle({ visible: next });
+  },
+
+  updateSwitches: async (patch) => {
+    const current = get().switches;
+    const merged: ServerSwitches = { ...current, ...patch };
+    // 关闭「本机模型服务」开关 1 时，强制连带关闭「共享给 iPhone」开关 2
+    if (!merged.localServerEnabled) {
+      merged.lanShareEnabled = false;
+    }
+    set({ switches: merged });
+    const status = await tauriInvoke<ServiceStatus>("update_server_switches", {
+      switches: merged,
+    });
+    if (status) {
+      set({ serviceStatus: status });
+    }
+  },
+
+  startLocalServer: async () => {
+    const status = await tauriInvoke<ServiceStatus>("start_local_server");
+    if (status) set({ serviceStatus: status });
+  },
+
+  stopLocalServer: async () => {
+    const status = await tauriInvoke<ServiceStatus>("stop_local_server");
+    if (status) set({ serviceStatus: status });
+  },
+
+  probeHealth: async () => {
+    const status = await tauriInvoke<ServiceStatus>("probe_server_health");
+    if (status) set({ serviceStatus: status });
+  },
+
+  updateTtsSettings: (patch) => {
+    const next = { ...get().ttsSettings, ...patch };
+    set({ ttsSettings: next });
+    void tauriInvoke("set_tts_settings", { settings: next });
+  },
+
+  setGlossary: (glossary) => {
+    set({ glossary });
+    void tauriInvoke("set_glossary", { glossary });
+  },
+
+  editSegmentSource: async (id, newSource) => {
+    set((s) => ({
+      segments: s.segments.map((seg) =>
+        seg.id === id
+          ? { ...seg, sourceText: newSource, status: "correcting", isEdited: true }
+          : seg
+      ),
+    }));
+    await tauriInvoke("retranslate_segment", { id, newSource });
+  },
+
+  generateSummary: async () => {
+    if (get().segments.length === 0 || get().summaryGenerating) return;
+    set({ summaryGenerating: true, summaryOpen: true });
+    try {
+      const md = await tauriInvoke<string>("generate_summary", {
+        templateId: get().summaryTemplateId,
+      });
+      if (typeof md === "string") {
+        set({ summaryMarkdown: md });
+      }
+    } finally {
+      set({ summaryGenerating: false });
+    }
+  },
+
+  importMediaFile: async () => {
+    await tauriInvoke("import_media_file");
+  },
+}));

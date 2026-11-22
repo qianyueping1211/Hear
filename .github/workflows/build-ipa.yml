@@ -8,10 +8,13 @@ on:
     # 只改电脑上的服务端脚本（server/）时也不用重新打包 App
     paths-ignore:
       - .github/workflows/build-ipa.yml
+      - .github/workflows/build-windows.yml
       - .github/workflows/rename-releases.yml
       - .github/workflows/server-contract.yml
       - start-hear-cloud.bat
+      - start-hear-token-admin.bat
       - VERSION
+      - 'desktop/**'
       - 'server/**'
       - 'docs/**'
       - README.md

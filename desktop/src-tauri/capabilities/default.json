@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Hear Desktop 主工作台与悬浮字幕窗基础权限",
+  "windows": ["main", "subtitle"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-set-always-on-top",
+    "core:window:allow-set-ignore-cursor-events",
+    "dialog:default",
+    "fs:default",
+    "global-shortcut:default",
+    "shell:allow-execute"
+  ]
+}

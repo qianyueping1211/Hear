@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+}
+
+/* 悬浮字幕清晰描边，保证浅色 PPT 与深色电影上均清晰可读 */
+.subtitle-stroke {
+  text-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.92),
+    0 0 8px rgba(0, 0, 0, 0.72),
+    1px 1px 0 rgba(0, 0, 0, 0.85),
+    -1px -1px 0 rgba(0, 0, 0, 0.85);
+}
+
+/* 自定义暗色细滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.45);
+}

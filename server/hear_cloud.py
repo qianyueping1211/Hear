@@ -34,6 +34,7 @@ import json
 import os
 import queue
 import secrets
+import signal
 import socket
 import ssl
 import sys
@@ -45,18 +46,24 @@ import urllib.request
 import wave
 import struct
 from contextlib import contextmanager
+from http.client import HTTPConnection, HTTPSConnection
 from http.server import ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 import hear_auth
 from hear_http import ERROR_CODES, RequestHandler, RequestPolicy, clone_upstream
 from hear_speaker import SpeakerDetector
 
-HOST = os.environ.get("HEAR_HOST", "0.0.0.0")
+HOST = (os.environ.get("HEAR_BIND_HOST") or os.environ.get("HEAR_HOST", "0.0.0.0")).strip() or "0.0.0.0"
 PORT = int(os.environ.get("HEAR_PORT", "8000"))
 MT_URL = os.environ.get("HEAR_MT_URL", "http://127.0.0.1:8081").rstrip("/")
 CLONE_URL = os.environ.get("HEAR_CLONE_URL", "http://127.0.0.1:8082").rstrip("/")
 ASR_URL = os.environ.get("HEAR_ASR_URL", "").rstrip("/")
 ASR_MODEL = os.environ.get("HEAR_ASR_MODEL", "small")
+LOCAL_SECRET = os.environ.get("HEAR_LOCAL_SECRET", "").strip()
+# 本机后端回环调用统一绕过 Windows/系统代理，避免代理软件劫持 127.0.0.1
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+MAX_BACKEND_JSON_BYTES = 8 * 1024 * 1024
 # 自签证书（make_cert.py 生成）。有的话同一个端口上 http 和 https 都能用
 _HERE = os.path.dirname(os.path.abspath(__file__))
 TLS_CERT = os.environ.get("HEAR_TLS_CERT", os.path.join(_HERE, "certs", "cert.pem"))
@@ -232,13 +239,17 @@ def primary_ip():
         return ""
 
 
-def local_ips():
-    """这台电脑上所有网卡的 IPv4 地址（去掉 127 开头的回环地址）。
+_local_ips_lock = threading.Lock()
+_local_ips_cache = (0.0, None)
 
-    换了网络、开了 VPN（Cloudflare WARP 之类）地址就变了，
-    所以这里把所有网卡的地址都列出来：证书里都带上，
-    手机不管用哪个地址连都能用（同一个证书到处都认）。
-    """
+
+def local_ips(force=False):
+    """这台电脑上所有网卡的 IPv4 地址（去掉 127 开头的回环地址，带 30s TTL 缓存）。"""
+    global _local_ips_cache
+    now = time.monotonic()
+    with _local_ips_lock:
+        if not force and _local_ips_cache[1] is not None and now - _local_ips_cache[0] < 30.0:
+            return list(_local_ips_cache[1])
     import re
     import socket
     import subprocess
@@ -292,6 +303,8 @@ def local_ips():
     t = threading.Thread(target=work, daemon=True)
     t.start()
     t.join(1.0)
+    with _local_ips_lock:
+        _local_ips_cache = (time.monotonic(), list(ips))
     return ips
 
 
@@ -463,7 +476,8 @@ def self_check():
     """后台自己连一下，通不通立刻就知道（不能挡住服务接收请求）"""
     time.sleep(2)
     try:
-        with urllib.request.urlopen("http://127.0.0.1:%d/health" % PORT, timeout=20) as r:
+        with _DIRECT_OPENER.open("http://127.0.0.1:%d/health" % PORT, timeout=20) as r:
+            r.read(65536)
             log("自检通过（%d）。在电脑浏览器打开上面第一个地址能打开，就说明服务没问题；"
                 "打不开就是服务没起来。" % r.status)
     except Exception as e:
@@ -489,27 +503,37 @@ def preload_whisper():
 
 
 def decode_wav(data):
-    """wav 字节 → (float32 列表, 采样率)，只取第一个声道"""
+    """wav 字节 → (float32 ndarray 或列表, 采样率)，只取第一个声道"""
     with wave.open(io.BytesIO(data), "rb") as w:
         channels = w.getnchannels()
         width = w.getsampwidth()
         rate = w.getframerate()
         frames = w.readframes(w.getnframes())
-    if width == 2:
+    if width not in (2, 4):
+        raise ValueError("只支持 16 位或 32 位整型 PCM 的 wav")
+    try:
+        import numpy as np
+        if width == 2:
+            arr = np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+        else:
+            # Python wave 模块只读整型 PCM（WAVE_FORMAT_PCM），32 位即 int32
+            arr = np.frombuffer(frames, dtype="<i4").astype(np.float32) / 2147483648.0
+        if channels > 1:
+            arr = np.ascontiguousarray(arr[::channels])
+        return arr, rate
+    except ImportError:
         import array
-        a = array.array("h")
-        a.frombytes(frames)
-        samples = [x / 32768.0 for x in a]
-    elif width == 4:
-        import array
-        a = array.array("f")
-        a.frombytes(frames)
-        samples = list(a)
-    else:
-        raise ValueError("只支持 16 位或 32 位浮点的 wav")
-    if channels > 1:
-        samples = samples[::channels]
-    return samples, rate
+        if width == 2:
+            a = array.array("h")
+            a.frombytes(frames)
+            samples = [x / 32768.0 for x in a]
+        else:
+            a = array.array("i")
+            a.frombytes(frames)
+            samples = [x / 2147483648.0 for x in a]
+        if channels > 1:
+            samples = samples[::channels]
+        return samples, rate
 
 
 # Whisper 修正最多等这么久（秒）。
@@ -661,8 +685,11 @@ def wav_sample_rate(data):
 def http_json(url, payload, timeout):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    with _DIRECT_OPENER.open(req, timeout=timeout) as resp:
+        raw = resp.read(MAX_BACKEND_JSON_BYTES + 1)
+        if len(raw) > MAX_BACKEND_JSON_BYTES:
+            raise urllib.error.URLError("backend response exceeds size limit")
+        return raw
 
 
 # 后端（翻译 / 克隆）的存活状态缓存：最多两秒查一次。
@@ -684,7 +711,8 @@ def backend_state(url):
         return hit[1]
     state = "连不上"
     try:
-        with urllib.request.urlopen(key + "/health", timeout=1.5) as resp:
+        with _DIRECT_OPENER.open(key + "/health", timeout=1.5) as resp:
+            resp.read(65536)
             if 200 <= resp.status < 300:
                 state = "就绪"
             else:
@@ -727,8 +755,8 @@ def backend_model(url):
         return hit[1]
     name = ""
     try:
-        with urllib.request.urlopen(key + "/props", timeout=3) as resp:
-            obj = json.loads(resp.read().decode("utf-8"))
+        with _DIRECT_OPENER.open(key + "/props", timeout=3) as resp:
+            obj = json.loads(resp.read(262144).decode("utf-8"))
         path = obj.get("model_path") or ""
         name = path.replace("\\", "/").split("/")[-1]
     except Exception:
@@ -873,8 +901,9 @@ a{color:#007aff;text-decoration:none}
         else:
             out["asr"] = whisper_status()
             out["asr_scheme"] = ASR_SCHEME
-        out["mt"] = backend_state(MT_URL)
-        if out["mt"] == "连不上":
+        mt_state = backend_state(MT_URL)
+        out["mt"] = mt_state
+        if mt_state == "连不上":
             out["mt"] = "连不上（%s）" % MT_URL
         # 把后端跑的是哪个模型报出来：启动时可以让用户按类型选大模型，
         # 手机上要能一眼看出"电脑上现在跑的是哪个"
@@ -886,9 +915,10 @@ a{color:#007aff;text-decoration:none}
             out["sensevoice"] = cap["sensevoice"]
             out["asr_whisper"] = cap["whisper"]
             out["asr_schemes"] = cap["schemes"]
-        mt_model = backend_model(MT_URL)
-        if mt_model:
-            out["mt_model"] = mt_model
+        if mt_state != "连不上":
+            mt_model = backend_model(MT_URL)
+            if mt_model:
+                out["mt_model"] = mt_model
         clone_state = backend_state(CLONE_URL)
         clone_model_valid = True
         out["clone"] = clone_state
@@ -917,8 +947,16 @@ a{color:#007aff;text-decoration:none}
                 out["asr_ready"] = sensevoice_available() or whisper_ready
             else:
                 out["asr_ready"] = whisper_ready
-        out["mt_ready"] = (backend_state(MT_URL) == "就绪")
+        out["mt_ready"] = (mt_state == "就绪")
         out["clone_ready"] = clone_state == "就绪" and clone_model_valid
+        # 桌面端与多端共享能力元信息（向后兼容旧版 iOS）
+        out["bind_host"] = HOST
+        out["lan_shared"] = HOST not in ("127.0.0.1", "::1", "localhost")
+        out["capabilities"] = {
+            "streaming_mt": True,
+            "per_device_preview": True,
+            "local_secret": bool(LOCAL_SECRET),
+        }
         # 口令服务是否就绪：auth_ready=false 时网关可达，但需要鉴权的请求会返回 503
         if AUTH is not None:
             out.update(AUTH.health())
@@ -1006,25 +1044,126 @@ a{color:#007aff;text-decoration:none}
         req = urllib.request.Request(
             ASR_URL + "/v1/audio/transcriptions", data=data,
             headers={"Content-Type": "multipart/form-data; boundary=%s" % boundary})
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            obj = json.loads(resp.read().decode("utf-8"))
+        with _DIRECT_OPENER.open(req, timeout=300) as resp:
+            obj = json.loads(resp.read(MAX_BACKEND_JSON_BYTES).decode("utf-8"))
         return obj.get("text", ""), obj.get("language", fallback)
 
     # -- 文本翻译 --
 
+    def _translate_stream(self, payload, timeout, log_content):
+        target = urlsplit(MT_URL + "/v1/chat/completions")
+        if target.scheme not in ("http", "https") or not target.hostname:
+            self._error("翻译后端地址不合法", 502)
+            return
+        factory = HTTPSConnection if target.scheme == "https" else HTTPConnection
+        conn = factory(target.hostname, target.port, timeout=timeout)
+        t0 = time.time()
+        collected = []
+        headers_sent = False
+        try:
+            body_bytes = json.dumps(payload).encode("utf-8")
+            path = target.path or "/v1/chat/completions"
+            if target.query:
+                path += "?" + target.query
+            conn.request("POST", path, body=body_bytes,
+                         headers={"Content-Type": "application/json", "Accept": "text/event-stream"})
+            resp = conn.getresponse()
+            if not 200 <= resp.status < 300:
+                detail = resp.read(500).decode("utf-8", "replace")
+                self._error("后端返回 %s：%s" % (resp.status, detail), 502)
+                return
+            self.close_connection = True
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            headers_sent = True
+
+            while True:
+                raw_line = resp.readline(65536)
+                if not raw_line:
+                    break
+                line = raw_line.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if not data_str:
+                    continue
+                if data_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_str)
+                except ValueError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices or not isinstance(choices[0], dict):
+                    continue
+                delta_obj = choices[0].get("delta") or choices[0].get("message") or {}
+                piece = delta_obj.get("content") if isinstance(delta_obj, dict) else None
+                if isinstance(piece, str) and piece:
+                    collected.append(piece)
+                    event = ("data: %s\n\n" % json.dumps({"delta": piece, "done": False}, ensure_ascii=False)).encode("utf-8")
+                    self.wfile.write(event)
+                    self.wfile.flush()
+
+            full_text = "".join(collected)
+            done_event = ("data: %s\n\n" % json.dumps({"text": full_text, "done": True}, ensure_ascii=False)).encode("utf-8")
+            self.wfile.write(done_event)
+            self.wfile.flush()
+            log_text("流式翻译 %.1fs：" % (time.time() - t0), full_text[:40], enabled=log_content)
+        except TimeoutError:
+            if not headers_sent:
+                raise
+            try:
+                err_ev = ("data: %s\n\n" % json.dumps({"error": "翻译响应超时", "done": True}, ensure_ascii=False)).encode("utf-8")
+                self.wfile.write(err_ev)
+                self.wfile.flush()
+            except OSError:
+                pass
+        finally:
+            conn.close()
+
     def translate(self, body):
         log_content = request_logs_content(self.headers)
-        req = json.loads(body.decode("utf-8"))
+        try:
+            req = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            self._error("翻译请求不是有效的 JSON", 400)
+            return
+        if not isinstance(req, dict):
+            self._error("翻译请求体必须是 JSON 对象", 400)
+            return
         prompt = req.get("prompt", "")
+        if not isinstance(prompt, str):
+            self._error("prompt 必须是字符串", 400)
+            return
         preview = self.headers.get("X-MT-Preview", "").strip() == "1"
+        accept_sse = "text/event-stream" in (self.headers.get("Accept") or "").lower()
+        want_stream = bool(req.get("stream") is True or accept_sse)
+        raw_max = req.get("max_tokens", 256 if preview else 512)
+        try:
+            max_tokens = int(raw_max)
+        except (TypeError, ValueError):
+            self._error("max_tokens 必须是整数", 400)
+            return
+        max_tokens = max(1, min(max_tokens, 256 if preview else 2048))
         payload = {
             "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-            "max_tokens": min(int(req.get("max_tokens", 256)), 256) if preview else int(req.get("max_tokens", 512)),
+            "stream": want_stream,
+            "max_tokens": max_tokens,
             "top_k": TOP_K,
             "top_p": TOP_P,
             "temperature": TEMPERATURE,
         }
+        if want_stream:
+            try:
+                self._translate_stream(payload, timeout=6 if preview else 300, log_content=log_content)
+            except TimeoutError:
+                if not preview:
+                    raise
+                self._error("翻译预览暂不可用，请稍后重试", 503)
+            return
         t0 = time.time()
         try:
             raw = http_json(MT_URL + "/v1/chat/completions", payload, timeout=6 if preview else 300)
@@ -1033,8 +1172,21 @@ a{color:#007aff;text-decoration:none}
                 raise
             self._error("翻译预览暂不可用，请稍后重试", 503)
             return
-        obj = json.loads(raw.decode("utf-8"))
-        text = obj["choices"][0]["message"]["content"]
+        except urllib.error.URLError as err:
+            if preview and isinstance(err.reason, TimeoutError):
+                self._error("翻译预览暂不可用，请稍后重试", 503)
+                return
+            raise
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+            choices = obj.get("choices") or []
+            msg = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
+            text = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(text, str):
+                raise ValueError("missing content")
+        except (UnicodeDecodeError, ValueError, KeyError, IndexError, TypeError):
+            self._error("翻译后端返回格式异常", 502)
+            return
         log_text("翻译 %.1fs：" % (time.time() - t0), text[:40], enabled=log_content)
         self._send_json({"text": text})
 
@@ -1390,6 +1542,7 @@ def make_ssl_context():
         return None
     try:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(TLS_CERT, TLS_KEY)
         return ctx
     except Exception as e:
@@ -1509,8 +1662,9 @@ def main():
         AUTH_MODE = "off"
     srv = MixedServer((HOST, PORT), Handler, ctx)
     srv.request_policy = RequestPolicy(MAX_BODY, int(os.environ.get("HEAR_MAX_INFLIGHT", "3")), token,
-                                       allow_loopback_http=ALLOW_LOOPBACK_HTTP, authenticator=AUTH)
-    log("服务起来了，监听 %s:%d" % (HOST, PORT))
+                                       allow_loopback_http=ALLOW_LOOPBACK_HTTP, authenticator=AUTH,
+                                       local_secret=LOCAL_SECRET or None)
+    log("服务起来了，监听 %s:%d（%s）" % (HOST, PORT, "仅本机" if HOST in ("127.0.0.1", "::1", "localhost") else "局域网共享"))
     if ALLOW_LOOPBACK_HTTP:
         log("已启用本机 HTTP 回源，仍需访问口令")
     # 签发根指纹：手机上开"严格模式"配对的时候，要对着这一串核对
@@ -1547,10 +1701,20 @@ def main():
         threading.Thread(target=preload_whisper, daemon=True).start()
     threading.Thread(target=warm_backends, daemon=True).start()
     threading.Thread(target=self_check, daemon=True).start()
+    def _handle_sigterm(signum, frame):
+        threading.Thread(target=srv.shutdown, daemon=True).start()
+
+    try:
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+    except (ValueError, OSError, AttributeError):
+        pass
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         log("停了")
+    finally:
+        if AUTH is not None:
+            AUTH.stop()
         srv.server_close()
 
 
