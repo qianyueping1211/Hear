@@ -120,6 +120,7 @@ try {
         Write-Host 'Connect the phone app to this cloud service; Whisper is managed on the computer.'
         Write-Host 'Both LAN and internet access require a token by default. The startup choice times out after 5 seconds.'
         Write-Host 'start-hear-cloud.bat --check    Check required server files'
+        Write-Host 'start-hear-cloud.bat --cloudflare-local-http    Allow authenticated HTTP only from a local Tunnel connector.'
         Write-Host 'HEAR_SERVER_REF accepts main, a release tag, or a full commit SHA.'
         exit 0
     }
@@ -136,7 +137,12 @@ try {
         }
     }
     if (-not (Test-ServerFiles $serverDir)) { throw "Incomplete server folder: $serverDir" }
-    if (Read-AccessMode) {
+    $loopbackHttp = $mode -eq '--cloudflare-local-http'
+    if ($loopbackHttp) {
+        $env:HEAR_ALLOW_LOOPBACK_HTTP = '1'
+        Write-Host '已启用 Cloudflare 本机 HTTP 回源。' -ForegroundColor Cyan
+    }
+    if ($loopbackHttp -or (Read-AccessMode)) {
         $env:HEAR_REQUIRE_TOKEN = '1'
         Write-Host '访问口令已启用。' -ForegroundColor Cyan
     } else {

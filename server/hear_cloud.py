@@ -105,6 +105,7 @@ LOG_CONTENT = os.environ.get("HEAR_LOG_CONTENT", "0" if DEPLOYMENT == "productio
 ACCESS_TOKEN_FILE = os.environ.get("HEAR_TOKEN_FILE",
                                    os.path.join(_HERE, "certs", "access-token.txt"))
 REQUIRE_TOKEN = os.environ.get("HEAR_REQUIRE_TOKEN", "").strip().lower() in ("1", "true", "yes", "on")
+ALLOW_LOOPBACK_HTTP = os.environ.get("HEAR_ALLOW_LOOPBACK_HTTP", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def access_token():
@@ -1453,6 +1454,8 @@ class MixedServer(ThreadingHTTPServer):
 
 
 def main():
+    if ALLOW_LOOPBACK_HTTP and not REQUIRE_TOKEN:
+        raise SystemExit("启用本机 HTTP 回源时，必须同时启用访问口令")
     _console_log.start()
     # 先把端口占上（这样别人连过来不会报"拒绝连接"），再开始处理请求
     ctx = make_ssl_context()
@@ -1460,8 +1463,11 @@ def main():
     if REQUIRE_TOKEN and (not token or ctx is None):
         raise SystemExit("访问口令已启用，需要可用的口令文件和 HTTPS 证书")
     srv = MixedServer((HOST, PORT), Handler, ctx)
-    srv.request_policy = RequestPolicy(MAX_BODY, int(os.environ.get("HEAR_MAX_INFLIGHT", "3")), token)
+    srv.request_policy = RequestPolicy(MAX_BODY, int(os.environ.get("HEAR_MAX_INFLIGHT", "3")), token,
+                                       allow_loopback_http=ALLOW_LOOPBACK_HTTP)
     log("服务起来了，监听 %s:%d" % (HOST, PORT))
+    if ALLOW_LOOPBACK_HTTP:
+        log("已启用本机 HTTP 回源，仍需访问口令")
     # 签发根指纹：手机上开"严格模式"配对的时候，要对着这一串核对
     _pair = pair_info()
     if _pair.get("root_fingerprint"):

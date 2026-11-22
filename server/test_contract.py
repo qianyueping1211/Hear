@@ -105,7 +105,7 @@ class StubASR(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def start_service(tmp, port, asr_url="", require_token=False):
+def start_service(tmp, port, asr_url="", require_token=False, allow_loopback_http=False):
     env = dict(os.environ)
     env["HEAR_PORT"] = str(port)
     env["HEAR_TLS_CERT"] = os.path.join(tmp, "cert.pem")
@@ -123,6 +123,7 @@ def start_service(tmp, port, asr_url="", require_token=False):
         env["HEAR_REQUIRE_TOKEN"] = "1"
     else:
         env.pop("HEAR_REQUIRE_TOKEN", None)
+    env["HEAR_ALLOW_LOOPBACK_HTTP"] = "1" if allow_loopback_http else "0"
     proc = subprocess.Popen([sys.executable, os.path.join(HERE, "hear_cloud.py")],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     for _ in range(60):
@@ -729,6 +730,31 @@ def main():
         code, data = req("/v1/asr", method="POST", body=wav, ctype="audio/wav",
                          headers={"X-Hear-Token": "wrong-token"})
         check("with a wrong token it refuses (401)", code == 401, "got %d" % code)
+
+        def loopback_request(headers):
+            with closing(HTTPConnection("127.0.0.1", PORT, timeout=5)) as client:
+                client.request("POST", "/v1/asr", body=wav,
+                               headers={"Content-Type": "audio/wav", **headers})
+                response = client.getresponse()
+                response.read()
+                return response.status
+
+        forwarded = {"X-Forwarded-Proto": "https", "X-Hear-Token": token}
+        check("HTTP is rejected by default even with the correct token and forwarded HTTPS header",
+              loopback_request(forwarded) == 401)
+        stop_service(proc3)
+        proc3 = start_service(tmp3, PORT, asr_url="http://127.0.0.1:%d" % stub3_port,
+                              require_token=True, allow_loopback_http=True)
+        check("opt-in accepts loopback HTTP with the correct token",
+              loopback_request({"X-Hear-Token": token}) == 200)
+        check("opt-in still rejects loopback HTTP without a token", loopback_request({}) == 401)
+        check("opt-in still rejects loopback HTTP with a wrong token",
+              loopback_request({"X-Hear-Token": "wrong-token"}) == 401)
+
+        from hear_http import RequestPolicy
+        policy = RequestPolicy(1024, 1, token, allow_loopback_http=True)
+        check("opt-in rejects HTTP from a non-loopback peer even with the correct token",
+              not policy.permits(object(), "192.0.2.10", token))
     finally:
         stop_service(proc3)
         try:

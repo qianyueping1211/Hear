@@ -72,20 +72,24 @@ def clone_upstream(url, payload, deadline, max_bytes):
 
 
 class RequestPolicy:
-    def __init__(self, max_body, max_inflight, access_token=None):
+    def __init__(self, max_body, max_inflight, access_token=None, *, allow_loopback_http=False):
         self.max_body = max_body
         self.access_token = access_token
+        self.allow_loopback_http = allow_loopback_http
         self.max_inflight = max_inflight
         self.lock = threading.Lock()
         self.inflight = 0
         self.background_inflight = 0
         self.previews = set()
 
-    def permits(self, connection, token):
+    def permits(self, connection, peer_host, token):
         if self.access_token is None:
             return True
-        return (isinstance(connection, ssl.SSLSocket)
-                and compare_digest(token.encode("utf-8"), self.access_token.encode("utf-8")))
+        # Use the real TCP peer. Forwarded headers cannot authorize plaintext.
+        local_proxy = self.allow_loopback_http and peer_host in ("127.0.0.1", "::1")
+        if not isinstance(connection, ssl.SSLSocket) and not local_proxy:
+            return False
+        return compare_digest(token.encode("utf-8"), self.access_token.encode("utf-8"))
 
     @contextmanager
     def reserve(self, *, background=False, preview=None):
@@ -186,8 +190,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         policy = self.server.request_policy
-        if not policy.permits(self.connection, (self.headers.get("X-Hear-Token") or "").strip()):
-            self._reject_without_reading("访问口令不对，或请求未使用 HTTPS", 401)
+        token = (self.headers.get("X-Hear-Token") or "").strip()
+        if not policy.permits(self.connection, self.client_address[0], token):
+            self._reject_without_reading("访问口令不对，或请求未使用允许的连接方式", 401)
             return
 
         try:
