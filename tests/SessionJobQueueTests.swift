@@ -42,6 +42,8 @@ struct SessionJobQueueTests {
         try await testCloudInferencePolicy()
         try testVerifiedAddress()
         try await testRecoveryState()
+        await testSenseVoiceRecovery()
+        await testPreviewPipeline()
         try testConversationBubbleSides()
         try testTranslationRevision()
         try testCurrentSegmentTranslation()
@@ -89,6 +91,83 @@ struct SessionJobQueueTests {
         let decoded = try JSONDecoder().decode([TranslationItem].self, from: data)
         precondition(decoded == items, "Speaker edits should survive persistence")
     }
+}
+
+@MainActor
+private func testSenseVoiceRecovery() async {
+    let queue = SessionJobQueue<Int>()
+    let recovery = SenseVoiceRecovery()
+    var processed: [Int] = []
+    var overflow: [Int] = []
+    var outcomes: [SenseVoiceRecovery.Outcome] = []
+    queue.pause()
+    for number in 1...4 {
+        queue.submit(number, onOverflow: { overflow.append($0) },
+                     process: { processed.append($0) }, timedOut: { _ in preconditionFailure() })
+    }
+    queue.keepPending(SenseVoiceRecovery.bufferedSegments)
+    precondition(!queue.isIdle && processed.isEmpty && overflow == [4])
+    recovery.start(timeout: .seconds(2), repair: {
+        try await Task.sleep(for: .milliseconds(60))
+    }) { result in
+        outcomes.append(result)
+        queue.resume()
+    }
+    await SessionJobQueueTests.until { queue.isIdle }
+    precondition(outcomes == [.recovered] && processed == [1, 2, 3])
+
+    // A continuation ignores Task.cancel like an in-flight Core ML call might.
+    let engine = HeldInference()
+    queue.pause()
+    queue.submit(5, process: { processed.append($0) }, timedOut: { _ in preconditionFailure() })
+    recovery.start(timeout: .milliseconds(200), repair: { await engine.wait() }) { result in
+        outcomes.append(result)
+        queue.cancel()
+    }
+    await SessionJobQueueTests.until { outcomes.count == 2 }
+    precondition(outcomes.last == .timedOut && !recovery.isActive && queue.isIdle)
+    precondition(processed == [1, 2, 3])
+    await engine.complete()
+    await Task.yield()
+    precondition(outcomes.count == 2, "A late recovery changed the final state")
+}
+
+private actor HeldInference {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    func wait() async {
+        guard !released else { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func complete() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+@MainActor
+private func testPreviewPipeline() async {
+    let lane = LatestPreviewWork<Int>()
+    let engine = HeldInference()
+    var owner: UUID?
+    var seen: [Int] = []
+    lane.submit(1) { id in
+        owner = id
+        seen.append(lane.next(for: id)!)
+        await engine.wait()
+        precondition(lane.next(for: id) == nil, "Canceled preview took a new snapshot")
+    }
+    await SessionJobQueueTests.until { owner != nil }
+    lane.cancel()
+    lane.submit(2) { id in seen.append(lane.next(for: id)!) }
+    lane.submit(3) { _ in preconditionFailure("Preview lanes should coalesce pending input") }
+    await engine.complete()
+    await SessionJobQueueTests.until { seen.count == 2 }
+    precondition(seen == [1, 3])
+    precondition(SessionPreviewPipeline.merge("the first part", "part is ready") == "the first part is ready")
 }
 
 private func testCloudInferencePolicy() async throws {
