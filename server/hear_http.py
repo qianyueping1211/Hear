@@ -14,7 +14,11 @@ class RequestPolicy:
     def __init__(self, max_body, max_inflight, access_token=None):
         self.max_body = max_body
         self.access_token = access_token
-        self.slots = threading.BoundedSemaphore(max_inflight) if max_inflight > 0 else None
+        self.max_inflight = max_inflight
+        self.lock = threading.Lock()
+        self.inflight = 0
+        self.background_inflight = 0
+        self.previews = set()
 
     def permits(self, connection, token):
         if self.access_token is None:
@@ -23,13 +27,28 @@ class RequestPolicy:
                 and compare_digest(token.encode("utf-8"), self.access_token.encode("utf-8")))
 
     @contextmanager
-    def reserve(self):
-        acquired = self.slots is None or self.slots.acquire(blocking=False)
+    def reserve(self, *, background=False, preview=None):
+        with self.lock:
+            full = self.max_inflight > 0 and self.inflight >= self.max_inflight
+            # Keep one slot free of background work even when a cancelled request
+            # is still running on the model. A single-slot installation stays usable.
+            background_full = (background and self.max_inflight > 1
+                               and self.background_inflight >= self.max_inflight - 1)
+            acquired = not (full or background_full or preview in self.previews)
+            if acquired:
+                self.inflight += 1
+                self.background_inflight += int(background)
+                if preview is not None:
+                    self.previews.add(preview)
         try:
             yield acquired
         finally:
-            if acquired and self.slots is not None:
-                self.slots.release()
+            if acquired:
+                with self.lock:
+                    self.inflight -= 1
+                    self.background_inflight -= int(background)
+                    if preview is not None:
+                        self.previews.remove(preview)
 
 
 class RequestHandler(BaseHTTPRequestHandler):
@@ -85,7 +104,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._reject_without_reading("请求体超过服务上限", 413)
             return
 
-        with policy.reserve() as admitted:
+        is_asr_preview = route == "/v1/asr" and self.headers.get("X-ASR-Preview", "").strip() == "1"
+        is_mt_preview = route == "/v1/translate" and self.headers.get("X-MT-Preview", "").strip() == "1"
+        preview = route if is_asr_preview or is_mt_preview else None
+        correction = route == "/v1/asr" and self.headers.get("X-ASR-Stage", "").strip() == "correct"
+        revision = route == "/v1/translate" and self.headers.get("X-MT-Stage", "").strip() == "revision"
+        background = preview is not None or correction or revision or route not in ("/v1/asr", "/v1/translate")
+        with policy.reserve(background=background, preview=preview) as admitted:
             if not admitted:
                 self._reject_without_reading("推理服务正忙，请稍后重试", 503)
                 return

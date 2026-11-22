@@ -417,7 +417,12 @@ final class LiveSession: ObservableObject {
     private var cloneRefs: [UUID: (samples: [Float], text: String)] = [:]
     private var cloneRefOrder: [UUID] = []
     private var cloneTasks: [UUID: Task<CloneAudio?, Never>] = [:]
-    private var cloneNote: [UUID: String] = [:]      // 每句样本的情况说明（写日志用）
+    private enum CloneReferenceIssue: String {
+        case disabled = "录音的时候声音克隆开关是关的"
+        case tooShort = "这句太短，没有完整的参考样本"
+        case tooLong = "这句太长，没有完整的参考样本"
+    }
+    private var cloneNote: [UUID: CloneReferenceIssue] = [:]
     private var appleEngines: [LiveTextEngine] = []   // 苹果自带模式：每种语言一个系统听写
 
     /// 排队等着处理的句子。
@@ -462,6 +467,9 @@ final class LiveSession: ObservableObject {
     private var mtPreviewID: UUID?
     private var mtPreviewTask: Task<Void, Never>?
     private var mtPreviewLoopID: UUID?
+    private let previewClock = ContinuousClock()
+    private var cloudASRPreviewRetryAt: ContinuousClock.Instant?
+    private var cloudMTPreviewRetryAt: ContinuousClock.Instant?
     // iOS 系统听写（逐字显示原文）
     private var live: LiveTextEngine?
     private var liveActive = false
@@ -2299,8 +2307,10 @@ final class LiveSession: ObservableObject {
             previewSamples = nil
             let id = job.id
             // 云端正式识别优先。翻译慢时，仍继续显示新句的预览。
-            guard phase == .ready, isRunning, !liveActive, useSense || asrBusyCount == 0,
+            let cloudPreview = usingCloudASR
+            guard phase == .ready, isRunning, !liveActive, !cloudPreview || asrBusyCount == 0,
                   id == currentSeg, id > finishedSeg else { continue }
+            if cloudPreview, let retryAt = cloudASRPreviewRetryAt, previewClock.now < retryAt { continue }
             let gen = runGen
             let a = langA, b = langB
             let forced = forcedLang
@@ -2315,10 +2325,14 @@ final class LiveSession: ObservableObject {
             do {
                 r = try await sentenceRecognizer.recognize(clip, candidates: cands, fallback: fallback, preview: true)
             } catch {
-                // 预览失败只影响这一次预览，不改引擎：
-                // 整句识别要是也失败，那边自然会回退（见 process）。
-                // 预览本来就是"尽力而为"，为它把用户的引擎换掉不合适。
-                hearLog("实时识别失败：\(error)", .warning)
+                guard !Task.isCancelled, generation == asrPreviewGeneration, gen == runGen else { return }
+                if error is CancellationError { continue }
+                if (error as? CloudClient.CloudError)?.isBusy == true {
+                    cloudASRPreviewRetryAt = previewClock.now.advanced(by: .seconds(2))
+                    hearLog("云端繁忙，实时识别预览稍后恢复")
+                } else {
+                    hearLog("实时识别失败：\(error)", .warning)
+                }
                 continue
             }
             hearLogText("实时识别 \(String(format: "%.1f", Date().timeIntervalSince(t0)))s：",
@@ -2409,12 +2423,20 @@ final class LiveSession: ObservableObject {
             let prompt = PromptBuilder.build(text: source, from: p.src, to: p.tgt,
                                              glossary: PromptBuilder.parseGlossary(glossary))
             if usingCloudMT {
+                if let retryAt = cloudMTPreviewRetryAt, previewClock.now < retryAt { continue }
                 do {
-                    let out = try await cloud.translate(prompt: prompt, src: p.src.id, dst: p.tgt.id, preview: true)
+                    let out = try await cloud.translate(prompt: prompt, src: p.src.id, dst: p.tgt.id, stage: .preview)
                     if !out.isEmpty { hearLogText("云端翻译（预览）：", String(out.prefix(20))) }
                     publish(out, true)
                 } catch {
-                    hearLog("云端翻译（预览）失败：\(error)", .warning)
+                    guard !Task.isCancelled, mtPreviewLoopID == loop, gen == runGen else { return }
+                    if error is CancellationError { continue }
+                    if (error as? CloudClient.CloudError)?.isBusy == true {
+                        cloudMTPreviewRetryAt = previewClock.now.advanced(by: .seconds(2))
+                        hearLog("云端繁忙，实时翻译预览稍后恢复")
+                    } else {
+                        hearLog("云端翻译（预览）失败：\(error)", .warning)
+                    }
                 }
                 continue
             }
@@ -2439,10 +2461,10 @@ final class LiveSession: ObservableObject {
     }
 
     private func translateFinal(_ text: String, from src: Language, to tgt: Language,
-                                previous: TranslationItem?,
+                                previous: TranslationItem?, stage: CloudClient.TranslationStage = .final,
                                 onPartial: @escaping @Sendable (String) -> Void) async throws -> String {
         let source = TranslationSource.currentSegment(text, language: src, after: useContext ? previous : nil)
-        let out = try await translateAttempt(source, from: src, to: tgt, onPartial: onPartial)
+        let out = try await translateAttempt(source, from: src, to: tgt, stage: stage, onPartial: onPartial)
         try Task.checkCancellation()
         let result = out.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !result.isEmpty else { throw TranslationResultError.empty }
@@ -2450,14 +2472,16 @@ final class LiveSession: ObservableObject {
     }
 
     private func translateAttempt(_ text: String, from src: Language, to tgt: Language,
+                                  stage: CloudClient.TranslationStage,
                                   onPartial: @escaping @Sendable (String) -> Void) async throws -> String {
         let engine: SessionTextEngine = usingAppleTranslation ? .system(systemTranslator)
             : (usingCloudMT ? .cloud(cloud) : .local(translator))
         do {
             return try await engine.translate(text: text, source: src, target: tgt,
-                                              glossary: glossary, onPartial: onPartial)
+                                              glossary: glossary, stage: stage, onPartial: onPartial)
         } catch {
             try Task.checkCancellation()
+            guard stage == .final, !(error is CancellationError) else { throw error }
             switch engine {
             case .system:
                 hearLog("苹果翻译失败：\(error)", .error)
@@ -2911,7 +2935,8 @@ final class LiveSession: ObservableObject {
         } catch {
             guard !Task.isCancelled, gen == runGen, isCurrentJob(itemID, token: token) else { return }
             hearLog("识别失败：\(error)", .error)
-            let keepEngine = (error as? CloudClient.CloudError)?.shouldKeepConfiguredEngine ?? false
+            let cloudError = error as? CloudClient.CloudError
+            let keepEngine = cloudError?.shouldKeepConfiguredEngine ?? false
             if usingCloudASR, !keepEngine {
                 cloudFallbackToApple(.asr, reason: error.localizedDescription)
             }
@@ -2921,7 +2946,8 @@ final class LiveSession: ObservableObject {
                     if !Self.hasRealText(items[index].sourceText) {
                         items[index].sourceText = "（识别失败，可长按修改）"
                     }
-                    items[index].applyTranslation("（翻译失败：识别未完成）", done: true)
+                    let reason = cloudError?.isBusy == true ? "云端识别繁忙，重试后仍未完成" : "识别未完成"
+                    items[index].applyTranslation("（翻译失败：\(reason)）", done: true)
                     jobTokens[itemID] = nil
                     persist()
                     kickReader()
@@ -3033,7 +3059,8 @@ final class LiveSession: ObservableObject {
                     embedding = try await self.localSpeaker.embedding(samples: job.samples, folder: folder)
                 }
             } catch {
-                hearLog("本机说话人识别失败：\(error)", .warning)
+                guard !Task.isCancelled, !(error is CancellationError) else { return }
+                hearLog("说话人识别失败：\(error)", .warning)
                 return
             }
             guard let embedding,
@@ -3093,7 +3120,7 @@ final class LiveSession: ObservableObject {
             hearLog("Whisper 校正 \(secs)s：基本一致")
             return
         }
-        guard let i = items.firstIndex(where: { $0.id == id }) else { return }
+        guard translationQueue.isIdle, let i = items.firstIndex(where: { $0.id == id }) else { return }
         // 用户手改过这一句的话，就别再自动改写了：
         // 手改的版本才是用户要的（"我改的" 优先于 "机器觉得更准"）。
         if items[i].sourceText != oldText {
@@ -3104,7 +3131,7 @@ final class LiveSession: ObservableObject {
         let tgt = items[i].target
         let previous = previousSegment(before: i)
         do {
-            let out = try await translateFinal(text, from: src, to: tgt, previous: previous) { _ in }
+            let out = try await translateFinal(text, from: src, to: tgt, previous: previous, stage: .revision) { _ in }
             guard gen == runGen else { return }
             // 期间又被人改过（手改或者又校正了一次）：这次的结果是旧的，丢掉
             guard (itemVersions[id] ?? 0) == revision,
@@ -3123,12 +3150,10 @@ final class LiveSession: ObservableObject {
                 kickReader()
             }
         } catch {
-            guard !Task.isCancelled, gen == runGen, (itemVersions[id] ?? 0) == revision,
-                  let current = items.firstIndex(where: { $0.id == id }),
-                  items[current].sourceText == oldText else { return }
-            items[current].applyTranslation("（翻译失败：\(error.localizedDescription)）", done: true)
-            persist()
-            hearLog("校正后重新翻译失败：\(error)", .error)
+            guard !Task.isCancelled, !(error is CancellationError),
+                  gen == runGen, (itemVersions[id] ?? 0) == revision else { return }
+            let level: LogLevel = (error as? CloudClient.CloudError)?.isBusy == true ? .info : .warning
+            hearLog("校正后重新翻译未完成，保留原有译文：\(error)", level)
         }
     }
 
@@ -3226,7 +3251,8 @@ final class LiveSession: ObservableObject {
                 }
             } else {
                 // 连请求都没发：说清楚是什么原因（说得太短、太长、开关当时关着……）
-                hearLog("这句没有声音样本，改用系统声音朗读（\(cloneMissingReason(item))）", .warning)
+                let (reason, level) = cloneMissingReason(item)
+                hearLog("改用系统声音朗读（\(reason)）", level)
             }
         } else if cloned != nil {
             cloneUnavailableNotified = false
@@ -3925,7 +3951,7 @@ final class LiveSession: ObservableObject {
         let secs = Double(samples.count) / 16_000
         guard voiceClone else {
             // 录音的时候声音克隆开关是关的：这一句没有样本
-            cloneNote[id] = "录音的时候声音克隆开关是关的"
+            cloneNote[id] = .disabled
             return
         }
         if secs >= 1.5 && secs <= 12 {
@@ -3933,7 +3959,7 @@ final class LiveSession: ObservableObject {
             cloneNote[id] = nil
         } else {
             cloneRefs[id] = nil
-            cloneNote[id] = secs > 12 ? "这句太长，没有完整的参考样本" : "这句太短，没有完整的参考样本"
+            cloneNote[id] = secs > 12 ? .tooLong : .tooShort
         }
         cloneRefOrder.removeAll { $0 == id }
         cloneRefOrder.append(id)
@@ -3958,28 +3984,30 @@ final class LiveSession: ObservableObject {
     }
 
     /// 这句为什么没能用克隆声音（写进日志，别只说一句"没有样本"）
-    private func cloneMissingReason(_ item: TranslationItem) -> String {
-        if !voiceClone { return "声音克隆开关没有打开" }
-        if item.translated.isEmpty { return "这句还没有译文" }
-        if item.translated.hasPrefix("（翻译失败") { return "这句翻译失败了" }
+    private func cloneMissingReason(_ item: TranslationItem) -> (String, LogLevel) {
+        if !voiceClone { return ("声音克隆开关没有打开", .info) }
+        if item.translated.isEmpty { return ("这句还没有译文", .warning) }
+        if item.translated.hasPrefix("（翻译失败") { return ("这句翻译失败了", .warning) }
         // 克隆模型只会说这几门语言（说译文那门语言，样本是源语言的，这是跨语言克隆）
         if !usingCloudClone, (!ZipVoiceModel.supports(item.target.id) || !ZipVoiceModel.supports(item.source.id)) {
-            return "本地 ZipVoice 仅支持中英文"
+            return ("本地 ZipVoice 仅支持中英文", .info)
         }
-        if !usingCloudClone, !cloneInstalled { return "尚未下载本地 ZipVoice 模型" }
+        if !usingCloudClone, !cloneInstalled { return ("尚未下载本地 ZipVoice 模型", .warning) }
         if CloudVoiceReference.languageNames[item.target.id] == nil {
-            return "\(item.target.displayName)这个语言声音克隆不支持"
+            return ("\(item.target.displayName)这个语言声音克隆不支持", .info)
         }
         guard let ref = cloneReference(for: item) else {
-            return cloneNote[item.id] ?? "这句没有留到声音样本"
+            if let issue = cloneNote[item.id] { return (issue.rawValue, .info) }
+            return ("这句没有留到声音样本", .warning)
         }
         let refText = ref.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if refText.isEmpty || refText == "…" {
-            return Self.hasRealText(item.sourceText)
+            let reason = Self.hasRealText(item.sourceText)
                 ? "参考文字还没有更新到这句的原文"
                 : "声音样本没有可用的参考文字"
+            return (reason, .warning)
         }
-        return "克隆任务没有启动"
+        return ("克隆任务没有启动", .warning)
     }
 
     /// 声音克隆的缓存键：语言 + 文字 + 参考音频的指纹。

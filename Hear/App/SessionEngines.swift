@@ -29,7 +29,7 @@ enum SessionTextEngine {
     case local(LlamaTranslator)
 
     func translate(text: String, source: Language, target: Language,
-                   glossary: String,
+                   glossary: String, stage: CloudClient.TranslationStage = .final,
                    onPartial: @escaping @Sendable (String) -> Void) async throws -> String {
         try Task.checkCancellation()
         func prompt() -> String {
@@ -40,7 +40,7 @@ enum SessionTextEngine {
         case .system(let engine):
             return try await engine.translate(text, from: source, to: target)
         case .cloud(let engine):
-            return try await engine.translate(prompt: prompt(), src: source.id, dst: target.id)
+            return try await engine.translate(prompt: prompt(), src: source.id, dst: target.id, stage: stage)
         case .local(let engine):
             return try await engine.translate(prompt: prompt(), onUpdate: onPartial)
         }

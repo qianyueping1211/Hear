@@ -273,6 +273,86 @@ def check_connection_recovery():
             worker.join(2)
 
 
+def check_inference_admission():
+    import hear_cloud
+    from hear_http import RequestPolicy
+
+    asr_started = threading.Event()
+    mt_started = threading.Event()
+    release = threading.Event()
+
+    class Handler(hear_cloud.Handler):
+        def asr(self, body):
+            if self.headers.get("X-ASR-Preview") == "1":
+                asr_started.set()
+                release.wait(5)
+            self._send_json({"text": "asr"})
+
+        def translate(self, body):
+            if self.headers.get("X-MT-Preview") == "1":
+                mt_started.set()
+                release.wait(5)
+            self._send_json({"text": "translation"})
+
+    with hear_cloud.MixedServer(("127.0.0.1", 0), Handler) as server:
+        server.request_policy = RequestPolicy(max_body=1024, max_inflight=3)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+
+        def post(path, headers=None):
+            client = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+            try:
+                client.request("POST", path, body=b"{}", headers=headers or {})
+                response = client.getresponse()
+                return response.status, response.getheader("Retry-After"), json.loads(response.read())
+            finally:
+                client.close()
+
+        asr_preview = ("/v1/asr", {"X-ASR-Preview": "1"})
+        mt_preview = ("/v1/translate", {"X-MT-Preview": "1"})
+        asr_result = []
+        mt_result = []
+        asr = threading.Thread(target=lambda: asr_result.append(post(*asr_preview)))
+        mt = threading.Thread(target=lambda: mt_result.append(post(*mt_preview)))
+        asr.start()
+        try:
+            assert asr_started.wait(1), "ASR preview did not start"
+            check("a second ASR preview is rejected while the first is still working",
+                  post(*asr_preview)[:2] == (503, "1"))
+            mt.start()
+            assert mt_started.wait(1), "MT preview did not start"
+            check("Whisper correction cannot take the reserved inference slot",
+                  post("/v1/asr", {"X-ASR-Stage": "correct"})[:2] == (503, "1"))
+            check("a corrected translation cannot take the reserved inference slot",
+                  post("/v1/translate", {"X-MT-Stage": "revision"})[:2] == (503, "1"))
+            check("speaker recognition cannot take the reserved inference slot",
+                  post("/v1/speaker")[:2] == (503, "1"))
+            check("final speech recognition works while both previews are busy",
+                  post("/v1/asr", {"X-ASR-Stage": "first"})[0] == 200)
+            check("final translation works while both previews are busy",
+                  post("/v1/translate")[0] == 200)
+        except (OSError, AssertionError, ValueError) as error:
+            check("inference admission under load", False, str(error))
+        finally:
+            release.set()
+            asr.join(3)
+            if mt.ident is not None:
+                mt.join(3)
+            try:
+                check("preview admission recovers after the original work finishes",
+                      bool(asr_result and mt_result) and post(*asr_preview)[0] == 200
+                      and post(*mt_preview)[0] == 200)
+            finally:
+                server.shutdown()
+                worker.join(2)
+
+    single = RequestPolicy(max_body=1024, max_inflight=1)
+    with single.reserve(background=True, preview="/v1/asr") as preview, single.reserve() as final:
+        check("single-slot servers can still run preview work", preview and not final)
+    with single.reserve() as final:
+        check("single-slot servers admit a final after a preview releases the slot", final)
+
+
 def main():
     global BASE
     tmp = tempfile.mkdtemp(prefix="hear-contract-")
@@ -464,6 +544,7 @@ def main():
     check_speaker_endpoint(wav)
     check_clone_readiness()
     check_connection_recovery()
+    check_inference_admission()
 
     print("\npassed %d, failed %d" % (len(PASSED), len(FAILED)))
     if FAILED:

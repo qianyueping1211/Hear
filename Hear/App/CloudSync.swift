@@ -34,8 +34,6 @@ final class CloudSync: ObservableObject {
     private enum Keys {
         static let enabled = "cloudSyncEnabled"
         static let bookmark = "cloudSyncBookmark"
-        /// 上次授权的文件夹路径（书签数据坏了的时候还能靠它找回来）
-        static let bookmarkPath = "cloudSyncBookmarkPath"
         static let lastSync = "cloudSyncLast"
         static let settingsHash = "cloudSyncSettingsHash"
     }
@@ -114,8 +112,7 @@ final class CloudSync: ObservableObject {
     /// 有没有可以放同步数据的地方
     /// （App 自己的 iCloud 容器，或者之前授权过的 iCloud 文件夹）
     var hasFolder: Bool {
-        if let cachedFolder { return true }
-        return withFolderAccess { _ in true } ?? false
+        enabled && resolveFolder() != nil
     }
 
     /// 同步数据所在的文件夹：iCloud 云盘里的「听见」
@@ -131,11 +128,13 @@ final class CloudSync: ObservableObject {
             do {
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 cachedFolder = dir
+                warnedNoAccess = false
                 return dir
             } catch {
                 continue     // 这个位置没权限，试下一个
             }
         }
+        closeScopedAccess()
         return nil
     }
 
@@ -153,24 +152,16 @@ final class CloudSync: ObservableObject {
     /// 只有开过权限的那一个能用。之前解析了两次，
     /// 于是每次都以为"没有权限"，又要让用户重新选文件夹。
     private func openScopedAccess() {
-        guard scopedFolder == nil else { return }
-        for u in bookmarkCandidates() {
-            if u.startAccessingSecurityScopedResource() {
-                scopedFolder = u
-                return
-            }
-        }
-        // 书签数据坏了的话，试试上次记下来的路径
-        if let path = UserDefaults.standard.string(forKey: Keys.bookmarkPath) {
-            let u = URL(fileURLWithPath: path)
-            if u.startAccessingSecurityScopedResource() {
-                scopedFolder = u
-                return
-            }
-        }
-        if !warnedNoAccess {
-            warnedNoAccess = true
-            hearLog("iCloud 同步：拿不到 iCloud 云盘文件夹的访问权限，请在设置里重新授权一次", .warning)
+        guard scopedFolder == nil, ownFolder == nil,
+              let data = UserDefaults.standard.data(forKey: Keys.bookmark) else { return }
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil,
+                                 bookmarkDataIsStale: &stale),
+              url.startAccessingSecurityScopedResource() else { return }
+        scopedFolder = url
+        if stale, let fresh = try? url.bookmarkData(options: .minimalBookmark,
+                                                   includingResourceValuesForKeys: nil, relativeTo: nil) {
+            UserDefaults.standard.set(fresh, forKey: Keys.bookmark)
         }
     }
 
@@ -178,6 +169,7 @@ final class CloudSync: ObservableObject {
     private func closeScopedAccess() {
         if let s = scopedFolder { s.stopAccessingSecurityScopedResource() }
         scopedFolder = nil
+        cachedFolder = nil
     }
 
     /// 候选的同步文件夹（按优先级排）
@@ -249,23 +241,6 @@ final class CloudSync: ObservableObject {
         }
     }
 
-    /// 之前授权过的那个文件夹（书签）
-    ///
-    /// iOS 上没有 macOS 那种"带安全权限的书签"（withSecurityScope 只有 macOS 有），
-    /// 用普通书签就行：苹果的文档里说，只要当时有权限，普通书签就能一直用。
-    /// 真正要注意的是：解析出来的这个 URL 实例要用到底，
-    /// 同一份书签解析两次会得到两个 URL，只有开过权限的那个能动里面的东西。
-    private func bookmarkCandidates() -> [URL] {
-        guard let data = UserDefaults.standard.data(forKey: Keys.bookmark) else { return [] }
-        var stale = false
-        guard let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil,
-                                 bookmarkDataIsStale: &stale) else { return [] }
-        if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-            UserDefaults.standard.set(fresh, forKey: Keys.bookmark)
-        }
-        return [url]
-    }
-
     /// 请求 iCloud 云盘的访问权限。
     ///
     /// - Returns: true 表示已经拿到权限了（不需要用户再选文件夹）；
@@ -286,7 +261,6 @@ final class CloudSync: ObservableObject {
         let dir = FileManager.default.fileExists(atPath: docs.path) ? docs : container
         hearLog("iCloud 同步：用 App 自己的 iCloud 云盘文件夹（系统授权，不用用户挑）", .info)
         ownFolder = dir
-        cachedFolder = nil
         closeScopedAccess()
         enabled = true
         verifyWritable()
@@ -296,18 +270,17 @@ final class CloudSync: ObservableObject {
 
     /// 用户选好 iCloud 云盘里的文件夹后调用（只在完全没有 iCloud 权限时才会用到）
     func setFolder(_ url: URL) {
-        // 先打开访问权限：建文件夹、写文件都要靠它
-        let access = url.startAccessingSecurityScopedResource()
-        // 如果下面把 scopedFolder 换成了这个 url，权限就留着不关
-        defer { if access, scopedFolder != url { url.stopAccessingSecurityScopedResource() } }
+        guard url.startAccessingSecurityScopedResource() else {
+            message = "未能访问所选文件夹，请在 iCloud 云盘中重新选择。"
+            hearLog("iCloud 同步：未获得所选文件夹的访问权限", .warning)
+            return
+        }
         do {
-            // 普通书签就行（iOS 上没有 macOS 那种带安全权限的书签）
-            let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+            let data = try url.bookmarkData(options: .minimalBookmark, includingResourceValuesForKeys: nil, relativeTo: nil)
             UserDefaults.standard.set(data, forKey: Keys.bookmark)
-            // 路径也记一份：万一书签数据坏了还能靠它找回来
-            UserDefaults.standard.set(url.path, forKey: Keys.bookmarkPath)
             useFolder(url)
         } catch {
+            url.stopAccessingSecurityScopedResource()
             message = "无法使用这个文件夹：\(error.localizedDescription)"
             hearLog("iCloud 同步：保存文件夹失败 \(error)", .error)
         }
@@ -316,7 +289,6 @@ final class CloudSync: ObservableObject {
     /// 就用这个文件夹同步（权限已经开着了）
     private func useFolder(_ url: URL) {
         ownFolder = nil        // 用户自己挑的，就用它
-        cachedFolder = nil
         closeScopedAccess()
         warnedNoAccess = false
         // 就用这个文件夹（权限已经开着了，后面都拿它操作）
@@ -368,6 +340,7 @@ final class CloudSync: ObservableObject {
             try? FileManager.default.removeItem(at: probe)
             message = nil
         } catch {
+            closeScopedAccess()
             message = "iCloud 云盘里的「\(Self.syncFolderName)」文件夹写不进去：\(error.localizedDescription)"
             hearLog("iCloud 同步：写不进去 \(error)", .warning)
         }
@@ -396,7 +369,7 @@ final class CloudSync: ObservableObject {
     }
 
     private func scheduleSync(delay: Double) {
-        guard enabled, hasFolder else { return }
+        guard enabled else { return }
         pending?.cancel()
         pending = Task { [weak self] in
             if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
@@ -436,22 +409,24 @@ final class CloudSync: ObservableObject {
             scheduleSync(delay: 1)
             return
         }
-        syncing = true
-        defer { syncing = false }
-        // 用书签授权的文件夹：访问期间要 startAccessing
-        // （要先开启权限，才能在里面建文件夹）
-        openScopedAccess()
         guard let dir = resolveFolder() else {
-            hearLog("iCloud 同步：找不到 iCloud 云盘里的「\(Self.syncFolderName)」文件夹", .warning)
-            message = "iCloud 云盘里找不到「\(Self.syncFolderName)」文件夹，请检查 iCloud 是否已登录"
+            let detail = "暂时无法访问 iCloud 云盘里的「\(Self.syncFolderName)」文件夹"
+            if message != detail { message = detail }
+            if !warnedNoAccess, UserDefaults.standard.data(forKey: Keys.bookmark) != nil {
+                warnedNoAccess = true
+                hearLog("iCloud 同步：\(detail)，下次同步时会重试", .warning)
+            }
             return
         }
+        syncing = true
+        defer { syncing = false }
         // 先把老文件夹「听见同步」的内容搬过来，再建 conversations
         migrateLegacyFolder(to: dir)
         let convDir = dir.appendingPathComponent("conversations", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: convDir, withIntermediateDirectories: true)
         } catch {
+            closeScopedAccess()
             message = "iCloud 文件夹不可用：\(error.localizedDescription)"
             hearLog("iCloud 同步：建文件夹失败 \(error)", .error)
             return

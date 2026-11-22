@@ -273,6 +273,11 @@ actor CloudClient {
         case badResponse(String)
         case net(String)          // 网络不通，说清楚为什么
 
+        var isBusy: Bool {
+            if case .http(let status, _) = self { return status == 429 || status == 503 }
+            return false
+        }
+
         var shouldKeepConfiguredEngine: Bool {
             if case .http(let status, _) = self { return [401, 403, 429, 503].contains(status) }
             return false
@@ -473,54 +478,45 @@ actor CloudClient {
         return req
     }
 
-    /// 发一个请求：连接被服务端断开之类的临时错误，重试一次。
-    ///
-    /// 服务现在用 HTTP/1.1 长连接，手机会复用同一个连接；
-    /// 连接空闲太久被服务端收掉的时候，正好赶上发请求就会断一下——
-    /// 重试一次就好，别让用户这一句白说。
-    /// （超时不重试：那是服务真的慢，重试只会让等待翻倍。）
-    /// retries = 1 表示不重试（实时预览用：要快，宁可这次失败也不要一直等着）
+    /// Retries are bounded by the caller. A timeout may already be running inference.
     private func sendWithRetry(_ req: URLRequest, path: String, retries: Int = 3) async throws -> (Data, HTTPURLResponse?) {
-        // 切到别的 App 以后，系统只给很短的时间跑代码，请求会被掐断。
-        // 用后台任务多要一点时间：翻译和声音克隆的请求能跑完。
         try await withBackgroundTime {
-        // 网络断了（Wi-Fi 抖一下、刚切过网络、电脑上的服务重启），
-        // 等一下再试往往就好了——不用让用户把刚才那句话重新说一遍。
-        var lastError: Error = CloudError.notConfigured
-        let tries = max(1, retries)
-        for attempt in 0..<tries {
-            do {
-                let (data, resp) = try await CloudClient.session.data(for: req)
-                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-                // 服务端说"现在太忙"（并发上限挡住了）：等一下再试。
-                // 不重试的话，这一句就白白丢了。
-                if (code == 503 || code == 429), attempt < tries - 1 {
-                    let wait = attempt == 0 ? 1.0 : 2.5
-                    hearLog("云端忙（HTTP \(code)），等 \(wait) 秒重试：\(path)", .warning)
-                    try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-                    continue
-                }
-                return (data, resp as? HTTPURLResponse)
-            } catch let e as URLError {
-                lastError = e
-                // 本地网络权限被系统拒了：告诉界面弹提示。
-                // 系统的授权框只问一次，拒绝了就得用户自己去设置里开，
-                // 不提示的话用户只会看到"连不上"，根本不知道要去哪儿开。
-                if Self.isLocalNetworkDenied(e) {
-                    hearLog("本地网络权限被拒绝：\(path)", .warning)
-                    NotificationCenter.default.post(name: .hearLocalNetworkDenied, object: nil)
+            let tries = max(1, retries)
+            let busyDelays: [Double] = [1, 2.5, 4]
+            for attempt in 0..<tries {
+                try Task.checkCancellation()
+                do {
+                    let (data, resp) = try await CloudClient.session.data(for: req)
+                    try Task.checkCancellation()
+                    let response = resp as? HTTPURLResponse
+                    let code = response?.statusCode ?? 0
+                    if (code == 503 || code == 429), attempt < tries - 1 {
+                        let backoff = busyDelays[min(attempt, busyDelays.count - 1)]
+                        let header = response?.value(forHTTPHeaderField: "Retry-After") ?? ""
+                        let suggested = Int(header) ?? 0
+                        let wait = max(backoff, Double(min(suggested, 4)))
+                        hearLog("云端忙（HTTP \(code)），等 \(wait) 秒重试：\(path)")
+                        try await Task.sleep(for: .seconds(wait))
+                        continue
+                    }
+                    return (data, response)
+                } catch let e as URLError {
+                    if Task.isCancelled || e.code == .cancelled { throw CancellationError() }
+                    if Self.isLocalNetworkDenied(e) {
+                        hearLog("本地网络权限被拒绝：\(path)", .warning)
+                        NotificationCenter.default.post(name: .hearLocalNetworkDenied, object: nil)
+                        throw CloudError.net(Self.friendlyError(e))
+                    }
+                    if Self.isTransientNetworkError(e), attempt < tries - 1 {
+                        let wait = attempt == 0 ? 1.5 : 4.0
+                        hearLog("云端连不上，等 \(wait) 秒重试：\(path)（\(e.code.rawValue)）")
+                        try await Task.sleep(for: .seconds(wait))
+                        continue
+                    }
                     throw CloudError.net(Self.friendlyError(e))
                 }
-                if Self.isTransientNetworkError(e), attempt < tries - 1 {
-                    let wait = attempt == 0 ? 1.5 : 4.0
-                    hearLog("云端连不上，等 \(wait) 秒重试：\(path)（\(e.code.rawValue)）", .warning)
-                    try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-                    continue
-                }
-                throw CloudError.net(Self.friendlyError(e))
             }
-        }
-            throw CloudError.net(Self.friendlyError(lastError))
+            throw CloudError.notConfigured
         }
     }
 
@@ -539,8 +535,10 @@ actor CloudClient {
     /// 请求并解析 JSON
     private func json(_ path: String, address: String, method: String = "GET", body: Data? = nil,
                       contentType: String = "application/json",
-                      timeout: TimeInterval = 60, retries: Int = 3) async throws -> [String: Any] {
-        let req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
+                      timeout: TimeInterval = 60, retries: Int = 3,
+                      headers: [String: String] = [:]) async throws -> [String: Any] {
+        var req = try makeRequest(path, address: address, method: method, body: body, contentType: contentType, timeout: timeout)
+        for (name, value) in headers { req.setValue(value, forHTTPHeaderField: name) }
         let (data, resp) = try await sendWithRetry(req, path: path, retries: retries)
         let code = resp?.statusCode ?? 0
         guard (200..<300).contains(code) else {
@@ -868,6 +866,7 @@ actor CloudClient {
                             preview: Bool) async throws -> (lang: String, text: String, correctionAddress: String?, speakerAddress: String?) {
         // 先试这个模型自己的地址，不行就退回通用服务地址（8000 会转发给识别后端）
         var lastError: Error = CloudError.notConfigured
+        var busyError: CloudError?
         var sawOnlyModelService = false
         var attempted = false
         // 预览只有一个总时限：探测、回退、加起来都不能超过它。
@@ -901,7 +900,7 @@ actor CloudClient {
                 // 预览只要快，不要修正
                 if preview { req.setValue("1", forHTTPHeaderField: "X-ASR-Preview") }
                 else { req.setValue("first", forHTTPHeaderField: "X-ASR-Stage") }
-                let (data, resp) = try await sendWithRetry(req, path: "/v1/asr", retries: preview ? 1 : 3)
+                let (data, resp) = try await sendWithRetry(req, path: "/v1/asr", retries: preview ? 1 : 4)
                 let code = resp?.statusCode ?? 0
                 guard (200..<300).contains(code) else {
                     throw CloudError.http(code, String(data: data.prefix(400), encoding: .utf8) ?? "")
@@ -916,13 +915,15 @@ actor CloudClient {
                 return (lang, text, correctionAddress, speakerAddress)
             } catch {
                 try Task.checkCancellation()
+                if error is CancellationError { throw error }
                 lastError = error
+                if let busy = error as? CloudError, busy.isBusy { busyError = busy }
             }
         }
         if !attempted && sawOnlyModelService {
             throw CloudError.badResponse("这个地址是单独的模型服务，不提供语音识别；识别请用 8000 的总服务地址")
         }
-        throw lastError
+        throw busyError.map { $0 as Error } ?? lastError
     }
 
     func speakerEmbedding(samples: [Float], address: String) async throws -> [Float]? {
@@ -930,8 +931,8 @@ actor CloudClient {
         guard candidateAddresses(asrAddress).contains(address) else { return nil }
         let wav = Wav.encode(samples: Array(samples.prefix(160_000)), sampleRate: 16_000)
         let request = try makeRequest("/v1/speaker", address: address, method: "POST", body: wav,
-                                      contentType: "audio/wav", timeout: 8)
-        let (data, response) = try await sendWithRetry(request, path: "/v1/speaker", retries: 1)
+                                      contentType: "audio/wav", timeout: 4)
+        let (data, response) = try await sendWithRetry(request, path: "/v1/speaker", retries: 2)
         guard response?.statusCode == 200, data.count < 32_768 else { return nil }
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         return (object?["embedding"] as? [NSNumber])?.map(\.floatValue)
@@ -939,12 +940,24 @@ actor CloudClient {
 
     // MARK: - 文本翻译
 
+    enum TranslationStage {
+        case preview, final, revision
+    }
+
     /// prompt 是 App 拼好的提示词（和本地模型用的是同一套格式）
-    func translate(prompt: String, src: String, dst: String, preview: Bool = false) async throws -> String {
+    func translate(prompt: String, src: String, dst: String, stage: TranslationStage = .final) async throws -> String {
         // 先试这个模型自己的地址，不行就退回通用服务地址（8000 会转发给翻译后端）
         var lastError: Error = CloudError.notConfigured
+        var busyError: CloudError?
+        let preview = stage == .preview
         let deadline = preview ? Date().addingTimeInterval(5) : nil
-        let retries = preview ? 1 : 3
+        let retries = stage == .final ? 4 : 1
+        let headers: [String: String]
+        switch stage {
+        case .preview: headers = ["X-MT-Preview": "1"]
+        case .revision: headers = ["X-MT-Stage": "revision"]
+        case .final: headers = [:]
+        }
         for addr in candidateAddresses(mtAddress) {
             try Task.checkCancellation()
             if let deadline, deadline.timeIntervalSinceNow <= 0 { break }
@@ -958,7 +971,7 @@ actor CloudClient {
                     let body: [String: Any] = [
                         "messages": [["role": "user", "content": prompt]],
                         "stream": false,
-                        "max_tokens": 512,
+                        "max_tokens": preview ? 256 : 512,
                         "top_k": 20,
                         "top_p": 0.6,
                         "temperature": 0.7,
@@ -974,17 +987,20 @@ actor CloudClient {
                 }
                 let body: [String: Any] = ["prompt": prompt, "src": src, "dst": dst]
                 let obj = try await json("/v1/translate", address: addr, method: "POST",
-                                         body: try JSONSerialization.data(withJSONObject: body), timeout: budget, retries: retries)
+                                         body: try JSONSerialization.data(withJSONObject: body), timeout: budget, retries: retries,
+                                         headers: headers)
                 guard let text = obj["text"] as? String else {
                     throw CloudError.badResponse("没有 text 字段")
                 }
                 return text
             } catch {
                 try Task.checkCancellation()
+                if error is CancellationError { throw error }
                 lastError = error
+                if let busy = error as? CloudError, busy.isBusy { busyError = busy }
             }
         }
-        throw lastError
+        throw busyError.map { $0 as Error } ?? lastError
     }
 
     // MARK: - 声音克隆

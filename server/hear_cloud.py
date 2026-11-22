@@ -772,6 +772,8 @@ class Handler(RequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            if code == 503:
+                self.send_header("Retry-After", "1")
             self.end_headers()
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError) as e:
@@ -977,16 +979,23 @@ a{color:#007aff;text-decoration:none}
         log_content = request_logs_content(self.headers)
         req = json.loads(body.decode("utf-8"))
         prompt = req.get("prompt", "")
+        preview = self.headers.get("X-MT-Preview", "").strip() == "1"
         payload = {
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
-            "max_tokens": int(req.get("max_tokens", 512)),
+            "max_tokens": min(int(req.get("max_tokens", 256)), 256) if preview else int(req.get("max_tokens", 512)),
             "top_k": TOP_K,
             "top_p": TOP_P,
             "temperature": TEMPERATURE,
         }
         t0 = time.time()
-        raw = http_json(MT_URL + "/v1/chat/completions", payload, timeout=300)
+        try:
+            raw = http_json(MT_URL + "/v1/chat/completions", payload, timeout=6 if preview else 300)
+        except TimeoutError:
+            if not preview:
+                raise
+            self._error("翻译预览暂不可用，请稍后重试", 503)
+            return
         obj = json.loads(raw.decode("utf-8"))
         text = obj["choices"][0]["message"]["content"]
         log_text("翻译 %.1fs：" % (time.time() - t0), text[:40], enabled=log_content)
