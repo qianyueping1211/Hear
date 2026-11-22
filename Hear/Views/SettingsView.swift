@@ -17,6 +17,7 @@ struct SettingsView: View {
     @ObservedObject private var llm = LLMSettings.shared
     @ObservedObject private var cloud = CloudSync.shared
     @State private var showCloudPicker = false
+    @State private var showHeadphoneOutputHelp = false
     /// 授权 iCloud 云盘的说明框（系统的授权框弹不出来时才需要）
     @State private var askCloudAuth = false
     /// 模型管理里的页签：0 = 本地模型，1 = 云端模型
@@ -234,15 +235,18 @@ struct SettingsView: View {
                     Text("翻译与总结")
                 }
 
-                // MARK: 朗读（出声 → 音色 → 耳机左右耳）
+                // MARK: 朗读
                 Section {
                     Toggle("朗读译文", isOn: $session.speakOutput)
-                    Toggle("显示声音图标", isOn: $session.showReadingIcon)
-                    // 声音克隆开关：默认关。开了就用说话人的原声朗读译文
-                    Toggle("声音克隆", isOn: $session.voiceClone)
                     Picker("声音输出位置", selection: outputBinding) {
                         Text("手机扬声器").tag(AudioOutput.speaker)
                         Text("耳机").tag(AudioOutput.headphones)
+                    }
+                    .pickerStyle(.menu)
+                    .alert("请先连接耳机", isPresented: $showHeadphoneOutputHelp) {
+                        Button("好", role: .cancel) {}
+                    } message: {
+                        Text("连接后，在「声音输出位置」选择「耳机」。")
                     }
                     if session.outputMode == .headphones {
                         Picker("左耳听", selection: $session.leftEar) {
@@ -256,6 +260,8 @@ struct SettingsView: View {
                             Text("不播放").tag("off")
                         }
                     }
+                    Toggle("显示声音图标", isOn: $session.showReadingIcon)
+                    Toggle("声音克隆", isOn: $session.voiceClone)
                 } header: {
                     Text("朗读")
                 }
@@ -721,7 +727,9 @@ struct SettingsView: View {
     private var outputBinding: Binding<AudioOutput> {
         Binding(
             get: { session.outputMode },
-            set: { new in if new != session.outputMode { session.cycleOutput() } }
+            set: { output in
+                if !session.setAudioOutput(output) { showHeadphoneOutputHelp = true }
+            }
         )
     }
 

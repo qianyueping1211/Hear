@@ -58,8 +58,17 @@ final class LiveSession: ObservableObject {
         let count = recognitionQueue.pendingCount
         return count > 1 ? "收音正常，\(count) 句等待识别…" : activity
     }
-    /// 实时翻译按钮上方的短暂提示（几秒后自动消失）
-    @Published private(set) var toast: String?
+    enum ToastPlacement { case controls, modelStatus }
+    private struct Toast {
+        let text: String
+        let placement: ToastPlacement
+    }
+    @Published private var activeToast: Toast?
+    var toast: String? { activeToast?.placement == .controls ? activeToast?.text : nil }
+    var modelReadyHint: String? {
+        guard !isAnyModelLoading, activeToast?.placement == .modelStatus else { return nil }
+        return activeToast?.text
+    }
     private var toastTask: Task<Void, Never>?
 
     // 设置
@@ -252,8 +261,6 @@ final class LiveSession: ObservableObject {
         }
     }
     @Published private(set) var cloneLoading = false
-    /// 本地模型刚加载好（用来提示用户，过几秒自动消失）
-    @Published private(set) var modelsJustLoaded = false
     /// 正在加载的东西（界面上显示进度用）
     var loadingHint: String? {
         if cloneLoading { return "正在加载声音克隆模型…" }
@@ -492,7 +499,7 @@ final class LiveSession: ObservableObject {
     /// 本地网络权限没开：界面上弹提示
     @Published var localNetworkHelp = false
 
-    // 对话翻译模式：按住某种语言的按钮说话，松开就暂停
+    // 对话翻译模式：点语言圆圈开始，再点同一个圆圈暂停。
     @Published var talkMode: Bool {
         didSet {
             guard talkMode != oldValue else { return }
@@ -500,21 +507,21 @@ final class LiveSession: ObservableObject {
             save("hearLastMode", talkMode)      // 多存一份：万一主的那份丢了还能找回来
             pushConfig()                        // 门槛不一样了（短回答的门槛）
             startToken = UUID()                 // 正在等待的"开始收音"作废
-            if isRunning {
-                talkLang = nil
-                Task { await finishRecording(readAfter: false) }
-            }
+            conversationInputLanguage = nil
+            if isRunning { Task { await finishRecording(readAfter: false) } }
         }
     }
-    @Published private(set) var holding: Language?      // 正按着的那种语言
-    private var talkLang: Language?                      // 最近一次按住的语言（松开后排队的句子也按它处理）
-    private var holdGen = 0
-    private var holdReleasing = false                    // 刚松开：把最后一句交出去
+    @Published private(set) var conversationInputLanguage: Language?
+    private var talkLang: Language?
+    private var conversationFlush: Task<Void, Never>?
+    private var finishingInput = false
     private var readIndex = 0
     private var readerTask: Task<Void, Never>?
     private var readerGen = 0
     private var oneShot = false
-    private var manualSpeaker = false     // 戴着耳机时用户手动切到了扬声器
+    private var manualSpeaker = false {
+        didSet { save("manualSpeakerOutput", manualSpeaker) }
+    }
 
     // 当前这一页对话（自动保存到历史）
     private(set) var conversationID = UUID() {
@@ -543,7 +550,9 @@ final class LiveSession: ObservableObject {
         silenceMs = d.object(forKey: "silenceMs") as? Double ?? 700
         glossary = d.string(forKey: "glossary") ?? ""
         hfHost = d.string(forKey: "hfHost") ?? "huggingface.co"
-        outputMode = AudioOutput(rawValue: d.string(forKey: "outputMode") ?? "") ?? .speaker
+        let savedOutput = AudioOutput(rawValue: d.string(forKey: "outputMode") ?? "") ?? .speaker
+        outputMode = savedOutput
+        manualSpeaker = d.bool(forKey: "manualSpeakerOutput") && savedOutput == .speaker
         leftEar = d.string(forKey: "leftEar") ?? "A"
         rightEar = d.string(forKey: "rightEar") ?? "B"
         voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
@@ -780,7 +789,7 @@ final class LiveSession: ObservableObject {
 
     /// 刷新“是否连着耳机”（设置页用来决定能不能选耳机麦克风）
     func refreshHeadset() {
-        headsetConnected = outputMode == .headphones || AudioRoute.headphonesLikelyConnected()
+        headsetConnected = AudioRoute.headphonesLikelyConnected()
     }
 
     /// 切换声音来源；正在聆听时马上重新接麦克风
@@ -792,72 +801,61 @@ final class LiveSession: ObservableObject {
     }
 
     private func routeChanged(_ reason: AVAudioSession.RouteChangeReason) {
-        if reason == .newDeviceAvailable { headsetConnected = true }
-        if reason == .oldDeviceUnavailable {
-            refreshHeadset()
-            // 耳机断开（关蓝牙、拿下耳机）：声音来源自动改回手机
-            if inputSource == "headset", !AudioRoute.headphonesLikelyConnected() {
-                headsetConnected = false
-                inputSource = "phone"
-                activity = "耳机已断开，改用手机麦克风"
-                hearLog("耳机已断开，声音来源改回手机麦克风", .warning)
-            }
-        }
         switch reason {
         case .newDeviceAvailable:
-            if outputMode == .headphones {
-                // 已经是耳机模式了：重新应用一次路由，让声音真的走耳机
-                AudioRoute.apply(.headphones)
-                return
-            }
+            refreshHeadset()
+            guard outputMode != .speaker || !manualSpeaker else { return }
             // 蓝牙耳机在扬声器模式下不一定看得到，所以再临时取消强制扬声器检查一次
-            guard AudioRoute.headphonesLikelyConnected() || AudioRoute.detectHeadphones() else {
-                AudioRoute.apply(.speaker); return
-            }
+            if !headsetConnected { headsetConnected = AudioRoute.detectHeadphones() }
+            guard headsetConnected else { return }
+            let switched = outputMode != .headphones
             outputMode = .headphones
-            manualSpeaker = false
             AudioRoute.apply(.headphones)
-            activity = "已连接耳机，改为耳机朗读"
-            hearLog("检测到耳机，朗读改为耳机")
+            if switched { hearLog("检测到耳机，朗读改为耳机") }
             kickReader()
         case .oldDeviceUnavailable:
-            manualSpeaker = false
-            guard outputMode == .headphones, !AudioRoute.headphonesLikelyConnected() else { return }
-            outputMode = .speaker
-            AudioRoute.apply(.speaker)
-            if isRunning { stopReading() }      // 扬声器 + 聆听中：先不读，停止后从这句接着读
-            activity = "耳机已断开，改为扬声器朗读"
-            hearLog("耳机已断开，朗读改为扬声器", .warning)
+            refreshHeadset()
+            guard !headsetConnected else { return }
+            let usedHeadsetOutput = outputMode == .headphones
+            let usedHeadsetInput = inputSource == "headset"
+            if usedHeadsetOutput {
+                outputMode = .speaker
+                if isRunning { stopReading() }
+                AudioRoute.apply(.speaker)
+            }
+            if usedHeadsetInput { inputSource = "phone" }
+            if usedHeadsetOutput || usedHeadsetInput {
+                hearLog("耳机已断开，收音或朗读改回手机")
+            }
         default:
             break
         }
     }
 
-    /// 长按“朗读”按钮 2 秒：在扬声器和耳机之间切换。没连耳机时不切换。
-    func cycleOutput() {
+    @discardableResult
+    func setAudioOutput(_ output: AudioOutput) -> Bool {
+        if output == .speaker { manualSpeaker = true }
+        guard output != outputMode else { return true }
         let haptic = UINotificationFeedbackGenerator()
-        if outputMode == .speaker {
+        if output == .headphones {
             try? AudioRoute.activate()
-            guard AudioRoute.detectHeadphones() else {
+            headsetConnected = AudioRoute.detectHeadphones()
+            guard headsetConnected else {
                 AudioRoute.apply(.speaker)
                 haptic.notificationOccurred(.warning)
-                activity = "未连接耳机"
-                hearLog("切换耳机朗读：未检测到耳机", .warning)
-                return
+                hearLog("切换耳机朗读：未检测到耳机")
+                return false
             }
-            outputMode = .headphones
             manualSpeaker = false
-            activity = "改为耳机朗读"
         } else {
-            outputMode = .speaker
-            manualSpeaker = true
             if isRunning { stopReading() }
-            activity = "改为扬声器朗读"
         }
-        AudioRoute.apply(outputMode)
+        outputMode = output
+        AudioRoute.apply(output)
         kickReader()
         hearLog("朗读输出切换为\(outputMode == .speaker ? "扬声器" : "耳机")")
         haptic.notificationOccurred(.success)
+        return true
     }
 
     func earLabel(_ slot: String) -> String {
@@ -1344,7 +1342,7 @@ final class LiveSession: ObservableObject {
     }
 
     /// 正在加载模型的次数（>0 说明还有模型在加载）
-    private var modelLoadCount = 0
+    @Published private var modelLoadCount = 0
     /// 每次加载的编号：只有最新那次的结果算数，旧的不要覆盖状态
     private var loadGen = 0
 
@@ -1378,16 +1376,16 @@ final class LiveSession: ObservableObject {
         guard gen == loadGen, !Task.isCancelled else { return }
         phase = .ready
         hearLog("识别与翻译就绪，用时 \(Int(Date().timeIntervalSince(start)))s，可用内存 \(Self.freeMB()) MB")
-        modelsJustLoaded = true
         showToast(needsLocalVoiceClone && !cloneReady
                   ? "可以开始翻译 · 暂用系统声音朗读"
-                  : "模型加载完成，可以开始翻译了", seconds: 5)
+                  : "模型加载完成，可以开始翻译了", seconds: 5, placement: .modelStatus)
     }
 
     func loadModels() async {
         // 每次加载都拿一个新编号：同时来了好几次加载（换引擎、下载完成等）时，
         // 只有最后一次的结果算数，不然旧的那次会先把"加载完成"提示弹出来，
         // 但其实还有模型在加载，一按翻译键又被拦下。
+        if activeToast?.placement == .modelStatus { dismissToast() }
         loadGen += 1
         let gen = loadGen
         modelLoadCount += 1
@@ -1562,106 +1560,89 @@ final class LiveSession: ObservableObject {
     // MARK: - 开始 / 停止
 
     func toggle() async {
-        // 用户动手了就不用再提示"加载完成"
+        guard !talkMode else { return }
         dismissToast()
-        modelsJustLoaded = false
         if isRunning { await finishRecording(); return }
-        _ = await beginListening(confirmHold: true)
+        _ = await beginListening(feedback: true)
     }
 
-    /// 对话翻译模式：按下某种语言的按钮
-    func holdBegan(_ lang: Language) async {
-        guard holding == nil else { return }
-        // 用户动手了就不用再提示"加载完成"
+    func toggleConversationInput(_ lang: Language) async {
+        guard talkMode, inputFinishToken == nil, !switchingConversation else { return }
         dismissToast()
-        modelsJustLoaded = false
-        if isRunning { stop(readAfter: false) }
+        let sameLanguage = conversationInputLanguage == lang
+        if conversationInputLanguage != nil || isRunning { endConversationInput() }
+        if sameLanguage { return }
+
         let token = UUID()
         startToken = token
-        holding = lang
+        conversationInputLanguage = lang
+        // 采集层先交完上一种语言的尾句，下一轮再切换语言和听写引擎。
+        let flush = conversationFlush
+        await flush?.value
+        for _ in 0..<8 {
+            guard startToken == token, !appleEngines.isEmpty, working else { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard startToken == token, talkMode, conversationInputLanguage == lang else { return }
         talkLang = lang
-        holdGen += 1
-        // 上一句的尾段还在路上：先别把"正在收尾"这个标记清掉，
-        // 清了的话尾句到了会被当成"已经停了"直接丢掉。
-        if let t = pendingTail, Date().timeIntervalSince(t.at) < 5 {
-            holdReleasing = true
-        } else {
-            pendingTail = nil
-            holdReleasing = false
+        if !(await beginListening(intent: token, feedback: true)), startToken == token {
+            conversationInputLanguage = nil
+            talkLang = nil
+            finishConversationReading(intent: token, clearActivity: false)
         }
-        // 苹果听写：上一段最后一句还在定稿，稍等一下再换听写（否则那句会丢）
-        var w = 0
-        while !appleEngines.isEmpty, working, w < 8 {
-            try? await Task.sleep(nanoseconds: 100_000_000)
-            w += 1
-        }
-        guard startToken == token, holding == lang else { return }
-        let ok = await beginListening(intent: token, confirmHold: true)
-        if !ok, startToken == token { holding = nil }
     }
 
-    /// 对话翻译模式：松开按钮 = 暂停收音，这一段说的话继续识别、翻译完
-    func holdEnded() {
-        guard holding != nil else { return }
-        holding = nil
-        // 还没开始录音就松手了：这次启动必须作废。
-        // 不作废的话，等麦克风权限的弹窗一放开，麦克风就自己开了——用户明明已经松手了。
-        startToken = UUID()
-        guard isRunning else { return }
-        releaseHold()
-    }
-
-    private func releaseHold() {
-        let g = holdGen
-        hearLog("松开按钮：暂停收音")
-        startToken = UUID()          // 正在等待的"开始收音"作废
-        holdReleasing = true
-        // 松手这一刻正在说的那一句（采集层停下来以后会把它交出来）
-        let tailSeg = currentSeg
-        // 记下它：这一句属于刚才按住的语种
-        pendingTail = (seg: tailSeg, lang: talkLang, at: Date())
+    private func endConversationInput() {
+        conversationInputLanguage = nil
+        let token = UUID()
+        startToken = token
+        guard isRunning else {
+            finishConversationReading(intent: token)
+            return
+        }
+        hearLog("对话翻译：暂停收音")
+        finishingInput = true
         isRunning = false
         meter.level = 0
         UIApplication.shared.isIdleTimerDisabled = false
-        capture.stop()                 // 把正在说的这一句交出去
         capture.muted = false
-        // 松手了就把麦克风放开（别的 App 才录得到声音）
-        scheduleMicrophoneRelease()
         translator.cancelPreview()
         cancelASRPreview()
         cancelMTPreview()
-        Task {
-            // 等采集层把最后一句交出来（引擎停了以后才 flush，有时要一秒多）。
-            // 这期间 holdReleasing 一直是 true：最后那句话才不会被当成"已经停了"丢掉。
-            var w = 0
-            while w < 40, finishedSeg < tailSeg, currentSeg == tailSeg {
-                try? await Task.sleep(nanoseconds: 100_000_000)
-                w += 1
+        conversationFlush = Task { [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            await withCheckedContinuation { (completion: CheckedContinuation<Void, Never>) in
+                self.capture.stop { completion.resume() }
             }
-            guard g == holdGen else { return }
-            holdReleasing = false
-            finishedSeg = max(finishedSeg, currentSeg)
-            partial = ""; partialTranslation = ""; partialTranslationTarget = nil; partialSource = nil
-            // 等这一段的识别和翻译做完，再关掉系统听写、开始朗读
-            var waited = 0
-            while working, waited < 150 {
-                try? await Task.sleep(nanoseconds: 100_000_000)
-                waited += 1
-            }
-            guard g == holdGen, holding == nil, !isRunning else { return }
-            stopAppleASR()
-            activity = ""
-            kickReader()
+            guard !Task.isCancelled else { return }
+            self.conversationFlush = nil
+            self.finishingInput = false
+            self.talkLang = nil
+            self.finishedSeg = max(self.finishedSeg, self.currentSeg)
+            self.partial = ""; self.partialTranslation = ""; self.partialTranslationTarget = nil; self.partialSource = nil
+            self.scheduleMicrophoneRelease()
+            self.finishConversationReading(intent: token)
         }
     }
 
-    /// 松手以后还在路上的尾句（采集层是异步交付的）。
-    /// 记着它的段号和当时按住的语种：
-    /// 下一次按住别的语种时，尾句不能被丢掉，也不能算到新的一边头上。
-    private var pendingTail: (seg: Int, lang: Language?, at: Date)?
+    private func finishConversationReading(intent: UUID, clearActivity: Bool = true) {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.conversationFlush?.value
+            for _ in 0..<150 {
+                guard intent == self.startToken, self.working else { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard intent == self.startToken, self.conversationInputLanguage == nil, !self.isRunning else { return }
+            self.talkLang = nil
+            self.stopAppleASR()
+            if clearActivity { self.activity = "" }
+            self.kickReader()
+        }
+    }
 
     /// 开始收音的令牌：每次开始换一个新的。
-    /// 用户在等待（要麦克风权限、等模型加载）期间松手了、停了、切模式了，
+    /// 用户在等待（要麦克风权限、等模型加载）期间又点了暂停、切模式了，
     /// 令牌就变了，这一次启动自动作废——不会莫名其妙开始录音。
     private var startToken = UUID()
 
@@ -1670,7 +1651,7 @@ final class LiveSession: ObservableObject {
     private var inputFinishToken: UUID?
     private var switchingConversation = false
 
-    private func beginListening(intent: UUID? = nil, confirmHold: Bool = false) async -> Bool {
+    private func beginListening(intent: UUID? = nil, feedback: Bool = false) async -> Bool {
         guard inputFinishToken == nil, !switchingConversation else { return false }
         let token = intent ?? UUID()
         if intent == nil { startToken = token }
@@ -1703,7 +1684,7 @@ final class LiveSession: ObservableObject {
         }
         // 等权限的时候用户已经松手/停了：这一次启动作废
         guard token == startToken else {
-            hearLog("开始收音：等待期间用户已经松开了，不启动", .info)
+            hearLog("开始收音：等待期间启动请求已取消", .info)
             return false
         }
         guard token == startToken else { return false }
@@ -1722,8 +1703,7 @@ final class LiveSession: ObservableObject {
         if inputSource == "headset", !hasHeadphones { inputSource = "phone" }   // 没耳机就用手机麦克风
         // 扬声器模式：聆听期间完全不播放、不改输出路由，停止后再从没读的那句开始读
         if outputMode == .speaker { stopReading() }
-        // 确认长按已生效。iOS 会抑制录音期间的触感，开麦前发送反馈。
-        if confirmHold { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+        if feedback { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
         do {
             try capture.start()
         } catch {
@@ -1748,7 +1728,7 @@ final class LiveSession: ObservableObject {
                 return false
             }
         }
-        if outputMode == .headphones { AudioRoute.apply(.headphones) }
+        AudioRoute.apply(outputMode)
         isRunning = true
         if !talkMode {
             HearLiveActivityController.shared.start(liveActivityState())
@@ -1764,7 +1744,7 @@ final class LiveSession: ObservableObject {
         }
         if dualLive { startAppleASR() }
         if talkMode, let l = talkLang {
-            hearLog("对话翻译：按住说\(l.displayName)")
+            hearLog("对话翻译：开始收听\(l.displayName)")
             activity = "正在听\(l.name)"
         } else {
             hearLog("开始实时翻译：\(langA.displayName) ⇄ \(langB.displayName)，朗读\(outputMode == .speaker ? "扬声器" : "耳机")")
@@ -1775,13 +1755,13 @@ final class LiveSession: ObservableObject {
     }
 
     /// 在实时翻译按钮上方显示几秒钟的提示
-    func showToast(_ text: String, seconds: Double = 2.5) {
-        toast = text
+    func showToast(_ text: String, seconds: Double = 2.5, placement: ToastPlacement = .controls) {
+        activeToast = Toast(text: text, placement: placement)
         toastTask?.cancel()
         toastTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            self?.toast = nil
+            self?.activeToast = nil
         }
     }
 
@@ -1789,7 +1769,7 @@ final class LiveSession: ObservableObject {
     func dismissToast() {
         toastTask?.cancel()
         toastTask = nil
-        toast = nil
+        activeToast = nil
     }
 
     /// 停完以后把麦克风放开：别的 App（比如录音机）要能录到声音。
@@ -1835,7 +1815,7 @@ final class LiveSession: ObservableObject {
         inputFinishToken = token
         defer { if inputFinishToken == token { inputFinishToken = nil } }
         startToken = UUID()
-        holdReleasing = true
+        finishingInput = true
         isRunning = false
         endLiveActivity()
         meter.level = 0
@@ -1844,7 +1824,7 @@ final class LiveSession: ObservableObject {
             capture.stop { completion.resume() }
         }
         guard inputFinishToken == token else { return }
-        holdReleasing = false
+        finishingInput = false
         scheduleMicrophoneRelease()
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(12))
@@ -1865,9 +1845,11 @@ final class LiveSession: ObservableObject {
         if wasRunning { hearLog("停止实时翻译") }
         restartTask?.cancel()
         restartTask = nil
-        holding = nil
-        holdReleasing = false
-        holdGen += 1
+        conversationInputLanguage = nil
+        conversationFlush?.cancel()
+        conversationFlush = nil
+        finishingInput = false
+        talkLang = nil
         startToken = UUID()          // 正在等待的"开始收音"全部作废
         capture.stop()
         capture.muted = false
@@ -1971,7 +1953,7 @@ final class LiveSession: ObservableObject {
 
     /// 左上角“清空”：清掉当前屏幕（内容已自动保存在历史里），正在聆听时继续聆听，记到新的一页
     func clearPage() {
-        if isRunning || holdReleasing {
+        if isRunning || finishingInput {
             newConversation(summarize: false, resumeListening: isRunning && !talkMode)
         } else {
             guard !switchingConversation, inputFinishToken == nil else { return }
@@ -2051,7 +2033,7 @@ final class LiveSession: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             defer { self.switchingConversation = false }
-            if self.isRunning || self.holdReleasing { await self.finishRecording(readAfter: false) }
+            if self.isRunning || self.finishingInput { await self.finishRecording(readAfter: false) }
             let deadline = ContinuousClock.now.advanced(by: .seconds(2))
             while !self.speakerQueue.isIdle, ContinuousClock.now < deadline {
                 do { try await Task.sleep(for: .milliseconds(50)) }
@@ -2191,7 +2173,7 @@ final class LiveSession: ObservableObject {
     private func handle(_ e: Segmenter.Event) {
         // 已经停止：停止前还没送到的断句事件一律丢弃
         // （最后那句的"结束"要接住：它带着这段声音，声音克隆要用）
-        if !isRunning && !holdReleasing && inputFinishToken == nil {
+        if !isRunning && !finishingInput && inputFinishToken == nil {
             switch e {
             case .started, .partial: return
             case .ended: break
@@ -2231,16 +2213,14 @@ final class LiveSession: ObservableObject {
             }
             // 先把这句（实时预览的文字）放进对话，整句识别完再替换，屏幕上不会空一下
             let mine = partialSeg == id
-            // 尾句属于上一次按住的那种语言，不能算到新按住的这边头上
-            let tailLang = (id == pendingTail?.seg) ? pendingTail?.lang : nil
-            let src = tailLang ?? forcedLang ?? (mine ? partialSource : nil)
+            let forced = forcedLang
+            let src = forced ?? (mine ? partialSource : nil)
                 ?? ((lastLangID == langB.id) ? langB : langA)
             let tgt = src == langA ? langB : langA
             // 已经停下来了：这一句不会再走整句识别，
             // 但这段声音要留下来（声音克隆的样本），译文等下接着补。
-            // 松手收尾（对话模式）不算"已经停下来了"：
-            // 那最后一句要照常处理，不然松手时说的最后一句就丢了
-            if !isRunning && !holdReleasing && inputFinishToken == nil {
+            // 收尾中的最后一句仍需完成识别。
+            if !isRunning && !finishingInput && inputFinishToken == nil {
                 if id == stopFlushSegID, let fid = stopFlushItemID {
                     stopFlushItemID = nil
                     if let idx = items.firstIndex(where: { $0.id == fid }) {
@@ -2267,11 +2247,6 @@ final class LiveSession: ObservableObject {
             items.append(item)
             if mine { partial = ""; partialTranslation = ""; partialTranslationTarget = nil; partialSource = nil }
             previewText[id] = nil
-            // 尾句处理完了：标记清掉
-            if id == pendingTail?.seg {
-                pendingTail = nil
-                holdReleasing = false
-            }
             // 声音样本先记下来（声音克隆要用）：
             // 整句识别要好几秒，用户随时可能点停止，
             // 等识别完再记就来不及了（那样只能退回系统声音朗读）
@@ -2279,7 +2254,7 @@ final class LiveSession: ObservableObject {
             let token = UUID()
             jobTokens[item.id] = token
             let job = ASRJob(itemID: item.id, segID: id, samples: samples, token: token, generation: runGen,
-                             left: langA, right: langB, forced: tailLang ?? forcedLang, fallback: src)
+                             left: langA, right: langB, forced: forced, fallback: src)
             recognitionQueue.submit(job) { [weak self] job in
                 guard let self, self.runGen == job.generation else { return }
                 if self.usingAppleASR {
@@ -2585,7 +2560,7 @@ final class LiveSession: ObservableObject {
         guard appleAvailable else { return }
         var engines: [LiveTextEngine] = []
         let gen = runGen
-        // 对话翻译模式只听按住的那种语言
+        // 对话翻译只听用户当前选择的语言。
         let langs = forcedLang.map { [$0] } ?? [langA, langB]
         for lang in langs {
             guard let e = LiveTextEngineFactory.make() else { continue }
@@ -2606,7 +2581,7 @@ final class LiveSession: ObservableObject {
             Task {
                 do {
                     try await e.start(languageID: lang.id, locale: lang.tts)
-                    guard isRunning || holdReleasing, gen == runGen, dualLive else { await e.stop(); return }
+                    guard isRunning || finishingInput, gen == runGen, dualLive else { await e.stop(); return }
                     if currentSeg > finishedSeg { e.markSegmentStart(currentSeg) }
                 } catch {
                     hearLog("系统听写不支持 \(lang.name)：\(error.localizedDescription)", .warning)
@@ -2865,8 +2840,8 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    /// 对话翻译模式下按住的语言（实时翻译模式为 nil）
-    private var forcedLang: Language? { talkMode ? talkLang : nil }
+    /// 采集结束前保留原来的语言，确保尾句按录制时的语言处理。
+    private var forcedLang: Language? { talkMode || finishingInput ? talkLang : nil }
 
     var isLoadingPhase: Bool { if case .loading = phase { return true }; return false }
     var loadingText: String? { if case .loading(let m) = phase { return m }; return nil }
@@ -3953,7 +3928,9 @@ final class LiveSession: ObservableObject {
             try await cloner.load()
             guard !Task.isCancelled, voiceClone, !voiceCloneCloud else { return }
             hearLog("ZipVoice：加载完成，可用内存 \(Self.freeMB()) MB，耗时 \(start.duration(to: .now))")
-            showToast("本地声音克隆模型已就绪")
+            if !allowDuringModelLoading {
+                showToast("本地声音克隆模型已就绪", placement: .modelStatus)
+            }
         } catch is CancellationError {
             return
         } catch {
@@ -4198,10 +4175,9 @@ final class LiveSession: ObservableObject {
         var c = Segmenter.Config()
         c.sensitivityDB = Float(sensitivity)
         c.silenceMs = Int(silenceMs)
-        // 对话翻译模式（按住说话）：短回答（"好""是"）也要认出来，
+        // 对话翻译模式需要识别“好”“是”之类的短回答，
         // 门槛比实时翻译低（400ms → 200ms）
         c.minSpeechMs = talkMode ? 200 : 400
-        // 按住说话：连"好""是"这种特别短的回答也要收进来
         c.holdMode = talkMode
         capture.updateConfig(c)
     }

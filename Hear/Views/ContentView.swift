@@ -23,7 +23,7 @@ struct ContentView: View {
                 Divider()
                 Group {
                     if session.phase == .ready || session.isLoadingPhase {
-                        // 加载模型时也显示对话页；加载进度只在 功能设置 → 引擎 下方显示
+                        // 加载模型时也显示对话页。
                         TranscriptView(onEdit: { item in
                             let source = item.displayedSource(using: session.chineseDisplayLanguage)
                             draft = source
@@ -42,10 +42,11 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
                     .overlay {
-                        if let hint = session.loadingHint {
-                            LoadingPill(text: hint)
+                        let loading = session.loadingHint
+                        if let hint = loading ?? session.modelReadyHint {
+                            ModelStatusPill(text: hint, isLoading: loading != nil)
                                 .fixedSize(horizontal: false, vertical: true)
-                                .accessibilityAddTraits(.updatesFrequently)
+                                .allowsHitTesting(false)
                         }
                     }
                     .zIndex(1)
@@ -236,17 +237,30 @@ struct NotePill: View {
     }
 }
 
-/// 加载模型时顶部的小提示
-struct LoadingPill: View {
+/// 加载进度与完成提示都在对话页分隔线上居中显示。
+struct ModelStatusPill: View {
     let text: String
+    let isLoading: Bool
+
     var body: some View {
         HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
+            Group {
+                if isLoading {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.green)
+                }
+            }
+            .frame(width: 16, height: 16)
+            .accessibilityHidden(true)
             Text(text).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())
+        .accessibilityAddTraits(isLoading ? .updatesFrequently : [])
     }
 }
 
@@ -311,9 +325,6 @@ struct TranscriptView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 12) {
-                    if session.items.isEmpty && session.partial.isEmpty {
-                        EmptyHint().padding(.top, 60)
-                    }
                     ForEach(session.items) { item in
                         BubbleView(item: item, leading: item.isLeading(left: session.langA, right: session.langB),
                                    displayLanguage: session.chineseDisplayLanguage,
@@ -335,6 +346,13 @@ struct TranscriptView: View {
                 }
                 .padding()
             }
+            .overlay {
+                if session.items.isEmpty && session.partial.isEmpty {
+                    EmptyHint()
+                        .padding(.horizontal, 28)
+                        .allowsHitTesting(false)
+                }
+            }
             .onChange(of: session.items.last?.id) { _, _ in
                 withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
             }
@@ -353,19 +371,34 @@ struct TranscriptView: View {
 
 struct EmptyHint: View {
     @EnvironmentObject var session: LiveSession
+
+    private var waitingForText: Bool {
+        session.isRunning || session.isAnyModelLoading || session.conversationInputLanguage != nil
+    }
+
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "waveform").font(.system(size: 44)).foregroundStyle(.secondary)
-            Text(session.talkMode ? "按住对应语言的圆圈 2 秒后说话" : "按住下方麦克风圆圈 2 秒开始")
-                .font(.headline)
-            Text(session.talkMode
-                 ? "左边按钮说\(session.langA.name)，右边按钮说\(session.langB.name)。左右滑动底部可以切回实时翻译模式。"
-                 : "\(session.langA.name) 和 \(session.langB.name) 都可以说，App 会自动识别是哪种语言并翻译成另一种。左右滑动底部可以切换到对话翻译模式。")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 30)
+        VStack(spacing: 20) {
+            Image(systemName: session.talkMode ? "bubble.left.and.bubble.right" : "waveform")
+                .font(.system(size: 27, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 64, height: 64)
+                .background(Color.accentColor.opacity(0.12), in: Circle())
+                .accessibilityHidden(true)
+            if waitingForText {
+                Text("原文和译文会显示在这里")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 8) {
+                    Text(session.talkMode ? "点击语言圆圈开始" : "点击麦克风开始")
+                        .font(.title3.weight(.semibold))
+                    Text(session.talkMode ? "再点同一个圆圈停止" : "自动识别上方选定的两种语言")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
+        .multilineTextAlignment(.center)
     }
 }
 
@@ -607,21 +640,9 @@ struct SourceEditor: View {
 struct ControlBar: View {
     @EnvironmentObject var session: LiveSession
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    static let recordingHoldDuration: TimeInterval = 2
 
     private var mainColor: Color { Color.accentColor }        // 开始后也用蓝色，只换成停止图标
     private var mainIcon: String { session.isRunning ? "stop.fill" : "mic.fill" }
-    private var mainHint: String {
-        if session.talkMode {
-            if let l = session.holding { return "正在听\(l.name) · 松开暂停" }
-            return "按住语种按钮 2 秒后说话"
-        }
-        guard session.isRunning else { return "按住 2 秒开始实时翻译" }
-        if session.speakOutput && session.outputMode == .speaker {
-            return "实时翻译中 · 点击停止后朗读"
-        }
-        return "实时翻译中 · 点击停止"
-    }
 
     var body: some View {
         VStack(spacing: 8) {
@@ -642,9 +663,6 @@ struct ControlBar: View {
             .clipped()
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: session.talkMode)
 
-            Text(mainHint)
-                .font(.callout.weight(.medium))
-
             ModeDots()
                 .padding(.bottom, 6)
         }
@@ -654,7 +672,8 @@ struct ControlBar: View {
         .simultaneousGesture(
             DragGesture(minimumDistance: 30).onEnded { v in
                 let dx = v.translation.width
-                guard session.holding == nil, abs(dx) > 50, abs(dx) > abs(v.translation.height) else { return }
+                guard session.conversationInputLanguage == nil, abs(dx) > 50,
+                      abs(dx) > abs(v.translation.height) else { return }
                 let talk = dx < 0
                 guard talk != session.talkMode else { return }
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -694,40 +713,31 @@ struct ControlBar: View {
         .padding(.horizontal, 24)
     }
 
-    @ViewBuilder
     private var liveMicrophone: some View {
-        let label = MicButton(meter: session.meter, running: session.isRunning,
-                              color: mainColor, icon: mainIcon)
-        if session.isRunning {
-            Button { Task { await session.toggle() } } label: { label }
-                .accessibilityLabel("停止实时翻译")
-        } else {
-            label
-                .contentShape(Circle())
-                .onLongPressGesture(minimumDuration: Self.recordingHoldDuration, maximumDistance: 12, perform: {
-                    guard !session.isRunning, session.phase == .ready else { return }
-                    Task { await session.toggle() }
-                }, onPressingChanged: { pressing in
-                    guard pressing, !session.isRunning, session.phase == .ready else { return }
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                })
-                .accessibilityAddTraits(.isButton)
-                .accessibilityLabel("按住两秒开始实时翻译")
-                .opacity(session.phase == .ready || session.isLoadingPhase ? 1 : 0.4)
+        let enabled = session.isRunning || session.phase == .ready
+        return Button {
+            Task { await session.toggle() }
+        } label: {
+            MicButton(meter: session.meter, running: session.isRunning, color: mainColor, icon: mainIcon)
+                .contentShape(.interaction, Circle().inset(by: 24))
         }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityLabel(session.isRunning ? "停止实时翻译" : "开始实时翻译")
+        .opacity(enabled || session.isLoadingPhase ? 1 : 0.4)
     }
 
-    /// 对话翻译模式：左边按住说语言 A，右边按住说语言 B，中间是播报和上下文
+    /// 对话翻译模式：左右圆圈分别负责两种语言。
     private var talkControls: some View {
         HStack(spacing: 0) {
-            HoldButton(lang: session.langA)
+            ConversationInputButton(lang: session.langA)
             Spacer(minLength: 4)
             VStack(spacing: 10) {
                 SpeakToggle()
                 ContextToggle()
             }
             Spacer(minLength: 4)
-            HoldButton(lang: session.langB)
+            ConversationInputButton(lang: session.langB)
         }
         .padding(.horizontal, 16)
     }
@@ -754,7 +764,7 @@ struct ModeDots: View {
             .padding(.vertical, 4)
             .contentShape(Rectangle())
             .onTapGesture {
-                guard session.holding == nil, !active else { return }
+                guard session.conversationInputLanguage == nil, !active else { return }
                 action()
             }
     }
@@ -777,40 +787,48 @@ struct ContextToggle: View {
     }
 }
 
-/// 对话翻译模式的按钮：和实时翻译的大按钮同样的样式，中间是这种语言的国旗。
-/// 按住时外面一圈圈水波纹不停往外扩，松开就停
-struct HoldButton: View {
+/// 只点圆圈操作，圆圈下面的语言名称用于辨认左右两侧。
+struct ConversationInputButton: View {
     @EnvironmentObject var session: LiveSession
     let lang: Language
-    @State private var pressing = false
-    @State private var beginTask: Task<Void, Never>?
-    @State private var requestedRecording = false
 
     var body: some View {
-        let active = session.isRunning && session.holding == lang
-        let enabled = session.phase == .ready
+        let selected = session.conversationInputLanguage == lang
+        let active = session.isRunning && selected
+        let enabled = selected || session.phase == .ready
         VStack(spacing: 6) {
             ZStack {
                 if active { RippleRings().allowsHitTesting(false) }
-                HoldRing(meter: session.meter, active: active)
+                ConversationInputRing(meter: session.meter, active: active)
                     .allowsHitTesting(false)
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 78, height: 78)
-                    .shadow(color: Color.accentColor.opacity(active ? 0.5 : 0), radius: 10)
-                    .overlay {
-                        Text(lang.flag)
-                            .font(.system(size: 38))
-                            .allowsHitTesting(false)
-                    }
-                    .contentShape(.interaction, Circle())
-                    .onLongPressGesture(minimumDuration: .infinity, maximumDistance: 12, perform: {},
-                                        onPressingChanged: { pressChanged($0, enabled: enabled) })
-                    .accessibilityLabel("按住两秒后说\(lang.name)")
+                Button {
+                    Task { await session.toggleConversationInput(lang) }
+                } label: {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 78, height: 78)
+                        .shadow(color: Color.accentColor.opacity(active ? 0.5 : 0), radius: 10)
+                        .overlay {
+                            if selected {
+                                Image(systemName: "stop.fill")
+                                    .font(.system(size: 27, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .allowsHitTesting(false)
+                            } else {
+                                Text(lang.flag)
+                                    .font(.system(size: 38))
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .contentShape(.interaction, Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!enabled)
+                .accessibilityLabel(selected ? "停止收听\(lang.name)" : "开始收听\(lang.name)")
             }
             .frame(width: 116, height: 110)
             .scaleEffect(active ? 1.08 : 1)
-            Text(active ? "松开暂停" : "按住说\(lang.name)")
+            Text(lang.name)
                 .font(.caption.weight(active ? .semibold : .regular))
                 .foregroundStyle(active ? Color.accentColor : Color.secondary)
                 .lineLimit(1)
@@ -821,34 +839,11 @@ struct HoldButton: View {
         }
         .animation(.spring(duration: 0.2), value: active)
         .opacity(enabled ? 1 : 0.4)
-        .onDisappear { cancelPress() }
-    }
-
-    private func pressChanged(_ down: Bool, enabled: Bool) {
-        guard down else { cancelPress(); return }
-        guard enabled, !pressing else { return }
-        pressing = true
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        beginTask = Task {
-            do { try await Task.sleep(for: .seconds(ControlBar.recordingHoldDuration)) }
-            catch { return }
-            guard pressing, !Task.isCancelled, session.talkMode else { return }
-            requestedRecording = true
-            await session.holdBegan(lang)
-        }
-    }
-
-    private func cancelPress() {
-        beginTask?.cancel()
-        beginTask = nil
-        if requestedRecording, session.holding == lang { session.holdEnded() }
-        requestedRecording = false
-        pressing = false
     }
 }
 
-/// 未按住时和实时翻译按钮一样的浅色外圈；按住时跟着音量变大
-struct HoldRing: View {
+/// 录音时外圈随音量变化。
+struct ConversationInputRing: View {
     @ObservedObject var meter: LevelMeter
     let active: Bool
 
@@ -860,7 +855,7 @@ struct HoldRing: View {
     }
 }
 
-/// 按住时的水波纹：三圈从按钮边缘不断往外扩、慢慢变淡
+/// 录音时的水波纹：三圈从按钮边缘不断往外扩、慢慢变淡
 struct RippleRings: View {
     var body: some View {
         TimelineView(.animation) { ctx in
@@ -947,7 +942,7 @@ struct SpeakToggle: View {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 showEars = true
             } else {
-                session.cycleOutput()
+                session.setAudioOutput(.headphones)
             }
         }
         .sheet(isPresented: $showEars) {
@@ -978,7 +973,7 @@ struct EarSheet: View {
             .padding(.horizontal, 24)
 
             Button {
-                session.cycleOutput()
+                session.setAudioOutput(.speaker)
                 dismiss()
             } label: {
                 Label("改用手机扬声器播报", systemImage: "speaker.wave.2")
