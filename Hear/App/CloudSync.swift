@@ -38,11 +38,8 @@ final class CloudSync: ObservableObject {
         static let settingsHash = "cloudSyncSettingsHash"
     }
 
-    /// 要同步的设置（UserDefaults 里的键）。模型文件本身、下载来源、同步自己的状态不同步
-    ///
-    /// 注意：在线模型（通用服务地址、三个模型各自的地址、识别方案、
-    /// 用不用云端翻译/克隆）一定要在这里面，不然换了手机或者重装之后就没了。
-    private static let settingKeys = [
+    /// Keep the original keys so the last sync hash can still be compared after upgrading.
+    private static let legacySettingKeys = [
         "langA", "langB", "speakOutput", "showReadingIcon",
         "liveActivityOnlyTranslation",
         "useContext", "sensitivity", "silenceMs", "glossary",
@@ -55,6 +52,12 @@ final class CloudSync: ObservableObject {
         // 下载源、翻译模型选哪个 gguf
         "hfHost", "ggufName",
     ]
+
+    private static let addedSettingKeys = [
+        "logContentEnabled", PerformanceLog.enabledKey,
+        ChineseDisplayLanguage.preferenceKey, "speakerTrackingEnabled", "manualSpeakerOutput",
+    ]
+    private static let settingKeys = legacySettingKeys + addedSettingKeys
 
     private var bag = Set<AnyCancellable>()
     private var pending: Task<Void, Never>?
@@ -311,9 +314,11 @@ final class CloudSync: ObservableObject {
         withSyncFolder { dir -> Void in
             migrateLegacyFolder(to: dir)
             guard let manifest = Self.readManifestNow(dir) else { return }
-            if decideSettings(manifest) == .pull, let cloud = Self.readSettingsNow(dir) {
-                applySettings(cloud, hash: manifest.settingsHash)
+            if decideSettings(manifest) == .pull,
+               let cloud = Self.readSettingsNow(dir, hash: manifest.settingsHash) {
+                let hasAdditions = applySettings(cloud, hash: manifest.settingsHash)
                 hearLog("iCloud 同步：启动时用了 iCloud 上更新的设置")
+                if hasAdditions { scheduleSync(delay: 1) }
             }
         }
     }
@@ -386,19 +391,13 @@ final class CloudSync: ObservableObject {
         var deleted: [String: Date] = [:]
     }
 
-    private enum SettingsAction { case push, pull, none }
-
-    private func decideSettings(_ cloud: Manifest?, forcePush: Bool = false) -> SettingsAction {
-        if forcePush { return .push }
-        let local = Self.settingsHash(Self.localSettings())
-        let last = UserDefaults.standard.string(forKey: Keys.settingsHash)
-        guard let cloudHash = cloud?.settingsHash else { return .push }   // iCloud 上还没有设置
-        if cloudHash == local { return .none }
-        guard let last else { return .pull }                              // 第一次同步：用 iCloud 的（恢复）
-        let localChanged = local != last
-        let cloudChanged = cloudHash != last
-        if cloudChanged && !localChanged { return .pull }
-        return .push                                                      // 这台手机改过：以这台为准
+    private func decideSettings(_ cloud: Manifest?, forcePush: Bool = false) -> CloudSettingsSyncPolicy.Action {
+        let settings = Self.localSettings()
+        let legacy = settings.filter { Self.legacySettingKeys.contains($0.key) }
+        return CloudSettingsSyncPolicy.decide(local: Self.settingsHash(settings),
+                                             legacyLocal: Self.settingsHash(legacy),
+                                             last: UserDefaults.standard.string(forKey: Keys.settingsHash),
+                                             remote: cloud?.settingsHash, forcePush: forcePush)
     }
 
     private func sync() async {
@@ -453,13 +452,15 @@ final class CloudSync: ObservableObject {
         // 1. 设置
         var settingsNote: String?
         var pushedSettings = 0
+        var updateSettingsAgain = false
+        var settingsReadFailed = false
         let doPush = forcePushSettings
         forcePushSettings = false
         switch decideSettings(manifest, forcePush: doPush) {
         case .push:
             let s = Self.localSettings()
-            let h = Self.settingsHash(s)
             let plist = Self.plist(s)
+            let h = Self.digest(plist)
             let url = dir.appendingPathComponent("settings.plist")
             if await Self.io({ Self.write(plist, to: url) }) {
                 manifest.settingsHash = h
@@ -469,10 +470,17 @@ final class CloudSync: ObservableObject {
                 hearLog("iCloud 同步：上传了 \(s.count) 项设置")
             }
         case .pull:
-            if let cloud = await Self.readSettings(dir) {
-                applySettings(cloud, hash: manifest.settingsHash)
-                settingsNote = "已从 iCloud 同步设置（\(cloud.count) 项）"
-                hearLog("iCloud 同步：用了 iCloud 上更新的设置（\(cloud.count) 项）")
+            let localBeforeRead = Self.settingsHash(Self.localSettings())
+            if let cloud = await Self.readSettings(dir, hash: manifest.settingsHash) {
+                if enabled, Self.settingsHash(Self.localSettings()) == localBeforeRead {
+                    updateSettingsAgain = applySettings(cloud, hash: manifest.settingsHash)
+                    settingsNote = "已从 iCloud 同步设置（\(cloud.count) 项）"
+                    hearLog("iCloud 同步：用了 iCloud 上更新的设置（\(cloud.count) 项）")
+                } else {
+                    updateSettingsAgain = true
+                }
+            } else {
+                settingsReadFailed = true
             }
         case .none:
             if let h = manifest.settingsHash { UserDefaults.standard.set(h, forKey: Keys.settingsHash) }
@@ -564,18 +572,17 @@ final class CloudSync: ObservableObject {
             manifest = Self.mergeManifest(after, manifest)
             hearLog("iCloud 同步：重新核对并合并清单（第 \(attempt + 1) 次）", .info)
         }
-        if wrote {
+        if wrote && !settingsReadFailed {
             lastSync = Date()
             UserDefaults.standard.set(lastSync, forKey: Keys.lastSync)
+            message = settingsNote
+        } else if settingsReadFailed {
+            message = "iCloud 设置文件还未更新到本机，稍后再试"
         } else {
-            // 没写回去就别装作同步成功了。
-            // （下面那句"已上传…"不能把它盖掉——盖掉了用户还以为同步好了）
             message = "同步结果没能写回 iCloud（稍后再试一次）"
             hearLog("iCloud 同步：清单没写回去，不记同步时间", .warning)
         }
-        if wrote {
-            message = settingsNote
-        }
+        if updateSettingsAgain { scheduleSync(delay: 1) }
         if pushed + pulled + removed > 0 || settingsNote != nil || pushedSettings > 0 {
             hearLog("iCloud 同步：上传 \(pushed) 页，下载 \(pulled) 页，删除 \(removed) 页")
         }
@@ -590,7 +597,9 @@ final class CloudSync: ObservableObject {
         return out
     }
 
-    private func applySettings(_ s: [String: Any], hash: String?) {
+    /// Older clients omit the new fields. Preserve a value already chosen on this
+    /// device and publish it again after applying the shared settings.
+    private func applySettings(_ s: [String: Any], hash: String?) -> Bool {
         applyingCloud = true
         let d = UserDefaults.standard
         for k in Self.settingKeys { if let v = s[k] { d.set(v, forKey: k) } }
@@ -602,6 +611,7 @@ final class CloudSync: ObservableObject {
             try? await Task.sleep(nanoseconds: 500_000_000)
             self.applyingCloud = false
         }
+        return Self.addedSettingKeys.contains { s[$0] == nil && d.object(forKey: $0) != nil }
     }
 
     private static func plist(_ s: [String: Any]) -> Data {
@@ -610,11 +620,15 @@ final class CloudSync: ObservableObject {
 
     /// XML plist 的键是排好序的，同样的设置得到同样的指纹
     private static func settingsHash(_ s: [String: Any]) -> String {
-        SHA256.hash(data: plist(s)).map { String(format: "%02x", $0) }.joined()
+        digest(plist(s))
     }
 
-    private nonisolated static func parseSettings(_ data: Data?) -> [String: Any]? {
-        guard let data else { return nil }
+    private nonisolated static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private nonisolated static func parseSettings(_ data: Data?, hash: String?) -> [String: Any]? {
+        guard let data, hash == nil || digest(data) == hash else { return nil }
         return (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
     }
 
@@ -625,8 +639,8 @@ final class CloudSync: ObservableObject {
         return try? d.decode(Manifest.self, from: data)
     }
 
-    private static func readSettings(_ dir: URL) async -> [String: Any]? {
-        parseSettings(await read(dir.appendingPathComponent("settings.plist")))
+    private static func readSettings(_ dir: URL, hash: String?) async -> [String: Any]? {
+        parseSettings(await read(dir.appendingPathComponent("settings.plist")), hash: hash)
     }
     /// 两份清单合并：每页取更新的那个时间，删除记录也取更新的那个
     private nonisolated static func mergeManifest(_ a: Manifest, _ b: Manifest) -> Manifest {
@@ -649,8 +663,8 @@ final class CloudSync: ObservableObject {
     private static func readManifest(_ dir: URL) async -> Manifest? {
         parseManifest(await read(dir.appendingPathComponent("manifest.json")))
     }
-    private static func readSettingsNow(_ dir: URL) -> [String: Any]? {
-        parseSettings(readNow(dir.appendingPathComponent("settings.plist")))
+    private static func readSettingsNow(_ dir: URL, hash: String?) -> [String: Any]? {
+        parseSettings(readNow(dir.appendingPathComponent("settings.plist")), hash: hash)
     }
     private static func readManifestNow(_ dir: URL) -> Manifest? {
         parseManifest(readNow(dir.appendingPathComponent("manifest.json")))

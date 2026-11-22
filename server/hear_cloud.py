@@ -1243,6 +1243,33 @@ def pair_info():
         return {"error": "拿不到签发根：%s" % e}
 
 
+def cert_has_current_server_profile(path):
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+    except ImportError:
+        # An already provisioned certificate can still be served.
+        return True
+
+    try:
+        with open(path, "rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+        usage = cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+        constraints = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+        # Older cryptography versions expose naive UTC dates.
+        since = getattr(cert, "not_valid_before_utc", None)
+        until = getattr(cert, "not_valid_after_utc", None)
+        if since is None:
+            since = cert.not_valid_before.replace(tzinfo=datetime.timezone.utc)
+            until = cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return (ExtendedKeyUsageOID.SERVER_AUTH in usage and not constraints.ca
+                and until - since <= datetime.timedelta(days=397)
+                and since <= now < until - datetime.timedelta(days=7))
+    except (OSError, ValueError, x509.ExtensionNotFound):
+        return False
+
+
 def ensure_cert():
     """确保有服务器证书；没有就自己生成一份。
 
@@ -1260,13 +1287,15 @@ def ensure_cert():
                 if root and not cert_signed_by_root(TLS_CERT, root[0]):
                     # 以前签的（自己签自己），重新用签发根签一张
                     log("这张证书不是用签发根签的，重新签一张")
+                elif not cert_has_current_server_profile(TLS_CERT):
+                    log("更新 HTTPS 服务证书，沿用现有签发根")
                 else:
                     return True
             else:
                 log("本机 IP 变成 %s 了（旧证书里没有），重新生成证书" % missing)
     try:
         from cryptography import x509
-        from cryptography.x509.oid import NameOID
+        from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
     except ImportError:
@@ -1303,9 +1332,10 @@ def ensure_cert():
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - datetime.timedelta(days=1))
-            .not_valid_after(now + datetime.timedelta(days=3650))
+            .not_valid_after(now + datetime.timedelta(days=365))
             .add_extension(x509.SubjectAlternativeName(san), critical=False)
-            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
             .sign(signer, hashes.SHA256())
         )
         # 证书文件里带上签发根：客户端要能顺着链找到它
@@ -1382,6 +1412,9 @@ class MixedServer(ThreadingHTTPServer):
         except OSError:
             self._close(sock)
             return None
+        if not first:
+            self._close(sock)
+            return None
         if first != b"\x16":
             sock.settimeout(180)        # 普通 http（同样设个读超时）
             return sock
@@ -1390,6 +1423,11 @@ class MixedServer(ThreadingHTTPServer):
             # 读超时：手机连上了不发数据、或者发一半就断开的，不能一直占着线程
             wrapped.settimeout(180)
             return wrapped
+        except (ssl.SSLEOFError, ConnectionResetError, ConnectionAbortedError):
+            # A client cancelled before the handshake completed. Keep actual TLS
+            # protocol and certificate errors visible in the console.
+            self._close(sock)
+            return None
         except OSError as e:
             self._close(sock)
             log("TLS 握手失败：%s%s" % (e, self.tls_hint(e)))

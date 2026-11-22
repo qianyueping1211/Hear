@@ -7,6 +7,7 @@
 
     python3 server/test_contract.py
 """
+import datetime
 import io
 import json
 import os
@@ -229,7 +230,11 @@ def check_clone_readiness():
 def check_connection_recovery():
     import hear_cloud
 
-    for error in (ssl.SSLError("certificate unknown"), ConnectionResetError()):
+    for error, expected_logs in (
+        (ssl.SSLError("certificate unknown"), 1),
+        (ssl.SSLEOFError(ssl.SSL_ERROR_EOF, "peer disconnected"), 0),
+        (ConnectionResetError(), 0),
+    ):
         with patch.object(hear_cloud, "log") as log:
             sock = SimpleNamespace(settimeout=lambda _: None, recv=lambda *_: b"\x16",
                                    close=lambda: None)
@@ -242,7 +247,7 @@ def check_connection_recovery():
                  patch.object(sock, "close") as close:
                 result = hear_cloud.MixedServer._wrap_tls(server, sock)
                 check("failed TLS handshake closes the socket (%s)" % type(error).__name__,
-                      result is None and close.call_count == 1 and log.call_count == 1)
+                      result is None and close.call_count == 1 and log.call_count == expected_logs)
 
     blocked = threading.Event()
     release = threading.Event()
@@ -352,6 +357,41 @@ def check_inference_admission():
         check("single-slot servers can still run preview work", preview and not final)
     with single.reserve() as final:
         check("single-slot servers admit a final after a preview releases the slot", final)
+
+
+def check_certificate_renewal(cert_directory):
+    import hear_cloud
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+
+    root_path = os.path.join(cert_directory, "root.pem")
+    root_key = os.path.join(cert_directory, "root.key")
+    cert_path = os.path.join(cert_directory, "cert.pem")
+    key_path = os.path.join(cert_directory, "key.pem")
+    with open(root_path, "rb") as file:
+        root = x509.load_pem_x509_certificate(file.read())
+    with open(root_key, "rb") as file:
+        signer = serialization.load_pem_private_key(file.read(), password=None)
+    with open(cert_path, "rb") as file:
+        previous = x509.load_pem_x509_certificate(file.read())
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    legacy = (x509.CertificateBuilder()
+              .subject_name(previous.subject).issuer_name(root.subject)
+              .public_key(previous.public_key()).serial_number(x509.random_serial_number())
+              .not_valid_before(now - datetime.timedelta(days=1))
+              .not_valid_after(now + datetime.timedelta(days=3650))
+              .add_extension(previous.extensions.get_extension_for_class(x509.SubjectAlternativeName).value,
+                             critical=False)
+              .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+              .sign(signer, hashes.SHA256()))
+    with open(cert_path, "wb") as file:
+        file.write(legacy.public_bytes(serialization.Encoding.PEM))
+    with patch.multiple(hear_cloud, ROOT_CERT=root_path, ROOT_KEY=root_key,
+                        TLS_CERT=cert_path, TLS_KEY=key_path), patch.object(hear_cloud, "log"):
+        check("legacy TLS certificate is renewed", hear_cloud.ensure_cert()
+              and hear_cloud.cert_has_current_server_profile(cert_path))
+        check("TLS renewal retains the existing signing root", hear_cloud.cert_signed_by_root(cert_path, root))
 
 
 def check_timeout_handling(cert_directory):
@@ -521,6 +561,23 @@ def main():
             return 1
 
         print("\n-- /health --")
+        address = ("127.0.0.1", PORT)
+        with socket.create_connection(address, timeout=2) as peer:
+            # Start a normal TLS handshake and then close before accepting the server.
+            outgoing = ssl.MemoryBIO()
+            handshake = ctx().wrap_bio(ssl.MemoryBIO(), outgoing, server_hostname=address[0])
+            try:
+                handshake.do_handshake()
+            except ssl.SSLWantReadError:
+                peer.sendall(outgoing.read())
+            peer.recv(1)
+        verified = ssl.create_default_context(cafile=os.path.join(tmp, "root.pem"))
+        with closing(HTTPSConnection(*address, context=verified, timeout=3)) as client:
+            client.request("GET", "/health")
+            response = client.getresponse()
+            response.read()
+            check("an abandoned TLS handshake does not block the next verified HTTPS request",
+                  response.status == 200)
         code, data = req("/health")
         check("/health returns 200", code == 200, "got %d" % code)
         try:
@@ -680,6 +737,7 @@ def main():
             pass
         shutil.rmtree(tmp3, ignore_errors=True)
 
+    check_certificate_renewal(tmp)
     check_timeout_handling(tmp)
     check_clone_deadline()
     shutil.rmtree(tmp, ignore_errors=True)

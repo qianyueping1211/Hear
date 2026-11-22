@@ -372,7 +372,7 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>文档对应版本</dt><dd>0.4.81</dd></div>
+        <div><dt>文档对应版本</dt><dd>0.4.82</dd></div>
         <div><dt>最低系统</dt><dd>iOS 18.0</dd></div>
         <div><dt>本机模型</dt><dd>SenseVoice · Hy-MT2 · ZipVoice</dd></div>
         <div><dt>云端模型</dt><dd>SenseVoice + Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
@@ -606,7 +606,7 @@ section.band{scroll-margin-top:62px}
       <div class="fgroup">
         <h3><em>08</em>稳定性与同步</h3>
         <ul>
-          <li><b>iCloud 同步</b>　可将设置和历史同步到 iCloud 云盘。需要访问授权时，可从功能设置授权；暂时失去访问后会在后续同步重新检查。</li>
+          <li><b>iCloud 同步</b>　可将设置和历史同步到 iCloud 云盘。同步的设置包括显示语言、区分说话人、记录对话内容和记录推理耗时的开关，以及声音输出偏好。运行日志文件留在本机。需要访问授权时，可从功能设置授权；暂时失去访问后会在后续同步重新检查。</li>
           <li><b>本机资源</b>　收到内存警告后会卸载本地模型。停止收音和朗读后，应用会释放音频会话。</li>
           <li><b>云端繁忙</b>　正式识别和译文优先，服务忙时预览短暂退让，正式请求在限定次数内重试。</li>
           <li><b>排查问题</b>　运行日志可区分识别、翻译、声音克隆、连接和模型加载相关问题。</li>
@@ -1053,7 +1053,7 @@ section.band{scroll-margin-top:62px}
         <div class="term"><span class="tag">HEALTH</span><h4>健康检查与状态判定</h4></div>
         <div class="detail">
           <p><code>/health</code> 报告各模型的就绪状态、可选识别方案和可用模型信息。启动阶段可能显示加载中。</p>
-          <p>如果 App 连不上，先用手机浏览器打开同一个服务地址，再检查 App 的 iOS 本地网络权限和 Windows 的专用网络防火墙设置。</p>
+          <p>如果 App 连不上，先用手机浏览器打开同一个 HTTPS 地址，再检查 App 的 iOS 本地网络权限和 Windows 的专用网络防火墙设置。新版 Windows 服务启动时会自动更新不符合规范的 HTTPS 服务证书，沿用现有签发根。</p>
         </div>
       </div>
 
@@ -1235,7 +1235,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 实时语音翻译<br>文档对应 0.4.81</p>
+      <p>听见 Hear · iPhone 实时语音翻译<br>文档对应 0.4.82</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>

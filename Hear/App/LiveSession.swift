@@ -3578,6 +3578,9 @@ final class LiveSession: ObservableObject {
         if gl != glossary { glossary = gl }
         let om = AudioOutput(rawValue: d.string(forKey: "outputMode") ?? "") ?? .speaker
         if om != outputMode { outputMode = om }
+        if let manual = d.object(forKey: "manualSpeakerOutput") as? Bool, manualSpeaker != manual {
+            manualSpeaker = manual
+        }
         let le = d.string(forKey: "leftEar") ?? "A"
         if le != leftEar { leftEar = le }
         let re = d.string(forKey: "rightEar") ?? "B"
@@ -3590,8 +3593,11 @@ final class LiveSession: ObservableObject {
         if vp != voiceProcessing { voiceProcessing = vp }
         let isrc = d.string(forKey: "inputSource") ?? "phone"
         if isrc != inputSource { inputSource = isrc }
-        let tm = (d.object(forKey: "talkMode") as? Bool) ?? d.bool(forKey: "talkMode")
-        if tm != talkMode { talkMode = tm }
+        let script = ChineseDisplayLanguage(rawValue: d.string(forKey: ChineseDisplayLanguage.preferenceKey) ?? "")
+            ?? .simplified
+        if script != chineseDisplayLanguage { chineseDisplayLanguage = script }
+        let identifySpeakers = (d.object(forKey: "speakerTrackingEnabled") as? Bool) ?? true
+        if identifySpeakers != speakerTrackingEnabled { speakerTrackingEnabled = identifySpeakers }
         // 大模型配置、日志设置各自存着，让它们也重新读一遍
         LLMSettings.shared.reloadFromDefaults()
         AppLog.shared.reloadFromDefaults()

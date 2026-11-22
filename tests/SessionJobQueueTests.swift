@@ -42,6 +42,7 @@ struct SessionJobQueueTests {
         try await testCloudInferencePolicy()
         try testVerifiedAddress()
         try await testRecoveryState()
+        testSettingsSyncUpgrade()
         await testSenseVoiceRecovery()
         await testPreviewPipeline()
         await testFinalPipelines()
@@ -390,6 +391,19 @@ private func testConversationMerge() {
     precondition(merged.conversation.summaries["example"]?.content == "Meeting recap")
     remote.items[0].speakerName = "小王"
     precondition(local.merging(remote, from: base).conflict, "Both edits to the same speaker must be preserved as a conflict")
+}
+
+private func testSettingsSyncUpgrade() {
+    precondition(CloudSettingsSyncPolicy.decide(local: "expanded", legacyLocal: "last",
+                                                 last: "last", remote: "newer") == .pull)
+    precondition(CloudSettingsSyncPolicy.decide(local: "expanded", legacyLocal: "last",
+                                                 last: "last", remote: "last") == .push)
+    precondition(CloudSettingsSyncPolicy.decide(local: "edited", legacyLocal: "edited-existing",
+                                                 last: "last", remote: "newer") == .push)
+    precondition(CloudSettingsSyncPolicy.decide(local: "expanded", legacyLocal: "legacy",
+                                                 last: nil, remote: "expanded") == .none)
+    precondition(CloudSettingsSyncPolicy.decide(local: "empty", legacyLocal: "empty",
+                                                 last: nil, remote: "cloud") == .pull)
 }
 
 private func testSpeechGating() {

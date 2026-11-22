@@ -44,6 +44,9 @@ final class AppLog: ObservableObject {
     @Published var contentEnabled: Bool {
         didSet { UserDefaults.standard.set(contentEnabled, forKey: "logContentEnabled") }
     }
+    @Published var performanceEnabled: Bool {
+        didSet { UserDefaults.standard.set(performanceEnabled, forKey: PerformanceLog.enabledKey) }
+    }
     @Published var maxMB: Int {
         didSet { UserDefaults.standard.set(maxMB, forKey: "logMaxMB"); rotateIfNeeded() }
     }
@@ -64,6 +67,7 @@ final class AppLog: ObservableObject {
         oldURL = docs.appendingPathComponent("hear-log.old.txt")
         enabled = UserDefaults.standard.object(forKey: "logEnabled") as? Bool ?? true
         contentEnabled = UserDefaults.standard.object(forKey: "logContentEnabled") as? Bool ?? false
+        performanceEnabled = UserDefaults.standard.bool(forKey: PerformanceLog.enabledKey)
         maxMB = UserDefaults.standard.object(forKey: "logMaxMB") as? Int ?? 100
         loadTail()
     }
@@ -72,6 +76,10 @@ final class AppLog: ObservableObject {
     func reloadFromDefaults() {
         let e = UserDefaults.standard.object(forKey: "logEnabled") as? Bool ?? true
         if e != enabled { enabled = e }
+        let content = UserDefaults.standard.bool(forKey: "logContentEnabled")
+        if content != contentEnabled { contentEnabled = content }
+        let performance = UserDefaults.standard.bool(forKey: PerformanceLog.enabledKey)
+        if performance != performanceEnabled { performanceEnabled = performance }
         let m = UserDefaults.standard.object(forKey: "logMaxMB") as? Int ?? 100
         if m != maxMB { maxMB = m }
     }

@@ -212,32 +212,38 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
             return
         }
         if userLocal {
-            // 内网自签证书：把证书本身当成自己的根，并且不校验主机名。
-            // （证书里的 IP 是生成证书那一刻的，电脑换了网络、IP 变了，
-            //   旧证书里就没有新 IP，手机会直接拒绝：
-            //   "certificate unknown"——这里放开，省得每次换网络都要重装证书）
-            // 先按系统的判断来：证书本来就合格就用系统的
+            // 先按系统的判断来：证书本来就合格就用系统的。
             if SecTrustEvaluateWithError(trust, nil) {
                 completionHandler(.useCredential, URLCredential(trust: trust))
                 return
             }
-            if let cert = SecTrustGetCertificateAtIndex(trust, 0) {
-                // 系统不认（自签证书、或者证书里的 IP 是旧的）：
-                // 内网地址就放宽——把证书本身当成自己的根，并且不校验主机名
-                var relaxed: SecTrust?
-                let st = SecTrustCreateWithCertificates(cert, SecPolicyCreateSSL(true, nil), &relaxed)
-                if st == errSecSuccess, let r = relaxed {
-                    SecTrustSetAnchorCertificates(r, [cert] as CFArray)
-                    if SecTrustEvaluateWithError(r, nil) {
-                        completionHandler(.useCredential, URLCredential(trust: r))
-                        return
-                    }
-                }
+            if let localTrust = Self.evaluateLocalChain(trust) {
+                completionHandler(.useCredential, URLCredential(trust: localTrust))
+                return
             }
-            completionHandler(.cancelAuthenticationChallenge, nil)
+            // 交还给系统保留证书错误码，避免把证书失败显示成“已取消”。
+            completionHandler(.performDefaultHandling, nil)
         } else {
             completionHandler(.performDefaultHandling, nil)
         }
+    }
+
+    // Compatibility mode is limited to a configured LAN host. The server sends
+    // its root with the leaf. Keep that chain and check its signatures and dates.
+    private static func evaluateLocalChain(_ trust: SecTrust) -> SecTrust? {
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
+              let root = chain.last,
+              let subject = SecCertificateCopyNormalizedSubjectSequence(root),
+              let issuer = SecCertificateCopyNormalizedIssuerSequence(root),
+              (subject as Data) == (issuer as Data) else { return nil }
+        var local: SecTrust?
+        guard SecTrustCreateWithCertificates(chain as CFArray, SecPolicyCreateSSL(true, nil), &local) == errSecSuccess,
+              let local,
+              SecTrustSetAnchorCertificates(local, [root] as CFArray) == errSecSuccess,
+              SecTrustSetAnchorCertificatesOnly(local, true) == errSecSuccess,
+              SecTrustSetNetworkFetchAllowed(local, false) == errSecSuccess,
+              SecTrustEvaluateWithError(local, nil) else { return nil }
+        return local
     }
 
     /// 是不是内网地址（自己解析 IP，不依赖 IPv4Address 那套 API，省得两个 init 搞混）
@@ -813,21 +819,16 @@ actor CloudClient {
     static func diagnose(address: String, testingEnteredAddress: Bool = false) async -> Diagnosis {
         let s = cleanURL(address)
         if s.isEmpty { return Diagnosis(text: "还没填地址") }
-        let testSession: URLSession?
-        if testingEnteredAddress, let host = URL(string: s)?.host, LocalServerTrust.isLocalHost(host) {
-            // 保存前也能测试。地址仅对这次测试有效，不写入全局配置。
-            testSession = URLSession(configuration: .ephemeral,
-                                     delegate: LocalServerTrust(enteredHost: host), delegateQueue: nil)
-        } else {
-            testSession = nil
-        }
-        defer { testSession?.finishTasksAndInvalidate() }
-        let connection = testSession ?? session
+        // 连接测试独立于推理会话。测试新填的内网地址时，信任范围只限本次。
+        let enteredHost = testingEnteredAddress ? URL(string: s)?.host : nil
+        let connection = URLSession(configuration: .ephemeral,
+                                    delegate: LocalServerTrust(enteredHost: enteredHost), delegateQueue: nil)
+        defer { connection.finishTasksAndInvalidate() }
         var r = await diagnoseOne(s, session: connection)
-        if !Self.looksConnected(r.text) {
+        if !Self.looksConnected(r.text), !Task.isCancelled {
             // 第一次访问局域网会弹系统的「本地网络」授权框。
             // 用户点「允许」之前请求是不通的，等一下再试一次就能通。
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            do { try await Task.sleep(for: .milliseconds(1_200)) } catch { return r }
             r = await diagnoseOne(s, session: connection)
         }
         return r
@@ -904,7 +905,11 @@ actor CloudClient {
                  .serverCertificateHasUnknownRoot, .serverCertificateHasBadDate,
                  .serverCertificateNotYetValid, .clientCertificateRejected:
                 hearLog("云端连接证书握手失败：\(s)（\(e.code.rawValue)）", .warning)
-                return Diagnosis(text: "无法建立 HTTPS 连接。请确认服务地址与电脑启动窗口显示的地址一致。")
+                return Diagnosis(text: "无法建立 HTTPS 连接。请确认服务地址与启动窗口一致，并用新版 Windows 服务重启以更新证书。")
+            case .cancelled:
+                if Task.isCancelled { return Diagnosis(text: "连接测试已取消") }
+                hearLog("云端连接中断：\(s)（\(e.code.rawValue)）", .warning)
+                return Diagnosis(text: "HTTPS 连接在完成前中断。请核对服务地址，并确认 Windows 服务已更新。")
             case .cannotFindHost:
                 return Diagnosis(text: "找不到这个地址：IP 写错了？")
             case .notConnectedToInternet:
