@@ -130,7 +130,7 @@ scripts/fetch_llama.sh          下载 llama.cpp 的 iOS 框架
 .github/workflows/build-ipa.yml GitHub 自动打包 iOS IPA
 ```
 
-未来 Android 和鸿蒙手机、平板客户端可分别加入 `apps/android/`、`apps/harmony/`；同一平台在一个工程内适配不同屏幕。当前 iOS 工程仍只面向 iPhone，尚未开启 iPad 构建目标。
+`apps/android/` 和 `apps/harmony/` 已预留给未来的手机、平板客户端；同一平台在一个工程内适配不同屏幕。当前 iOS 工程仍只面向 iPhone，尚未开启 iPad 构建目标。
 
 ## 常见问题
 
