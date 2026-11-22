@@ -344,6 +344,17 @@ function Say($t)  { Write-Host "==> $t" -ForegroundColor Cyan }
 function Step($t) { Write-Host "    $t" -ForegroundColor DarkGray }
 function Die($t)  { Write-Host "!! $t" -ForegroundColor Red; exit 1 }
 
+# 云端服务依赖的模块缺一个就起不来。旧版 start-hear-cloud.bat 的下载清单里没有新模块，
+# 会出现"hear_cloud.py 是新的、hear_auth.py 不存在"的情况，这里提前说清楚。
+$missingModules = @(@("hear_cloud.py", "hear_auth.py", "hear_http.py", "hear_speaker.py") |
+    Where-Object { -not (Test-Path -LiteralPath (Join-Path $ServerDir $_)) })
+if ($missingModules.Count -gt 0) {
+    Write-Host "!! server 文件夹里缺少：$($missingModules -join '、')" -ForegroundColor Red
+    Write-Host "   多半是用了旧版 start-hear-cloud.bat。请从仓库根目录拿最新的 start-hear-cloud.bat 替换旧的，" -ForegroundColor Red
+    Write-Host "   或者在仓库目录执行 git pull，然后再启动一次。" -ForegroundColor Red
+    exit 1
+}
+
 # 让所有服务子进程成为同一个 Windows Job 的成员。BAT 窗口被关闭、
 # PowerShell 被强制结束时，系统会关闭 Job 句柄并连带结束整棵进程树。
 if (-not ("Hear.KillJob" -as [type])) {
@@ -864,6 +875,10 @@ $cloud = Start-Process -FilePath $venvPy -ArgumentList "`"$cloudScript`"" `
 Add-ProcessToHearJob $cloud
 Record-HearProcess $cloud
 Start-Sleep -Seconds 3
+$cloud.Refresh()
+if ($cloud.HasExited) {
+    Die "云端服务刚启动就退出了（退出码 $($cloud.ExitCode)），原因看上面的报错"
+}
 Say "云端服务已启动（端口 $Port），模型还在准备中"
 Write-Host "    电脑浏览器打开 https://127.0.0.1:$Port/ 看看服务在不在（自签证书，浏览器会提示不安全，点继续就行）" -ForegroundColor Cyan
 Write-Host "    手机浏览器打开下面打印的地址，能打开就说明手机到电脑是通的" -ForegroundColor Cyan
@@ -1134,9 +1149,16 @@ try { if ($OrigCodePage) { chcp $OrigCodePage > $null } } catch {}
 
 if ($cloud) {
     if ($cloud.HasExited) {
-        Say "云端服务退出了（退出码 $($cloud.ExitCode)），看看上面的报错"
+        Write-Host "!! 云端服务退出了（退出码 $($cloud.ExitCode)），原因看上面的红色报错。" -ForegroundColor Red
+        # 退出码非 0，BAT 窗口才会停住等你看报错，不会一闪就关
+        exit 1
     }
     else {
         Wait-Process -Id $cloud.Id
+        $cloud.Refresh()
+        if ($cloud.ExitCode -ne 0) {
+            Write-Host "!! 云端服务退出了（退出码 $($cloud.ExitCode)），原因看上面的红色报错。" -ForegroundColor Red
+            exit 1
+        }
     }
 }
