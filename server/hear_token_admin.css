@@ -6,7 +6,8 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body { margin: 0; font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--ink); }
-.bar { display: flex; align-items: center; gap: 24px; padding: 0 24px; height: 56px; background: #111827; color: #fff; }
+.bar { display: flex; align-items: center; gap: 24px; padding: 0 24px; height: 56px; background: #111827; color: #fff;
+  position: sticky; top: 0; z-index: 20; }
 .brand { font-weight: 650; font-size: 16px; }
 .brand span { font-weight: 400; color: #9ca3af; margin-left: 6px; }
 nav { display: flex; gap: 4px; }
@@ -31,6 +32,9 @@ button.danger { background: #fff; border-color: #f1b7b7; color: var(--danger); }
 button.ghost { background: transparent; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 .toolbar { display: flex; gap: 10px; align-items: center; margin: 8px 0 12px; flex-wrap: wrap; }
+/* 顶部导航和查询栏滚动时固定：查询栏贴在导航下面，底色遮住滚上去的表格 */
+.toolbar { position: sticky; top: 56px; z-index: 10; background: var(--bg); margin: 0 0 12px; padding: 10px 0;
+  box-shadow: 0 6px 6px -6px rgba(17,24,39,.12); }
 .row { display: flex; gap: 10px; align-items: center; }
 .row h1 { margin: 0; }
 .grow { flex: 1; }
