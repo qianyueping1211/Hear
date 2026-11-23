@@ -317,88 +317,99 @@ private struct ConversationAudioBar: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Text(ConversationAudioPlayer.formatTime(displayedTime))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 42, alignment: .leading)
+            if player.isDownloadingFromCloud {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在从 iCloud 加载录音…")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+            } else {
+                HStack(spacing: 8) {
+                    Text(ConversationAudioPlayer.formatTime(displayedTime))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 42, alignment: .leading)
 
-                Slider(
-                    value: Binding(
-                        get: { displayedTime },
-                        set: { newVal in dragTime = newVal }
-                    ),
-                    in: 0...max(player.duration, 0.01),
-                    onEditingChanged: { editing in
-                        isDragging = editing
-                        if !editing {
-                            player.seek(to: dragTime)
-                        } else {
-                            dragTime = player.currentTime
+                    Slider(
+                        value: Binding(
+                            get: { displayedTime },
+                            set: { newVal in dragTime = newVal }
+                        ),
+                        in: 0...max(player.duration, 0.01),
+                        onEditingChanged: { editing in
+                            isDragging = editing
+                            if !editing {
+                                player.seek(to: dragTime)
+                            } else {
+                                dragTime = player.currentTime
+                            }
                         }
+                    )
+                    .tint(Color.accentColor)
+
+                    Text(ConversationAudioPlayer.formatTime(player.duration))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 42, alignment: .trailing)
+                }
+
+                HStack(spacing: 16) {
+                    Button {
+                        player.cycleRate()
+                    } label: {
+                        Text(rateLabel)
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color(.secondarySystemBackground), in: Capsule())
                     }
-                )
-                .tint(Color.accentColor)
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("播放倍速 \(rateLabel)")
 
-                Text(ConversationAudioPlayer.formatTime(player.duration))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 42, alignment: .trailing)
-            }
+                    Spacer()
 
-            HStack(spacing: 16) {
-                Button {
-                    player.cycleRate()
-                } label: {
-                    Text(rateLabel)
-                        .font(.caption.weight(.semibold).monospacedDigit())
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(Color(.secondarySystemBackground), in: Capsule())
+                    Button {
+                        player.skip(by: -10)
+                    } label: {
+                        Image(systemName: "gobackward.10")
+                            .font(.title3)
+                            .frame(width: 40, height: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("快退 10 秒")
+
+                    Button {
+                        if !player.isPlaying { onBeforePlay() }
+                        player.togglePlayPause()
+                    } label: {
+                        Label(playButtonTitle, systemImage: playButtonIcon)
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 9)
+                            .background(Color.accentColor, in: Capsule())
+                            .foregroundStyle(.white)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(playButtonTitle)
+
+                    Button {
+                        player.skip(by: 10)
+                    } label: {
+                        Image(systemName: "goforward.10")
+                            .font(.title3)
+                            .frame(width: 40, height: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("快进 10 秒")
+
+                    Spacer()
+
+                    // 右侧占位，让中间播放按钮组保持视觉居中
+                    Color.clear.frame(width: 44, height: 1)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("播放倍速 \(rateLabel)")
-
-                Spacer()
-
-                Button {
-                    player.skip(by: -10)
-                } label: {
-                    Image(systemName: "gobackward.10")
-                        .font(.title3)
-                        .frame(width: 40, height: 36)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("快退 10 秒")
-
-                Button {
-                    if !player.isPlaying { onBeforePlay() }
-                    player.togglePlayPause()
-                } label: {
-                    Label(playButtonTitle, systemImage: playButtonIcon)
-                        .font(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 9)
-                        .background(Color.accentColor, in: Capsule())
-                        .foregroundStyle(.white)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(playButtonTitle)
-
-                Button {
-                    player.skip(by: 10)
-                } label: {
-                    Image(systemName: "goforward.10")
-                        .font(.title3)
-                        .frame(width: 40, height: 36)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("快进 10 秒")
-
-                Spacer()
-
-                // 右侧占位，让中间播放按钮组保持视觉居中
-                Color.clear.frame(width: 44, height: 1)
             }
         }
         .padding(.horizontal, 16)

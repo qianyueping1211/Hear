@@ -37,7 +37,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 60
     env:
-      BUNDLE_ID: com.hear.app
+      BUNDLE_ID: hear.yueping1211.asia.app
       TEAM_ID: ""
       GH_TOKEN: ${{ github.token }}
       PUBLISH_RELEASE: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[no release]') }}

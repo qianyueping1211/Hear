@@ -25,7 +25,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 40
     env:
-      BUNDLE_ID: com.hear.app
+      BUNDLE_ID: hear.yueping1211.asia.app
       TEAM_ID: ""
       GH_TOKEN: ${{ github.token }}
     steps:

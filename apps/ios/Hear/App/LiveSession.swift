@@ -1755,6 +1755,12 @@ final class LiveSession: ObservableObject {
         if outputMode == .speaker { stopReading() }
         if feedback { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
         activity = "正在打开麦克风…"
+        if saveFullRecording {
+            CloudSync.shared.restoreCloudRecordingToLocalIfNeeded(conversationID)
+            CloudSync.shared.activeRecordingID = conversationID
+        } else {
+            CloudSync.shared.activeRecordingID = nil
+        }
         fullRecorder.configure(enabled: saveFullRecording, conversationID: conversationID)
         do {
             try await capture.start()
@@ -1956,6 +1962,12 @@ final class LiveSession: ObservableObject {
         startToken = UUID()          // 正在等待的"开始收音"全部作废
         capture.stop()
         fullRecorder.flush()
+        if CloudSync.shared.activeRecordingID == conversationID {
+            CloudSync.shared.activeRecordingID = nil
+            if saveFullRecording {
+                CloudSync.shared.scheduleSync(delay: 1.5)
+            }
+        }
         capture.muted = false
         isRunning = false
         endLiveActivity()
@@ -2158,6 +2170,12 @@ final class LiveSession: ObservableObject {
     private func archiveConversation(summarize: Bool) {
         persist()
         fullRecorder.close()
+        if CloudSync.shared.activeRecordingID == conversationID {
+            CloudSync.shared.activeRecordingID = nil
+        }
+        if saveFullRecording {
+            CloudSync.shared.scheduleSync(delay: 1.0)
+        }
         segStartFrames.removeAll()
         let oldID = conversationID
         // 有内容就算：原文已经认出来了、译文还在补，也值得总结

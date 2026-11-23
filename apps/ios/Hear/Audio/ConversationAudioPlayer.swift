@@ -1,18 +1,21 @@
 import AVFoundation
 import Foundation
 
-/// 历史对话完整录音播放器：支持播放、暂停、继续、快进/快退、倍速与进度拖动
+/// 历史对话完整录音播放器：支持播放、暂停、继续、快进/快退、倍速与进度拖动，
+/// 自动优先读本地缓存，本地上传后已清理时直接从 iCloud recordings/ 子文件夹加载播放。
 @MainActor
 final class ConversationAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published private(set) var hasAudio = false
+    @Published private(set) var isDownloadingFromCloud = false
     @Published private(set) var isPlaying = false
     @Published private(set) var currentTime: Double = 0
     @Published private(set) var duration: Double = 0
-    @Published private(set) var playbackRate: Float = 1.0
+    @Published var playbackRate: Float = 1.0
 
     private var player: AVAudioPlayer?
     private var timer: Timer?
     private var loadedID: UUID?
+    private var loadTask: Task<Void, Never>?
 
     var isPausedMidway: Bool {
         !isPlaying && currentTime > 0.05 && currentTime < max(0, duration - 0.15)
@@ -21,12 +24,43 @@ final class ConversationAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDe
     func load(conversationID: UUID) {
         if loadedID == conversationID, player != nil { return }
         stop()
+        loadTask?.cancel()
+        loadTask = nil
         loadedID = conversationID
-        let url = ConversationStore.audioFileURL(for: conversationID)
-        guard ConversationStore.shared.hasAudioFile(conversationID) else {
+
+        // 1. 优先读取本地缓存（尚未上传或正在离线暂存）
+        if ConversationStore.shared.hasLocalAudioFile(conversationID) {
+            let localURL = ConversationStore.audioFileURL(for: conversationID)
+            openPlayer(at: localURL)
+            return
+        }
+
+        // 2. 本地缓存上传成功后已清理：从 iCloud recordings/ 子文件夹加载或按需拉取
+        guard CloudSync.shared.hasCloudRecording(conversationID) else {
             clearPlayer()
             return
         }
+        if let cloudURL = CloudSync.shared.cloudRecordingURL(for: conversationID),
+           FileManager.default.fileExists(atPath: cloudURL.path) {
+            openPlayer(at: cloudURL)
+            return
+        }
+
+        hasAudio = true
+        isDownloadingFromCloud = true
+        loadTask = Task { [weak self] in
+            let readyURL = await CloudSync.shared.prepareCloudRecordingForPlayback(conversationID)
+            guard let self, !Task.isCancelled, self.loadedID == conversationID else { return }
+            self.isDownloadingFromCloud = false
+            if let readyURL {
+                self.openPlayer(at: readyURL)
+            } else {
+                self.clearPlayer()
+            }
+        }
+    }
+
+    private func openPlayer(at url: URL) {
         ConversationAudioRecorder.repairWavHeaderIfNeeded(at: url)
         do {
             let p = try AVAudioPlayer(contentsOf: url)
@@ -37,6 +71,7 @@ final class ConversationAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDe
             player = p
             duration = max(0, p.duration)
             currentTime = 0
+            isDownloadingFromCloud = false
             hasAudio = duration > 0.05
             if !hasAudio { clearPlayer() }
         } catch {
@@ -108,6 +143,9 @@ final class ConversationAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDe
     }
 
     func stop() {
+        loadTask?.cancel()
+        loadTask = nil
+        isDownloadingFromCloud = false
         stopTimer()
         player?.stop()
         if isPlaying { AudioRoute.speaking = false }
@@ -119,6 +157,7 @@ final class ConversationAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDe
         stopTimer()
         player = nil
         hasAudio = false
+        isDownloadingFromCloud = false
         isPlaying = false
         currentTime = 0
         duration = 0

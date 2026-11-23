@@ -102,6 +102,11 @@ final class CloudSync: ObservableObject {
     // MARK: - 文件夹
 
     /// iCloud 云盘里我们自己的文件夹：就用 App 名字（听见），用户不用选也不用改
+    /// iCloud 同步目录内单独存放完整录音的子文件夹
+    private static let recordingsFolderName = "recordings"
+    /// 正在录制中的对话 ID：录制未结束前不上传也不清理本地缓存，避免写入冲突
+    var activeRecordingID: UUID? = nil
+
     static var syncFolderName: String {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
             .flatMap { $0.isEmpty ? nil : $0 } ?? "听见"
@@ -448,8 +453,10 @@ final class CloudSync: ObservableObject {
         // 先把老文件夹「听见同步」的内容搬过来，再建 conversations
         migrateLegacyFolder(to: dir)
         let convDir = dir.appendingPathComponent("conversations", isDirectory: true)
+        let recordingsDir = dir.appendingPathComponent(Self.recordingsFolderName, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: convDir, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
         } catch {
             closeScopedAccess()
             message = "iCloud 文件夹不可用：\(error.localizedDescription)"
@@ -530,6 +537,10 @@ final class CloudSync: ObservableObject {
             if let gone = deleted[key], gone >= max(l ?? .distantPast, c ?? .distantPast) {
                 if l != nil { store.removeSynced(id); removed += 1 }
                 if c != nil { await Self.io { Self.remove(file) }; manifest.conversations[key] = nil }
+                let cloudWav = recordingsDir.appendingPathComponent("\(key).wav")
+                if FileManager.default.fileExists(atPath: cloudWav.path) || Self.isCloudPlaceholder(cloudWav) {
+                    await Self.io { Self.remove(cloudWav) }
+                }
                 continue
             }
             if let l, let c, let base = store.syncBase(id),
@@ -572,6 +583,42 @@ final class CloudSync: ObservableObject {
                       let data = store.rawData(id) {
                 store.rememberSyncBase(data, id: id)
             }
+        }
+
+        // 4. 完整录音：上传到 iCloud 的 recordings/ 子文件夹，上传校验成功后删除本地缓存（离线或失败则保留本地待下次续传）
+        var uploadedRecordings = 0
+        let localDir = ConversationStore.conversationsDirectory
+        let localWavFiles = ((try? FileManager.default.contentsOfDirectory(
+            at: localDir, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
+        )) ?? []).filter { $0.pathExtension.lowercased() == "wav" }
+
+        for localWav in localWavFiles {
+            let key = localWav.deletingPathExtension().lastPathComponent
+            guard let id = UUID(uuidString: key) else { continue }
+            // 正在录制的对话跳过，避免边写边传或误删本地句柄
+            if id == activeRecordingID { continue }
+            let cloudWav = recordingsDir.appendingPathComponent("\(key).wav")
+            if deleted[key] != nil {
+                try? FileManager.default.removeItem(at: localWav)
+                if FileManager.default.fileExists(atPath: cloudWav.path) || Self.isCloudPlaceholder(cloudWav) {
+                    await Self.io { Self.remove(cloudWav) }
+                }
+                continue
+            }
+            let size = ((try? localWav.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            guard size > 44 else { continue }
+            let ok = await Self.io {
+                ConversationAudioRecorder.repairWavHeaderIfNeeded(at: localWav)
+                return Self.uploadRecordingFile(from: localWav, to: cloudWav)
+            }
+            if ok && id != activeRecordingID {
+                try? FileManager.default.removeItem(at: localWav)
+                uploadedRecordings += 1
+                hearLog("iCloud 同步：完整录音 \(key.prefix(8)) 已上传至 recordings/ 并清理本地缓存")
+            }
+        }
+        if uploadedRecordings > 0 {
+            hearLog("iCloud 同步：本次共上传并清理本地录音缓存 \(uploadedRecordings) 个")
         }
 
         // 提交：先读一次合并，再写；写完再核对一遍——
@@ -796,6 +843,93 @@ final class CloudSync: ObservableObject {
         NSFileCoordinator().coordinate(writingItemAt: url, options: .forDeleting, error: &err) { u in
             try? FileManager.default.removeItem(at: u)
         }
+    }
+
+    // MARK: - 完整录音 iCloud 管理（recordings/ 子文件夹）
+
+    /// 该对话在 iCloud recordings/ 目录下的录音路径（仅在开启并可用 iCloud 时返回）
+    func cloudRecordingURL(for id: UUID) -> URL? {
+        guard enabled, let dir = resolveFolder() else { return nil }
+        return dir
+            .appendingPathComponent(Self.recordingsFolderName, isDirectory: true)
+            .appendingPathComponent("\(id.uuidString).wav")
+    }
+
+    /// iCloud 中是否存在该对话的完整录音（含尚未下载到本机的 .icloud 占位文件）
+    func hasCloudRecording(_ id: UUID) -> Bool {
+        guard let url = cloudRecordingURL(for: id) else { return false }
+        if FileManager.default.fileExists(atPath: url.path) {
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
+            return size > 44
+        }
+        return Self.isCloudPlaceholder(url)
+    }
+
+    /// 播放前确保 iCloud 上的完整录音已下载到本机，返回可直接供 AVAudioPlayer 读取的 URL
+    func prepareCloudRecordingForPlayback(_ id: UUID) async -> URL? {
+        guard let url = cloudRecordingURL(for: id) else { return nil }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) {
+            return url
+        }
+        guard Self.isCloudPlaceholder(url) else { return nil }
+        try? fm.startDownloadingUbiquitousItem(at: url)
+        let deadline = Date().addingTimeInterval(25)
+        while Date() < deadline {
+            if fm.fileExists(atPath: url.path) {
+                let size = (try? fm.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
+                if size > 44 { return url }
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        return fm.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// 同一对话续录时：如果本地缓存已被上传后清理，先把 iCloud 里的录音复制回本地缓存再继续追加，避免覆盖冲突
+    func restoreCloudRecordingToLocalIfNeeded(_ id: UUID) {
+        let localURL = ConversationStore.audioFileURL(for: id)
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: localURL.path),
+              let cloudURL = cloudRecordingURL(for: id),
+              fm.fileExists(atPath: cloudURL.path) else { return }
+        try? fm.createDirectory(at: ConversationStore.conversationsDirectory, withIntermediateDirectories: true)
+        var err: NSError?
+        NSFileCoordinator().coordinate(readingItemAt: cloudURL, options: [], error: &err) { u in
+            try? fm.copyItem(at: u, to: localURL)
+        }
+    }
+
+    /// 手动删除历史会话时，立即同步删除 iCloud recordings/ 中对应的录音文件
+    func deleteCloudRecording(_ id: UUID) {
+        guard let url = cloudRecordingURL(for: id) else { return }
+        Task {
+            await Self.io { Self.remove(url) }
+            hearLog("iCloud 同步：已删除云端录音 \(id.uuidString.prefix(8))")
+        }
+    }
+
+    private nonisolated static func uploadRecordingFile(from localURL: URL, to remoteURL: URL) -> Bool {
+        let fm = FileManager.default
+        guard let attrs = try? fm.attributesOfItem(atPath: localURL.path),
+              let localSize = (attrs[.size] as? NSNumber)?.int64Value,
+              localSize > 44 else { return false }
+        var ok = false
+        var err: NSError?
+        NSFileCoordinator().coordinate(writingItemAt: remoteURL, options: .forReplacing, error: &err) { dst in
+            do {
+                if fm.fileExists(atPath: dst.path) {
+                    try fm.removeItem(at: dst)
+                }
+                try fm.copyItem(at: localURL, to: dst)
+                let dstAttrs = try fm.attributesOfItem(atPath: dst.path)
+                let dstSize = (dstAttrs[.size] as? NSNumber)?.int64Value ?? 0
+                ok = (dstSize == localSize)
+            } catch {
+                hearLog("iCloud 同步：上传录音失败 \(dst.lastPathComponent) \(error)", .warning)
+                ok = false
+            }
+        }
+        return err == nil && ok
     }
 }
 

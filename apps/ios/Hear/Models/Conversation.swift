@@ -64,11 +64,15 @@ final class ConversationStore: ObservableObject {
 
     func audioFileURL(_ id: UUID) -> URL { Self.audioFileURL(for: id) }
 
-    func hasAudioFile(_ id: UUID) -> Bool {
+    func hasLocalAudioFile(_ id: UUID) -> Bool {
         let url = audioFileURL(id)
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = attrs[.size] as? NSNumber else { return false }
         return size.intValue > 44
+    }
+
+    func hasAudioFile(_ id: UUID) -> Bool {
+        hasLocalAudioFile(id) || CloudSync.shared.hasCloudRecording(id)
     }
 
     private func fileURL(_ id: UUID) -> URL { dir.appendingPathComponent("\(id.uuidString).json") }
@@ -107,6 +111,7 @@ final class ConversationStore: ObservableObject {
         try? FileManager.default.removeItem(at: fileURL(id))
         try? FileManager.default.removeItem(at: syncBaseURL(id))
         try? FileManager.default.removeItem(at: audioFileURL(id))
+        CloudSync.shared.deleteCloudRecording(id)
         metas.removeAll { $0.id == id }
         writeIndex()
         revision += 1
@@ -207,6 +212,7 @@ final class ConversationStore: ObservableObject {
         try? FileManager.default.removeItem(at: fileURL(id))
         try? FileManager.default.removeItem(at: syncBaseURL(id))
         try? FileManager.default.removeItem(at: audioFileURL(id))
+        CloudSync.shared.deleteCloudRecording(id)
         metas.removeAll { $0.id == id }
         writeIndex()
         revision += 1
