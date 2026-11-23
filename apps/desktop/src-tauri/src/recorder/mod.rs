@@ -98,13 +98,20 @@ impl StreamingWavRecorder {
     }
 }
 
-/// 从已录制的 16 kHz 单声道 16-bit PCM WAV 文件中截取 [start_ms, end_ms] 音频片段并封装为独立 WAV（供 Qwen3-TTS 声音克隆作参考音频）
-pub fn slice_wav_range_16k_mono(path: &Path, start_ms: u64, end_ms: u64) -> Option<Vec<u8>> {
+/// 从已录制的 16 kHz 单/双声道 16-bit PCM WAV 文件中截取 [start_ms, end_ms] 音频片段并封装为单声道 WAV（供 Qwen3-TTS 声音克隆作参考音频）
+/// 若为双路混合立体声（左=系统声 channel 0，右=麦克风 channel 1），优先提取 preferred_channel 对应轨的纯净人声。
+pub fn slice_wav_range_16k_mono(
+    path: &Path,
+    start_ms: u64,
+    end_ms: u64,
+    preferred_channel: Option<usize>,
+) -> Option<Vec<u8>> {
     if end_ms <= start_ms {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
-    let (samples, _, _) = decode_wav_to_16k_mono(&bytes).ok()?;
+    let (samples, _, _) =
+        decode_wav_to_16k_mono_with_channel(&bytes, preferred_channel).ok()?;
     let start_idx = ((start_ms * 16_000) / 1000) as usize;
     let mut end_idx = ((end_ms * 16_000) / 1000) as usize;
     if start_idx >= samples.len() {
@@ -139,6 +146,13 @@ pub fn encode_wav_16k_mono(samples: &[f32]) -> Vec<u8> {
 
 /// 解析标准 PCM/Float WAV 字节并重采样为 16 kHz 单声道 f32，同时生成 50ms 波形峰值与总时长
 pub fn decode_wav_to_16k_mono(bytes: &[u8]) -> Result<(Vec<f32>, u64, Vec<f32>), String> {
+    decode_wav_to_16k_mono_with_channel(bytes, None)
+}
+
+pub fn decode_wav_to_16k_mono_with_channel(
+    bytes: &[u8],
+    preferred_channel: Option<usize>,
+) -> Result<(Vec<f32>, u64, Vec<f32>), String> {
     if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err("文件不是有效的 WAV 音频格式".to_string());
     }
@@ -195,7 +209,38 @@ pub fn decode_wav_to_16k_mono(bytes: &[u8]) -> Result<(Vec<f32>, u64, Vec<f32>),
     }
 
     let mut mono = Vec::with_capacity(frame_count);
+    let pick_ch = preferred_channel.filter(|&c| c < ch);
     for f in 0..frame_count {
+        if let Some(c) = pick_ch {
+            let off = f * frame_stride + c * bytes_per_sample;
+            let sample = match (audio_format, bits_per_sample) {
+                (1, 8) => (raw[off] as f32 - 128.0) / 128.0,
+                (1, 16) => i16::from_le_bytes([raw[off], raw[off + 1]]) as f32 / 32768.0,
+                (1, 24) => {
+                    let b0 = raw[off] as i32;
+                    let b1 = (raw[off + 1] as i32) << 8;
+                    let b2 = ((raw[off + 2] as i8) as i32) << 16;
+                    (b0 | b1 | b2) as f32 / 8_388_608.0
+                }
+                (1, 32) => {
+                    let v =
+                        i32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]);
+                    (v as f64 / 2_147_483_648.0) as f32
+                }
+                (3, 32) => {
+                    f32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]])
+                }
+                _ => {
+                    return Err(format!(
+                        "不支持的 WAV 编码（format={}，{} bit）",
+                        audio_format, bits_per_sample
+                    ));
+                }
+            };
+            mono.push(sample.clamp(-1.0, 1.0));
+            continue;
+        }
+
         let mut sum = 0.0f32;
         for c in 0..ch {
             let off = f * frame_stride + c * bytes_per_sample;

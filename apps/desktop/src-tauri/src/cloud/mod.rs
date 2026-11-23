@@ -362,7 +362,22 @@ impl HearCloudClient {
         token: Option<&str>,
     ) -> Result<Vec<u8>, String> {
         let base_url = normalize_service_url(raw_address)?;
+        let cloud_lang = match lang.trim().to_ascii_lowercase().as_str() {
+            "zh" | "zh-cn" | "zh-tw" => "chinese",
+            "en" | "en-us" | "en-gb" => "english",
+            "ja" | "ja-jp" => "japanese",
+            "ko" | "ko-kr" => "korean",
+            "de" | "de-de" => "german",
+            "fr" | "fr-fr" => "french",
+            "es" | "es-es" => "spanish",
+            "ru" | "ru-ru" => "russian",
+            "pt" | "pt-br" => "portuguese",
+            "it" | "it-it" => "italian",
+            other => other,
+        };
+
         let mut ref_id: Option<String> = None;
+        let ref_len = reference_wav.as_ref().map(|w| w.len()).unwrap_or(0);
 
         if let Some(wav) = reference_wav {
             if !wav.is_empty() {
@@ -374,25 +389,47 @@ impl HearCloudClient {
                         .body(wav),
                     token,
                 );
-                if let Ok(resp) = req.timeout(Duration::from_secs(12)).send().await {
-                    if resp.status().is_success() {
+                match req.timeout(Duration::from_secs(12)).send().await {
+                    Ok(resp) if resp.status().is_success() => {
                         if let Ok(val) = resp.json::<serde_json::Value>().await {
                             ref_id = val.get("id").and_then(|v| v.as_str()).map(str::to_string);
                         }
+                    }
+                    Ok(resp) => {
+                        crate::logger::warn(format!(
+                            "[clone:reference] HTTP {} from {}",
+                            resp.status().as_u16(),
+                            ref_url
+                        ));
+                    }
+                    Err(e) => {
+                        crate::logger::warn(format!(
+                            "[clone:reference] request failed {}: {}",
+                            ref_url, e
+                        ));
                     }
                 }
             }
         }
 
         let clone_url = format!("{}/v1/clone", base_url);
+        crate::logger::info(format!(
+            "[clone] POST {} lang={} text_chars={} ref_bytes={} ref_id={:?}",
+            clone_url,
+            cloud_lang,
+            text.chars().count(),
+            ref_len,
+            ref_id
+        ));
         let mut payload = serde_json::json!({
             "text": text,
-            "lang": lang,
+            "lang": cloud_lang,
         });
         if let Some(rid) = ref_id {
             payload["reference_id"] = serde_json::Value::String(rid);
             if !reference_text.trim().is_empty() {
-                payload["reference_text"] = serde_json::Value::String(reference_text.trim().to_string());
+                payload["reference_text"] =
+                    serde_json::Value::String(reference_text.trim().to_string());
             }
         }
 
@@ -407,12 +444,18 @@ impl HearCloudClient {
             .timeout(Duration::from_secs(60))
             .send()
             .await
-            .map_err(|e| format!("声音克隆请求失败：{}", e))?;
+            .map_err(|e| {
+                let msg = format!("声音克隆请求失败：{}", e);
+                crate::logger::error(&msg);
+                msg
+            })?;
 
         if !resp.status().is_success() {
             let code = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("声音克隆返回 HTTP {}：{}", code, body));
+            let msg = format!("声音克隆返回 HTTP {}：{}", code, body);
+            crate::logger::error(&msg);
+            return Err(msg);
         }
 
         let bytes = resp
@@ -422,6 +465,7 @@ impl HearCloudClient {
         if bytes.len() < 44 {
             return Err("声音克隆返回的音频数据为空".to_string());
         }
+        crate::logger::info(format!("[clone] 合成完成: wav_bytes={}", bytes.len()));
         Ok(bytes.to_vec())
     }
 

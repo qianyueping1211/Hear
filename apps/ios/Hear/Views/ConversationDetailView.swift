@@ -137,13 +137,25 @@ struct ConversationDetailView: View {
             .padding(.top, 20)
 
         case .some(.generating):
-            VStack(spacing: 10) {
-                ProgressView()
-                Text("正在后台生成总结… 可以离开这个页面，完成后会自动保存。")
-                    .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            if let partial = record?.content, !partial.isEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("正在实时生成总结…").font(.caption).foregroundStyle(.secondary)
+                    }
+                    MarkdownView(text: partial)
+                        .padding()
+                        .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 16))
+                }
+            } else {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("正在后台生成总结… 可以离开这个页面，完成后会自动保存。")
+                        .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 20)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 20)
 
         case .some(.failed):
             VStack(alignment: .leading, spacing: 10) {

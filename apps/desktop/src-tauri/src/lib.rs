@@ -18,6 +18,7 @@ use state::{
     SubtitleSegment, SubtitleStyle, TtsOutputSettings, UpdateCheckResult, UpdateConfig,
 };
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -30,6 +31,8 @@ pub struct AppRuntime {
     pub cloud: HearCloudClient,
     pub capture: Mutex<Option<audio::LiveCaptureHandle>>,
     pub summary_markdown: Mutex<String>,
+    pub segment_wavs: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    pub import_cancel: AtomicBool,
 }
 
 impl AppRuntime {
@@ -39,6 +42,8 @@ impl AppRuntime {
             cloud: HearCloudClient::new(),
             capture: Mutex::new(None),
             summary_markdown: Mutex::new(String::new()),
+            segment_wavs: Mutex::new(std::collections::HashMap::new()),
+            import_cancel: AtomicBool::new(false),
         }
     }
 
@@ -80,6 +85,112 @@ impl AppRuntime {
             updated
         };
         let _ = app.emit("history:updated", &metas);
+    }
+
+    /// 后台自动调用大模型根据对话内容提炼 10~18 字正式会议标题并回写到历史列表
+    pub fn spawn_auto_title(self: &Arc<Self>, app: AppHandle) {
+        let rt = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let summary_md = rt.summary_markdown.lock().await.clone();
+            let (conv_id, base_url, token, body_snippet) = {
+                let snap = rt.snapshot.lock().await;
+                if snap.segments.len() < 2 && summary_md.trim().is_empty() {
+                    return;
+                }
+                let cid = snap.active_conversation_id.clone();
+                // 仅当标题仍是默认首句截断或未命名时才自动提炼，避免覆盖已提炼或用户手动重命名的标题
+                let default_first: String = snap
+                    .segments
+                    .first()
+                    .map(|s| {
+                        if !s.source_text.trim().is_empty() {
+                            s.source_text.trim()
+                        } else {
+                            s.translated_text.trim()
+                        }
+                    })
+                    .unwrap_or("")
+                    .chars()
+                    .take(24)
+                    .collect();
+                if let Some(meta) = snap.conversations.iter().find(|m| m.id == cid) {
+                    if meta.title != "未命名录音对话" && meta.title != default_first {
+                        return;
+                    }
+                }
+                let (addr, tok) = match snap.service_config.mt_source {
+                    EngineSource::Local => (
+                        snap.service_config.local_service_address.trim().to_string(),
+                        snap.service_config.local_access_token.clone(),
+                    ),
+                    EngineSource::Cloud => (
+                        snap.service_config.cloud_service_address.trim().to_string(),
+                        snap.service_config.cloud_access_token.clone(),
+                    ),
+                };
+                if addr.is_empty() {
+                    return;
+                }
+                let snippet = if !summary_md.trim().is_empty() {
+                    summary_md.chars().take(600).collect::<String>()
+                } else {
+                    snap.segments
+                        .iter()
+                        .take(10)
+                        .map(|s| {
+                            if !s.translated_text.trim().is_empty() {
+                                format!("{} ({})", s.translated_text.trim(), s.source_text.trim())
+                            } else {
+                                s.source_text.trim().to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                (cid, addr, tok, snippet)
+            };
+
+            let prompt = format!(
+                "请根据以下对话记录，提炼一个 10 到 18 个字的正式中文会议或对话标题（例如：数据中心项目技术澄清与报价对齐会议）。注意：只输出标题本身，不要带引号、书名号、标点符号或任何多余解释：\n\n{}",
+                body_snippet
+            );
+            let tok_opt = if token.trim().is_empty() {
+                None
+            } else {
+                Some(token.as_str())
+            };
+            if let Ok(raw) = rt
+                .cloud
+                .translate_stream(&base_url, &prompt, false, tok_opt, |_| {})
+                .await
+            {
+                let cleaned = audio::clean_translation_output(&raw);
+                let first_line = cleaned.lines().next().unwrap_or("").trim();
+                let stripped = first_line
+                    .trim_matches(|c: char| {
+                        c == '"'
+                            || c == '\''
+                            || c == '“'
+                            || c == '”'
+                            || c == '《'
+                            || c == '》'
+                            || c == '#'
+                            || c == '*'
+                            || c == '。'
+                            || c.is_whitespace()
+                    })
+                    .chars()
+                    .take(26)
+                    .collect::<String>();
+                if stripped.chars().count() >= 4 {
+                    if let Ok(metas) = history_store::rename_conversation(&app, &conv_id, &stripped)
+                    {
+                        rt.snapshot.lock().await.conversations = metas.clone();
+                        let _ = app.emit("history:updated", &metas);
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -208,6 +319,7 @@ async fn stop_recording_impl(
     }
     let _ = app.emit("session:mode", SessionMode::Idle);
     rt.save_history(app).await;
+    rt.spawn_auto_title(app.clone());
     Ok(SessionMode::Idle)
 }
 
@@ -288,6 +400,7 @@ async fn clear_recording(
 ) -> Result<(), String> {
     rt.save_history(&app).await;
     *rt.summary_markdown.lock().await = String::new();
+    rt.segment_wavs.lock().await.clear();
     let mut snap = rt.snapshot.lock().await;
     snap.active_conversation_id = format!("conv-{}", uuid::Uuid::new_v4());
     snap.segments.clear();
@@ -386,58 +499,152 @@ async fn clone_segment_speech(
     if trimmed.is_empty() {
         return Err("朗读文本为空".to_string());
     }
-    let (clone_url, clone_tok, audio_path, start_ms, end_ms, ref_text) = {
+    let (primary_url, primary_tok, fallback_url, fallback_tok, audio_path_opt, seg_info, same_ch_candidates) = {
         let snap = rt.snapshot.lock().await;
-        let (addr, tok) = match snap.service_config.clone_source {
-            EngineSource::Local => (
-                snap.service_config.local_service_address.trim().to_string(),
-                snap.service_config.local_access_token.clone(),
-            ),
-            EngineSource::Cloud => (
-                snap.service_config.cloud_service_address.trim().to_string(),
-                snap.service_config.cloud_access_token.clone(),
-            ),
+        let local_pair = (
+            snap.service_config.local_service_address.trim().to_string(),
+            snap.service_config.local_access_token.clone(),
+        );
+        let cloud_pair = (
+            snap.service_config.cloud_service_address.trim().to_string(),
+            snap.service_config.cloud_access_token.clone(),
+        );
+        // 若 clone_source 仍为默认 Local 但本机未就绪、而远端云端已配置，则优先路由到云端 Qwen3-TTS
+        let prefer_cloud = snap.service_config.clone_source == EngineSource::Cloud
+            || (!snap.local_status.ok && !cloud_pair.0.is_empty());
+        let ((p_url, p_tok), (f_url, f_tok)) = if prefer_cloud {
+            (cloud_pair, local_pair)
+        } else {
+            (local_pair, cloud_pair)
         };
-        if addr.is_empty() {
+        if p_url.is_empty() && f_url.is_empty() {
             return Err("未配置声音复刻服务地址".to_string());
         }
-        let wav_path = snap
-            .playback
-            .audio_path
-            .clone()
-            .ok_or_else(|| "当前没有可用于声音复刻的原始录音文件".to_string())?;
-        let seg = snap
+        let seg = snap.segments.iter().find(|s| s.id == id).cloned();
+        let target_ch = seg.as_ref().map(|s| s.channel);
+        let candidates: Vec<(String, String)> = snap
             .segments
             .iter()
-            .find(|s| s.id == id)
-            .ok_or_else(|| "未找到对应的字幕段落".to_string())?;
+            .rev()
+            .filter(|s| Some(s.channel) == target_ch && !s.source_text.trim().is_empty())
+            .take(8)
+            .map(|s| (s.id.clone(), s.source_text.clone()))
+            .collect();
         (
-            addr,
-            tok,
-            wav_path,
-            seg.start_ms,
-            seg.end_ms,
-            seg.source_text.clone(),
+            p_url,
+            p_tok,
+            f_url,
+            f_tok,
+            snap.playback.audio_path.clone(),
+            seg,
+            candidates,
         )
     };
 
-    let ref_wav = tokio::task::spawn_blocking(move || {
-        recorder::slice_wav_range_16k_mono(Path::new(&audio_path), start_ms, end_ms)
-    })
-    .await
-    .map_err(|e| format!("切片参考音频异常：{}", e))?
-    .ok_or_else(|| "参考音频时长不足（需至少 0.35 秒）".to_string())?;
+    // 1. 优先从内存 segment_wavs 取本句（或同声道最近一句 >= 0.6s）的纯净 16kHz 单声道 WAV
+    let mut ref_wav: Option<Vec<u8>> = None;
+    let mut ref_text = seg_info
+        .as_ref()
+        .map(|s| s.source_text.clone())
+        .unwrap_or_default();
+    {
+        let wav_map = rt.segment_wavs.lock().await;
+        if let Some(w) = wav_map.get(&id) {
+            if w.len() >= 19_200 {
+                ref_wav = Some(w.clone());
+            }
+        }
+        if ref_wav.is_none() {
+            for (cid, ctext) in &same_ch_candidates {
+                if let Some(w) = wav_map.get(cid) {
+                    if w.len() >= 19_200 {
+                        ref_wav = Some(w.clone());
+                        ref_text = ctext.clone();
+                        break;
+                    }
+                }
+            }
+        }
+        if ref_wav.is_none() {
+            if let Some(w) = wav_map.get(&id) {
+                if w.len() > 44 {
+                    ref_wav = Some(w.clone());
+                }
+            }
+        }
+    }
 
-    let tok_opt = if clone_tok.trim().is_empty() {
+    // 2. 若内存中未缓存（例如从历史记录加载的会话），则从磁盘 WAV 切片
+    if ref_wav.is_none() {
+        if let (Some(audio_path), Some(seg)) = (audio_path_opt, seg_info) {
+            let start_ms = seg.start_ms;
+            let end_ms = seg.end_ms;
+            let pref_ch = match seg.channel {
+                AudioChannel::System => Some(0usize),
+                AudioChannel::Mic => Some(1usize),
+                AudioChannel::File => None,
+            };
+            ref_wav = tokio::task::spawn_blocking(move || {
+                recorder::slice_wav_range_16k_mono(Path::new(&audio_path), start_ms, end_ms, pref_ch)
+                    .or_else(|| {
+                        recorder::slice_wav_range_16k_mono(Path::new(&audio_path), start_ms, end_ms, None)
+                    })
+            })
+            .await
+            .ok()
+            .flatten();
+        }
+    }
+
+    let p_tok_opt = if primary_tok.trim().is_empty() {
         None
     } else {
-        Some(clone_tok.as_str())
+        Some(primary_tok.as_str())
     };
-    let wav_bytes = rt
+    let primary_target = if !primary_url.is_empty() {
+        &primary_url
+    } else {
+        &fallback_url
+    };
+    let primary_token = if !primary_url.is_empty() {
+        p_tok_opt
+    } else if fallback_tok.trim().is_empty() {
+        None
+    } else {
+        Some(fallback_tok.as_str())
+    };
+
+    match rt
         .cloud
-        .clone_voice(&clone_url, &trimmed, &lang, Some(ref_wav), &ref_text, tok_opt)
-        .await?;
-    Ok(tauri::ipc::Response::new(wav_bytes))
+        .clone_voice(
+            primary_target,
+            &trimmed,
+            &lang,
+            ref_wav.clone(),
+            &ref_text,
+            primary_token,
+        )
+        .await
+    {
+        Ok(wav_bytes) => Ok(tauri::ipc::Response::new(wav_bytes)),
+        Err(first_err) => {
+            if !primary_url.is_empty() && !fallback_url.is_empty() && primary_url != fallback_url {
+                let f_tok_opt = if fallback_tok.trim().is_empty() {
+                    None
+                } else {
+                    Some(fallback_tok.as_str())
+                };
+                if let Ok(wav_bytes) = rt
+                    .cloud
+                    .clone_voice(&fallback_url, &trimmed, &lang, ref_wav, &ref_text, f_tok_opt)
+                    .await
+                {
+                    return Ok(tauri::ipc::Response::new(wav_bytes));
+                }
+            }
+            Err(first_err)
+        }
+    }
 }
 
 #[tauri::command]
@@ -1026,7 +1233,37 @@ async fn generate_summary(
     *rt.summary_markdown.lock().await = final_md.clone();
     let _ = app.emit("summary:delta", &final_md);
     rt.save_history(&app).await;
+    rt.inner().spawn_auto_title(app.clone());
     Ok(final_md)
+}
+
+#[tauri::command]
+async fn cancel_import_media(rt: State<'_, Arc<AppRuntime>>) -> Result<(), String> {
+    rt.import_cancel.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
+async fn export_recording_wav(
+    rt: State<'_, Arc<AppRuntime>>,
+    dest_path: String,
+) -> Result<String, String> {
+    let trimmed = dest_path.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("未指定导出文件路径".to_string());
+    }
+    let src_path = {
+        let snap = rt.snapshot.lock().await;
+        snap.playback
+            .audio_path
+            .clone()
+            .ok_or_else(|| "当前没有可导出的原始录音文件".to_string())?
+    };
+    tokio::task::spawn_blocking(move || std::fs::copy(&src_path, &trimmed))
+        .await
+        .map_err(|e| format!("导出音频任务异常：{}", e))?
+        .map_err(|e| format!("导出 WAV 文件失败：{}", e))?;
+    Ok(dest_path)
 }
 
 fn load_media_as_16k_wav(src_path: &Path) -> Result<(Vec<f32>, u64, Vec<f32>, Vec<u8>), String> {
@@ -1184,9 +1421,12 @@ async fn import_media_file(
     }
 
     let rt_bg = rt.inner().clone();
+    rt_bg.import_cancel.store(false, Ordering::Relaxed);
     let app_bg = app.clone();
     tauri::async_runtime::spawn(async move {
         let total = chunks.len();
+        let mut voice_clusterer = audio::VoiceprintClusterer::new();
+        let mut recent_ctx: Vec<(String, String)> = Vec::new();
         let languages_hdr = if lock_src {
             src_lang.clone()
         } else {
@@ -1204,6 +1444,17 @@ async fn import_media_file(
         };
 
         for (idx, (start_ms, end_ms, seg_samples)) in chunks.into_iter().enumerate() {
+            if rt_bg.import_cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let _ = app_bg.emit(
+                "import:progress",
+                serde_json::json!({
+                    "current": idx + 1,
+                    "total": total,
+                    "active": true
+                }),
+            );
             let _ = app_bg.emit(
                 "subtitle:partial",
                 serde_json::json!({
@@ -1211,6 +1462,7 @@ async fn import_media_file(
                     "translation": ""
                 }),
             );
+            let speaker_label = voice_clusterer.assign_speaker(&seg_samples, "发言人");
             let wav = recorder::encode_wav_16k_mono(&seg_samples);
             let (source_text, detected_lang) = match rt_bg
                 .cloud
@@ -1248,7 +1500,7 @@ async fn import_media_file(
                 start_ms,
                 end_ms,
                 channel: AudioChannel::File,
-                speaker_label: Some("文件".to_string()),
+                speaker_label: Some(speaker_label),
                 source_lang: actual_src.clone(),
                 target_lang: actual_dst.clone(),
                 source_text: source_text.clone(),
@@ -1263,8 +1515,13 @@ async fn import_media_file(
             }
             let _ = app_bg.emit("segment:upsert", &seg);
 
-            let prompt =
-                audio::build_translation_prompt(&source_text, &actual_src, &actual_dst, &glossary);
+            let prompt = audio::build_translation_prompt_with_context(
+                &source_text,
+                &actual_src,
+                &actual_dst,
+                &glossary,
+                &recent_ctx,
+            );
             match rt_bg
                 .cloud
                 .translate_stream(&mt_url, &prompt, false, mt_tok_opt, |_| {})
@@ -1278,6 +1535,10 @@ async fn import_media_file(
                         cleaned
                     };
                     seg.status = "final".to_string();
+                    recent_ctx.push((seg.source_text.clone(), seg.translated_text.clone()));
+                    if recent_ctx.len() > 2 {
+                        recent_ctx.remove(0);
+                    }
                 }
                 Err(err) => {
                     seg.translated_text = format!("（翻译失败：{}）", err);
@@ -1300,7 +1561,16 @@ async fn import_media_file(
             snap.live_partial_source.clear();
             snap.live_partial_translation.clear();
         }
+        let _ = app_bg.emit(
+            "import:progress",
+            serde_json::json!({
+                "current": total,
+                "total": total,
+                "active": false
+            }),
+        );
         rt_bg.save_history(&app_bg).await;
+        rt_bg.spawn_auto_title(app_bg.clone());
         let _ = app_bg.emit(
             "subtitle:partial",
             serde_json::json!({ "source": "", "translation": "" }),
@@ -1644,6 +1914,8 @@ pub fn run() {
             speak_text_sapi,
             generate_summary,
             import_media_file,
+            cancel_import_media,
+            export_recording_wav,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hear Desktop");

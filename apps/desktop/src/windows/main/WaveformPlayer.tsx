@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Headphones,
   Mic,
   Pause,
   Play,
@@ -10,6 +11,7 @@ import {
 } from "lucide-react";
 import { formatTimestamp } from "../../lib/export";
 import { useHearStore } from "../../stores/useHearStore";
+import type { AudioCaptureMode } from "../../types/hear";
 
 const SPEEDS = [0.75, 1.0, 1.25, 1.5, 2.0];
 
@@ -18,9 +20,11 @@ export function WaveformPlayer() {
     mode,
     audioLevel,
     captureMode,
+    audioSources,
     playback,
     seekNonce,
     seekTargetMs,
+    setCaptureMode,
     startRecording,
     pauseRecording,
     resumeRecording,
@@ -36,6 +40,9 @@ export function WaveformPlayer() {
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const sysGainRef = useRef<GainNode | null>(null);
+  const micGainRef = useRef<GainNode | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
   // 录音结束后（idle 且有音频文件）才从 Rust 后端加载 WAV 字节供回放；新录音录制中或暂停中不提供播放
@@ -81,18 +88,65 @@ export function WaveformPlayer() {
     }
   }, [seekNonce, seekTargetMs, audioUrl, playback.isPlaying]);
 
-  // 同步播放/暂停、倍速与音量
+  // 同步播放/暂停、倍速与分轨独立音量（左声道=系统内录/对方，右声道=麦克风/我）
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
     audio.playbackRate = playback.speed;
-    audio.volume = Math.max(0, Math.min(1, playback.systemVolume));
-  }, [playback.speed, playback.systemVolume, audioUrl]);
+    if (sysGainRef.current && micGainRef.current) {
+      audio.volume = 1.0;
+      sysGainRef.current.gain.value = Math.max(0, Math.min(1.5, playback.systemVolume));
+      micGainRef.current.gain.value =
+        captureMode === "dual_mix"
+          ? Math.max(0, Math.min(1.5, playback.micVolume))
+          : 0.0;
+    } else {
+      audio.volume = Math.max(0, Math.min(1, playback.systemVolume));
+    }
+  }, [playback.speed, playback.systemVolume, playback.micVolume, captureMode, audioUrl]);
+
+  const ensureWebAudioGraph = () => {
+    const audio = audioRef.current;
+    if (!audio || audioCtxRef.current) {
+      if (audioCtxRef.current?.state === "suspended") {
+        void audioCtxRef.current.resume();
+      }
+      return;
+    }
+    try {
+      const Ctx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const source = ctx.createMediaElementSource(audio);
+      const splitter = ctx.createChannelSplitter(2);
+      const sysGain = ctx.createGain();
+      const micGain = ctx.createGain();
+      sysGain.gain.value = Math.max(0, Math.min(1.5, playback.systemVolume));
+      micGain.gain.value =
+        captureMode === "dual_mix"
+          ? Math.max(0, Math.min(1.5, playback.micVolume))
+          : 0.0;
+      source.connect(splitter);
+      splitter.connect(sysGain, 0);
+      splitter.connect(micGain, 1);
+      sysGain.connect(ctx.destination);
+      micGain.connect(ctx.destination);
+      audioCtxRef.current = ctx;
+      sysGainRef.current = sysGain;
+      micGainRef.current = micGain;
+    } catch {
+      // Web Audio 不支持或已绑定时退回原生 audio.volume
+    }
+  };
 
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !audioUrl) return;
     if (playback.isPlaying) {
+      ensureWebAudioGraph();
       void audio.play().catch(() => {
         void setPlaybackPlaying(false);
       });
@@ -368,8 +422,8 @@ export function WaveformPlayer() {
         />
       </div>
 
-      {/* 右侧：仅在录音已结束且可回放时显示倍速与音量控制；录制/暂停期间不显示播放控件 */}
-      {canSeek && (
+      {/* 右侧：回放界面显示倍速与音量；录制界面右下角显示收音音源选择（带耳机/音源图标，非设置图标） */}
+      {canSeek ? (
         <div className="flex items-center gap-3 shrink-0">
           <button
             onClick={nextSpeed}
@@ -429,6 +483,26 @@ export function WaveformPlayer() {
               />
             </div>
           )}
+        </div>
+      ) : (
+        <div
+          className="flex items-center gap-1.5 rounded-lg bg-surface-800 border border-white/10 px-2.5 py-1.5 shrink-0"
+          title="选择实时录音的收音来源（双路混合 / 仅麦克风 / 仅系统内录）"
+        >
+          <Headphones className="w-3.5 h-3.5 text-brand-400 shrink-0" />
+          <select
+            value={captureMode}
+            onChange={(e) =>
+              void setCaptureMode(e.target.value as AudioCaptureMode)
+            }
+            className="bg-transparent text-xs text-slate-200 focus:outline-none max-w-[180px] cursor-pointer"
+          >
+            {audioSources.map((src) => (
+              <option key={src.id} value={src.kind} className="bg-surface-900">
+                {src.label}
+              </option>
+            ))}
+          </select>
         </div>
       )}
     </div>

@@ -110,7 +110,7 @@ const DEFAULT_PROBE: ServiceProbeResult = {
 
 const DEFAULT_TTS: TtsOutputSettings = {
   enabled: false,
-  useVoiceClone: false,
+  useVoiceClone: true,
   outputDeviceId: "default",
   duckOriginalAudio: true,
   duckRatio: 0.25,
@@ -146,6 +146,7 @@ interface HearStoreState extends AppSnapshot {
   sessionError: string | null;
   sessionNotice: string | null;
   speakingSegmentId: string | null;
+  preparingCloneSegmentId: string | null;
   seekNonce: number;
   seekTargetMs: number;
   searchQuery: string;
@@ -167,6 +168,7 @@ interface HearStoreState extends AppSnapshot {
   downloadingUpdate: boolean;
   updateDownloadProgress: { downloaded: number; total: number } | null;
   updateDownloadError: string | null;
+  importProgress: { current: number; total: number; active: boolean } | null;
 
   hydrate: () => Promise<void>;
   clearSessionError: () => void;
@@ -231,10 +233,12 @@ interface HearStoreState extends AppSnapshot {
   stopSpeakingSegment: () => void;
   generateSummary: () => Promise<void>;
   importMediaFile: () => Promise<void>;
+  cancelImportMedia: () => Promise<void>;
+  exportRecordingWav: () => Promise<void>;
 }
 
 export const useHearStore = create<HearStoreState>((set, get) => ({
-  appVersion: "0.1.10",
+  appVersion: "0.1.11",
   activeConversationId: "",
   conversations: [],
   mode: "idle" as SessionMode,
@@ -265,6 +269,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   sessionError: null,
   sessionNotice: null,
   speakingSegmentId: null,
+  preparingCloneSegmentId: null,
   seekNonce: 0,
   seekTargetMs: 0,
   searchQuery: "",
@@ -286,11 +291,21 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   downloadingUpdate: false,
   updateDownloadProgress: null,
   updateDownloadError: null,
+  importProgress: null,
 
   hydrate: async () => {
     const snap = await tauriInvoke<AppSnapshot>("get_snapshot");
     if (snap) {
-      set({ ...snap });
+      let tts = snap.ttsSettings;
+      if (
+        typeof window !== "undefined" &&
+        window.localStorage.getItem("hear_voice_clone_v11") !== "1"
+      ) {
+        window.localStorage.setItem("hear_voice_clone_v11", "1");
+        tts = { ...tts, useVoiceClone: true };
+        void tauriInvoke("set_tts_settings", { settings: tts });
+      }
+      set({ ...snap, ttsSettings: tts });
     }
     const sources = await tauriInvoke<AudioSourceOption[]>("list_audio_sources");
     if (sources && sources.length > 0) {
@@ -387,6 +402,14 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       await listen<ConversationMeta[]>("history:updated", (ev) => {
         set({ conversations: ev.payload });
       });
+      await listen<{ current: number; total: number; active: boolean }>(
+        "import:progress",
+        (ev) => {
+          set({
+            importProgress: ev.payload.active ? ev.payload : null,
+          });
+        }
+      );
       await listen("shortcut:copy_latest", () => {
         const segs = get().segments;
         const last = segs[segs.length - 1];
@@ -962,14 +985,18 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     }
     set({ speakingSegmentId: id });
 
-    // 若用户开启了 Qwen3-TTS 原声克隆且在桌面端，优先使用该句原音切片进行原声复刻朗读
-    if (isTauriRuntime() && get().ttsSettings.useVoiceClone && get().playback.hasAudio) {
+    // 若开启了 Qwen3-TTS 原声克隆且在桌面端，录制过程中或已录音会话均优先调用服务端 /v1/clone/reference + /v1/clone
+    if (isTauriRuntime() && get().ttsSettings.useVoiceClone) {
+      set({ preparingCloneSegmentId: id });
       try {
         const raw = await tauriInvoke<ArrayBuffer | Uint8Array>("clone_segment_speech", {
           id,
           text: trimmed,
           lang,
         });
+        if (get().speakingSegmentId === id) {
+          set({ preparingCloneSegmentId: null });
+        }
         if (raw && get().speakingSegmentId === id) {
           const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
           if (bytes.byteLength > 44) {
@@ -993,7 +1020,10 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
           }
         }
       } catch {
-        // 原声克隆不可用或参考音频过短时，平滑回退到系统语音合成
+        // 原声克隆不可用时，平滑回退到系统语音合成
+        if (get().preparingCloneSegmentId === id) {
+          set({ preparingCloneSegmentId: null });
+        }
       }
     }
 
@@ -1040,7 +1070,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
-    set({ speakingSegmentId: null });
+    set({ speakingSegmentId: null, preparingCloneSegmentId: null });
   },
 
   generateSummary: async () => {
@@ -1101,6 +1131,29 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         summaryMarkdown: "",
       });
       await tauriInvoke("import_media_file", { filePath: selected });
+    } catch (err) {
+      set({
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  cancelImportMedia: async () => {
+    await tauriInvoke("cancel_import_media");
+    set({ importProgress: null });
+  },
+
+  exportRecordingWav: async () => {
+    if (!isTauriRuntime() || !get().playback.hasAudio) return;
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const dest = await save({
+        title: "导出原始 WAV 录音文件",
+        defaultPath: "hear-recording.wav",
+        filters: [{ name: "WAV 音频文件", extensions: ["wav"] }],
+      });
+      if (!dest) return;
+      await tauriInvoke("export_recording_wav", { destPath: dest });
     } catch (err) {
       set({
         sessionError: err instanceof Error ? err.message : String(err),

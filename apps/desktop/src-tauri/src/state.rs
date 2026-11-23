@@ -189,7 +189,7 @@ impl Default for TtsOutputSettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            use_voice_clone: false,
+            use_voice_clone: true,
             output_device_id: "default".to_string(),
             duck_original_audio: true,
             duck_ratio: 0.25,

@@ -858,10 +858,9 @@ export function SettingsModal() {
                 <span>优先使用 Qwen3-TTS 声音克隆（不可用时自动退回系统语音）</span>
                 <input
                   type="checkbox"
-                  disabled={!ttsSettings.enabled}
                   checked={ttsSettings.useVoiceClone}
                   onChange={(e) => updateTtsSettings({ useVoiceClone: e.target.checked })}
-                  className="w-4 h-4 accent-brand-500 disabled:opacity-35"
+                  className="w-4 h-4 accent-brand-500"
                 />
               </label>
 

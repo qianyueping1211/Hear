@@ -94,20 +94,32 @@ struct HistoryView: View {
 struct HistoryRow: View {
     let meta: ConversationMeta
 
+    private var durationLabel: String? {
+        guard let secs = meta.durationSeconds, secs > 0 else { return nil }
+        let m = secs / 60
+        let s = secs % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 5) {
             HStack {
                 Text(meta.title).font(.headline).lineLimit(1)
                 Spacer()
                 statusBadge
             }
             if !meta.preview.isEmpty {
-                Text(meta.preview).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                Text(meta.preview).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
             }
-            Text("\(meta.langs) · \(meta.itemCount) 句 · \(meta.updatedAt.formatted(date: .abbreviated, time: .shortened))")
-                .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                if let dur = durationLabel {
+                    Label(dur, systemImage: "clock")
+                }
+                Text("\(meta.langs) · \(meta.itemCount) 句 · \(meta.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+            }
+            .font(.caption).foregroundStyle(.secondary)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
     }
 
     @ViewBuilder private var statusBadge: some View {

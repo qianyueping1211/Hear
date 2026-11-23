@@ -11,6 +11,7 @@ struct ConversationMeta: Codable, Identifiable, Equatable {
     var langs: String
     var summaryStatus: SummaryRecord.Status?
     var hasPendingWork: Bool? = nil
+    var durationSeconds: Int? = nil
 }
 
 /// 本地存储：
@@ -195,14 +196,38 @@ final class ConversationStore: ObservableObject {
     // MARK: 索引
 
     private static func meta(of c: Conversation) -> ConversationMeta {
-        let first = c.items.first.map { $0.sourceText } ?? ""
+        let summaryContent = (c.summaries[c.activeTemplateID]?.content
+            ?? c.summaries[SummaryTemplate.defaultID]?.content
+            ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let previewText: String
+        if !summaryContent.isEmpty {
+            let cleanLines = summaryContent
+                .components(separatedBy: .newlines)
+                .map { line in
+                    line.trimmingCharacters(in: .whitespaces)
+                        .replacingOccurrences(of: "#", with: "")
+                        .replacingOccurrences(of: "*", with: "")
+                        .trimmingCharacters(in: .whitespaces)
+                }
+                .filter { !$0.isEmpty }
+            previewText = String(cleanLines.joined(separator: " ").prefix(120))
+        } else {
+            let joined = c.items.prefix(3).map { item in
+                let tr = item.translated.trimmingCharacters(in: .whitespacesAndNewlines)
+                return tr.isEmpty ? item.sourceText : "\(item.sourceText) · \(tr)"
+            }.joined(separator: " ")
+            previewText = String(joined.prefix(120))
+        }
+        let elapsed = c.items.isEmpty ? 0 : max(0, Int(c.updatedAt.timeIntervalSince(c.createdAt)))
         return ConversationMeta(
             id: c.id, title: c.title, createdAt: c.createdAt, updatedAt: c.updatedAt,
-            itemCount: c.items.count, preview: String(first.prefix(60)),
+            itemCount: c.items.count, preview: previewText,
             langs: "\(c.langA.name) ⇄ \(c.langB.name)",
             summaryStatus: c.summaries[c.activeTemplateID]?.status
                 ?? c.summaries[SummaryTemplate.defaultID]?.status,
-            hasPendingWork: c.items.contains { !$0.done } || c.summaries.values.contains { $0.status == .generating }
+            hasPendingWork: c.items.contains { !$0.done } || c.summaries.values.contains { $0.status == .generating },
+            durationSeconds: elapsed > 0 ? elapsed : nil
         )
     }
 

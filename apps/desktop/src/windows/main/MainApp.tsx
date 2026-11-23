@@ -12,11 +12,13 @@ import {
   FileAudio,
   History,
   Info,
+  Loader2,
   Lock,
   Mic,
   PanelRight,
   PanelTop,
   Pencil,
+  Play,
   RefreshCw,
   Search,
   Settings,
@@ -37,7 +39,6 @@ import {
   parseSummaryTimestampMs,
 } from "../../lib/export";
 import { SUMMARY_TEMPLATES, useHearStore } from "../../stores/useHearStore";
-import type { AudioCaptureMode } from "../../types/hear";
 import { SettingsModal } from "./SettingsModal";
 import { WaveformPlayer } from "./WaveformPlayer";
 
@@ -51,6 +52,85 @@ const LANGUAGES = [
   { id: "es", label: "Español" },
 ];
 
+/**
+ * 与 iOS TranslationRevision.changes 保持完全一致的分词与 LCS 差异对比算法：
+ * 英文按单词切分，中日韩按单字切分，找出终稿译文中相比初版译文新增/修正的片段并以高亮色标注。
+ */
+function tokenizeForDiff(text: string): string[] {
+  const result: string[] = [];
+  let word = "";
+  for (const ch of text) {
+    const code = ch.codePointAt(0) ?? 0;
+    const isCjk =
+      (code >= 0x3000 && code <= 0x9fff) || (code >= 0x20000 && code <= 0x323af);
+    const isAlphaNum = /[\p{L}\p{N}]/u.test(ch);
+    if (isAlphaNum && !isCjk) {
+      word += ch;
+    } else {
+      if (word) {
+        result.push(word);
+        word = "";
+      }
+      result.push(ch);
+    }
+  }
+  if (word) result.push(word);
+  return result;
+}
+
+function computeTranslationDiff(
+  previous: string,
+  current: string
+): { text: string; changed: boolean }[] {
+  const prevTokens = tokenizeForDiff(previous);
+  const currTokens = tokenizeForDiff(current);
+  const m = prevTokens.length;
+  const n = currTokens.length;
+  if (m === 0 || n === 0 || m * n > 40_000) {
+    return [{ text: current, changed: false }];
+  }
+  const dp: Uint16Array[] = Array.from(
+    { length: m + 1 },
+    () => new Uint16Array(n + 1)
+  );
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (prevTokens[i] === currTokens[j]) {
+        dp[i][j] = dp[i + 1][j + 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+  }
+  const unchangedIdx = new Set<number>();
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (prevTokens[i] === currTokens[j]) {
+      unchangedIdx.add(j);
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  const out: { text: string; changed: boolean }[] = [];
+  for (let k = 0; k < n; k++) {
+    const tok = currTokens[k];
+    const isWhitespace = /^\s+$/.test(tok);
+    const changed = !unchangedIdx.has(k) && !isWhitespace;
+    const last = out[out.length - 1];
+    if (last && last.changed === changed) {
+      last.text += tok;
+    } else {
+      out.push({ text: tok, changed });
+    }
+  }
+  return out;
+}
+
 export function MainApp() {
   const {
     mode,
@@ -58,10 +138,10 @@ export function MainApp() {
     targetLang,
     lockSourceLang,
     captureMode,
-    audioSources,
     sessionError,
     sessionNotice,
     speakingSegmentId,
+    preparingCloneSegmentId,
     segments,
     livePartialSource,
     livePartialTranslation,
@@ -74,6 +154,7 @@ export function MainApp() {
     updateInfo,
     playback,
     ttsSettings,
+    activeConversationId,
     conversations,
     viewMode,
     searchQuery,
@@ -81,6 +162,7 @@ export function MainApp() {
     summaryTemplateId,
     summaryMarkdown,
     summaryGenerating,
+    importProgress,
     hydrate,
     clearSessionError,
     clearSessionNotice,
@@ -100,17 +182,17 @@ export function MainApp() {
     toggleSubtitleVisible,
     testServiceConnection,
     editSegmentSource,
-    editSegmentTranslation,
     editSegmentSpeaker,
     speakSegment,
     generateSummary,
     importMediaFile,
+    cancelImportMedia,
+    exportRecordingWav,
   } = useHearStore();
 
   const [autoFollow, setAutoFollow] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editSourceDraft, setEditSourceDraft] = useState("");
-  const [editTransDraft, setEditTransDraft] = useState("");
   const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
   const [speakerDraft, setSpeakerDraft] = useState("");
   const [speakerApplyAll, setSpeakerApplyAll] = useState(true);
@@ -270,45 +352,59 @@ export function MainApp() {
     });
   };
 
+  const currentConvTitle = useMemo(() => {
+    const found = (conversations ?? []).find((c) => c.id === activeConversationId);
+    if (found?.title) return found.title;
+    if (mode === "recording") return "正在实时录音…";
+    if (mode === "paused") return "录音已暂停";
+    return "当前录音对话";
+  }, [conversations, activeConversationId, mode]);
+
   return (
     <div className="h-screen w-screen flex flex-col bg-surface-950 text-slate-100">
-      {/* 顶部控制栏 */}
-      <header className="h-14 border-b border-white/10 bg-surface-900/90 px-4 flex items-center justify-between gap-3 shrink-0">
-        <div className="flex items-center gap-2.5 min-w-0">
-          {viewMode === "workspace" && (
+      {/* 顶部控制栏：加高留白、不重复写产品名称、不放双路混合与导入按钮；语种切换移至右侧云端服务之前 */}
+      <header className="h-16 border-b border-white/10 bg-surface-900/90 px-6 flex items-center justify-between gap-4 shrink-0">
+        <div className="flex items-center gap-3 min-w-0">
+          {viewMode === "workspace" ? (
+            <>
+              <button
+                type="button"
+                onClick={() => void backToHome()}
+                title="返回历史记录主页"
+                className="px-3 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs text-slate-200 flex items-center gap-1.5 shrink-0"
+              >
+                <ArrowLeft className="w-3.5 h-3.5 text-brand-400" />
+                <span>返回列表</span>
+              </button>
+              <span className="text-sm font-medium text-slate-200 truncate">
+                {currentConvTitle}
+              </span>
+            </>
+          ) : (
+            <span className="text-xs text-slate-400">
+              选择上方功能卡片开启实时翻译或导入转写，点击下方历史记录可回放原音与查看总结
+            </span>
+          )}
+        </div>
+
+        {/* 右侧：新版本提醒 + 语种切换（位于服务状态之前）+ 服务状态胶囊 + 悬浮字幕 + 总结 + 设置 */}
+        <div className="flex items-center gap-2 shrink-0">
+          {updateInfo?.hasUpdate && (
             <button
-              type="button"
-              onClick={() => void backToHome()}
-              title="返回历史记录主页"
-              className="px-2.5 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs text-slate-200 flex items-center gap-1.5 shrink-0"
+              onClick={() => setSettingsOpen(true, "system")}
+              title={`发现新版本 v${updateInfo.latestVersion}，点击查看更新说明并一键更新`}
+              className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30 text-xs flex items-center gap-1.5"
             >
-              <ArrowLeft className="w-3.5 h-3.5 text-brand-400" />
-              <span>返回列表</span>
+              <ArrowUpCircle className="w-3.5 h-3.5" />
+              <span>新版本 v{updateInfo.latestVersion}</span>
             </button>
           )}
 
-          <div className="font-semibold tracking-wide text-white flex items-center gap-2 shrink-0">
-            <span className="w-2.5 h-2.5 rounded-full bg-brand-500 inline-block" />
-            听见 Hear
-          </div>
-
-          <select
-            value={captureMode}
-            onChange={(e) => void setCaptureMode(e.target.value as AudioCaptureMode)}
-            className="rounded-lg bg-surface-800 border border-white/10 px-2.5 py-1.5 text-xs text-slate-100 max-w-[230px]"
-          >
-            {audioSources.map((src) => (
-              <option key={src.id} value={src.kind}>
-                {src.label}
-              </option>
-            ))}
-          </select>
-
-          <div className="flex items-center gap-1 rounded-lg bg-surface-800 border border-white/10 px-2 py-1 text-xs">
+          <div className="flex items-center gap-1 rounded-lg bg-surface-800 border border-white/10 px-2.5 py-1.5 text-xs">
             <select
               value={sourceLang}
               onChange={(e) => void setLanguagePair(e.target.value, targetLang, lockSourceLang)}
-              className="bg-transparent text-slate-100 focus:outline-none"
+              className="bg-transparent text-slate-100 focus:outline-none cursor-pointer"
             >
               {LANGUAGES.map((l) => (
                 <option key={l.id} value={l.id} className="bg-surface-900">
@@ -320,7 +416,7 @@ export function MainApp() {
             <select
               value={targetLang}
               onChange={(e) => void setLanguagePair(sourceLang, e.target.value, lockSourceLang)}
-              className="bg-transparent text-slate-100 focus:outline-none"
+              className="bg-transparent text-slate-100 focus:outline-none cursor-pointer"
             >
               {LANGUAGES.map((l) => (
                 <option key={l.id} value={l.id} className="bg-surface-900">
@@ -338,32 +434,6 @@ export function MainApp() {
               {lockSourceLang ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
             </button>
           </div>
-
-          {viewMode === "workspace" && (
-            <button
-              disabled={mode === "batch_processing"}
-              onClick={() => void importMediaFile()}
-              title="选择本地 WAV/MP3/MP4 等音视频文件，批量生成双语字幕与时间轴"
-              className="px-2.5 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 disabled:opacity-50 text-xs text-slate-200 flex items-center gap-1.5"
-            >
-              <FileAudio className="w-3.5 h-3.5 text-sky-400" />
-              {mode === "batch_processing" ? "批量转写中…" : "导入音视频"}
-            </button>
-          )}
-        </div>
-
-        {/* 右侧：新版本提醒 + 服务状态胶囊 + 悬浮字幕 + 总结 + 设置 */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          {updateInfo?.hasUpdate && (
-            <button
-              onClick={() => setSettingsOpen(true, "system")}
-              title={`发现新版本 v${updateInfo.latestVersion}，点击查看更新说明并一键更新`}
-              className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30 text-xs flex items-center gap-1.5"
-            >
-              <ArrowUpCircle className="w-3.5 h-3.5" />
-              <span>新版本 v{updateInfo.latestVersion}</span>
-            </button>
-          )}
 
           <div
             onClick={() => setSettingsOpen(true, "server")}
@@ -734,6 +804,14 @@ export function MainApp() {
 
             <div className="flex items-center gap-1.5 text-xs">
               <button
+                disabled={!playback.hasAudio}
+                onClick={() => void exportRecordingWav()}
+                title="导出当前会话的原始 WAV 录音文件"
+                className="px-2.5 py-1 rounded-md bg-surface-900 border border-white/10 text-slate-300 hover:text-white disabled:opacity-35 flex items-center gap-1"
+              >
+                <FileAudio className="w-3.5 h-3.5 text-emerald-400" /> 导出 WAV
+              </button>
+              <button
                 disabled={segments.length === 0}
                 onClick={() => downloadBlob("hear-subtitles.srt", buildSrt(segments, true))}
                 className="px-2.5 py-1 rounded-md bg-surface-900 border border-white/10 text-slate-300 hover:text-white disabled:opacity-35 flex items-center gap-1"
@@ -759,6 +837,46 @@ export function MainApp() {
               </button>
             </div>
           </div>
+
+          {importProgress && importProgress.active && (
+            <div className="mx-5 mt-3 rounded-xl bg-sky-500/15 border border-sky-400/40 px-4 py-2.5 flex items-center justify-between gap-4 text-xs text-sky-100">
+              <div className="flex-1 min-w-0 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span>
+                    正在批量识别与翻译导入文件（{importProgress.current} /{" "}
+                    {importProgress.total} 句）…
+                  </span>
+                  <span className="font-mono text-sky-300">
+                    {Math.round(
+                      (importProgress.current / Math.max(1, importProgress.total)) * 100
+                    )}
+                    %
+                  </span>
+                </div>
+                <div className="h-1.5 w-full rounded-full bg-surface-950 overflow-hidden">
+                  <div
+                    className="h-full bg-sky-400 transition-all duration-200"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        Math.round(
+                          (importProgress.current / Math.max(1, importProgress.total)) *
+                            100
+                        )
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void cancelImportMedia()}
+                className="px-2.5 py-1 rounded-md bg-rose-500/25 hover:bg-rose-500/40 border border-rose-400/30 text-rose-200 shrink-0"
+              >
+                中途取消
+              </button>
+            </div>
+          )}
 
           {sessionNotice && (
             <div className="mx-5 mt-3 rounded-xl bg-amber-500/15 border border-amber-400/40 px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs text-amber-100">
@@ -851,8 +969,16 @@ export function MainApp() {
                   const isEditing = editingId === seg.id;
                   const isEditingSpeaker = editingSpeakerId === seg.id;
                   const isSpeaking = speakingSegmentId === seg.id;
+                  const isPreparingClone = preparingCloneSegmentId === seg.id;
+                  const isRecordingMode = mode === "recording" || mode === "paused";
                   const speakerText =
                     seg.speakerLabel ?? (seg.channel === "mic" ? "我" : "对方");
+                  const diffParts =
+                    seg.baselineTranslated &&
+                    seg.baselineTranslated !== seg.translatedText &&
+                    seg.translatedText !== "翻译中…"
+                      ? computeTranslationDiff(seg.baselineTranslated, seg.translatedText)
+                      : null;
 
                   return (
                     <div
@@ -861,18 +987,20 @@ export function MainApp() {
                         itemRefs.current[seg.id] = el;
                       }}
                       onClick={() => {
-                        if (
-                          !isEditing &&
-                          !isEditingSpeaker &&
-                          mode === "idle" &&
-                          playback.hasAudio
-                        ) {
+                        if (isEditing || isEditingSpeaker) return;
+                        if (isRecordingMode) {
+                          // 录制过程中：点击卡片播放译文（Qwen3-TTS 原声克隆）
+                          void speakSegment(
+                            seg.id,
+                            seg.translatedText || seg.sourceText,
+                            seg.targetLang
+                          );
+                        } else if (playback.hasAudio) {
+                          // 结束录制或查看历史记录时：点击卡片播放该句原始录音（原文原音）
                           void seekPlayback(seg.startMs, true);
                         }
                       }}
-                      className={`group rounded-xl border p-3.5 transition ${
-                        mode === "idle" && playback.hasAudio ? "cursor-pointer" : ""
-                      } ${
+                      className={`group rounded-xl border p-3.5 transition cursor-pointer ${
                         isActive
                           ? "bg-brand-500/15 border-brand-400/50 shadow-sm"
                           : "bg-surface-900/75 border-white/5 hover:border-white/15 hover:bg-surface-800/70"
@@ -910,75 +1038,83 @@ export function MainApp() {
                             <span>{speakerText}</span>
                           </button>
 
-                          {seg.isEdited && (
-                            <span
-                              title={
-                                seg.baselineTranslated
-                                  ? `原译文：${seg.baselineTranslated}`
-                                  : "已手动校对修改"
-                              }
-                              className="px-1.5 py-0.5 rounded bg-brand-500/15 text-brand-300 flex items-center gap-1"
-                            >
-                              <Wand2 className="w-3 h-3" />
-                              已校对
-                            </span>
-                          )}
-
                           {seg.status === "correcting" && (
                             <span className="text-amber-300 animate-pulse">
-                              正在重新翻译…
+                              正在修正译文…
                             </span>
                           )}
                         </div>
 
-                        {/* 常驻操作栏：朗读译文 + 修改原文/译文 + 复制（对标 iOS 直观可见） */}
+                        {/* 常驻操作栏：录制中播放译文（Qwen3 克隆）/ 结束或历史记录播放原音 + 修改原文 + 复制 */}
                         <div
                           className="flex items-center gap-1"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void speakSegment(
-                                seg.id,
-                                seg.translatedText || seg.sourceText,
-                                seg.targetLang
-                              )
-                            }
-                            title={
-                              isSpeaking
-                                ? "停止朗读译文"
-                                : ttsSettings.useVoiceClone && playback.hasAudio
-                                  ? "使用原声克隆朗读本句译文"
-                                  : "朗读本句译文"
-                            }
-                            className={`px-2 py-1 rounded flex items-center gap-1 transition ${
-                              isSpeaking
-                                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/40"
-                                : "hover:bg-white/10 text-slate-300 hover:text-white"
-                            }`}
-                          >
-                            {isSpeaking ? (
-                              <>
-                                <Square className="w-3 h-3 fill-current" />
-                                <span>朗读中</span>
-                              </>
-                            ) : (
-                              <>
-                                <Volume2 className="w-3.5 h-3.5" />
-                                <span>朗读</span>
-                              </>
-                            )}
-                          </button>
+                          {isRecordingMode ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void speakSegment(
+                                  seg.id,
+                                  seg.translatedText || seg.sourceText,
+                                  seg.targetLang
+                                )
+                              }
+                              title={
+                                isSpeaking
+                                  ? "停止播放译文"
+                                  : ttsSettings.useVoiceClone
+                                  ? "使用 Qwen3-TTS 原声克隆播放本句译文"
+                                  : "播放本句译文"
+                              }
+                              className={`px-2 py-1 rounded flex items-center gap-1 transition ${
+                                isSpeaking
+                                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/40"
+                                  : "hover:bg-white/10 text-slate-300 hover:text-white"
+                              }`}
+                            >
+                              {isPreparingClone ? (
+                                <>
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-400" />
+                                  <span>克隆中…</span>
+                                </>
+                              ) : isSpeaking ? (
+                                <>
+                                  <Square className="w-3 h-3 fill-current" />
+                                  <span>播放中</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Volume2 className="w-3.5 h-3.5" />
+                                  <span>播放译文</span>
+                                </>
+                              )}
+                            </button>
+                          ) : (
+                            playback.hasAudio && (
+                              <button
+                                type="button"
+                                onClick={() => void seekPlayback(seg.startMs, true)}
+                                title="从该句起始位置播放原始录音（原文原音）"
+                                className={`px-2 py-1 rounded flex items-center gap-1 transition ${
+                                  isActive && playback.isPlaying
+                                    ? "bg-brand-500/25 text-brand-300"
+                                    : "hover:bg-white/10 text-slate-300 hover:text-white"
+                                }`}
+                              >
+                                <Play className="w-3.5 h-3.5" />
+                                <span>播放原音</span>
+                              </button>
+                            )
+                          )}
 
                           <button
                             type="button"
                             onClick={() => {
                               setEditingId(isEditing ? null : seg.id);
                               setEditSourceDraft(seg.sourceText);
-                              setEditTransDraft(seg.translatedText);
                             }}
-                            title="修改原文重译，或直接修改译文"
+                            title="修改识别原文并重新翻译（对标 iOS 修改原文）"
                             className={`px-2 py-1 rounded flex items-center gap-1 transition ${
                               isEditing
                                 ? "bg-brand-500/25 text-brand-300"
@@ -986,7 +1122,7 @@ export function MainApp() {
                             }`}
                           >
                             <Pencil className="w-3.5 h-3.5" />
-                            <span>修改</span>
+                            <span>修改原文</span>
                           </button>
 
                           <button
@@ -1070,15 +1206,15 @@ export function MainApp() {
                         </div>
                       )}
 
-                      {/* 原文 + 译文双框编辑面板（对标 iOS：可改原文重译，也可直接改译文） */}
+                      {/* 修改原文面板（对标 iOS SourceEditor：只校对原文，下方只读展示最新译文对照，点保存并重译） */}
                       {isEditing ? (
                         <div
                           className="mt-2 rounded-lg bg-surface-950/90 border border-brand-500/50 p-3 space-y-2.5"
                           onClick={(e) => e.stopPropagation()}
                         >
                           <div className="space-y-1">
-                            <label className="text-[11px] text-slate-400">
-                              修改识别原文（点「保存原文并重译」将保留旧译文对照并自动重新翻译）
+                            <label className="text-[11px] text-slate-300 font-medium">
+                              修改原文
                             </label>
                             <input
                               value={editSourceDraft}
@@ -1086,28 +1222,23 @@ export function MainApp() {
                               className="w-full rounded bg-surface-900 border border-white/15 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-brand-500"
                             />
                           </div>
-                          <div className="space-y-1">
-                            <label className="text-[11px] text-slate-400">
-                              或直接修改译文（无需等待模型，立即保存人工校对译文）
-                            </label>
-                            <input
-                              value={editTransDraft}
-                              onChange={(e) => setEditTransDraft(e.target.value)}
-                              className="w-full rounded bg-surface-900 border border-white/15 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
-                            />
-                          </div>
+                          {seg.translatedText && (
+                            <div className="space-y-1">
+                              <label className="text-[11px] text-slate-400">
+                                最新译文（保存原文后将自动重新翻译并以高亮色标出修正处）
+                              </label>
+                              <div className="w-full rounded bg-surface-900/60 border border-white/5 px-2.5 py-1.5 text-xs text-slate-400">
+                                {seg.translatedText}
+                              </div>
+                            </div>
+                          )}
                           <div className="flex items-center justify-end gap-2 pt-0.5">
                             <button
                               type="button"
-                              onClick={() => {
-                                if (editSourceDraft.trim()) {
-                                  void editSegmentSource(seg.id, editSourceDraft.trim());
-                                }
-                                setEditingId(null);
-                              }}
-                              className="px-3 py-1.5 rounded bg-brand-500 hover:bg-brand-600 text-white text-xs font-medium flex items-center gap-1"
+                              onClick={() => setEditingId(null)}
+                              className="px-3 py-1.5 rounded bg-surface-800 text-slate-300 text-xs"
                             >
-                              <RefreshCw className="w-3 h-3" /> 保存原文并重译
+                              取消
                             </button>
                             <button
                               type="button"
@@ -1118,41 +1249,47 @@ export function MainApp() {
                                 ) {
                                   void editSegmentSource(seg.id, editSourceDraft.trim());
                                 }
-                                if (editTransDraft.trim()) {
-                                  void editSegmentTranslation(
-                                    seg.id,
-                                    editTransDraft.trim()
-                                  );
-                                }
                                 setEditingId(null);
                               }}
-                              className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium flex items-center gap-1"
+                              className="px-3 py-1.5 rounded bg-brand-500 hover:bg-brand-600 text-white text-xs font-medium flex items-center gap-1"
                             >
-                              <Check className="w-3 h-3" /> 直接保存译文
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => setEditingId(null)}
-                              className="px-2.5 py-1.5 rounded bg-surface-800 text-slate-300 text-xs"
-                            >
-                              取消
+                              <RefreshCw className="w-3 h-3" /> 保存并重译
                             </button>
                           </div>
                         </div>
                       ) : (
                         <>
+                          {/* 原文：若经过 Whisper 二次校对或手动校对原文，在原文末尾显示魔法棒图标（对标 iOS BubbleView） */}
                           <div className="text-xs text-slate-300 leading-relaxed">
-                            {seg.sourceText}
-                          </div>
-                          <div className="text-sm font-medium text-white mt-1 leading-relaxed">
-                            {seg.translatedText}
-                          </div>
-                          {seg.baselineTranslated &&
-                            seg.baselineTranslated !== seg.translatedText && (
-                              <div className="text-[11px] text-slate-500 mt-1">
-                                校对前原译：{seg.baselineTranslated}
-                              </div>
+                            <span>{seg.sourceText}</span>
+                            {seg.isEdited && (
+                              <span
+                                title="原文已通过高精度模型或人工校对"
+                                className="inline-flex items-center ml-1.5 text-brand-400 align-middle"
+                              >
+                                <Wand2 className="w-3.5 h-3.5" />
+                              </span>
                             )}
+                          </div>
+
+                          {/* 译文：若存在边说边译初稿或校对前基线译文，对修正后的词句使用高亮色区分（对标 iOS TranslationRevision） */}
+                          <div className="text-sm font-medium text-white mt-1 leading-relaxed">
+                            {diffParts
+                              ? diffParts.map((part, pIdx) =>
+                                  part.changed ? (
+                                    <span
+                                      key={pIdx}
+                                      className="text-amber-300 font-semibold"
+                                      title={`修正前：${seg.baselineTranslated}`}
+                                    >
+                                      {part.text}
+                                    </span>
+                                  ) : (
+                                    <span key={pIdx}>{part.text}</span>
+                                  )
+                                )
+                              : seg.translatedText}
+                          </div>
                         </>
                       )}
                     </div>

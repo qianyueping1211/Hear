@@ -39,6 +39,17 @@ pub fn lang_en_name(code: &str) -> &'static str {
 
 /// 构造与 Hy-MT2 官方推荐一致的翻译提示词（附带匹配的自定义术语表）
 pub fn build_translation_prompt(text: &str, src: &str, dst: &str, glossary_raw: &str) -> String {
+    build_translation_prompt_with_context(text, src, dst, glossary_raw, &[])
+}
+
+/// 构造带前文滑动窗口上下文（最多前 2 句）与自定义术语表的翻译提示词，提升指代消解与断句连贯度
+pub fn build_translation_prompt_with_context(
+    text: &str,
+    src: &str,
+    dst: &str,
+    glossary_raw: &str,
+    recent_context: &[(String, String)],
+) -> String {
     let lower_text = text.to_lowercase();
     let mut matched_terms: Vec<(String, String)> = Vec::new();
     for line in glossary_raw.lines() {
@@ -57,37 +68,161 @@ pub fn build_translation_prompt(text: &str, src: &str, dst: &str, glossary_raw: 
     }
 
     if src == "zh" || dst == "zh" {
-        let hints = if matched_terms.is_empty() {
-            String::new()
-        } else {
+        let mut prefix = String::new();
+        if !matched_terms.is_empty() {
             let rows: Vec<String> = matched_terms
                 .iter()
                 .map(|(a, b)| format!("{} 翻译成 {}", a, b))
                 .collect();
-            format!("参考下面的翻译：\n{}\n\n", rows.join("\n"))
-        };
+            prefix.push_str(&format!("参考下面的翻译：\n{}\n\n", rows.join("\n")));
+        }
+        if !recent_context.is_empty() {
+            let ctx_rows: Vec<String> = recent_context
+                .iter()
+                .rev()
+                .take(2)
+                .rev()
+                .map(|(s, t)| format!("- 原文：{}\n  译文：{}", s.trim(), t.trim()))
+                .collect();
+            prefix.push_str(&format!(
+                "前文语境参考（仅供理解上下文与指代，严禁重复输出前文）：\n{}\n\n",
+                ctx_rows.join("\n")
+            ));
+        }
         format!(
             "{}将以下文本翻译为{}，注意只需要输出翻译后的结果，不要额外解释：\n\n{}",
-            hints,
+            prefix,
             lang_zh_name(dst),
             text
         )
     } else {
-        let hints = if matched_terms.is_empty() {
-            String::new()
-        } else {
+        let mut prefix = String::new();
+        if !matched_terms.is_empty() {
             let rows: Vec<String> = matched_terms
                 .iter()
                 .map(|(a, b)| format!("{} translates to {}", a, b))
                 .collect();
-            format!("Refer to the following translations:\n{}\n\n", rows.join("\n"))
-        };
+            prefix.push_str(&format!(
+                "Refer to the following translations:\n{}\n\n",
+                rows.join("\n")
+            ));
+        }
+        if !recent_context.is_empty() {
+            let ctx_rows: Vec<String> = recent_context
+                .iter()
+                .rev()
+                .take(2)
+                .rev()
+                .map(|(s, t)| format!("- Source: {}\n  Translation: {}", s.trim(), t.trim()))
+                .collect();
+            prefix.push_str(&format!(
+                "Preceding context (for reference only, do not repeat):\n{}\n\n",
+                ctx_rows.join("\n")
+            ));
+        }
         format!(
             "{}Translate the following segment into {}, without additional explanation.\n\n{}",
-            hints,
+            prefix,
             lang_en_name(dst),
             text
         )
+    }
+}
+
+/// 轻量级实时声纹特征聚类器（基于过零率 ZCR、一阶差分频谱质心与低频共振能量比，自动区分多位远端发言人）
+pub struct VoiceprintClusterer {
+    centroids: Vec<([f32; 3], usize)>,
+}
+
+impl VoiceprintClusterer {
+    pub fn new() -> Self {
+        Self {
+            centroids: Vec::new(),
+        }
+    }
+
+    pub fn extract_features(samples: &[f32]) -> Option<[f32; 3]> {
+        if samples.len() < 3200 {
+            return None;
+        }
+        let mut zcr_sum = 0.0f32;
+        let mut diff_sum = 0.0f32;
+        let mut low_sum = 0.0f32;
+        let mut voiced_frames = 0usize;
+
+        for frame in samples.chunks(320) {
+            if frame.len() < 320 {
+                break;
+            }
+            let energy: f32 = frame.iter().map(|&x| x * x).sum::<f32>() / 320.0;
+            if energy < 0.00018 {
+                continue;
+            }
+            let mut zc = 0usize;
+            let mut diff_e = 0.0f32;
+            let mut lp = frame[0];
+            let mut low_e = 0.0f32;
+            for i in 1..frame.len() {
+                if (frame[i] >= 0.0) != (frame[i - 1] >= 0.0) {
+                    zc += 1;
+                }
+                let d = frame[i] - frame[i - 1];
+                diff_e += d * d;
+                lp = 0.86 * lp + 0.14 * frame[i];
+                low_e += lp * lp;
+            }
+            let total_e = (energy * 320.0).max(1e-6);
+            zcr_sum += (zc as f32) / 320.0;
+            diff_sum += (diff_e / total_e).sqrt().clamp(0.0, 2.0) * 0.5;
+            low_sum += (low_e / total_e).sqrt().clamp(0.0, 1.5);
+            voiced_frames += 1;
+        }
+
+        if voiced_frames < 3 {
+            return None;
+        }
+        let inv = 1.0 / (voiced_frames as f32);
+        Some([zcr_sum * inv, diff_sum * inv, low_sum * inv])
+    }
+
+    pub fn assign_speaker(&mut self, samples: &[f32], prefix: &str) -> String {
+        let Some(feat) = Self::extract_features(samples) else {
+            return prefix.to_string();
+        };
+        if self.centroids.is_empty() {
+            self.centroids.push((feat, 1));
+            return prefix.to_string();
+        }
+        let mut best_idx = 0usize;
+        let mut best_dist = f32::MAX;
+        for (i, (c, _)) in self.centroids.iter().enumerate() {
+            let d0 = (feat[0] - c[0]) * 2.4;
+            let d1 = (feat[1] - c[1]) * 1.8;
+            let d2 = (feat[2] - c[2]) * 1.6;
+            let dist = (d0 * d0 + d1 * d1 + d2 * d2).sqrt();
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = i;
+            }
+        }
+        let idx = if best_dist > 0.24 && self.centroids.len() < 4 {
+            self.centroids.push((feat, 1));
+            self.centroids.len() - 1
+        } else {
+            let (ref mut c, ref mut count) = self.centroids[best_idx];
+            let n = (*count as f32).min(12.0);
+            for k in 0..3 {
+                c[k] = (c[k] * n + feat[k]) / (n + 1.0);
+            }
+            *count += 1;
+            best_idx
+        };
+
+        if idx == 0 {
+            prefix.to_string()
+        } else {
+            format!("{} {}", prefix, idx + 1)
+        }
     }
 }
 
@@ -539,13 +674,15 @@ mod win_wasapi {
             let q1 = &mut rest[0].rec_queue;
             let rem = q0.len().max(q1.len());
             if rem > 0 {
-                let mut mixed = Vec::with_capacity(rem);
+                // 双声道分轨交织写入：左声道(L)=系统内录(对方)，右声道(R)=麦克风(我)
+                let mut stereo = Vec::with_capacity(rem * 2);
                 for _ in 0..rem {
                     let a = q0.pop_front().unwrap_or(0.0);
                     let b = q1.pop_front().unwrap_or(0.0);
-                    mixed.push((a + b).clamp(-1.0, 1.0));
+                    stereo.push(a.clamp(-1.0, 1.0));
+                    stereo.push(b.clamp(-1.0, 1.0));
                 }
-                let _ = rec.write_f32(&mixed);
+                let _ = rec.write_f32(&stereo);
             }
         }
     }
@@ -623,7 +760,9 @@ mod win_wasapi {
             let rec_path = std::env::temp_dir()
                 .join("Hear-Recordings")
                 .join(format!("rec-{}.wav", uuid::Uuid::new_v4()));
-            let mut recorder = StreamingWavRecorder::create(&rec_path, VAD_SAMPLE_RATE, 1).ok();
+            let rec_channels = if lanes.len() >= 2 { 2 } else { 1 };
+            let mut recorder =
+                StreamingWavRecorder::create(&rec_path, VAD_SAMPLE_RATE, rec_channels).ok();
 
             let _ = ready_tx.send(Ok(()));
 
@@ -692,7 +831,7 @@ mod win_wasapi {
                     }
                 }
 
-                // 将单路或双路（系统声 + 麦克风）真实混合写入 WAV 录音文件，确保回放与波形永远有声
+                // 单路写入 1 声道 WAV；双路混合写入 2 声道立体声分轨 WAV（左声道=系统声/对方，右声道=麦克风/我）
                 if let Some(ref mut rec) = recorder {
                     if lanes.len() == 1 {
                         if !lanes[0].rec_queue.is_empty() {
@@ -705,24 +844,33 @@ mod win_wasapi {
                         let q1 = &mut rest[0].rec_queue;
                         let common = q0.len().min(q1.len());
                         if common > 0 {
-                            let mut mixed = Vec::with_capacity(common);
+                            let mut stereo = Vec::with_capacity(common * 2);
                             for _ in 0..common {
                                 let a = q0.pop_front().unwrap_or(0.0);
                                 let b = q1.pop_front().unwrap_or(0.0);
-                                mixed.push((a + b).clamp(-1.0, 1.0));
+                                stereo.push(a.clamp(-1.0, 1.0));
+                                stereo.push(b.clamp(-1.0, 1.0));
                             }
-                            let _ = rec.write_f32(&mixed);
+                            let _ = rec.write_f32(&stereo);
                         }
-                        // 若其中一路暂停吐包（例如系统扬声器未播放任何声音），防止另一路积压超过 250ms
+                        // 若其中一路暂停吐包（例如系统扬声器未播放任何声音），补零交织对齐另一路，防止积压超过 250ms
                         let max_lead = (VAD_SAMPLE_RATE as usize) / 4;
                         if q0.len() > max_lead {
                             let extra = q0.len() - max_lead;
-                            let buf: Vec<f32> = q0.drain(..extra).collect();
-                            let _ = rec.write_f32(&buf);
+                            let mut stereo = Vec::with_capacity(extra * 2);
+                            for s in q0.drain(..extra) {
+                                stereo.push(s.clamp(-1.0, 1.0));
+                                stereo.push(0.0);
+                            }
+                            let _ = rec.write_f32(&stereo);
                         } else if q1.len() > max_lead {
                             let extra = q1.len() - max_lead;
-                            let buf: Vec<f32> = q1.drain(..extra).collect();
-                            let _ = rec.write_f32(&buf);
+                            let mut stereo = Vec::with_capacity(extra * 2);
+                            for s in q1.drain(..extra) {
+                                stereo.push(0.0);
+                                stereo.push(s.clamp(-1.0, 1.0));
+                            }
+                            let _ = rec.write_f32(&stereo);
                         }
                     }
 
@@ -1065,6 +1213,7 @@ impl LiveCaptureHandle {
         // 启动异步推理消费协程：VAD 片段 -> /v1/asr -> 流式/JSON /v1/translate -> 实时推送主窗与悬浮字幕
         let worker_task = tauri::async_runtime::spawn(async move {
             let mut last_preview_at: Option<Instant> = None;
+            let mut voice_clusterer = VoiceprintClusterer::new();
 
             while let Some(item) = seg_rx.recv().await {
                 let (
@@ -1136,7 +1285,7 @@ impl LiveCaptureHandle {
                         }
                         last_preview_at = Some(Instant::now());
                         let wav = encode_wav_16k_mono(&samples);
-                        if let Ok((text, _)) = rt
+                        if let Ok((text, detected_lang)) = rt
                             .cloud
                             .transcribe_wav(
                                 &asr_url,
@@ -1148,18 +1297,74 @@ impl LiveCaptureHandle {
                             )
                             .await
                         {
-                            if !text.is_empty() {
+                            let clean_src = text.trim().to_string();
+                            if !clean_src.is_empty() {
                                 {
                                     let mut snap = rt.snapshot.lock().await;
-                                    snap.live_partial_source = text.clone();
+                                    snap.live_partial_source = clean_src.clone();
                                 }
                                 let _ = app.emit(
                                     "subtitle:partial",
                                     serde_json::json!({
-                                        "source": text,
-                                        "translation": "正在识别…"
+                                        "source": clean_src,
+                                        "translation": "正在翻译…"
                                     }),
                                 );
+                                // 边说边译：说话过程中实时调用预览翻译，流式更新译文预览
+                                let (p_src, p_dst) =
+                                    if !lock_src && detected_lang == dst_lang && dst_lang != src_lang {
+                                        (dst_lang.clone(), src_lang.clone())
+                                    } else {
+                                        (
+                                            if detected_lang.is_empty() {
+                                                src_lang.clone()
+                                            } else {
+                                                detected_lang
+                                            },
+                                            dst_lang.clone(),
+                                        )
+                                    };
+                                let p_prompt =
+                                    build_translation_prompt(&clean_src, &p_src, &p_dst, &glossary);
+                                let app_p = app.clone();
+                                let src_p = clean_src.clone();
+                                if let Ok(raw_p) = rt
+                                    .cloud
+                                    .translate_stream(
+                                        &mt_url,
+                                        &p_prompt,
+                                        true,
+                                        mt_token_opt,
+                                        |delta_p| {
+                                            let c = clean_translation_output(delta_p);
+                                            if !c.is_empty() {
+                                                let _ = app_p.emit(
+                                                    "subtitle:partial",
+                                                    serde_json::json!({
+                                                        "source": src_p,
+                                                        "translation": c
+                                                    }),
+                                                );
+                                            }
+                                        },
+                                    )
+                                    .await
+                                {
+                                    let final_p = clean_translation_output(&raw_p);
+                                    if !final_p.is_empty() {
+                                        {
+                                            let mut snap = rt.snapshot.lock().await;
+                                            snap.live_partial_translation = final_p.clone();
+                                        }
+                                        let _ = app.emit(
+                                            "subtitle:partial",
+                                            serde_json::json!({
+                                                "source": clean_src,
+                                                "translation": final_p
+                                            }),
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -1230,25 +1435,63 @@ impl LiveCaptureHandle {
                                 )
                             };
 
+                        let speaker_label = if item.channel == AudioChannel::Mic {
+                            "我".to_string()
+                        } else {
+                            voice_clusterer.assign_speaker(&samples, "对方")
+                        };
+
                         let seg_uuid = format!("seg-{}-{}", segment_id, uuid::Uuid::new_v4());
+                        // 缓存本句原始 16kHz 单声道 WAV 字节，供录制过程中随时调用 Qwen3-TTS 原声克隆
+                        rt.segment_wavs
+                            .lock()
+                            .await
+                            .insert(seg_uuid.clone(), wav.clone());
+
+                        let (recent_ctx, preview_baseline): (Vec<(String, String)>, Option<String>) = {
+                            let snap = rt.snapshot.lock().await;
+                            let ctx = snap
+                                .segments
+                                .iter()
+                                .rev()
+                                .filter(|s| {
+                                    s.status == "final"
+                                        && !s.source_text.trim().is_empty()
+                                        && !s.translated_text.trim().is_empty()
+                                })
+                                .take(2)
+                                .map(|s| (s.source_text.clone(), s.translated_text.clone()))
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect();
+                            let prev_tr = snap.live_partial_translation.trim().to_string();
+                            let baseline = if !prev_tr.is_empty()
+                                && prev_tr != "翻译中…"
+                                && prev_tr != "正在翻译…"
+                                && prev_tr != "正在识别…"
+                            {
+                                Some(prev_tr)
+                            } else {
+                                None
+                            };
+                            (ctx, baseline)
+                        };
+
                         let mut seg = SubtitleSegment {
                             id: seg_uuid.clone(),
                             seq: segment_id,
                             start_ms,
                             end_ms,
                             channel: item.channel,
-                            speaker_label: Some(
-                                if item.channel == AudioChannel::Mic {
-                                    "我".to_string()
-                                } else {
-                                    "对方".to_string()
-                                },
-                            ),
+                            speaker_label: Some(speaker_label),
                             source_lang: actual_src.clone(),
                             target_lang: actual_dst.clone(),
                             source_text: source_text.clone(),
-                            translated_text: "翻译中…".to_string(),
-                            baseline_translated: None,
+                            translated_text: preview_baseline
+                                .clone()
+                                .unwrap_or_else(|| "翻译中…".to_string()),
+                            baseline_translated: preview_baseline,
                             status: "preview".to_string(),
                             is_edited: None,
                         };
@@ -1257,7 +1500,7 @@ impl LiveCaptureHandle {
                             let mut snap = rt.snapshot.lock().await;
                             snap.segments.push(seg.clone());
                             snap.live_partial_source = source_text.clone();
-                            snap.live_partial_translation = "翻译中…".to_string();
+                            snap.live_partial_translation = seg.translated_text.clone();
                         }
                         let _ = app.emit("segment:upsert", &seg);
                         let _ = app.emit(
@@ -1269,8 +1512,13 @@ impl LiveCaptureHandle {
                         );
 
                         let t_mt = Instant::now();
-                        let prompt =
-                            build_translation_prompt(&source_text, &actual_src, &actual_dst, &glossary);
+                        let prompt = build_translation_prompt_with_context(
+                            &source_text,
+                            &actual_src,
+                            &actual_dst,
+                            &glossary,
+                            &recent_ctx,
+                        );
                         let app_stream = app.clone();
                         let src_for_cb = source_text.clone();
                         let mut seg_cb = seg.clone();
@@ -1322,8 +1570,10 @@ impl LiveCaptureHandle {
                                 );
                                 rt.save_history(&app).await;
 
-                                // 若服务端为 sensevoice+whisper 双阶段模式，后台静默触发 Whisper 二次精修（不阻塞后续新句）
-                                if can_correct {
+                                // 若服务端为 sensevoice+whisper 双阶段模式，对 >= 1.2s 且 >= 5 字符的句子后台静默触发 Whisper 二次精修（跳过极短词减少云端队列占用）
+                                let seg_dur_ms = end_ms.saturating_sub(start_ms);
+                                let char_count = source_text.trim().chars().count();
+                                if can_correct && seg_dur_ms >= 1200 && char_count >= 5 {
                                     let rt_corr = rt.clone();
                                     let app_corr = app.clone();
                                     let asr_url_c = asr_url.clone();
