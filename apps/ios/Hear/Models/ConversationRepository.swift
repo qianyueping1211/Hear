@@ -32,7 +32,7 @@ extension ConversationStore {
         return true
     }
 
-    func updateSourceText(conversationID: UUID, itemID: UUID, to newSource: String) -> (source: Language, target: Language, previous: String?)? {
+    func updateSourceText(conversationID: UUID, itemID: UUID, to newSource: String) -> (source: Language, target: Language, previous: TranslationItem?)? {
         guard Self.deletedIDs[conversationID.uuidString] == nil,
               var conversation = load(conversationID),
               let index = conversation.items.firstIndex(where: { $0.id == itemID }) else { return nil }
@@ -41,7 +41,7 @@ extension ConversationStore {
         conversation.items[index].sourceText = newSource
         conversation.items[index].done = true
         conversation.items[index].beginTranslationRevision()
-        let previous: String? = index > 0 ? conversation.items[index - 1].sourceText : nil
+        let previous: TranslationItem? = index > 0 ? conversation.items[index - 1] : nil
         save(conversation)
         return (src, tgt, previous)
     }
