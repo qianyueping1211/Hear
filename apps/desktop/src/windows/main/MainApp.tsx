@@ -15,6 +15,7 @@ import {
   Loader2,
   Lock,
   Mic,
+  Minus,
   PanelRight,
   PanelTop,
   Pencil,
@@ -31,6 +32,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   buildMarkdown,
   buildSrt,
@@ -201,9 +203,48 @@ export function MainApp() {
   const [historySearch, setHistorySearch] = useState("");
   const [renamingConvId, setRenamingConvId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [isMaximized, setIsMaximized] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const clickTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    try {
+      const win = getCurrentWindow();
+      void win.isMaximized().then(setIsMaximized).catch(() => {});
+      void win
+        .onResized(() => {
+          void win.isMaximized().then(setIsMaximized).catch(() => {});
+        })
+        .then((fn) => {
+          unlisten = fn;
+        })
+        .catch(() => {});
+    } catch {
+      // non-Tauri preview
+    }
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  const handleWinMinimize = () => {
+    try {
+      void getCurrentWindow().minimize();
+    } catch {}
+  };
+  const handleWinToggleMaximize = () => {
+    try {
+      const win = getCurrentWindow();
+      void win.toggleMaximize().then(() => win.isMaximized().then(setIsMaximized));
+    } catch {}
+  };
+  const handleWinClose = () => {
+    try {
+      void getCurrentWindow().close();
+    } catch {}
+  };
 
   const knownSpeakers = useMemo(() => {
     const set = new Set<string>(["我", "对方"]);
@@ -365,10 +406,20 @@ export function MainApp() {
 
   return (
     <div className="h-screen w-screen flex flex-col bg-surface-950 text-slate-100">
-      {/* 顶部控制栏：加高留白、不重复写产品名称、不放双路混合与导入按钮；语种切换移至右侧云端服务之前，右侧按钮统一高度 */}
-      <header className="h-[72px] border-b border-white/10 bg-surface-900/90 px-6 flex items-center justify-between gap-4 shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
-          {viewMode === "workspace" && (
+      {/* 自定义无边框一体化顶栏（56px 舒展高度）：替代 Windows 30px 原生窄标题栏，支持拖动、双击最大化与大尺寸最小化/最大化/关闭按钮 */}
+      <header
+        data-tauri-drag-region
+        onDoubleClick={(e) => {
+          if ((e.target as HTMLElement).closest("button, select, input")) return;
+          handleWinToggleMaximize();
+        }}
+        className="h-14 border-b border-white/10 bg-surface-900/95 pl-5 pr-2 flex items-center justify-between gap-4 shrink-0 select-none"
+      >
+        <div
+          data-tauri-drag-region
+          className="flex items-center gap-3 min-w-0 flex-1 h-full"
+        >
+          {viewMode === "workspace" ? (
             <>
               <button
                 type="button"
@@ -379,14 +430,32 @@ export function MainApp() {
                 <ArrowLeft className="w-3.5 h-3.5 text-brand-400" />
                 <span>返回列表</span>
               </button>
-              <span className="text-sm font-medium text-slate-200 truncate">
+              <span
+                data-tauri-drag-region
+                className="text-sm font-medium text-slate-200 truncate"
+              >
                 {currentConvTitle}
               </span>
             </>
+          ) : (
+            <div data-tauri-drag-region className="flex items-center gap-2.5">
+              <div
+                data-tauri-drag-region
+                className="w-6 h-6 rounded-md bg-gradient-to-br from-emerald-400 to-brand-500 flex items-center justify-center text-[12px] font-bold text-white shadow-sm"
+              >
+                听
+              </div>
+              <span
+                data-tauri-drag-region
+                className="text-sm font-semibold text-slate-100 tracking-wide"
+              >
+                听见 Hear
+              </span>
+            </div>
           )}
         </div>
 
-        {/* 右侧：新版本提醒 + 语种切换（位于服务状态之前）+ 服务状态胶囊 + 悬浮字幕 + 总结 + 设置（全部统一 h-9 高度） */}
+        {/* 右侧：统一 h-9 工具栏按钮 + 分隔线 + 舒展的 Windows 窗口控制按钮（最小化/最大化/关闭） */}
         <div className="flex items-center gap-2 shrink-0">
           {updateInfo?.hasUpdate && (
             <button
@@ -486,6 +555,40 @@ export function MainApp() {
           >
             <Settings className="w-4 h-4" />
           </button>
+
+          <div className="h-5 w-px bg-white/10 mx-1" />
+
+          {/* 自定义窗口控制按钮（高 40px、宽 44px，比 Windows 原生 30px 标题栏更舒展易点） */}
+          <div className="flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={handleWinMinimize}
+              title="最小化"
+              className="h-10 w-11 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 inline-flex items-center justify-center transition"
+            >
+              <Minus className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={handleWinToggleMaximize}
+              title={isMaximized ? "还原窗口" : "最大化"}
+              className="h-10 w-11 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 inline-flex items-center justify-center transition"
+            >
+              {isMaximized ? (
+                <Copy className="w-3.5 h-3.5" />
+              ) : (
+                <Square className="w-3.5 h-3.5" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={handleWinClose}
+              title="关闭"
+              className="h-10 w-11 rounded-lg text-slate-300 hover:text-white hover:bg-rose-500/85 inline-flex items-center justify-center transition"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </header>
 
