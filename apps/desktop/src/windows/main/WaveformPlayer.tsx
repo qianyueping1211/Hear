@@ -191,14 +191,15 @@ export function WaveformPlayer() {
 
     let peaks: number[];
     if (rawPeaks.length > 0 && maxRawPeak >= 0.0015) {
-      const normBase = Math.max(maxRawPeak, 0.015);
+      // 统一合理的归一化基准，避免录音初期底噪被过度放大导致波纹夸张
+      const normBase = Math.max(maxRawPeak, 0.12);
       peaks = rawPeaks.map((p) => {
-        if (p < 0.001) return 0.08;
+        if (p < 0.002) return 0.08;
         const ratio = Math.min(1, p / normBase);
-        return Math.max(0.1, Math.min(0.96, Math.pow(ratio, 0.62)));
+        return Math.max(0.08, Math.min(0.86, Math.pow(ratio, 0.85) * 0.86));
       });
     } else if (segments.length > 0) {
-      // 若历史记录或刚结束的会话缺少原始峰值采样，根据对话句子时间轴自动生成高对比度声纹图
+      // 若历史记录或刚结束的会话缺少原始峰值采样，根据对话句子时间轴自动生成自然声纹图
       const totalMs = Math.max(
         playback.durationMs,
         segments[segments.length - 1]?.endMs ?? 0,
@@ -214,11 +215,11 @@ export function WaveformPlayer() {
         if (seg) {
           const span = Math.max(350, seg.endMs - seg.startMs);
           const rel = Math.max(0, Math.min(1, (tMs - seg.startMs) / span));
-          const env = Math.max(0.25, Math.sin(rel * Math.PI));
+          const env = Math.max(0.22, Math.sin(rel * Math.PI));
           const jitter = ((idx * 37 + seg.seq * 13) % 19) / 19;
           peaks[idx] = Math.max(
-            0.18,
-            Math.min(0.95, 0.28 + env * 0.45 + jitter * 0.22)
+            0.14,
+            Math.min(0.82, 0.22 + env * 0.38 + jitter * 0.18)
           );
         }
       }
@@ -242,23 +243,14 @@ export function WaveformPlayer() {
 
     for (let i = 0; i < barCount; i++) {
       const srcIdx = Math.floor((i / barCount) * peaks.length);
-      let amp = Math.max(0.08, Math.min(1, peaks[srcIdx] ?? 0.08));
-      // 录音中让最右侧几个柱子叠加当前实时电平跳动感
-      if (isRecording && i >= barCount - 3) {
-        amp = Math.max(amp, Math.min(1, audioLevel * 1.15 + 0.1));
-      }
-      const barH = amp * (height - 6);
+      const amp = Math.max(0.08, Math.min(0.86, peaks[srcIdx] ?? 0.08));
+      const barH = amp * (height - 8);
       const x = i * barW;
       const y = (height - barH) / 2;
       const ratio = i / barCount;
 
-      if (isRecording) {
-        ctx.fillStyle =
-          i >= barCount - 4 ? "#fb7185" : "rgba(244, 63, 94, 0.72)";
-      } else if (isPaused) {
-        ctx.fillStyle =
-          ratio <= progress ? "#fbbf24" : "rgba(251, 191, 36, 0.30)";
-      } else if (playback.hasAudio || segments.length > 0) {
+      // 录音中、暂停中与回放时保持完全一致的蓝色声纹风格
+      if (isRecording || isPaused || playback.hasAudio || segments.length > 0) {
         ctx.fillStyle =
           ratio <= progress ? "#60a5fa" : "rgba(96, 165, 250, 0.42)";
       } else {
@@ -268,10 +260,10 @@ export function WaveformPlayer() {
       ctx.fillRect(x + 0.5, y, Math.max(1.5, barW - 1.5), barH);
     }
 
-    // 指针（录音中在最右端脉冲，回放/暂停态在当前播放位置）
+    // 指针（录音中在最右端，回放/暂停态在当前位置，与播放风格统一）
     if (isRecording || playback.hasAudio || segments.length > 0) {
       const px = Math.min(width - 2, Math.max(1, progress * width));
-      ctx.fillStyle = isRecording ? "#fda4af" : "#f8fafc";
+      ctx.fillStyle = "#f8fafc";
       ctx.fillRect(px - 1, 0, 2, height);
     }
   }, [
