@@ -35,19 +35,29 @@ final class SessionClonePipeline {
 
     func reference(for item: TranslationItem, in items: [TranslationItem],
                    hasText: (String) -> Bool) -> Reference? {
+        // 0. 若用户录制了「我的固定声纹样本」且开启优先复用，本地 ZipVoice 与云端 Qwen3-TTS 均直接使用该高质样本
+        let fixedStore = FixedVoiceSampleStore.shared
+        if fixedStore.preferOverLive, let fixed = fixedStore.loadReference() {
+            return fixed
+        }
         if let own = references[item.id] {
             return (own.samples, hasText(own.text) ? own.text : item.sourceText)
         }
-        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return nil }
-        // 1. 优先复用同一说话人且同语种的前文参考音
-        if let speaker = item.speakerID {
-            for earlier in items[..<index].reversed() where earlier.speakerID == speaker && earlier.source == item.source {
+        if let index = items.firstIndex(where: { $0.id == item.id }) {
+            // 1. 优先复用同一说话人且同语种的前文参考音
+            if let speaker = item.speakerID {
+                for earlier in items[..<index].reversed() where earlier.speakerID == speaker && earlier.source == item.source {
+                    if let ref = references[earlier.id], hasText(ref.text) { return ref }
+                }
+            }
+            // 2. 未开启说话人区分或同说话人无前文样本时，兜底复用同语种最近一句的参考音（短词如 OK/谢谢 也能克隆）
+            for earlier in items[..<index].reversed() where earlier.source == item.source {
                 if let ref = references[earlier.id], hasText(ref.text) { return ref }
             }
         }
-        // 2. 未开启说话人区分或同说话人无前文样本时，兜底复用同语种最近一句的参考音（短词如 OK/谢谢 也能克隆）
-        for earlier in items[..<index].reversed() where earlier.source == item.source {
-            if let ref = references[earlier.id], hasText(ref.text) { return ref }
+        // 3. 最终兜底：若用户已录制固定声纹样本，则始终可用，避免退回系统朗读
+        if let fixed = fixedStore.loadReference() {
+            return fixed
         }
         return nil
     }

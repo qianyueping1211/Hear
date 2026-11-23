@@ -716,6 +716,9 @@ async fn clone_segment_speech(
     text: String,
     lang: String,
 ) -> Result<tauri::ipc::Response, String> {
+    if !rt.snapshot.lock().await.tts_settings.use_voice_clone {
+        return Err("声音克隆已关闭".to_string());
+    }
     let wav = synthesize_cloned_segment_wav(&app, rt.inner(), &id, &text, &lang).await?;
     Ok(tauri::ipc::Response::new(wav))
 }
@@ -755,6 +758,9 @@ async fn play_cloned_segment_to_device(
     target: String,
     is_auto: Option<bool>,
 ) -> Result<(), String> {
+    if !rt.snapshot.lock().await.tts_settings.use_voice_clone {
+        return Err("声音克隆已关闭".to_string());
+    }
     if is_auto == Some(true) {
         let mut spoken = rt.auto_spoken_ids.lock().await;
         if !spoken.insert(id.clone()) {
@@ -775,6 +781,14 @@ async fn play_cloned_segment_to_device(
             return Err(e);
         }
     };
+    // 克隆耗时期间若用户已关闭「声音克隆」，立即中止播放，绝不放出克隆音
+    if !rt.snapshot.lock().await.tts_settings.use_voice_clone {
+        let _ = app.emit(
+            "tts:state",
+            serde_json::json!({ "id": id, "state": "ready" }),
+        );
+        return Ok(());
+    }
     let (device_name, mute_system_loopback, hard_mute_all) = {
         let snap = rt.snapshot.lock().await;
         let seg_ch = snap.segments.iter().find(|s| s.id == id).map(|s| s.channel);
@@ -904,6 +918,50 @@ async fn save_my_voice_sample(
     let _ = std::fs::write(&txt_p, chosen_text.trim());
     logger::info(format!("[voice] 已保存我的固定声纹样本：{} bytes", bytes.len()));
     Ok(true)
+}
+
+#[tauri::command]
+async fn save_recorded_my_voice_sample(
+    app: AppHandle,
+    wav_bytes: Vec<u8>,
+    ref_text: String,
+) -> Result<bool, String> {
+    let trimmed_text = ref_text.trim();
+    if trimmed_text.is_empty() {
+        return Err("参考朗读文本不能为空".to_string());
+    }
+    // 16kHz 16-bit mono PCM: 32,000 bytes/sec; 要求 3~10 秒（留 0.5 秒容差）
+    let min_bytes = 44 + 16_000 * 2 * 3 - 4_000;
+    let max_bytes = 44 + 16_000 * 2 * 11;
+    if wav_bytes.len() < min_bytes {
+        return Err("录制时长不足 3 秒，不符合 Qwen3-TTS 最佳声纹样本要求，请重新录制 3~10 秒".to_string());
+    }
+    if wav_bytes.len() > max_bytes {
+        return Err("录制时长超过 10 秒，请重新录制 3~10 秒".to_string());
+    }
+    if wav_bytes.len() < 12 || &wav_bytes[0..4] != b"RIFF" || &wav_bytes[8..12] != b"WAVE" {
+        return Err("音频格式无效，需要 16kHz 单声道 WAV".to_string());
+    }
+    let (wav_p, txt_p) = my_voice_ref_paths(&app).ok_or_else(|| "无法访问应用数据目录".to_string())?;
+    std::fs::write(&wav_p, &wav_bytes).map_err(|e| format!("保存声纹样本失败：{}", e))?;
+    std::fs::write(&txt_p, trimmed_text).map_err(|e| format!("保存参考文本失败：{}", e))?;
+    logger::info(format!(
+        "[voice] 已保存弹出录制的固定声纹样本：{} bytes ({:.1}s), text_chars={}",
+        wav_bytes.len(),
+        (wav_bytes.len().saturating_sub(44)) as f32 / 32_000.0,
+        trimmed_text.chars().count()
+    ));
+    Ok(true)
+}
+
+#[tauri::command]
+async fn read_my_voice_sample_wav(app: AppHandle) -> Result<tauri::ipc::Response, String> {
+    let (wav_p, _) = my_voice_ref_paths(&app).ok_or_else(|| "无法访问应用数据目录".to_string())?;
+    let bytes = std::fs::read(&wav_p).map_err(|_| "尚未录制固定声纹样本".to_string())?;
+    if bytes.len() <= 44 {
+        return Err("声纹样本文件无效".to_string());
+    }
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
@@ -1799,19 +1857,13 @@ async fn import_media_file(
                 continue;
             }
 
-            let (actual_src, actual_dst) =
-                if !lock_src && detected_lang == dst_lang && dst_lang != src_lang {
-                    (dst_lang.clone(), src_lang.clone())
-                } else {
-                    (
-                        if detected_lang.is_empty() {
-                            src_lang.clone()
-                        } else {
-                            detected_lang
-                        },
-                        dst_lang.clone(),
-                    )
-                };
+            let (actual_src, actual_dst) = audio::resolve_translation_direction(
+                &source_text,
+                &detected_lang,
+                &src_lang,
+                &dst_lang,
+                lock_src,
+            );
 
             let seg_id = format!("imp-{}-{}", idx + 1, uuid::Uuid::new_v4());
             let mut seg = SubtitleSegment {
@@ -2214,6 +2266,8 @@ pub fn run() {
             stop_device_tts,
             play_cloned_segment_to_device,
             save_my_voice_sample,
+            save_recorded_my_voice_sample,
+            read_my_voice_sample_wav,
             get_my_voice_sample_status,
             clear_my_voice_sample,
             read_segment_original_wav,

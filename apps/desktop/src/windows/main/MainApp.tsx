@@ -418,6 +418,36 @@ export function MainApp() {
         </button>
       )}
 
+      {/* 声音克隆前面的「自动朗读译文」快捷开关 */}
+      <button
+        type="button"
+        onClick={() => {
+          const nextEnabled = !ttsSettings.enabled;
+          if (nextEnabled && !ttsSettings.autoSpeakMyMic && !ttsSettings.autoSpeakOther) {
+            void updateTtsSettings({
+              enabled: true,
+              autoSpeakMyMic: true,
+              autoSpeakOther: true,
+            });
+          } else {
+            void updateTtsSettings({ enabled: nextEnabled });
+          }
+        }}
+        title={
+          ttsSettings.enabled
+            ? "自动朗读译文已开启（点击关闭）"
+            : "自动朗读译文已关闭（点击开启）"
+        }
+        className={`h-9 px-2.5 rounded-lg border text-xs inline-flex items-center gap-1.5 transition ${
+          ttsSettings.enabled
+            ? "bg-emerald-500/20 border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30"
+            : "bg-surface-800 border-white/10 text-slate-400 hover:text-white hover:bg-white/5"
+        }`}
+      >
+        <Volume2 className="w-3.5 h-3.5" />
+        <span>自动朗读译文</span>
+      </button>
+
       {/* 语言转换前面的「声音克隆」快捷开关（开/关 + 面对面/会议同传模式切换） */}
       <div className="h-9 inline-flex items-center rounded-lg border border-white/10 bg-surface-800 overflow-hidden text-xs">
         <button

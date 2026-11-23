@@ -40,6 +40,127 @@ pub fn lang_en_name(code: &str) -> &'static str {
     }
 }
 
+/// 将 ASR 返回的语言标签归一化为标准 2 字母代码（如 zh-CN / chinese -> zh, en-US -> en）
+pub fn normalize_lang_code(raw: &str) -> String {
+    let s = raw.trim().to_ascii_lowercase();
+    if s.is_empty() || s == "auto" {
+        return String::new();
+    }
+    if s.starts_with("zh") || s == "chinese" || s == "yue" || s == "cantonese" || s == "mandarin" {
+        return "zh".to_string();
+    }
+    if s.starts_with("en") || s == "english" {
+        return "en".to_string();
+    }
+    if s.starts_with("ja") || s == "jp" || s == "japanese" {
+        return "ja".to_string();
+    }
+    if s.starts_with("ko") || s == "kr" || s == "korean" {
+        return "ko".to_string();
+    }
+    if s.starts_with("fr") || s == "french" {
+        return "fr".to_string();
+    }
+    if s.starts_with("de") || s == "german" {
+        return "de".to_string();
+    }
+    if s.starts_with("es") || s == "spanish" {
+        return "es".to_string();
+    }
+    s
+}
+
+/// 根据文本实际字形统计推断语言（避免 ASR 误把中文标为 en/空导致中译中）
+pub fn infer_text_script_lang(text: &str) -> Option<&'static str> {
+    let mut cjk = 0usize;
+    let mut kana = 0usize;
+    let mut hangul = 0usize;
+    let mut latin = 0usize;
+    for ch in text.chars() {
+        let u = ch as u32;
+        if (0x3040..=0x30FF).contains(&u) {
+            kana += 1;
+        } else if (0xAC00..=0xD7AF).contains(&u) || (0x1100..=0x11FF).contains(&u) {
+            hangul += 1;
+        } else if (0x4E00..=0x9FFF).contains(&u) || (0x3400..=0x4DBF).contains(&u) {
+            cjk += 1;
+        } else if ch.is_ascii_alphabetic() {
+            latin += 1;
+        }
+    }
+    if kana >= 2 {
+        return Some("ja");
+    }
+    if hangul >= 2 {
+        return Some("ko");
+    }
+    if cjk >= 2 && cjk * 2 >= latin {
+        return Some("zh");
+    }
+    if cjk == 0 && latin >= 4 {
+        return Some("en");
+    }
+    None
+}
+
+/// 解析最终翻译方向，彻底杜绝「原文中文、译文还是中文」等同语种翻译
+pub fn resolve_translation_direction(
+    text: &str,
+    detected_lang: &str,
+    src_lang: &str,
+    dst_lang: &str,
+    lock_src: bool,
+) -> (String, String) {
+    let norm_src = normalize_lang_code(src_lang);
+    let norm_dst = {
+        let d = normalize_lang_code(dst_lang);
+        if d.is_empty() { "zh".to_string() } else { d }
+    };
+    let norm_det = normalize_lang_code(detected_lang);
+
+    // 字形强判定：若原文明显是中文/日文/韩文，优先以字形为准纠正 ASR 误判
+    let effective_src = match infer_text_script_lang(text) {
+        Some("zh") => "zh".to_string(),
+        Some("ja") => "ja".to_string(),
+        Some("ko") => "ko".to_string(),
+        Some("en") => {
+            if matches!(norm_det.as_str(), "fr" | "de" | "es") {
+                norm_det
+            } else if !norm_det.is_empty() && norm_det != "zh" && norm_det != "ja" && norm_det != "ko" {
+                norm_det
+            } else if matches!(norm_src.as_str(), "fr" | "de" | "es" | "en") {
+                norm_src.clone()
+            } else {
+                "en".to_string()
+            }
+        }
+        _ => {
+            if !norm_det.is_empty() {
+                norm_det
+            } else if !norm_src.is_empty() {
+                norm_src.clone()
+            } else {
+                "en".to_string()
+            }
+        }
+    };
+
+    // 若识别出的语种与目标语种相同（例如用户说中文但当前目标语是中文），必须自动翻转目标语，绝不出现中译中
+    if effective_src == norm_dst {
+        if !norm_src.is_empty() && norm_src != norm_dst {
+            return (norm_dst, norm_src);
+        }
+        let fallback_dst = if norm_dst == "zh" { "en" } else { "zh" };
+        return (effective_src, fallback_dst.to_string());
+    }
+
+    if !lock_src && effective_src == norm_dst && !norm_src.is_empty() && norm_src != norm_dst {
+        (norm_dst, norm_src)
+    } else {
+        (effective_src, norm_dst)
+    }
+}
+
 /// 构造与 Hy-MT2 官方推荐一致的翻译提示词（附带匹配的自定义术语表）
 pub fn build_translation_prompt(text: &str, src: &str, dst: &str, glossary_raw: &str) -> String {
     build_translation_prompt_with_context(text, src, dst, glossary_raw, &[])
@@ -1403,19 +1524,13 @@ impl LiveCaptureHandle {
                                     }),
                                 );
                                 // 边说边译：说话过程中实时调用预览翻译，流式更新译文预览
-                                let (p_src, p_dst) =
-                                    if !lock_src && detected_lang == dst_lang && dst_lang != src_lang {
-                                        (dst_lang.clone(), src_lang.clone())
-                                    } else {
-                                        (
-                                            if detected_lang.is_empty() {
-                                                src_lang.clone()
-                                            } else {
-                                                detected_lang
-                                            },
-                                            dst_lang.clone(),
-                                        )
-                                    };
+                                let (p_src, p_dst) = resolve_translation_direction(
+                                    &clean_src,
+                                    &detected_lang,
+                                    &src_lang,
+                                    &dst_lang,
+                                    lock_src,
+                                );
                                 let p_prompt =
                                     build_translation_prompt(&clean_src, &p_src, &p_dst, &glossary);
                                 let app_p = app.clone();
@@ -1513,19 +1628,13 @@ impl LiveCaptureHandle {
                             continue;
                         }
 
-                        let (actual_src, actual_dst) =
-                            if !lock_src && detected_lang == dst_lang && dst_lang != src_lang {
-                                (dst_lang.clone(), src_lang.clone())
-                            } else {
-                                (
-                                    if detected_lang.is_empty() {
-                                        src_lang.clone()
-                                    } else {
-                                        detected_lang
-                                    },
-                                    dst_lang.clone(),
-                                )
-                            };
+                        let (actual_src, actual_dst) = resolve_translation_direction(
+                            &source_text,
+                            &detected_lang,
+                            &src_lang,
+                            &dst_lang,
+                            lock_src,
+                        );
 
                         let speaker_label = if item.channel == AudioChannel::Mic {
                             "我".to_string()
@@ -1737,10 +1846,17 @@ impl LiveCaptureHandle {
                                         if !should_retranslate {
                                             return;
                                         }
-                                        let prompt_c = build_translation_prompt_with_context(
+                                        let (ref_src, ref_dst) = resolve_translation_direction(
                                             &clean_ref,
                                             &src_lang_c,
+                                            &src_lang_c,
                                             &dst_lang_c,
+                                            false,
+                                        );
+                                        let prompt_c = build_translation_prompt_with_context(
+                                            &clean_ref,
+                                            &ref_src,
+                                            &ref_dst,
                                             &glossary_c,
                                             &recent_ctx_c,
                                         );
@@ -1911,5 +2027,26 @@ mod tests {
         assert!(frames_seen >= 5 && frames_seen <= 7, "frames={}", frames_seen);
         // 连续 3 帧抗键盘敲击起振保护后，剩余帧均应触发人声
         assert!(speech_frames >= 3, "speech_frames={}", speech_frames);
+    }
+
+    #[test]
+    fn resolves_translation_direction_without_same_language_loop() {
+        // 即使 ASR 把中文误标为 en 或 zh-CN，且目标是 zh，也必须翻转成 zh -> en，绝不中译中
+        assert_eq!(
+            resolve_translation_direction("今天天气真不错", "en", "en", "zh", false),
+            ("zh".to_string(), "en".to_string())
+        );
+        assert_eq!(
+            resolve_translation_direction("今天天气真不错", "zh-CN", "en", "zh", true),
+            ("zh".to_string(), "en".to_string())
+        );
+        assert_eq!(
+            resolve_translation_direction("今天天气真不错", "zh", "auto", "zh", false),
+            ("zh".to_string(), "en".to_string())
+        );
+        assert_eq!(
+            resolve_translation_direction("Hello world today", "en-US", "en", "zh", false),
+            ("en".to_string(), "zh".to_string())
+        );
     }
 }

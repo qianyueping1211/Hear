@@ -16,6 +16,8 @@ struct SettingsView: View {
     @ObservedObject private var log = AppLog.shared
     @ObservedObject private var llm = LLMSettings.shared
     @ObservedObject private var cloud = CloudSync.shared
+    @State private var voiceSampleStore = FixedVoiceSampleStore.shared
+    @State private var showVoiceSampleRecorder = false
     @State private var showCloudPicker = false
     @State private var showHeadphoneOutputHelp = false
     /// 授权 iCloud 云盘的说明框（系统的授权框弹不出来时才需要）
@@ -263,8 +265,27 @@ struct SettingsView: View {
                     }
                     Toggle("显示声音图标", isOn: $session.showReadingIcon)
                     Toggle("声音克隆", isOn: $session.voiceClone)
+                    Button {
+                        showVoiceSampleRecorder = true
+                    } label: {
+                        LabeledContent("我的固定声纹样本") {
+                            if voiceSampleStore.hasSample {
+                                Text(String(format: "已录制 %.1f 秒", voiceSampleStore.durationSeconds))
+                                    .foregroundStyle(.green)
+                            } else {
+                                Text("去录制（3~10 秒）")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .foregroundStyle(.primary)
+                    if voiceSampleStore.hasSample {
+                        Toggle("克隆时优先使用固定声纹", isOn: $voiceSampleStore.preferOverLive)
+                    }
                 } header: {
                     Text("朗读")
+                } footer: {
+                    Text("录制 3~10 秒固定声纹后，本地 ZipVoice 与云端 Qwen3-TTS 声音克隆均可直接使用。")
                 }
 
                 // MARK: 语言和日志
@@ -336,6 +357,9 @@ struct SettingsView: View {
             .sheet(isPresented: $showCloudPicker) {
                 CloudFolderPicker { url in cloud.setFolder(url) }
                     .ignoresSafeArea()
+            }
+            .sheet(isPresented: $showVoiceSampleRecorder) {
+                VoiceSampleRecorderSheet()
             }
             // 授权 iCloud 云盘：先试系统的（自己就弹「允许访问 iCloud 云盘」），
             // 没有权限才让用户在文件里挑一个文件夹。

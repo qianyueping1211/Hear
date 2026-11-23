@@ -11,7 +11,9 @@ import {
   FolderOpen,
   Laptop,
   Loader2,
+  Mic,
   Palette,
+  Play,
   RefreshCw,
   RotateCcw,
   Save,
@@ -23,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import { useHearStore } from "../../stores/useHearStore";
+import { VoiceSampleRecorderModal } from "./VoiceSampleRecorderModal";
 import type {
   EngineSource,
   ServiceProbeResult,
@@ -161,7 +164,8 @@ export function SettingsModal() {
     outputDevices,
     hasMyVoiceSample,
     refreshOutputDevices,
-    saveMyVoiceSample,
+    saveRecordedMyVoiceSample,
+    readMyVoiceSampleWav,
     clearMyVoiceSample,
     glossary,
     updateConfig,
@@ -199,6 +203,8 @@ export function SettingsModal() {
   const [savedHint, setSavedHint] = useState<"local" | "cloud" | "system" | null>(null);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [removeModelsOnUninstall, setRemoveModelsOnUninstall] = useState(false);
+  const [voiceRecorderOpen, setVoiceRecorderOpen] = useState(false);
+  const [previewingVoiceSample, setPreviewingVoiceSample] = useState(false);
 
   // 仅在弹窗打开瞬间同步一次草稿并做只读状态探测，避免保存单项配置时把其它草稿或「已保存」提示冲掉
   useEffect(() => {
@@ -1058,7 +1064,7 @@ export function SettingsModal() {
                 </div>
               </div>
 
-              {/* 固定我的声纹样本（开会免首句提取延迟） */}
+              {/* 固定我的声纹样本（弹出按指定文本录制 3~10 秒，本地与云端声纹克隆通用） */}
               <div className="rounded-xl bg-surface-800/60 border border-white/10 p-4 flex items-center justify-between gap-3">
                 <div className="space-y-1">
                   <div className="font-medium text-white flex items-center gap-2">
@@ -1070,20 +1076,58 @@ export function SettingsModal() {
                           : "bg-surface-900 text-slate-400"
                       }`}
                     >
-                      {hasMyVoiceSample ? "已锁定" : "未设置"}
+                      {hasMyVoiceSample ? "已录制" : "未设置"}
                     </span>
                   </div>
                   <div className="text-xs text-slate-400">
-                    录音中说一句 2~5 秒清晰的话后点击锁定，开会同传时从第一句起就用你的原声克隆。
+                    按 Qwen3-TTS 模型要求弹出录制 3~10 秒指定朗读文本，本地与云端克隆服务均可直接复用，首句即原声。
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  {hasMyVoiceSample && (
+                    <button
+                      type="button"
+                      disabled={previewingVoiceSample}
+                      onClick={async () => {
+                        setPreviewingVoiceSample(true);
+                        try {
+                          const wav = await readMyVoiceSampleWav();
+                          if (wav && wav.byteLength > 44) {
+                            const copy = new Uint8Array(wav.byteLength);
+                            copy.set(wav);
+                            const url = URL.createObjectURL(
+                              new Blob([copy.buffer], { type: "audio/wav" })
+                            );
+                            const audio = new Audio(url);
+                            audio.onended = () => {
+                              URL.revokeObjectURL(url);
+                              setPreviewingVoiceSample(false);
+                            };
+                            audio.onerror = () => {
+                              URL.revokeObjectURL(url);
+                              setPreviewingVoiceSample(false);
+                            };
+                            await audio.play();
+                            return;
+                          }
+                        } catch {
+                          // ignore
+                        }
+                        setPreviewingVoiceSample(false);
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-surface-900 border border-white/10 text-slate-200 hover:bg-white/10 text-xs inline-flex items-center gap-1 disabled:opacity-50"
+                    >
+                      <Play className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>{previewingVoiceSample ? "试听中…" : "试听"}</span>
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => void saveMyVoiceSample()}
-                    className="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-xs font-medium"
+                    onClick={() => setVoiceRecorderOpen(true)}
+                    className="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-xs font-medium inline-flex items-center gap-1.5"
                   >
-                    用最近一句锁定
+                    <Mic className="w-3.5 h-3.5" />
+                    <span>{hasMyVoiceSample ? "重新录制" : "录制声纹"}</span>
                   </button>
                   {hasMyVoiceSample && (
                     <button
@@ -1096,6 +1140,11 @@ export function SettingsModal() {
                   )}
                 </div>
               </div>
+              <VoiceSampleRecorderModal
+                open={voiceRecorderOpen}
+                onClose={() => setVoiceRecorderOpen(false)}
+                onSave={saveRecordedMyVoiceSample}
+              />
             </div>
           )}
 

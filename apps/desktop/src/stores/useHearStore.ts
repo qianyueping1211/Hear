@@ -260,6 +260,8 @@ interface HearStoreState extends AppSnapshot {
   stopSpeakingSegment: () => void;
   refreshOutputDevices: () => Promise<void>;
   saveMyVoiceSample: (segmentId?: string) => Promise<boolean>;
+  saveRecordedMyVoiceSample: (wavBytes: Uint8Array, refText: string) => Promise<boolean>;
+  readMyVoiceSampleWav: () => Promise<Uint8Array | null>;
   clearMyVoiceSample: () => Promise<void>;
   generateSummary: () => Promise<void>;
   importMediaFile: () => Promise<void>;
@@ -329,16 +331,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   hydrate: async () => {
     const snap = await tauriInvoke<AppSnapshot>("get_snapshot");
     if (snap) {
-      let tts = snap.ttsSettings;
-      if (
-        typeof window !== "undefined" &&
-        window.localStorage.getItem("hear_voice_clone_v11") !== "1"
-      ) {
-        window.localStorage.setItem("hear_voice_clone_v11", "1");
-        tts = { ...tts, useVoiceClone: true };
-        void tauriInvoke("set_tts_settings", { settings: tts });
-      }
-      set({ ...snap, ttsSettings: { ...DEFAULT_TTS, ...tts } });
+      set({ ...snap, ttsSettings: { ...DEFAULT_TTS, ...snap.ttsSettings } });
     }
     const sources = await tauriInvoke<AudioSourceOption[]>("list_audio_sources");
     if (sources && sources.length > 0) {
@@ -398,41 +391,50 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
           !isSubtitleWindow() &&
           seg.status === "final" &&
           seg.translatedText.trim() &&
-          seg.translatedText !== "翻译中…" &&
-          get().ttsSettings.useVoiceClone
+          seg.translatedText !== "翻译中…"
         ) {
           const tts = get().ttsSettings;
+          const isRecording = get().mode === "recording";
           const autoMyMic =
-            tts.enabled && tts.autoSpeakMyMic && seg.channel === "mic";
+            isRecording && tts.enabled && tts.autoSpeakMyMic && seg.channel === "mic";
           const autoOther =
-            tts.enabled && tts.autoSpeakOther && seg.channel === "system";
+            isRecording && tts.enabled && tts.autoSpeakOther && seg.channel === "system";
           if (autoMyMic || autoOther) {
             // 每条对话只自动播报一次，防止 Whisper 二次精修或重复事件导致同一句反复朗读
             if (autoSpokenSegmentIds.has(seg.id)) {
               return;
             }
             autoSpokenSegmentIds.add(seg.id);
-            const target =
-              tts.routingMode === "meeting" && seg.channel === "mic"
-                ? "meeting_mic"
-                : "local";
-            set((s) => ({
-              cloneStates: { ...s.cloneStates, [seg.id]: "cloning" },
-            }));
-            void tauriInvoke("play_cloned_segment_to_device", {
-              id: seg.id,
-              text: seg.translatedText.trim(),
-              lang: seg.targetLang,
-              target,
-              isAuto: true,
-            }).catch(() => {
+            if (tts.useVoiceClone) {
+              const target =
+                tts.routingMode === "meeting" && seg.channel === "mic"
+                  ? "meeting_mic"
+                  : "local";
               set((s) => ({
-                cloneStates: { ...s.cloneStates, [seg.id]: "ready" },
-                speakingSegmentId:
-                  s.speakingSegmentId === seg.id ? null : s.speakingSegmentId,
+                cloneStates: { ...s.cloneStates, [seg.id]: "cloning" },
               }));
-            });
-          } else {
+              void tauriInvoke("play_cloned_segment_to_device", {
+                id: seg.id,
+                text: seg.translatedText.trim(),
+                lang: seg.targetLang,
+                target,
+                isAuto: true,
+              }).catch(() => {
+                set((s) => ({
+                  cloneStates: { ...s.cloneStates, [seg.id]: "ready" },
+                  speakingSegmentId:
+                    s.speakingSegmentId === seg.id ? null : s.speakingSegmentId,
+                }));
+              });
+            } else {
+              // 声音克隆已关闭：严格使用系统语音朗读译文，绝不触发声音克隆
+              void get().speakSegment(
+                seg.id,
+                seg.translatedText.trim(),
+                seg.targetLang
+              );
+            }
+          } else if (tts.useVoiceClone) {
             void get().prepareSegmentClone(
               seg.id,
               seg.translatedText.trim(),
@@ -1033,6 +1035,19 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     const next = { ...get().ttsSettings, ...patch };
     set({ ttsSettings: next });
     void tauriInvoke("set_tts_settings", { settings: next });
+    if (patch.useVoiceClone === false) {
+      // 关闭声音克隆时立即清空所有克隆缓存并终止正在排队/播放的克隆音频
+      cloneWavCache.clear();
+      cloneInflight.clear();
+      stopActiveCloneAudio();
+      if (isTauriRuntime()) {
+        void tauriInvoke("stop_device_tts");
+      }
+      set({ cloneStates: {}, preparingCloneSegmentId: null });
+    }
+    if (patch.enabled === false) {
+      get().stopSpeakingSegment();
+    }
   },
 
   setGlossary: (glossary) => {
@@ -1382,6 +1397,42 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       set({ sessionError: String(e) });
       return false;
     }
+  },
+
+  saveRecordedMyVoiceSample: async (wavBytes, refText) => {
+    if (!isTauriRuntime()) return false;
+    try {
+      const ok = await tauriInvoke<boolean>("save_recorded_my_voice_sample", {
+        wavBytes: Array.from(wavBytes),
+        refText,
+      });
+      if (ok) {
+        set({
+          hasMyVoiceSample: true,
+          sessionNotice: "已保存我的固定声纹样本（本地与云端声纹克隆均可直接使用）",
+        });
+        return true;
+      }
+    } catch (err) {
+      set({
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return false;
+  },
+
+  readMyVoiceSampleWav: async () => {
+    if (!isTauriRuntime()) return null;
+    try {
+      const raw = await tauriInvoke<ArrayBuffer | Uint8Array>("read_my_voice_sample_wav");
+      if (raw) {
+        const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+        if (bytes.byteLength > 44) return bytes;
+      }
+    } catch {
+      // ignore
+    }
+    return null;
   },
 
   clearMyVoiceSample: async () => {
