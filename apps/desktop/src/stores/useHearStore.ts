@@ -124,6 +124,8 @@ interface HearStoreState extends AppSnapshot {
   audioSources: AudioSourceOption[];
   audioLevel: number;
   sessionError: string | null;
+  seekNonce: number;
+  seekTargetMs: number;
   searchQuery: string;
   summaryOpen: boolean;
   summaryTemplateId: string;
@@ -156,6 +158,9 @@ interface HearStoreState extends AppSnapshot {
 
   seekPlayback: (ms: number, autoPlay?: boolean) => Promise<void>;
   togglePlayback: () => Promise<void>;
+  setPlaybackPlaying: (playing: boolean) => Promise<void>;
+  syncPlaybackPosition: (ms: number) => void;
+  readRecordingAudio: () => Promise<Uint8Array | null>;
   setPlaybackSpeed: (speed: number) => void;
   setTrackVolumes: (systemVolume: number, micVolume: number) => void;
 
@@ -172,6 +177,7 @@ interface HearStoreState extends AppSnapshot {
   reinstallLocalServer: () => Promise<void>;
   uninstallLocalServer: (removeModels: boolean) => Promise<void>;
   openLocalServerDir: () => Promise<void>;
+  openLogsDir: () => Promise<void>;
   saveUpdateConfig: (patch: Partial<UpdateConfig>) => Promise<UpdateConfig>;
   checkForUpdates: (override?: UpdateConfig) => Promise<UpdateCheckResult | null>;
   downloadAndInstallUpdate: () => Promise<void>;
@@ -185,7 +191,7 @@ interface HearStoreState extends AppSnapshot {
 }
 
 export const useHearStore = create<HearStoreState>((set, get) => ({
-  appVersion: "0.1.7",
+  appVersion: "0.1.8",
   mode: "idle" as SessionMode,
   sourceLang: "en",
   targetLang: "zh",
@@ -212,6 +218,8 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   ],
   audioLevel: 0,
   sessionError: null,
+  seekNonce: 0,
+  seekTargetMs: 0,
   searchQuery: "",
   summaryOpen: true,
   summaryTemplateId: "meeting",
@@ -304,6 +312,18 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       await listen<RecordingPlaybackState>("recording:ready", (ev) => {
         set({ playback: ev.payload });
       });
+      await listen<string>("summary:delta", (ev) => {
+        set({ summaryMarkdown: ev.payload, summaryOpen: true });
+      });
+      await listen("shortcut:copy_latest", () => {
+        const segs = get().segments;
+        const last = segs[segs.length - 1];
+        if (!last) return;
+        const text = last.translatedText || last.sourceText;
+        if (text) {
+          void navigator.clipboard?.writeText(text);
+        }
+      });
     }
   },
 
@@ -357,20 +377,45 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   },
 
   seekPlayback: async (ms, autoPlay = true) => {
-    set((s) => ({
-      playback: {
-        ...s.playback,
-        positionMs: Math.max(0, Math.min(ms, s.playback.durationMs || ms)),
-        isPlaying: autoPlay ? true : s.playback.isPlaying,
-      },
-    }));
+    set((s) => {
+      const clamped = Math.max(0, Math.min(ms, s.playback.durationMs || ms));
+      return {
+        seekNonce: s.seekNonce + 1,
+        seekTargetMs: clamped,
+        playback: {
+          ...s.playback,
+          positionMs: clamped,
+          isPlaying: autoPlay ? true : s.playback.isPlaying,
+        },
+      };
+    });
     await tauriInvoke("seek_playback", { positionMs: Math.floor(ms), autoPlay });
   },
 
   togglePlayback: async () => {
     const playing = !get().playback.isPlaying;
+    await get().setPlaybackPlaying(playing);
+  },
+
+  setPlaybackPlaying: async (playing) => {
     set((s) => ({ playback: { ...s.playback, isPlaying: playing } }));
     await tauriInvoke("set_playback_playing", { playing });
+  },
+
+  syncPlaybackPosition: (ms) => {
+    set((s) => ({
+      playback: {
+        ...s.playback,
+        positionMs: Math.max(0, Math.min(ms, s.playback.durationMs || ms)),
+      },
+    }));
+  },
+
+  readRecordingAudio: async () => {
+    if (!isTauriRuntime()) return null;
+    const raw = await tauriInvoke<ArrayBuffer | Uint8Array>("read_recording_audio");
+    if (!raw) return null;
+    return raw instanceof Uint8Array ? raw : new Uint8Array(raw);
   },
 
   setPlaybackSpeed: (speed) => {
@@ -540,6 +585,16 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     }
   },
 
+  openLogsDir: async () => {
+    try {
+      await tauriInvoke("open_logs_dir");
+    } catch (err) {
+      set({
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
   saveUpdateConfig: async (patch) => {
     const merged: UpdateConfig = { ...get().updateConfig, ...patch };
     set({ updateConfig: merged });
@@ -616,7 +671,12 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
 
   generateSummary: async () => {
     if (get().segments.length === 0 || get().summaryGenerating) return;
-    set({ summaryGenerating: true, summaryOpen: true });
+    set({
+      summaryGenerating: true,
+      summaryOpen: true,
+      summaryMarkdown: "",
+      sessionError: null,
+    });
     try {
       const md = await tauriInvoke<string>("generate_summary", {
         templateId: get().summaryTemplateId,
@@ -624,12 +684,48 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       if (typeof md === "string") {
         set({ summaryMarkdown: md });
       }
+    } catch (err) {
+      set({
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       set({ summaryGenerating: false });
     }
   },
 
   importMediaFile: async () => {
-    await tauriInvoke("import_media_file");
+    if (!isTauriRuntime()) return;
+    set({ sessionError: null });
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selected = await open({
+        multiple: false,
+        title: "选择本地音频或视频文件",
+        filters: [
+          {
+            name: "音视频文件",
+            extensions: [
+              "wav",
+              "mp3",
+              "m4a",
+              "mp4",
+              "mkv",
+              "flac",
+              "ogg",
+              "aac",
+              "webm",
+              "mov",
+            ],
+          },
+        ],
+      });
+      if (!selected || Array.isArray(selected)) return;
+      set({ segments: [], summaryMarkdown: "" });
+      await tauriInvoke("import_media_file", { filePath: selected });
+    } catch (err) {
+      set({
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
   },
 }));

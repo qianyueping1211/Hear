@@ -56,6 +56,11 @@ impl HearCloudClient {
     pub fn new() -> Self {
         let http = Client::builder()
             .no_proxy()
+            .user_agent(concat!(
+                "HearDesktop/",
+                env!("CARGO_PKG_VERSION"),
+                " (Windows NT 10.0; Win64; x64)"
+            ))
             .connect_timeout(Duration::from_secs(5))
             // 兼容局域网/本机自签证书；后续可叠加 #hear-root=... 严格指纹固定校验
             .danger_accept_invalid_certs(true)

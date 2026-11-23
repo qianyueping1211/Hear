@@ -1,9 +1,8 @@
+use crate::logger;
 use crate::recorder::{encode_wav_16k_mono, StreamingWavRecorder};
 use crate::state::{AudioCaptureMode, AudioChannel, EngineSource, SubtitleSegment};
 use crate::vad::{SegmentEvent, Segmenter, VAD_SAMPLE_RATE, VAD_WINDOW_SAMPLES};
 use crate::AppRuntime;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, Stream, StreamConfig};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
@@ -109,7 +108,6 @@ pub fn clean_translation_output(raw: &str) -> String {
 
 /// 将任意采样率/声道数的实时输入下混为单声道并线性重采样到 16 kHz，再按 512 采样帧喂入 VAD 与断句器
 struct LaneProcessor {
-    channel: AudioChannel,
     src_rate: u32,
     channels: usize,
     pos: f64,
@@ -121,16 +119,15 @@ struct LaneProcessor {
 }
 
 impl LaneProcessor {
-    fn new(channel: AudioChannel, src_rate: u32, channels: usize) -> Self {
+    fn new(src_rate: u32, channels: usize) -> Self {
         Self {
-            channel,
             src_rate: src_rate.max(8_000),
             channels: channels.max(1),
             pos: 0.0,
             prev_sample: None,
             frame_buf: Vec::with_capacity(VAD_WINDOW_SAMPLES * 2),
             segmenter: Segmenter::new(640, 15),
-            noise_floor: 0.004,
+            noise_floor: 0.0012,
             hangover: 0,
         }
     }
@@ -147,14 +144,28 @@ impl LaneProcessor {
         if frames == 0 {
             return;
         }
+
+        // 多声道下混：对 4 通道及以上笔记本阵列麦防反相抵消（若均值能量明显低于首通道，则回退首通道）
         let mut mono = Vec::with_capacity(frames);
+        let mut avg_energy = 0.0f32;
+        let mut ch0_energy = 0.0f32;
         for i in 0..frames {
-            let mut sum = 0.0f32;
             let base = i * ch;
+            let mut sum = 0.0f32;
             for c in 0..ch {
                 sum += interleaved[base + c];
             }
-            mono.push(sum / ch as f32);
+            let avg = sum / ch as f32;
+            let c0 = interleaved[base];
+            avg_energy += avg * avg;
+            ch0_energy += c0 * c0;
+            mono.push(avg);
+        }
+        if ch > 2 && ch0_energy > 1e-7 && avg_energy < ch0_energy * 0.25 {
+            mono.clear();
+            for i in 0..frames {
+                mono.push(interleaved[i * ch]);
+            }
         }
 
         // 线性重采样到 16 kHz
@@ -191,22 +202,22 @@ impl LaneProcessor {
             let energy: f32 = frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32;
             let rms = energy.sqrt();
 
-            let thresh = (self.noise_floor * 2.6).max(0.0085).min(0.06);
+            let thresh = (self.noise_floor * 2.4).max(0.0028).min(0.045);
             let speech_now = rms > thresh;
             let has_speech = if speech_now {
-                self.hangover = 6; // ~192ms 拖尾保护，防止吞尾音
+                self.hangover = 7; // ~224ms 拖尾保护，防止吞尾音
                 true
             } else if self.hangover > 0 {
                 self.hangover -= 1;
                 true
             } else {
                 // 仅在静音时缓慢更新底噪估计
-                self.noise_floor = (self.noise_floor * 0.96 + rms * 0.04).clamp(0.0015, 0.025);
+                self.noise_floor = (self.noise_floor * 0.96 + rms * 0.04).clamp(0.0005, 0.018);
                 false
             };
 
             let ev = self.segmenter.push_frame(&frame, has_speech);
-            let level = (rms * 8.0).clamp(0.0, 1.0);
+            let level = (rms * 12.0).clamp(0.0, 1.0);
             on_frame(&frame, has_speech, level, ev);
         }
     }
@@ -221,72 +232,616 @@ struct CapturedSegment {
     event: SegmentEvent,
 }
 
-fn build_cpal_stream<F>(
-    device: &cpal::Device,
-    config: &StreamConfig,
-    sample_format: SampleFormat,
-    on_samples: F,
-    err_app: AppHandle,
-) -> Result<Stream, String>
-where
-    F: FnMut(&[f32]) + Send + 'static,
-{
-    let err_fn = move |err| {
-        let _ = err_app.emit("session:error", format!("音频采集流异常：{}", err));
+#[cfg(target_os = "windows")]
+mod win_wasapi {
+    use super::*;
+    use std::ffi::c_void;
+    use windows::core::GUID;
+    use windows::Win32::Media::Audio::{
+        eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
+        MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
+        WAVEFORMATEXTENSIBLE,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+        COINIT_MULTITHREADED,
     };
 
-    match sample_format {
-        SampleFormat::F32 => {
-            let mut cb = on_samples;
-            device
-                .build_input_stream(config, move |data: &[f32], _| cb(data), err_fn, None)
-                .map_err(|e| format!("创建 F32 音频流失败：{}", e))
+    const FLAG_SILENT: u32 = 0x2;
+    const WAVE_FORMAT_PCM: u16 = 1;
+    const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
+    const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+
+    const GUID_PCM: GUID = GUID::from_u128(0x00000001_0000_0010_8000_00aa00389b71);
+    const GUID_IEEE_FLOAT: GUID = GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
+
+    #[derive(Clone, Copy, Debug)]
+    enum SampleEncoding {
+        F32,
+        I16,
+        I24,
+        I32,
+    }
+
+    struct WasapiLane {
+        channel: AudioChannel,
+        audio_client: IAudioClient,
+        capture_client: IAudioCaptureClient,
+        encoding: SampleEncoding,
+        channels: usize,
+        sample_rate: u32,
+        processor: LaneProcessor,
+        stat_frames: u64,
+        stat_speech_frames: u64,
+        stat_peak: f32,
+        record_to_wav: bool,
+    }
+
+    impl WasapiLane {
+        unsafe fn open(
+            enumerator: &IMMDeviceEnumerator,
+            channel: AudioChannel,
+            is_loopback: bool,
+            record_to_wav: bool,
+        ) -> Result<Self, String> {
+            let flow = if is_loopback { eRender } else { eCapture };
+            let device = enumerator
+                .GetDefaultAudioEndpoint(flow, eConsole)
+                .map_err(|e| {
+                    if is_loopback {
+                        format!("未找到系统默认播放设备（{:?}）", e)
+                    } else {
+                        format!("未找到默认麦克风设备（{:?}）", e)
+                    }
+                })?;
+
+            let audio_client: IAudioClient = device
+                .Activate(CLSCTX_ALL, None)
+                .map_err(|e| format!("激活 WASAPI 音频客户端失败：{:?}", e))?;
+
+            let mix_ptr = audio_client
+                .GetMixFormat()
+                .map_err(|e| format!("获取 WASAPI 混音格式失败：{:?}", e))?;
+            if mix_ptr.is_null() {
+                return Err("WASAPI 返回空的混音格式".to_string());
+            }
+
+            let wf: WAVEFORMATEX = std::ptr::read_unaligned(mix_ptr);
+            let tag = wf.wFormatTag;
+            let channels = wf.nChannels as usize;
+            let sample_rate = wf.nSamplesPerSec;
+            let bits = wf.wBitsPerSample;
+
+            let encoding = if tag == WAVE_FORMAT_IEEE_FLOAT && bits == 32 {
+                SampleEncoding::F32
+            } else if tag == WAVE_FORMAT_PCM && bits == 16 {
+                SampleEncoding::I16
+            } else if tag == WAVE_FORMAT_PCM && bits == 24 {
+                SampleEncoding::I24
+            } else if tag == WAVE_FORMAT_PCM && bits == 32 {
+                SampleEncoding::I32
+            } else if tag == WAVE_FORMAT_EXTENSIBLE {
+                let wfe: WAVEFORMATEXTENSIBLE =
+                    std::ptr::read_unaligned(mix_ptr as *const WAVEFORMATEXTENSIBLE);
+                let sub = wfe.SubFormat;
+                if sub == GUID_IEEE_FLOAT && bits == 32 {
+                    SampleEncoding::F32
+                } else if sub == GUID_PCM && bits == 16 {
+                    SampleEncoding::I16
+                } else if sub == GUID_PCM && bits == 24 {
+                    SampleEncoding::I24
+                } else if sub == GUID_PCM && bits == 32 {
+                    SampleEncoding::I32
+                } else {
+                    CoTaskMemFree(Some(mix_ptr as *const c_void));
+                    return Err(format!(
+                        "不支持的 WASAPI 扩展音频格式（bits={}，sub={:?}）",
+                        bits, sub
+                    ));
+                }
+            } else {
+                CoTaskMemFree(Some(mix_ptr as *const c_void));
+                return Err(format!(
+                    "不支持的 WASAPI 音频格式（tag={}，bits={}）",
+                    tag, bits
+                ));
+            };
+
+            // 关键：系统内录严格使用纯轮询模式（不叠加 EVENTCALLBACK），规避 Windows 11 SoundWire/Intel 驱动事件丢失导致全零静音的问题
+            let stream_flags = if is_loopback {
+                AUDCLNT_STREAMFLAGS_LOOPBACK
+            } else {
+                0
+            };
+            let init_res = audio_client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                stream_flags,
+                10_000_000, // 1.0 秒缓冲
+                0,
+                mix_ptr,
+                None,
+            );
+            CoTaskMemFree(Some(mix_ptr as *const c_void));
+            init_res.map_err(|e| format!("初始化 WASAPI 音频流失败：{:?}", e))?;
+
+            let capture_client: IAudioCaptureClient = audio_client
+                .GetService()
+                .map_err(|e| format!("获取 WASAPI 采集客户端失败：{:?}", e))?;
+
+            audio_client
+                .Start()
+                .map_err(|e| format!("启动 WASAPI 采集流失败：{:?}", e))?;
+
+            logger::info(format!(
+                "WASAPI 采集已启动: channel={:?} loopback={} sr={} ch={} bits={} enc={:?}",
+                channel, is_loopback, sample_rate, channels, bits, encoding
+            ));
+
+            Ok(Self {
+                channel,
+                audio_client,
+                capture_client,
+                encoding,
+                channels: channels.max(1),
+                sample_rate: sample_rate.max(8_000),
+                processor: LaneProcessor::new(sample_rate, channels),
+                stat_frames: 0,
+                stat_speech_frames: 0,
+                stat_peak: 0.0,
+                record_to_wav,
+            })
         }
-        SampleFormat::I16 => {
-            let mut cb = on_samples;
-            device
-                .build_input_stream(
-                    config,
-                    move |data: &[i16], _| {
-                        let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
-                        cb(&f);
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| format!("创建 I16 音频流失败：{}", e))
+
+        unsafe fn drain_packets(
+            &mut self,
+            recorder: &mut Option<StreamingWavRecorder>,
+            seg_tx: &tokio_mpsc::UnboundedSender<CapturedSegment>,
+        ) -> f32 {
+            let mut max_level = 0.0f32;
+            let mut scratch: Vec<f32> = Vec::new();
+
+            loop {
+                let pkt = match self.capture_client.GetNextPacketSize() {
+                    Ok(n) if n > 0 => n,
+                    _ => break,
+                };
+                let _ = pkt;
+
+                let mut data_ptr: *mut u8 = std::ptr::null_mut();
+                let mut num_frames: u32 = 0;
+                let mut buf_flags: u32 = 0;
+                if self
+                    .capture_client
+                    .GetBuffer(&mut data_ptr, &mut num_frames, &mut buf_flags, None, None)
+                    .is_err()
+                {
+                    break;
+                }
+
+                let nf = num_frames as usize;
+                let sample_count = nf * self.channels;
+                scratch.clear();
+                scratch.reserve(sample_count);
+
+                let is_silent = (buf_flags & FLAG_SILENT) != 0 || data_ptr.is_null();
+                if is_silent {
+                    scratch.resize(sample_count, 0.0f32);
+                } else {
+                    match self.encoding {
+                        SampleEncoding::F32 => {
+                            let bytes = std::slice::from_raw_parts(data_ptr, sample_count * 4);
+                            for c in bytes.chunks_exact(4) {
+                                let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                                let clean = if v.is_finite() { v } else { 0.0 };
+                                scratch.push(clean);
+                            }
+                        }
+                        SampleEncoding::I16 => {
+                            let bytes = std::slice::from_raw_parts(data_ptr, sample_count * 2);
+                            for c in bytes.chunks_exact(2) {
+                                let v = i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0;
+                                scratch.push(v);
+                            }
+                        }
+                        SampleEncoding::I24 => {
+                            let bytes = std::slice::from_raw_parts(data_ptr, sample_count * 3);
+                            for c in bytes.chunks_exact(3) {
+                                let b0 = c[0] as i32;
+                                let b1 = (c[1] as i32) << 8;
+                                let b2 = ((c[2] as i8) as i32) << 16;
+                                scratch.push((b0 | b1 | b2) as f32 / 8_388_608.0);
+                            }
+                        }
+                        SampleEncoding::I32 => {
+                            let bytes = std::slice::from_raw_parts(data_ptr, sample_count * 4);
+                            for c in bytes.chunks_exact(4) {
+                                let v = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                                scratch.push((v as f64 / 2_147_483_648.0) as f32);
+                            }
+                        }
+                    }
+                }
+
+                let _ = self.capture_client.ReleaseBuffer(num_frames);
+
+                for &s in &scratch {
+                    let a = s.abs();
+                    if a > self.stat_peak {
+                        self.stat_peak = a;
+                    }
+                }
+                self.stat_frames += nf as u64;
+
+                let ch = self.channel;
+                let record_this = self.record_to_wav;
+                let mut speech_hits = 0u64;
+                self.processor.push_interleaved(&scratch, |frame, has_speech, level, ev| {
+                    if has_speech {
+                        speech_hits += 1;
+                    }
+                    if level > max_level {
+                        max_level = level;
+                    }
+                    if record_this {
+                        if let Some(ref mut rec) = recorder {
+                            let _ = rec.write_f32(frame);
+                        }
+                    }
+                    if let Some(event) = ev {
+                        let _ = seg_tx.send(CapturedSegment { channel: ch, event });
+                    }
+                });
+                self.stat_speech_frames += speech_hits;
+            }
+            max_level
         }
-        SampleFormat::I32 => {
-            let mut cb = on_samples;
-            device
-                .build_input_stream(
-                    config,
-                    move |data: &[i32], _| {
-                        let f: Vec<f32> =
-                            data.iter().map(|&s| (s as f64 / 2_147_483_648.0) as f32).collect();
-                        cb(&f);
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| format!("创建 I32 音频流失败：{}", e))
+
+        unsafe fn stop_and_flush(
+            &mut self,
+            seg_tx: &tokio_mpsc::UnboundedSender<CapturedSegment>,
+        ) {
+            let _ = self.audio_client.Stop();
+            if let Some(ev) = self.processor.flush_final() {
+                let _ = seg_tx.send(CapturedSegment {
+                    channel: self.channel,
+                    event: ev,
+                });
+            }
+            logger::info(format!(
+                "WASAPI 采集已停止: channel={:?} total_frames={} speech_frames={} peak={:.5}",
+                self.channel, self.stat_frames, self.stat_speech_frames, self.stat_peak
+            ));
         }
-        SampleFormat::U16 => {
-            let mut cb = on_samples;
-            device
-                .build_input_stream(
-                    config,
-                    move |data: &[u16], _| {
-                        let f: Vec<f32> =
-                            data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0).collect();
-                        cb(&f);
-                    },
-                    err_fn,
-                    None,
-                )
-                .map_err(|e| format!("创建 U16 音频流失败：{}", e))
+    }
+
+    pub fn run_capture_thread(
+        capture_mode: AudioCaptureMode,
+        stop_flag: Arc<AtomicBool>,
+        stop_rx: mpsc::Receiver<()>,
+        ready_tx: mpsc::SyncSender<Result<(), String>>,
+        seg_tx: tokio_mpsc::UnboundedSender<CapturedSegment>,
+        app: AppHandle,
+        rt: Arc<AppRuntime>,
+    ) {
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let com_inited = hr.is_ok();
+
+            let enumerator: IMMDeviceEnumerator =
+                match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let msg = format!("初始化 Windows 音频设备枚举器失败：{:?}", e);
+                        logger::error(&msg);
+                        let _ = ready_tx.send(Err(msg));
+                        if com_inited {
+                            CoUninitialize();
+                        }
+                        return;
+                    }
+                };
+
+            let want_system = matches!(
+                capture_mode,
+                AudioCaptureMode::SystemLoopback
+                    | AudioCaptureMode::AppLoopback
+                    | AudioCaptureMode::DualMix
+            );
+            let want_mic = matches!(
+                capture_mode,
+                AudioCaptureMode::Microphone | AudioCaptureMode::DualMix
+            );
+
+            let mut lanes: Vec<WasapiLane> = Vec::new();
+            if want_system {
+                match WasapiLane::open(&enumerator, AudioChannel::System, true, true) {
+                    Ok(lane) => lanes.push(lane),
+                    Err(e) => {
+                        logger::error(&e);
+                        let _ = ready_tx.send(Err(e));
+                        if com_inited {
+                            CoUninitialize();
+                        }
+                        return;
+                    }
+                }
+            }
+            if want_mic {
+                match WasapiLane::open(&enumerator, AudioChannel::Mic, false, !want_system) {
+                    Ok(lane) => lanes.push(lane),
+                    Err(e) => {
+                        for l in &mut lanes {
+                            let _ = l.audio_client.Stop();
+                        }
+                        logger::error(&e);
+                        let _ = ready_tx.send(Err(e));
+                        if com_inited {
+                            CoUninitialize();
+                        }
+                        return;
+                    }
+                }
+            }
+
+            let rec_path = std::env::temp_dir()
+                .join("Hear-Recordings")
+                .join(format!("rec-{}.wav", uuid::Uuid::new_v4()));
+            let mut recorder = StreamingWavRecorder::create(&rec_path, VAD_SAMPLE_RATE, 1).ok();
+
+            let _ = ready_tx.send(Ok(()));
+
+            let mut last_level_emit = Instant::now();
+            let mut last_stat_log = Instant::now();
+            let started_at = Instant::now();
+            let mut silence_warned = false;
+
+            while !stop_flag.load(Ordering::Relaxed) {
+                if stop_rx.try_recv().is_ok() {
+                    break;
+                }
+                let mut level = 0.0f32;
+                for lane in &mut lanes {
+                    let l = lane.drain_packets(&mut recorder, &seg_tx);
+                    if l > level {
+                        level = l;
+                    }
+                }
+                if last_level_emit.elapsed().as_millis() >= 66 {
+                    last_level_emit = Instant::now();
+                    let _ = app.emit("audio:level", level);
+                }
+                if last_stat_log.elapsed().as_secs() >= 3 {
+                    last_stat_log = Instant::now();
+                    for lane in &lanes {
+                        logger::info(format!(
+                            "[audio] channel={:?} sr={} ch={} frames={} peak={:.5} vad_speech={}",
+                            lane.channel,
+                            lane.sample_rate,
+                            lane.channels,
+                            lane.stat_frames,
+                            lane.stat_peak,
+                            lane.stat_speech_frames
+                        ));
+                    }
+                    if !silence_warned && started_at.elapsed().as_secs() >= 7 {
+                        let any_signal = lanes.iter().any(|l| l.stat_peak > 0.0005);
+                        if !any_signal {
+                            silence_warned = true;
+                            let hint = if want_system && !want_mic {
+                                "已录音超过 7 秒但系统播放设备未检测到任何声音信号；若你在对着麦克风说话，请将左上角音频源切换为「默认麦克风」或「双路混合」"
+                            } else {
+                                "已录音超过 7 秒但未检测到有效音频信号，请检查 Windows 默认音频设备是否静音或选错设备"
+                            };
+                            logger::warn(hint);
+                            let _ = app.emit("session:error", hint);
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+
+            for lane in &mut lanes {
+                lane.stop_and_flush(&seg_tx);
+            }
+            drop(lanes);
+            drop(seg_tx);
+
+            if let Some(rec) = recorder.take() {
+                if let Ok((path, duration_ms, peaks)) = rec.finalize() {
+                    if duration_ms > 0 {
+                        let rt_done = rt.clone();
+                        let app_done = app.clone();
+                        let path_str = path.to_string_lossy().to_string();
+                        tauri::async_runtime::spawn(async move {
+                            let pb = {
+                                let mut snap = rt_done.snapshot.lock().await;
+                                snap.playback.has_audio = true;
+                                snap.playback.audio_path = Some(path_str);
+                                snap.playback.duration_ms = duration_ms;
+                                snap.playback.peaks = peaks;
+                                snap.playback.clone()
+                            };
+                            let _ = app_done.emit("recording:ready", pb);
+                        });
+                    }
+                }
+            }
+            let _ = app.emit("audio:level", 0.0f32);
+
+            if com_inited {
+                CoUninitialize();
+            }
         }
-        other => Err(format!("不支持的音频采样格式：{:?}", other)),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod cpal_fallback {
+    use super::*;
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use cpal::{SampleFormat, Stream, StreamConfig};
+
+    fn build_cpal_stream<F>(
+        device: &cpal::Device,
+        config: &StreamConfig,
+        sample_format: SampleFormat,
+        on_samples: F,
+        err_app: AppHandle,
+    ) -> Result<Stream, String>
+    where
+        F: FnMut(&[f32]) + Send + 'static,
+    {
+        let err_fn = move |err| {
+            let msg = format!("音频采集流异常：{}", err);
+            logger::error(&msg);
+            let _ = err_app.emit("session:error", msg);
+        };
+        match sample_format {
+            SampleFormat::F32 => {
+                let mut cb = on_samples;
+                device
+                    .build_input_stream(config, move |data: &[f32], _| cb(data), err_fn, None)
+                    .map_err(|e| format!("创建 F32 音频流失败：{}", e))
+            }
+            SampleFormat::I16 => {
+                let mut cb = on_samples;
+                device
+                    .build_input_stream(
+                        config,
+                        move |data: &[i16], _| {
+                            let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
+                            cb(&f);
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| format!("创建 I16 音频流失败：{}", e))
+            }
+            other => Err(format!("不支持的音频采样格式：{:?}", other)),
+        }
+    }
+
+    pub fn run_capture_thread(
+        _capture_mode: AudioCaptureMode,
+        stop_flag: Arc<AtomicBool>,
+        stop_rx: mpsc::Receiver<()>,
+        ready_tx: mpsc::SyncSender<Result<(), String>>,
+        seg_tx: tokio_mpsc::UnboundedSender<CapturedSegment>,
+        app: AppHandle,
+        rt: Arc<AppRuntime>,
+    ) {
+        let host = cpal::default_host();
+        let Some(dev) = host.default_input_device() else {
+            let _ = ready_tx.send(Err("未找到默认输入音频设备".to_string()));
+            return;
+        };
+        let supported = match dev.default_input_config() {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = ready_tx.send(Err(format!("获取输入设备参数失败：{}", e)));
+                return;
+            }
+        };
+        let fmt = supported.sample_format();
+        let cfg: StreamConfig = supported.into();
+        let proc = Arc::new(std::sync::Mutex::new(LaneProcessor::new(
+            cfg.sample_rate.0,
+            cfg.channels as usize,
+        )));
+        let rec_path = std::env::temp_dir()
+            .join("Hear-Recordings")
+            .join(format!("rec-{}.wav", uuid::Uuid::new_v4()));
+        let recorder = StreamingWavRecorder::create(&rec_path, VAD_SAMPLE_RATE, 1)
+            .ok()
+            .map(|r| Arc::new(std::sync::Mutex::new(r)));
+
+        let proc_cb = proc.clone();
+        let tx_cb = seg_tx.clone();
+        let app_cb = app.clone();
+        let rec_cb = recorder.clone();
+        let stop_cb = stop_flag.clone();
+        let mut last_level_emit = Instant::now();
+
+        let stream = match build_cpal_stream(
+            &dev,
+            &cfg,
+            fmt,
+            move |samples| {
+                if stop_cb.load(Ordering::Relaxed) {
+                    return;
+                }
+                if let Ok(mut p) = proc_cb.lock() {
+                    p.push_interleaved(samples, |frame, _, level, ev| {
+                        if let Some(ref rec) = rec_cb {
+                            if let Ok(mut r) = rec.lock() {
+                                let _ = r.write_f32(frame);
+                            }
+                        }
+                        if last_level_emit.elapsed().as_millis() >= 66 {
+                            last_level_emit = Instant::now();
+                            let _ = app_cb.emit("audio:level", level);
+                        }
+                        if let Some(event) = ev {
+                            let _ = tx_cb.send(CapturedSegment {
+                                channel: AudioChannel::Mic,
+                                event,
+                            });
+                        }
+                    });
+                }
+            },
+            app.clone(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+                return;
+            }
+        };
+        if let Err(e) = stream.play() {
+            let _ = ready_tx.send(Err(format!("启动音频采集失败：{}", e)));
+            return;
+        }
+        let _ = ready_tx.send(Ok(()));
+        let _ = stop_rx.recv();
+        stop_flag.store(true, Ordering::Relaxed);
+        drop(stream);
+
+        if let Ok(mut p) = proc.lock() {
+            if let Some(ev) = p.flush_final() {
+                let _ = seg_tx.send(CapturedSegment {
+                    channel: AudioChannel::Mic,
+                    event: ev,
+                });
+            }
+        }
+        drop(seg_tx);
+
+        if let Some(rec_arc) = recorder {
+            if let Ok(rec_mutex) = Arc::try_unwrap(rec_arc) {
+                if let Ok(rec) = rec_mutex.into_inner() {
+                    if let Ok((path, duration_ms, peaks)) = rec.finalize() {
+                        if duration_ms > 0 {
+                            let rt_done = rt.clone();
+                            let app_done = app.clone();
+                            let path_str = path.to_string_lossy().to_string();
+                            tauri::async_runtime::spawn(async move {
+                                let pb = {
+                                    let mut snap = rt_done.snapshot.lock().await;
+                                    snap.playback.has_audio = true;
+                                    snap.playback.audio_path = Some(path_str);
+                                    snap.playback.duration_ms = duration_ms;
+                                    snap.playback.peaks = peaks;
+                                    snap.playback.clone()
+                                };
+                                let _ = app_done.emit("recording:ready", pb);
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        let _ = app.emit("audio:level", 0.0f32);
     }
 }
 
@@ -316,208 +871,26 @@ impl LiveCaptureHandle {
         let capture_thread = std::thread::Builder::new()
             .name("hear-audio-capture".to_string())
             .spawn(move || {
-                let host = cpal::default_host();
-                let mut streams: Vec<Stream> = Vec::new();
-                let mut processors: Vec<Arc<std::sync::Mutex<LaneProcessor>>> = Vec::new();
-
-                let rec_path = std::env::temp_dir()
-                    .join("Hear-Recordings")
-                    .join(format!("rec-{}.wav", uuid::Uuid::new_v4()));
-                let recorder = StreamingWavRecorder::create(&rec_path, VAD_SAMPLE_RATE, 1)
-                    .ok()
-                    .map(|r| Arc::new(std::sync::Mutex::new(r)));
-
-                let want_system = matches!(
+                #[cfg(target_os = "windows")]
+                win_wasapi::run_capture_thread(
                     capture_mode,
-                    AudioCaptureMode::SystemLoopback
-                        | AudioCaptureMode::AppLoopback
-                        | AudioCaptureMode::DualMix
+                    stop_flag_capture,
+                    stop_rx,
+                    ready_tx,
+                    seg_tx,
+                    app_capture,
+                    rt_capture,
                 );
-                let want_mic = matches!(
+                #[cfg(not(target_os = "windows"))]
+                cpal_fallback::run_capture_thread(
                     capture_mode,
-                    AudioCaptureMode::Microphone | AudioCaptureMode::DualMix
+                    stop_flag_capture,
+                    stop_rx,
+                    ready_tx,
+                    seg_tx,
+                    app_capture,
+                    rt_capture,
                 );
-
-                let mut setup_err: Option<String> = None;
-
-                if want_system {
-                    match host.default_output_device() {
-                        Some(dev) => match dev.default_output_config() {
-                            Ok(supported) => {
-                                let fmt = supported.sample_format();
-                                let cfg: StreamConfig = supported.into();
-                                let proc = Arc::new(std::sync::Mutex::new(LaneProcessor::new(
-                                    AudioChannel::System,
-                                    cfg.sample_rate.0,
-                                    cfg.channels as usize,
-                                )));
-                                let proc_cb = proc.clone();
-                                let tx_cb = seg_tx.clone();
-                                let app_cb = app_capture.clone();
-                                let rec_cb = recorder.clone();
-                                let stop_cb = stop_flag_capture.clone();
-                                let mut last_level_emit = Instant::now();
-                                match build_cpal_stream(
-                                    &dev,
-                                    &cfg,
-                                    fmt,
-                                    move |samples| {
-                                        if stop_cb.load(Ordering::Relaxed) {
-                                            return;
-                                        }
-                                        if let Ok(mut p) = proc_cb.lock() {
-                                            p.push_interleaved(samples, |frame, _, level, ev| {
-                                                if let Some(ref rec) = rec_cb {
-                                                    if let Ok(mut r) = rec.lock() {
-                                                        let _ = r.write_f32(frame);
-                                                    }
-                                                }
-                                                if last_level_emit.elapsed().as_millis() >= 66 {
-                                                    last_level_emit = Instant::now();
-                                                    let _ = app_cb.emit("audio:level", level);
-                                                }
-                                                if let Some(event) = ev {
-                                                    let _ = tx_cb.send(CapturedSegment {
-                                                        channel: AudioChannel::System,
-                                                        event,
-                                                    });
-                                                }
-                                            });
-                                        }
-                                    },
-                                    app_capture.clone(),
-                                ) {
-                                    Ok(stream) => {
-                                        if let Err(e) = stream.play() {
-                                            setup_err = Some(format!("启动系统内录失败：{}", e));
-                                        } else {
-                                            streams.push(stream);
-                                            processors.push(proc);
-                                        }
-                                    }
-                                    Err(e) => setup_err = Some(format!("系统声音内录初始化失败：{}", e)),
-                                }
-                            }
-                            Err(e) => setup_err = Some(format!("获取系统播放设备参数失败：{}", e)),
-                        },
-                        None => setup_err = Some("未找到系统默认播放设备，无法捕获系统声音".to_string()),
-                    }
-                }
-
-                if setup_err.is_none() && want_mic {
-                    match host.default_input_device() {
-                        Some(dev) => match dev.default_input_config() {
-                            Ok(supported) => {
-                                let fmt = supported.sample_format();
-                                let cfg: StreamConfig = supported.into();
-                                let proc = Arc::new(std::sync::Mutex::new(LaneProcessor::new(
-                                    AudioChannel::Mic,
-                                    cfg.sample_rate.0,
-                                    cfg.channels as usize,
-                                )));
-                                let proc_cb = proc.clone();
-                                let tx_cb = seg_tx.clone();
-                                let app_cb = app_capture.clone();
-                                let rec_cb = if !want_system { recorder.clone() } else { None };
-                                let stop_cb = stop_flag_capture.clone();
-                                let mut last_level_emit = Instant::now();
-                                match build_cpal_stream(
-                                    &dev,
-                                    &cfg,
-                                    fmt,
-                                    move |samples| {
-                                        if stop_cb.load(Ordering::Relaxed) {
-                                            return;
-                                        }
-                                        if let Ok(mut p) = proc_cb.lock() {
-                                            p.push_interleaved(samples, |frame, _, level, ev| {
-                                                if let Some(ref rec) = rec_cb {
-                                                    if let Ok(mut r) = rec.lock() {
-                                                        let _ = r.write_f32(frame);
-                                                    }
-                                                }
-                                                if last_level_emit.elapsed().as_millis() >= 66 {
-                                                    last_level_emit = Instant::now();
-                                                    let _ = app_cb.emit("audio:level", level);
-                                                }
-                                                if let Some(event) = ev {
-                                                    let _ = tx_cb.send(CapturedSegment {
-                                                        channel: AudioChannel::Mic,
-                                                        event,
-                                                    });
-                                                }
-                                            });
-                                        }
-                                    },
-                                    app_capture.clone(),
-                                ) {
-                                    Ok(stream) => {
-                                        if let Err(e) = stream.play() {
-                                            setup_err = Some(format!("启动麦克风采集失败：{}", e));
-                                        } else {
-                                            streams.push(stream);
-                                            processors.push(proc);
-                                        }
-                                    }
-                                    Err(e) => setup_err = Some(format!("麦克风初始化失败：{}", e)),
-                                }
-                            }
-                            Err(e) => setup_err = Some(format!("获取麦克风参数失败：{}", e)),
-                        },
-                        None => setup_err = Some("未找到默认麦克风设备".to_string()),
-                    }
-                }
-
-                if let Some(err) = setup_err {
-                    drop(streams);
-                    let _ = ready_tx.send(Err(err));
-                    return;
-                }
-
-                let _ = ready_tx.send(Ok(()));
-
-                // 阻塞等待停止信号，期间保持 WASAPI 音频流存活
-                let _ = stop_rx.recv();
-                stop_flag_capture.store(true, Ordering::Relaxed);
-                drop(streams);
-
-                // 停录时冲刷句尾未切完的话，避免丢最后半句
-                for proc in &processors {
-                    if let Ok(mut p) = proc.lock() {
-                        let ch = p.channel;
-                        if let Some(ev) = p.flush_final() {
-                            let _ = seg_tx.send(CapturedSegment { channel: ch, event: ev });
-                        }
-                    }
-                }
-                drop(seg_tx);
-
-                // 结束并回写录音文件头，将真实波形与时长同步回前端播放器
-                if let Some(rec_arc) = recorder {
-                    if let Ok(rec_mutex) = Arc::try_unwrap(rec_arc) {
-                        if let Ok(rec) = rec_mutex.into_inner() {
-                            if let Ok((path, duration_ms, peaks)) = rec.finalize() {
-                                if duration_ms > 0 {
-                                    let rt_done = rt_capture.clone();
-                                    let app_done = app_capture.clone();
-                                    let path_str = path.to_string_lossy().to_string();
-                                    tauri::async_runtime::spawn(async move {
-                                        let pb = {
-                                            let mut snap = rt_done.snapshot.lock().await;
-                                            snap.playback.has_audio = true;
-                                            snap.playback.audio_path = Some(path_str);
-                                            snap.playback.duration_ms = duration_ms;
-                                            snap.playback.peaks = peaks;
-                                            snap.playback.clone()
-                                        };
-                                        let _ = app_done.emit("recording:ready", pb);
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                let _ = app_capture.emit("audio:level", 0.0f32);
             })
             .map_err(|e| format!("启动音频采集线程失败：{}", e))?;
 
@@ -533,7 +906,7 @@ impl LiveCaptureHandle {
             }
         }
 
-        // 启动异步推理消费协程：VAD 片段 -> /v1/asr -> 流式 /v1/translate -> 实时推送主窗与悬浮字幕
+        // 启动异步推理消费协程：VAD 片段 -> /v1/asr -> 流式/JSON /v1/translate -> 实时推送主窗与悬浮字幕
         let worker_task = tauri::async_runtime::spawn(async move {
             let mut last_preview_at: Option<Instant> = None;
 
@@ -599,7 +972,6 @@ impl LiveCaptureHandle {
 
                 match item.event {
                     SegmentEvent::Partial { samples, .. } => {
-                        // 实时预览节流（至少间隔 900ms，避免压爆 CPU/网关）
                         let throttled = last_preview_at
                             .map(|t| t.elapsed().as_millis() < 900)
                             .unwrap_or(false);
@@ -641,10 +1013,10 @@ impl LiveCaptureHandle {
                         end_ms,
                         samples,
                     } => {
-                        // 忽略过短的噪声片段（< 250ms）
                         if samples.len() < (VAD_SAMPLE_RATE as usize / 4) {
                             continue;
                         }
+                        let t0 = Instant::now();
                         let wav = encode_wav_16k_mono(&samples);
                         let (source_text, detected_lang) = match rt
                             .cloud
@@ -658,8 +1030,18 @@ impl LiveCaptureHandle {
                             )
                             .await
                         {
-                            Ok(pair) => pair,
+                            Ok(pair) => {
+                                logger::info(format!(
+                                    "[asr] seg={} ms={} lang={} chars={}",
+                                    segment_id,
+                                    t0.elapsed().as_millis(),
+                                    pair.1,
+                                    pair.0.chars().count()
+                                ));
+                                pair
+                            }
                             Err(err) => {
+                                logger::error(format!("[asr] seg={} failed: {}", segment_id, err));
                                 let _ = app.emit("session:error", err);
                                 continue;
                             }
@@ -676,7 +1058,6 @@ impl LiveCaptureHandle {
                             continue;
                         }
 
-                        // 双向自动判别方向（未锁定源语种且识别结果为目标语种时自动反向翻译）
                         let (actual_src, actual_dst) =
                             if !lock_src && detected_lang == dst_lang && dst_lang != src_lang {
                                 (dst_lang.clone(), src_lang.clone())
@@ -729,6 +1110,7 @@ impl LiveCaptureHandle {
                             }),
                         );
 
+                        let t_mt = Instant::now();
                         let prompt =
                             build_translation_prompt(&source_text, &actual_src, &actual_dst, &glossary);
                         let app_stream = app.clone();
@@ -755,6 +1137,12 @@ impl LiveCaptureHandle {
                         {
                             Ok(full_raw) => {
                                 let final_text = clean_translation_output(&full_raw);
+                                logger::info(format!(
+                                    "[mt] seg={} ms={} chars={}",
+                                    segment_id,
+                                    t_mt.elapsed().as_millis(),
+                                    final_text.chars().count()
+                                ));
                                 seg.translated_text = if final_text.is_empty() {
                                     source_text.clone()
                                 } else {
@@ -776,6 +1164,7 @@ impl LiveCaptureHandle {
                                 );
                             }
                             Err(err) => {
+                                logger::error(format!("[mt] seg={} failed: {}", segment_id, err));
                                 seg.translated_text = format!("（翻译失败：{}）", err);
                                 seg.status = "error".to_string();
                                 {
@@ -811,9 +1200,59 @@ impl LiveCaptureHandle {
         if let Some(handle) = self.capture_thread.take() {
             let _ = handle.join();
         }
-        // worker_task 会在 seg_rx 消费完冲刷出来的最后一句后自动退出
         let _ = &self.worker_task;
     }
+}
+
+/// 离线批量切分 16 kHz 单声道音频为带精确起止时间戳的语音段落（用于本地音视频文件导入）
+pub fn segment_offline_16k_mono(samples: &[f32]) -> Vec<(u64, u64, Vec<f32>)> {
+    let mut lane = LaneProcessor::new(VAD_SAMPLE_RATE, 1);
+    let mut out: Vec<(u64, u64, Vec<f32>)> = Vec::new();
+    let min_samples = (VAD_SAMPLE_RATE as usize) / 4;
+
+    lane.push_interleaved(samples, |_, _, _, ev| {
+        if let Some(SegmentEvent::Final {
+            start_ms,
+            end_ms,
+            samples: seg,
+            ..
+        }) = ev
+        {
+            if seg.len() >= min_samples {
+                out.push((start_ms, end_ms, seg));
+            }
+        }
+    });
+    if let Some(SegmentEvent::Final {
+        start_ms,
+        end_ms,
+        samples: seg,
+        ..
+    }) = lane.flush_final()
+    {
+        if seg.len() >= min_samples {
+            out.push((start_ms, end_ms, seg));
+        }
+    }
+
+    if out.is_empty() && samples.len() >= min_samples {
+        let peak = samples.iter().fold(0.0f32, |a, &s| a.max(s.abs()));
+        if peak > 0.003 {
+            let chunk_len = (VAD_SAMPLE_RATE as usize) * 12;
+            let mut offset = 0usize;
+            while offset < samples.len() {
+                let end = (offset + chunk_len).min(samples.len());
+                if end - offset >= min_samples {
+                    let start_ms = (offset as u64 * 1000) / VAD_SAMPLE_RATE as u64;
+                    let end_ms = (end as u64 * 1000) / VAD_SAMPLE_RATE as u64;
+                    out.push((start_ms, end_ms, samples[offset..end].to_vec()));
+                }
+                offset = end;
+            }
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -835,8 +1274,7 @@ mod tests {
 
     #[test]
     fn resamples_48k_stereo_to_16k_mono_and_triggers_vad() {
-        let mut lane = LaneProcessor::new(AudioChannel::System, 48_000, 2);
-        // 0.2s of stereo 48kHz tone -> 9600 frames = 19200 interleaved samples -> ~3200 mono 16k samples (6 frames of 512)
+        let mut lane = LaneProcessor::new(48_000, 2);
         let mut stereo = Vec::with_capacity(19_200);
         for i in 0..9_600 {
             let v = ((i as f32) * 0.05).sin() * 0.25;

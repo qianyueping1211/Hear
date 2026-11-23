@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Pause, Play, RotateCcw, RotateCw, Volume2 } from "lucide-react";
 import { formatTimestamp } from "../../lib/export";
 import { useHearStore } from "../../stores/useHearStore";
@@ -9,13 +9,84 @@ export function WaveformPlayer() {
   const {
     captureMode,
     playback,
+    seekNonce,
+    seekTargetMs,
     togglePlayback,
+    setPlaybackPlaying,
+    syncPlaybackPosition,
+    readRecordingAudio,
     seekPlayback,
     setPlaybackSpeed,
     setTrackVolumes,
   } = useHearStore();
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+
+  // 录音文件就绪或切换时从 Rust 后端加载真实 WAV 字节并绑定到 HTMLAudioElement
+  useEffect(() => {
+    let revoked = false;
+    let objectUrl: string | null = null;
+    if (!playback.hasAudio || !playback.audioPath) {
+      setAudioUrl(null);
+      return;
+    }
+    void readRecordingAudio().then((bytes) => {
+      if (revoked || !bytes || bytes.byteLength === 0) return;
+      const copy = new Uint8Array(bytes.byteLength);
+      copy.set(bytes);
+      const blob = new Blob([copy.buffer], { type: "audio/wav" });
+      objectUrl = URL.createObjectURL(blob);
+      setAudioUrl(objectUrl);
+    });
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [playback.hasAudio, playback.audioPath, readRecordingAudio]);
+
+  // 响应显式跳转请求（点波形、点字幕句子、快退/快进）
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !audioUrl || seekNonce === 0) return;
+    audio.currentTime = Math.max(0, seekTargetMs / 1000);
+    if (playback.isPlaying) {
+      void audio.play().catch(() => {});
+    }
+  }, [seekNonce, seekTargetMs, audioUrl, playback.isPlaying]);
+
+  // 同步播放/暂停、倍速与音量
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.playbackRate = playback.speed;
+    audio.volume = Math.max(0, Math.min(1, playback.systemVolume));
+  }, [playback.speed, playback.systemVolume, audioUrl]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !audioUrl) return;
+    if (playback.isPlaying) {
+      void audio.play().catch(() => {
+        void setPlaybackPlaying(false);
+      });
+    } else {
+      audio.pause();
+    }
+  }, [playback.isPlaying, audioUrl, setPlaybackPlaying]);
+
+  // 播放期间高频平滑刷新波形指针与字幕高亮位置
+  useEffect(() => {
+    if (!playback.isPlaying || !audioUrl) return;
+    const timer = window.setInterval(() => {
+      const audio = audioRef.current;
+      if (audio && !audio.paused) {
+        syncPlaybackPosition(audio.currentTime * 1000);
+      }
+    }, 60);
+    return () => window.clearInterval(timer);
+  }, [playback.isPlaying, audioUrl, syncPlaybackPosition]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -73,6 +144,16 @@ export function WaveformPlayer() {
 
   return (
     <div className="h-20 border-t border-white/10 bg-surface-900/95 px-5 flex items-center gap-4">
+      <audio
+        ref={audioRef}
+        src={audioUrl ?? undefined}
+        preload="auto"
+        onEnded={() => {
+          syncPlaybackPosition(playback.durationMs);
+          void setPlaybackPlaying(false);
+        }}
+        className="hidden"
+      />
       {/* 播放控制 */}
       <div className="flex items-center gap-2 shrink-0">
         <button

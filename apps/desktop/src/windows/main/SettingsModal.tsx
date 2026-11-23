@@ -172,6 +172,7 @@ export function SettingsModal() {
     reinstallLocalServer,
     uninstallLocalServer,
     openLocalServerDir,
+    openLogsDir,
     saveUpdateConfig,
     checkForUpdates,
     downloadAndInstallUpdate,
@@ -209,12 +210,18 @@ export function SettingsModal() {
     setSavedHint(null);
     setConfirmUninstall(false);
     void refreshLocalServerInstallStatus();
-    // 若已配置本机地址且本次尚未探测过，打开设置页自动做一次只读 /health 检测
+    // 若已配置本机或远端地址且本次尚未探测过，打开设置页自动做一次只读 /health 检测
     const localTested = Boolean(
       snap.localStatus.address || snap.localStatus.error || snap.localStatus.latencyMs > 0
     );
     if (!localTested && snap.serviceConfig.localServiceAddress.trim()) {
       void testServiceConnection("local");
+    }
+    const cloudTested = Boolean(
+      snap.cloudStatus.address || snap.cloudStatus.error || snap.cloudStatus.latencyMs > 0
+    );
+    if (!cloudTested && snap.serviceConfig.cloudServiceAddress.trim()) {
+      void testServiceConnection("cloud");
     }
   }, [settingsOpen, refreshLocalServerInstallStatus, testServiceConnection]);
 
@@ -945,6 +952,13 @@ export function SettingsModal() {
                     className="px-3 py-1.5 rounded-lg bg-surface-950 border border-white/10 hover:bg-white/5 text-xs text-slate-200 flex items-center gap-1.5"
                   >
                     <ExternalLink className="w-3.5 h-3.5" /> GitHub 仓库
+                  </button>
+                  <button
+                    onClick={() => void openLogsDir()}
+                    title="打开客户端运行日志目录（hear-desktop.log）"
+                    className="px-3 py-1.5 rounded-lg bg-surface-950 border border-white/10 hover:bg-white/5 text-xs text-slate-200 flex items-center gap-1.5"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" /> 打开日志目录
                   </button>
                   <button
                     onClick={() =>

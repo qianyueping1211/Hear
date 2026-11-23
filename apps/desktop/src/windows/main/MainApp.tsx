@@ -321,12 +321,13 @@ export function MainApp() {
           </button>
 
           <button
+            disabled={mode === "batch_processing"}
             onClick={() => void importMediaFile()}
-            title="拖入或选择本地音视频文件，批量生成双语字幕与时间轴"
-            className="px-2.5 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs text-slate-200 flex items-center gap-1.5"
+            title="选择本地 WAV/MP3/MP4 等音视频文件，批量生成双语字幕与时间轴"
+            className="px-2.5 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 disabled:opacity-50 text-xs text-slate-200 flex items-center gap-1.5"
           >
             <FileAudio className="w-3.5 h-3.5 text-sky-400" />
-            导入音视频
+            {mode === "batch_processing" ? "批量转写中…" : "导入音视频"}
           </button>
         </div>
 

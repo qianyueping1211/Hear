@@ -92,6 +92,121 @@ pub fn encode_wav_16k_mono(samples: &[f32]) -> Vec<u8> {
     out
 }
 
+/// 解析标准 PCM/Float WAV 字节并重采样为 16 kHz 单声道 f32，同时生成 50ms 波形峰值与总时长
+pub fn decode_wav_to_16k_mono(bytes: &[u8]) -> Result<(Vec<f32>, u64, Vec<f32>), String> {
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("文件不是有效的 WAV 音频格式".to_string());
+    }
+
+    let mut pos = 12usize;
+    let mut audio_format: u16 = 0;
+    let mut channels: u16 = 0;
+    let mut sample_rate: u32 = 0;
+    let mut bits_per_sample: u16 = 0;
+    let mut data_slice: Option<&[u8]> = None;
+
+    while pos + 8 <= bytes.len() {
+        let id = &bytes[pos..pos + 4];
+        let size = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
+        pos += 8;
+        let end = pos.saturating_add(size).min(bytes.len());
+        if id == b"fmt " && end - pos >= 16 {
+            audio_format = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]);
+            channels = u16::from_le_bytes([bytes[pos + 2], bytes[pos + 3]]);
+            sample_rate = u32::from_le_bytes([
+                bytes[pos + 4],
+                bytes[pos + 5],
+                bytes[pos + 6],
+                bytes[pos + 7],
+            ]);
+            bits_per_sample = u16::from_le_bytes([bytes[pos + 14], bytes[pos + 15]]);
+        } else if id == b"data" {
+            data_slice = Some(&bytes[pos..end]);
+            break;
+        }
+        // WAV 块按 2 字节对齐
+        pos = end + (size % 2);
+    }
+
+    let raw = data_slice.ok_or_else(|| "WAV 文件缺少 data 音频数据块".to_string())?;
+    if channels == 0 || sample_rate == 0 {
+        return Err("WAV 音频参数无效（声道数或采样率为 0）".to_string());
+    }
+
+    let bytes_per_sample = (bits_per_sample / 8) as usize;
+    if bytes_per_sample == 0 {
+        return Err("WAV 位深参数无效".to_string());
+    }
+    let ch = channels as usize;
+    let frame_stride = bytes_per_sample * ch;
+    let frame_count = raw.len() / frame_stride.max(1);
+    if frame_count == 0 {
+        return Err("WAV 文件不包含有效音频采样".to_string());
+    }
+
+    let mut mono = Vec::with_capacity(frame_count);
+    for f in 0..frame_count {
+        let mut sum = 0.0f32;
+        for c in 0..ch {
+            let off = f * frame_stride + c * bytes_per_sample;
+            let sample = match (audio_format, bits_per_sample) {
+                (1, 8) => (raw[off] as f32 - 128.0) / 128.0,
+                (1, 16) => i16::from_le_bytes([raw[off], raw[off + 1]]) as f32 / 32768.0,
+                (1, 24) => {
+                    let b0 = raw[off] as i32;
+                    let b1 = (raw[off + 1] as i32) << 8;
+                    let b2 = ((raw[off + 2] as i8) as i32) << 16;
+                    (b0 | b1 | b2) as f32 / 8_388_608.0
+                }
+                (1, 32) => {
+                    let v = i32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]);
+                    (v as f64 / 2_147_483_648.0) as f32
+                }
+                (3, 32) => f32::from_le_bytes([raw[off], raw[off + 1], raw[off + 2], raw[off + 3]]),
+                _ => {
+                    return Err(format!(
+                        "不支持的 WAV 编码（format={}，{} bit）",
+                        audio_format, bits_per_sample
+                    ));
+                }
+            };
+            sum += sample.clamp(-1.0, 1.0);
+        }
+        mono.push(sum / ch as f32);
+    }
+
+    // 线性重采样到 16 kHz
+    let samples_16k = if sample_rate == 16_000 {
+        mono
+    } else {
+        let out_len = ((mono.len() as u64 * 16_000) / sample_rate as u64).max(1) as usize;
+        let step = sample_rate as f64 / 16_000.0;
+        let mut out = Vec::with_capacity(out_len);
+        let max_idx = mono.len() - 1;
+        for i in 0..out_len {
+            let p = i as f64 * step;
+            let idx = (p.floor() as usize).min(max_idx);
+            let next = (idx + 1).min(max_idx);
+            let frac = (p - idx as f64) as f32;
+            out.push(mono[idx] + (mono[next] - mono[idx]) * frac);
+        }
+        out
+    };
+
+    let duration_ms = (samples_16k.len() as u64 * 1000) / 16_000;
+    let peaks: Vec<f32> = samples_16k
+        .chunks(800) // 50ms @ 16kHz
+        .map(|chunk| chunk.iter().fold(0.0f32, |acc, &s| acc.max(s.abs())))
+        .collect();
+
+    Ok((samples_16k, duration_ms, peaks))
+}
+
 fn write_wav_header<W: Write>(
     w: &mut W,
     sample_rate: u32,
@@ -134,5 +249,16 @@ mod tests {
         let meta = std::fs::metadata(&path).unwrap();
         assert_eq!(meta.len(), 44 + 8_000 * 2);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn decodes_wav_roundtrip_and_computes_peaks() {
+        let orig: Vec<f32> = (0..16_000).map(|i| ((i as f32) * 0.02).sin() * 0.4).collect();
+        let wav = encode_wav_16k_mono(&orig);
+        let (decoded, duration_ms, peaks) = decode_wav_to_16k_mono(&wav).unwrap();
+        assert_eq!(decoded.len(), 16_000);
+        assert_eq!(duration_ms, 1000);
+        assert_eq!(peaks.len(), 20);
+        assert!(peaks.iter().all(|&p| p > 0.3 && p <= 0.45));
     }
 }

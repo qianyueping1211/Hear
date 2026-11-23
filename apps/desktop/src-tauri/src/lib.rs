@@ -2,6 +2,7 @@ pub mod audio;
 pub mod cloud;
 pub mod config_store;
 pub mod local_server;
+pub mod logger;
 pub mod platform;
 pub mod recorder;
 pub mod state;
@@ -11,14 +12,16 @@ pub mod vad;
 use cloud::HearCloudClient;
 use config_store::{load_config, save_config, PersistedConfig};
 use state::{
-    AppSnapshot, AudioCaptureMode, AudioSourceOption, EngineSource, LocalServerInstallStatus,
-    ServiceConfig, ServiceProbeResult, SessionMode, SubtitleStyle, TtsOutputSettings,
-    UpdateCheckResult, UpdateConfig,
+    AppSnapshot, AudioCaptureMode, AudioChannel, AudioSourceOption, EngineSource,
+    LocalServerInstallStatus, ServiceConfig, ServiceProbeResult, SessionMode, SubtitleLayoutMode,
+    SubtitleSegment, SubtitleStyle, TtsOutputSettings, UpdateCheckResult, UpdateConfig,
 };
+use std::path::Path;
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tokio::sync::Mutex;
 
 pub struct AppRuntime {
@@ -87,10 +90,9 @@ async fn set_capture_mode(
     Ok(())
 }
 
-#[tauri::command]
-async fn toggle_recording(
-    app: AppHandle,
-    rt: State<'_, Arc<AppRuntime>>,
+async fn toggle_recording_impl(
+    app: &AppHandle,
+    rt: &Arc<AppRuntime>,
 ) -> Result<SessionMode, String> {
     let mut cap_guard = rt.capture.lock().await;
 
@@ -138,7 +140,7 @@ async fn toggle_recording(
         });
     }
 
-    let handle = audio::LiveCaptureHandle::start(app.clone(), rt.inner().clone(), capture_mode)?;
+    let handle = audio::LiveCaptureHandle::start(app.clone(), rt.clone(), capture_mode)?;
     *cap_guard = Some(handle);
     {
         let mut snap = rt.snapshot.lock().await;
@@ -146,6 +148,32 @@ async fn toggle_recording(
     }
     let _ = app.emit("session:mode", SessionMode::Recording);
     Ok(SessionMode::Recording)
+}
+
+#[tauri::command]
+async fn toggle_recording(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<SessionMode, String> {
+    toggle_recording_impl(&app, rt.inner()).await
+}
+
+#[tauri::command]
+async fn read_recording_audio(
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<tauri::ipc::Response, String> {
+    let path = {
+        let snap = rt.snapshot.lock().await;
+        snap.playback
+            .audio_path
+            .clone()
+            .ok_or_else(|| "当前没有可回放的录音文件".to_string())?
+    };
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(&path))
+        .await
+        .map_err(|e| format!("读取录音任务异常：{}", e))?
+        .map_err(|e| format!("读取录音文件失败：{}", e))?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
@@ -451,6 +479,11 @@ async fn open_local_server_dir(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn open_logs_dir(app: AppHandle) -> Result<(), String> {
+    logger::open_log_dir(&app)
+}
+
+#[tauri::command]
 async fn set_tts_settings(
     app: AppHandle,
     rt: State<'_, Arc<AppRuntime>>,
@@ -534,19 +567,371 @@ async fn retranslate_segment(
     Ok(())
 }
 
-#[tauri::command]
-async fn generate_summary(
-    _rt: State<'_, Arc<AppRuntime>>,
-    template_id: String,
-) -> Result<String, String> {
-    Ok(format!(
-        "### 一键总结预览（模板：{}）\n\n- [00:00] 当前为预览版框架输出，后续将接入完整流式 LLM 纪要生成与时间戳锚点。",
-        template_id
-    ))
+fn format_mm_ss(ms: u64) -> String {
+    let total_secs = ms / 1000;
+    format!("{:02}:{:02}", total_secs / 60, total_secs % 60)
 }
 
 #[tauri::command]
-async fn import_media_file() -> Result<(), String> {
+async fn generate_summary(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    template_id: String,
+) -> Result<String, String> {
+    let (base_url, token, transcript) = {
+        let snap = rt.snapshot.lock().await;
+        if snap.segments.is_empty() {
+            return Err("当前还没有可总结的字幕记录".to_string());
+        }
+        let (addr, tok) = match snap.service_config.mt_source {
+            EngineSource::Local => (
+                snap.service_config.local_service_address.clone(),
+                snap.service_config.local_access_token.clone(),
+            ),
+            EngineSource::Cloud => (
+                snap.service_config.cloud_service_address.clone(),
+                snap.service_config.cloud_access_token.clone(),
+            ),
+        };
+        if addr.trim().is_empty() {
+            return Err("请先在「设置 → 模型服务」配置文本翻译/大模型服务地址".to_string());
+        }
+        let mut lines = Vec::with_capacity(snap.segments.len());
+        let mut char_budget = 0usize;
+        for seg in &snap.segments {
+            let speaker = seg.speaker_label.as_deref().unwrap_or("说话人");
+            let line = if seg.translated_text.trim().is_empty()
+                || seg.translated_text.trim() == seg.source_text.trim()
+            {
+                format!("[{}] {}: {}", format_mm_ss(seg.start_ms), speaker, seg.source_text)
+            } else {
+                format!(
+                    "[{}] {}: {}（译：{}）",
+                    format_mm_ss(seg.start_ms),
+                    speaker,
+                    seg.source_text,
+                    seg.translated_text
+                )
+            };
+            char_budget += line.chars().count();
+            if char_budget > 12_000 {
+                break;
+            }
+            lines.push(line);
+        }
+        (addr, tok, lines.join("\n"))
+    };
+
+    let instruction = match template_id.as_str() {
+        "bilingual" => {
+            "请将以下带时间戳的语音记录提炼为中英双语核心要点（Markdown 列表），每条要点前务必保留对应原句的时间戳（如 [01:23]），简洁准确、不要编造未提及的内容。"
+        }
+        "qa" => {
+            "请从以下带时间戳的语音记录中整理出「关键问答」与「行动待办清单」（Markdown 列表），每条尽量附带对应时间戳（如 [01:23]），明确提出人/负责人（若提及）。"
+        }
+        _ => {
+            "请将以下带时间戳的语音记录整理为结构化中文会议纪要，包含「核心议题」「关键结论」「后续行动项」，每条要点尽量保留原文对应的 [mm:ss] 时间戳以便回听跳转。"
+        }
+    };
+
+    let prompt = format!("{}\n\n<transcript>\n{}\n</transcript>", instruction, transcript);
+    let tok_opt = if token.trim().is_empty() {
+        None
+    } else {
+        Some(token.as_str())
+    };
+    let app_stream = app.clone();
+    let raw = rt
+        .cloud
+        .translate_stream(&base_url, &prompt, false, tok_opt, |partial| {
+            let cleaned = audio::clean_translation_output(partial);
+            if !cleaned.is_empty() {
+                let _ = app_stream.emit("summary:delta", cleaned);
+            }
+        })
+        .await?;
+
+    let final_md = audio::clean_translation_output(&raw);
+    if final_md.is_empty() {
+        return Err("模型未返回总结内容，请检查模型服务状态".to_string());
+    }
+    let _ = app.emit("summary:delta", &final_md);
+    Ok(final_md)
+}
+
+fn load_media_as_16k_wav(src_path: &Path) -> Result<(Vec<f32>, u64, Vec<f32>, Vec<u8>), String> {
+    let ext = src_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let wav_bytes = if ext == "wav" {
+        std::fs::read(src_path).map_err(|e| format!("读取音频文件失败：{}", e))?
+    } else {
+        // 非 WAV 格式自动调用系统 ffmpeg 转码为 16 kHz 单声道 16-bit PCM WAV
+        let tmp_wav = std::env::temp_dir().join(format!("hear-ff-{}.wav", uuid::Uuid::new_v4()));
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.arg("-y")
+            .arg("-i")
+            .arg(src_path)
+            .args(["-vn", "-ac", "1", "-ar", "16000", "-f", "wav"])
+            .arg(&tmp_wav);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let output = cmd.output().map_err(|_| {
+            format!(
+                "暂未检测到 ffmpeg，无法直接解码 .{} 格式；请安装 ffmpeg 到系统 PATH，或先转换为 .wav 再导入",
+                if ext.is_empty() { "媒体" } else { &ext }
+            )
+        })?;
+        if !output.status.success() {
+            let _ = std::fs::remove_file(&tmp_wav);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: String = stderr.chars().rev().take(240).collect::<String>().chars().rev().collect();
+            return Err(format!("ffmpeg 解码失败：{}", tail.trim()));
+        }
+        let bytes = std::fs::read(&tmp_wav).map_err(|e| format!("读取转码后的 WAV 失败：{}", e))?;
+        let _ = std::fs::remove_file(&tmp_wav);
+        bytes
+    };
+
+    let (samples_16k, duration_ms, peaks) = recorder::decode_wav_to_16k_mono(&wav_bytes)?;
+    let normalized_wav = recorder::encode_wav_16k_mono(&samples_16k);
+    Ok((samples_16k, duration_ms, peaks, normalized_wav))
+}
+
+#[tauri::command]
+async fn import_media_file(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    file_path: String,
+) -> Result<(), String> {
+    let trimmed = file_path.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("未选择音视频文件".to_string());
+    }
+
+    // 校验语音识别与翻译服务地址已配置
+    let (asr_url, asr_tok, mt_url, mt_tok, src_lang, dst_lang, lock_src, glossary) = {
+        let snap = rt.snapshot.lock().await;
+        let (a_url, a_tok) = match snap.service_config.asr_source {
+            EngineSource::Local => (
+                snap.service_config.local_service_address.trim().to_string(),
+                snap.service_config.local_access_token.clone(),
+            ),
+            EngineSource::Cloud => (
+                snap.service_config.cloud_service_address.trim().to_string(),
+                snap.service_config.cloud_access_token.clone(),
+            ),
+        };
+        let (m_url, m_tok) = match snap.service_config.mt_source {
+            EngineSource::Local => (
+                snap.service_config.local_service_address.trim().to_string(),
+                snap.service_config.local_access_token.clone(),
+            ),
+            EngineSource::Cloud => (
+                snap.service_config.cloud_service_address.trim().to_string(),
+                snap.service_config.cloud_access_token.clone(),
+            ),
+        };
+        if a_url.is_empty() || m_url.is_empty() {
+            return Err("请先在「设置 → 模型服务」配置语音识别与文本翻译服务地址".to_string());
+        }
+        (
+            a_url,
+            a_tok,
+            m_url,
+            m_tok,
+            snap.source_lang.clone(),
+            snap.target_lang.clone(),
+            snap.lock_source_lang,
+            snap.glossary.clone(),
+        )
+    };
+
+    // 若当前正在实时录音，先停录
+    {
+        let mut cap = rt.capture.lock().await;
+        if let Some(handle) = cap.take() {
+            let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
+        }
+    }
+
+    let path_for_decode = trimmed.clone();
+    let (samples_16k, duration_ms, peaks, normalized_wav) =
+        tokio::task::spawn_blocking(move || load_media_as_16k_wav(Path::new(&path_for_decode)))
+            .await
+            .map_err(|e| format!("音频解码任务异常：{}", e))??;
+
+    // 持久化归一化 WAV 供波形播放器回放与点句跳转
+    let saved_path = std::env::temp_dir()
+        .join("Hear-Recordings")
+        .join(format!("import-{}.wav", uuid::Uuid::new_v4()));
+    if let Some(parent) = saved_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&saved_path, &normalized_wav)
+        .map_err(|e| format!("写入导入音频缓存失败：{}", e))?;
+    let saved_path_str = saved_path.to_string_lossy().to_string();
+
+    let pb = {
+        let mut snap = rt.snapshot.lock().await;
+        snap.mode = SessionMode::BatchProcessing;
+        snap.segments.clear();
+        snap.live_partial_source.clear();
+        snap.live_partial_translation.clear();
+        snap.playback = state::RecordingPlaybackState {
+            has_audio: true,
+            audio_path: Some(saved_path_str),
+            duration_ms,
+            position_ms: 0,
+            is_playing: false,
+            speed: snap.playback.speed,
+            system_volume: snap.playback.system_volume,
+            mic_volume: snap.playback.mic_volume,
+            peaks,
+        };
+        snap.playback.clone()
+    };
+    let _ = app.emit("session:mode", SessionMode::BatchProcessing);
+    let _ = app.emit("recording:ready", pb);
+
+    let chunks = audio::segment_offline_16k_mono(&samples_16k);
+    if chunks.is_empty() {
+        let mut snap = rt.snapshot.lock().await;
+        snap.mode = SessionMode::Idle;
+        let _ = app.emit("session:mode", SessionMode::Idle);
+        return Err("音频中未检测到有效人声片段".to_string());
+    }
+
+    let rt_bg = rt.inner().clone();
+    let app_bg = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let total = chunks.len();
+        let languages_hdr = if lock_src {
+            src_lang.clone()
+        } else {
+            format!("{},{}", src_lang, dst_lang)
+        };
+        let asr_tok_opt = if asr_tok.trim().is_empty() {
+            None
+        } else {
+            Some(asr_tok.as_str())
+        };
+        let mt_tok_opt = if mt_tok.trim().is_empty() {
+            None
+        } else {
+            Some(mt_tok.as_str())
+        };
+
+        for (idx, (start_ms, end_ms, seg_samples)) in chunks.into_iter().enumerate() {
+            let _ = app_bg.emit(
+                "subtitle:partial",
+                serde_json::json!({
+                    "source": format!("正在批量识别导入文件（{}/{}）…", idx + 1, total),
+                    "translation": ""
+                }),
+            );
+            let wav = recorder::encode_wav_16k_mono(&seg_samples);
+            let (source_text, detected_lang) = match rt_bg
+                .cloud
+                .transcribe_wav(&asr_url, wav, &languages_hdr, &src_lang, false, asr_tok_opt)
+                .await
+            {
+                Ok(pair) => pair,
+                Err(err) => {
+                    let _ = app_bg.emit("session:error", err);
+                    break;
+                }
+            };
+            if source_text.trim().is_empty() {
+                continue;
+            }
+
+            let (actual_src, actual_dst) =
+                if !lock_src && detected_lang == dst_lang && dst_lang != src_lang {
+                    (dst_lang.clone(), src_lang.clone())
+                } else {
+                    (
+                        if detected_lang.is_empty() {
+                            src_lang.clone()
+                        } else {
+                            detected_lang
+                        },
+                        dst_lang.clone(),
+                    )
+                };
+
+            let seg_id = format!("imp-{}-{}", idx + 1, uuid::Uuid::new_v4());
+            let mut seg = SubtitleSegment {
+                id: seg_id.clone(),
+                seq: (idx + 1) as u64,
+                start_ms,
+                end_ms,
+                channel: AudioChannel::File,
+                speaker_label: Some("文件".to_string()),
+                source_lang: actual_src.clone(),
+                target_lang: actual_dst.clone(),
+                source_text: source_text.clone(),
+                translated_text: "翻译中…".to_string(),
+                baseline_translated: None,
+                status: "preview".to_string(),
+                is_edited: None,
+            };
+            {
+                let mut snap = rt_bg.snapshot.lock().await;
+                snap.segments.push(seg.clone());
+            }
+            let _ = app_bg.emit("segment:upsert", &seg);
+
+            let prompt =
+                audio::build_translation_prompt(&source_text, &actual_src, &actual_dst, &glossary);
+            match rt_bg
+                .cloud
+                .translate_stream(&mt_url, &prompt, false, mt_tok_opt, |_| {})
+                .await
+            {
+                Ok(raw_tr) => {
+                    let cleaned = audio::clean_translation_output(&raw_tr);
+                    seg.translated_text = if cleaned.is_empty() {
+                        source_text.clone()
+                    } else {
+                        cleaned
+                    };
+                    seg.status = "final".to_string();
+                }
+                Err(err) => {
+                    seg.translated_text = format!("（翻译失败：{}）", err);
+                    seg.status = "error".to_string();
+                    let _ = app_bg.emit("session:error", err);
+                }
+            }
+            {
+                let mut snap = rt_bg.snapshot.lock().await;
+                if let Some(s) = snap.segments.iter_mut().find(|s| s.id == seg_id) {
+                    *s = seg.clone();
+                }
+            }
+            let _ = app_bg.emit("segment:upsert", &seg);
+        }
+
+        {
+            let mut snap = rt_bg.snapshot.lock().await;
+            snap.mode = SessionMode::Idle;
+            snap.live_partial_source.clear();
+            snap.live_partial_translation.clear();
+        }
+        let _ = app_bg.emit(
+            "subtitle:partial",
+            serde_json::json!({ "source": "", "translation": "" }),
+        );
+        let _ = app_bg.emit("session:mode", SessionMode::Idle);
+    });
+
     Ok(())
 }
 
@@ -644,6 +1029,7 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            logger::init(app.handle());
             let loaded = load_config(app.handle());
             let initial_style = loaded.subtitle_style.clone();
             let auto_check = loaded.update_config.auto_check_on_startup;
@@ -675,6 +1061,153 @@ pub fn run() {
                 );
             }
 
+            // 注册全局快捷键（如与其他软件冲突则静默忽略，不影响应用启动）
+            {
+                let rt_hk = runtime_setup.clone();
+                let _ = app.global_shortcut().on_shortcut(
+                    "CommandOrControl+Shift+H",
+                    move |app_h, _, ev| {
+                        if ev.state() == ShortcutState::Pressed {
+                            let app_c = app_h.clone();
+                            let rt_c = rt_hk.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Err(err) = toggle_recording_impl(&app_c, &rt_c).await {
+                                    let _ = app_c.emit("session:error", err);
+                                }
+                            });
+                        }
+                    },
+                );
+                let rt_hk = runtime_setup.clone();
+                let _ = app.global_shortcut().on_shortcut(
+                    "CommandOrControl+Shift+S",
+                    move |app_h, _, ev| {
+                        if ev.state() == ShortcutState::Pressed {
+                            let app_c = app_h.clone();
+                            let rt_c = rt_hk.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let style = {
+                                    let mut snap = rt_c.snapshot.lock().await;
+                                    snap.subtitle_style.visible = !snap.subtitle_style.visible;
+                                    snap.subtitle_style.clone()
+                                };
+                                if let Some(w) = app_c.get_webview_window("subtitle") {
+                                    if style.visible {
+                                        let _ = w.unminimize();
+                                        let _ = w.show();
+                                    } else {
+                                        let _ = w.hide();
+                                    }
+                                }
+                                rt_c.persist(&app_c).await;
+                                let _ = app_c.emit("subtitle:style", style);
+                            });
+                        }
+                    },
+                );
+                let rt_hk = runtime_setup.clone();
+                let _ = app.global_shortcut().on_shortcut(
+                    "CommandOrControl+Shift+L",
+                    move |app_h, _, ev| {
+                        if ev.state() == ShortcutState::Pressed {
+                            let app_c = app_h.clone();
+                            let rt_c = rt_hk.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let style = {
+                                    let mut snap = rt_c.snapshot.lock().await;
+                                    snap.subtitle_style.click_through =
+                                        !snap.subtitle_style.click_through;
+                                    snap.subtitle_style.clone()
+                                };
+                                if let Some(w) = app_c.get_webview_window("subtitle") {
+                                    let _ = platform::apply_overlay_traits(
+                                        &w,
+                                        style.click_through,
+                                        style.exclude_from_capture,
+                                    );
+                                }
+                                rt_c.persist(&app_c).await;
+                                let _ = app_c.emit("subtitle:style", style);
+                            });
+                        }
+                    },
+                );
+                let rt_hk = runtime_setup.clone();
+                let _ = app.global_shortcut().on_shortcut(
+                    "CommandOrControl+Shift+B",
+                    move |app_h, _, ev| {
+                        if ev.state() == ShortcutState::Pressed {
+                            let app_c = app_h.clone();
+                            let rt_c = rt_hk.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let style = {
+                                    let mut snap = rt_c.snapshot.lock().await;
+                                    snap.subtitle_style.layout = match snap.subtitle_style.layout {
+                                        SubtitleLayoutMode::Bilingual => {
+                                            SubtitleLayoutMode::TranslationFocus
+                                        }
+                                        SubtitleLayoutMode::TranslationFocus => {
+                                            SubtitleLayoutMode::TranslationOnly
+                                        }
+                                        SubtitleLayoutMode::TranslationOnly => {
+                                            SubtitleLayoutMode::Bilingual
+                                        }
+                                    };
+                                    snap.subtitle_style.clone()
+                                };
+                                rt_c.persist(&app_c).await;
+                                let _ = app_c.emit("subtitle:style", style);
+                            });
+                        }
+                    },
+                );
+                let _ = app.global_shortcut().on_shortcut(
+                    "CommandOrControl+Shift+C",
+                    move |app_h, _, ev| {
+                        if ev.state() == ShortcutState::Pressed {
+                            let _ = app_h.emit("shortcut:copy_latest", ());
+                        }
+                    },
+                );
+            }
+
+            // 启动时后台自动对已配置的「本机服务」与「远端云端服务」做一次只读 /health 检测（不启动任何进程）
+            {
+                let (local_addr, local_tok, cloud_addr, cloud_tok) = {
+                    let snap = runtime_setup.snapshot.blocking_lock();
+                    (
+                        snap.service_config.local_service_address.clone(),
+                        snap.service_config.local_access_token.clone(),
+                        snap.service_config.cloud_service_address.clone(),
+                        snap.service_config.cloud_access_token.clone(),
+                    )
+                };
+                if !local_addr.trim().is_empty() {
+                    let handle = app.handle().clone();
+                    let rt_bg = runtime_setup.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let res = rt_bg.cloud.test_connection(&local_addr, &local_tok).await;
+                        {
+                            let mut snap = rt_bg.snapshot.lock().await;
+                            snap.local_status = res.clone();
+                        }
+                        let _ = handle.emit("service:local_status", &res);
+                    });
+                }
+                if !cloud_addr.trim().is_empty() {
+                    let handle = app.handle().clone();
+                    let rt_bg = runtime_setup.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let res = rt_bg.cloud.test_connection(&cloud_addr, &cloud_tok).await;
+                        {
+                            let mut snap = rt_bg.snapshot.lock().await;
+                            snap.cloud_status = res.clone();
+                        }
+                        let _ = handle.emit("service:cloud_status", &res);
+                    });
+                }
+            }
+
             // 启动时后台自动检测 Windows 新版本（静默不阻塞启动）
             if auto_check {
                 let handle = app.handle().clone();
@@ -697,6 +1230,7 @@ pub fn run() {
             set_language_pair,
             set_capture_mode,
             toggle_recording,
+            read_recording_audio,
             clear_recording,
             seek_playback,
             set_playback_playing,
@@ -714,6 +1248,7 @@ pub fn run() {
             reinstall_local_server,
             uninstall_local_server,
             open_local_server_dir,
+            open_logs_dir,
             set_tts_settings,
             set_glossary,
             retranslate_segment,
