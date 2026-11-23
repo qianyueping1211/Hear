@@ -445,6 +445,7 @@ async fn load_conversation(
         }
     }
     rt.save_history(&app).await;
+    rt.segment_wavs.lock().await.clear();
 
     let conv = history_store::load_conversation(&app, &id)?;
     *rt.summary_markdown.lock().await = conv.summary_markdown.clone();
@@ -1412,13 +1413,14 @@ async fn import_media_file(
         )
     };
 
-    // 若当前正在实时录音，先停录
+    // 若当前正在实时录音，先停录并清空旧会话片段 WAV 缓存
     {
         let mut cap = rt.capture.lock().await;
         if let Some(handle) = cap.take() {
             let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
         }
     }
+    rt.segment_wavs.lock().await.clear();
 
     let path_for_decode = trimmed.clone();
     let (samples_16k, duration_ms, peaks, normalized_wav) =

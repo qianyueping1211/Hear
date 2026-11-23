@@ -404,198 +404,178 @@ export function MainApp() {
     return "当前录音对话";
   }, [conversations, activeConversationId, mode]);
 
+  const toolbarButtons = (
+    <div className="flex items-center gap-2 shrink-0">
+      {updateInfo?.hasUpdate && (
+        <button
+          onClick={() => setSettingsOpen(true, "system")}
+          title={`发现新版本 v${updateInfo.latestVersion}，点击查看更新说明并一键更新`}
+          className="h-9 px-3 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30 text-xs inline-flex items-center gap-1.5"
+        >
+          <ArrowUpCircle className="w-3.5 h-3.5" />
+          <span>新版本 v{updateInfo.latestVersion}</span>
+        </button>
+      )}
+
+      <div className="h-9 flex items-center gap-1 rounded-lg bg-surface-800 border border-white/10 px-2.5 text-xs">
+        <select
+          value={sourceLang}
+          onChange={(e) => void setLanguagePair(e.target.value, targetLang, lockSourceLang)}
+          className="bg-transparent text-slate-100 focus:outline-none cursor-pointer"
+        >
+          {LANGUAGES.map((l) => (
+            <option key={l.id} value={l.id} className="bg-surface-900">
+              {l.label}
+            </option>
+          ))}
+        </select>
+        <span className="text-slate-500 px-0.5">{lockSourceLang ? "→" : "⇄"}</span>
+        <select
+          value={targetLang}
+          onChange={(e) => void setLanguagePair(sourceLang, e.target.value, lockSourceLang)}
+          className="bg-transparent text-slate-100 focus:outline-none cursor-pointer"
+        >
+          {LANGUAGES.map((l) => (
+            <option key={l.id} value={l.id} className="bg-surface-900">
+              {l.label}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={() => void setLanguagePair(sourceLang, targetLang, !lockSourceLang)}
+          title={lockSourceLang ? "已锁定源语种（单向翻译，纯外语视频更稳更快）" : "自动双向判别语种"}
+          className={`ml-1 p-1 rounded ${
+            lockSourceLang ? "text-amber-300 bg-amber-500/15" : "text-slate-400 hover:text-white"
+          }`}
+        >
+          {lockSourceLang ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+        </button>
+      </div>
+
+      <div
+        onClick={() => setSettingsOpen(true, "server")}
+        title={serviceBadge.tooltip}
+        className="h-9 px-3 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs inline-flex items-center gap-1.5 cursor-pointer"
+      >
+        <span className={`w-2 h-2 rounded-full ${serviceBadge.dotClass}`} />
+        <span>{serviceBadge.statusText}</span>
+        <button
+          type="button"
+          onClick={(e) => void handleQuickRefresh(e)}
+          title="刷新服务状态"
+          className="ml-0.5 p-0.5 rounded hover:bg-white/10 text-slate-400 hover:text-white"
+        >
+          <RefreshCw
+            className={`w-3 h-3 ${serviceBadge.checking ? "animate-spin" : ""}`}
+          />
+        </button>
+      </div>
+
+      <button
+        onClick={() => void toggleSubtitleVisible()}
+        title="显示 / 隐藏悬浮字幕窗 (Ctrl+Shift+S)"
+        className={`h-9 w-9 rounded-lg border inline-flex items-center justify-center ${
+          subtitleStyle.visible
+            ? "bg-brand-500/20 border-brand-500/40 text-brand-400"
+            : "bg-surface-800 border-white/10 text-slate-400 hover:text-white"
+        }`}
+      >
+        <PanelTop className="w-4 h-4" />
+      </button>
+
+      {viewMode === "workspace" && (
+        <button
+          onClick={() => setSummaryOpen(!summaryOpen)}
+          title="展开 / 收起一键总结面板"
+          className={`h-9 w-9 rounded-lg border inline-flex items-center justify-center ${
+            summaryOpen
+              ? "bg-purple-500/20 border-purple-500/40 text-purple-300"
+              : "bg-surface-800 border-white/10 text-slate-400 hover:text-white"
+          }`}
+        >
+          <PanelRight className="w-4 h-4" />
+        </button>
+      )}
+
+      <button
+        onClick={() => setSettingsOpen(true)}
+        title="模型服务、悬浮字幕样式与音频设置"
+        className="h-9 w-9 rounded-lg bg-surface-800 border border-white/10 text-slate-300 hover:text-white inline-flex items-center justify-center"
+      >
+        <Settings className="w-4 h-4" />
+      </button>
+    </div>
+  );
+
   return (
     <div className="h-screen w-screen flex flex-col bg-surface-950 text-slate-100">
-      {/* 自定义无边框一体化顶栏（56px 舒展高度）：替代 Windows 30px 原生窄标题栏，支持拖动、双击最大化与大尺寸最小化/最大化/关闭按钮 */}
+      {/* 最顶部窗口标题栏（48px 舒展高度）：仅放应用标识与最小化/最大化/关闭按钮 */}
       <header
         data-tauri-drag-region
         onDoubleClick={(e) => {
           if ((e.target as HTMLElement).closest("button, select, input")) return;
           handleWinToggleMaximize();
         }}
-        className="h-14 border-b border-white/10 bg-surface-900/95 pl-5 pr-2 flex items-center justify-between gap-4 shrink-0 select-none"
+        className="h-12 border-b border-white/5 bg-surface-900/95 pl-5 pr-2 flex items-center justify-between gap-4 shrink-0 select-none"
       >
         <div
           data-tauri-drag-region
-          className="flex items-center gap-3 min-w-0 flex-1 h-full"
+          className="flex items-center gap-2.5 min-w-0 flex-1 h-full"
         >
-          {viewMode === "workspace" ? (
-            <>
-              <button
-                type="button"
-                onClick={() => void backToHome()}
-                title="返回历史记录主页"
-                className="h-9 px-3 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs text-slate-200 inline-flex items-center gap-1.5 shrink-0"
-              >
-                <ArrowLeft className="w-3.5 h-3.5 text-brand-400" />
-                <span>返回列表</span>
-              </button>
-              <span
-                data-tauri-drag-region
-                className="text-sm font-medium text-slate-200 truncate"
-              >
-                {currentConvTitle}
-              </span>
-            </>
-          ) : (
-            <div data-tauri-drag-region className="flex items-center gap-2.5">
-              <div
-                data-tauri-drag-region
-                className="w-6 h-6 rounded-md bg-gradient-to-br from-emerald-400 to-brand-500 flex items-center justify-center text-[12px] font-bold text-white shadow-sm"
-              >
-                听
-              </div>
-              <span
-                data-tauri-drag-region
-                className="text-sm font-semibold text-slate-100 tracking-wide"
-              >
-                听见 Hear
-              </span>
-            </div>
-          )}
+          <div
+            data-tauri-drag-region
+            className="w-6 h-6 rounded-md bg-gradient-to-br from-emerald-400 to-brand-500 flex items-center justify-center text-[12px] font-bold text-white shadow-sm"
+          >
+            听
+          </div>
+          <span
+            data-tauri-drag-region
+            className="text-sm font-semibold text-slate-100 tracking-wide"
+          >
+            听见 Hear
+          </span>
         </div>
 
-        {/* 右侧：统一 h-9 工具栏按钮 + 分隔线 + 舒展的 Windows 窗口控制按钮（最小化/最大化/关闭） */}
-        <div className="flex items-center gap-2 shrink-0">
-          {updateInfo?.hasUpdate && (
-            <button
-              onClick={() => setSettingsOpen(true, "system")}
-              title={`发现新版本 v${updateInfo.latestVersion}，点击查看更新说明并一键更新`}
-              className="h-9 px-3 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30 text-xs inline-flex items-center gap-1.5"
-            >
-              <ArrowUpCircle className="w-3.5 h-3.5" />
-              <span>新版本 v{updateInfo.latestVersion}</span>
-            </button>
-          )}
-
-          <div className="h-9 flex items-center gap-1 rounded-lg bg-surface-800 border border-white/10 px-2.5 text-xs">
-            <select
-              value={sourceLang}
-              onChange={(e) => void setLanguagePair(e.target.value, targetLang, lockSourceLang)}
-              className="bg-transparent text-slate-100 focus:outline-none cursor-pointer"
-            >
-              {LANGUAGES.map((l) => (
-                <option key={l.id} value={l.id} className="bg-surface-900">
-                  {l.label}
-                </option>
-              ))}
-            </select>
-            <span className="text-slate-500 px-0.5">{lockSourceLang ? "→" : "⇄"}</span>
-            <select
-              value={targetLang}
-              onChange={(e) => void setLanguagePair(sourceLang, e.target.value, lockSourceLang)}
-              className="bg-transparent text-slate-100 focus:outline-none cursor-pointer"
-            >
-              {LANGUAGES.map((l) => (
-                <option key={l.id} value={l.id} className="bg-surface-900">
-                  {l.label}
-                </option>
-              ))}
-            </select>
-            <button
-              onClick={() => void setLanguagePair(sourceLang, targetLang, !lockSourceLang)}
-              title={lockSourceLang ? "已锁定源语种（单向翻译，纯外语视频更稳更快）" : "自动双向判别语种"}
-              className={`ml-1 p-1 rounded ${
-                lockSourceLang ? "text-amber-300 bg-amber-500/15" : "text-slate-400 hover:text-white"
-              }`}
-            >
-              {lockSourceLang ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
-            </button>
-          </div>
-
-          <div
-            onClick={() => setSettingsOpen(true, "server")}
-            title={serviceBadge.tooltip}
-            className="h-9 px-3 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs inline-flex items-center gap-1.5 cursor-pointer"
-          >
-            <span className={`w-2 h-2 rounded-full ${serviceBadge.dotClass}`} />
-            <span>{serviceBadge.statusText}</span>
-            <button
-              type="button"
-              onClick={(e) => void handleQuickRefresh(e)}
-              title="刷新服务状态"
-              className="ml-0.5 p-0.5 rounded hover:bg-white/10 text-slate-400 hover:text-white"
-            >
-              <RefreshCw
-                className={`w-3 h-3 ${serviceBadge.checking ? "animate-spin" : ""}`}
-              />
-            </button>
-          </div>
-
+        {/* 右上角窗口控制按钮（高 40px、宽 44px） */}
+        <div className="flex items-center gap-0.5 shrink-0">
           <button
-            onClick={() => void toggleSubtitleVisible()}
-            title="显示 / 隐藏悬浮字幕窗 (Ctrl+Shift+S)"
-            className={`h-9 w-9 rounded-lg border inline-flex items-center justify-center ${
-              subtitleStyle.visible
-                ? "bg-brand-500/20 border-brand-500/40 text-brand-400"
-                : "bg-surface-800 border-white/10 text-slate-400 hover:text-white"
-            }`}
+            type="button"
+            onClick={handleWinMinimize}
+            title="最小化"
+            className="h-10 w-11 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 inline-flex items-center justify-center transition"
           >
-            <PanelTop className="w-4 h-4" />
+            <Minus className="w-4 h-4" />
           </button>
-
-          {viewMode === "workspace" && (
-            <button
-              onClick={() => setSummaryOpen(!summaryOpen)}
-              title="展开 / 收起一键总结面板"
-              className={`h-9 w-9 rounded-lg border inline-flex items-center justify-center ${
-                summaryOpen
-                  ? "bg-purple-500/20 border-purple-500/40 text-purple-300"
-                  : "bg-surface-800 border-white/10 text-slate-400 hover:text-white"
-              }`}
-            >
-              <PanelRight className="w-4 h-4" />
-            </button>
-          )}
-
           <button
-            onClick={() => setSettingsOpen(true)}
-            title="模型服务、悬浮字幕样式与音频设置"
-            className="h-9 w-9 rounded-lg bg-surface-800 border border-white/10 text-slate-300 hover:text-white inline-flex items-center justify-center"
+            type="button"
+            onClick={handleWinToggleMaximize}
+            title={isMaximized ? "还原窗口" : "最大化"}
+            className="h-10 w-11 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 inline-flex items-center justify-center transition"
           >
-            <Settings className="w-4 h-4" />
+            {isMaximized ? (
+              <Copy className="w-3.5 h-3.5" />
+            ) : (
+              <Square className="w-3.5 h-3.5" />
+            )}
           </button>
-
-          <div className="h-5 w-px bg-white/10 mx-1" />
-
-          {/* 自定义窗口控制按钮（高 40px、宽 44px，比 Windows 原生 30px 标题栏更舒展易点） */}
-          <div className="flex items-center gap-0.5">
-            <button
-              type="button"
-              onClick={handleWinMinimize}
-              title="最小化"
-              className="h-10 w-11 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 inline-flex items-center justify-center transition"
-            >
-              <Minus className="w-4 h-4" />
-            </button>
-            <button
-              type="button"
-              onClick={handleWinToggleMaximize}
-              title={isMaximized ? "还原窗口" : "最大化"}
-              className="h-10 w-11 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 inline-flex items-center justify-center transition"
-            >
-              {isMaximized ? (
-                <Copy className="w-3.5 h-3.5" />
-              ) : (
-                <Square className="w-3.5 h-3.5" />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={handleWinClose}
-              title="关闭"
-              className="h-10 w-11 rounded-lg text-slate-300 hover:text-white hover:bg-rose-500/85 inline-flex items-center justify-center transition"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={handleWinClose}
+            title="关闭"
+            className="h-10 w-11 rounded-lg text-slate-300 hover:text-white hover:bg-rose-500/85 inline-flex items-center justify-center transition"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
       </header>
 
       {viewMode === "home" ? (
-        /* 默认主页：顶部 3 张快捷功能卡片（开始录音 / 导入文件 / 悬浮字幕） + 下方「最近文件」历史列表 */
-        <div className="flex-1 overflow-y-auto px-8 py-7">
-          <div className="max-w-5xl mx-auto space-y-7">
+        /* 默认主页：右上角 4 个功能按钮与下方 3 张快捷卡片、最近文件共用同一内容区域 */
+        <div className="flex-1 overflow-y-auto px-8 pt-4 pb-7">
+          <div className="max-w-5xl mx-auto space-y-6">
+            <div className="flex items-center justify-end">
+              {toolbarButtons}
+            </div>
             {sessionError && (
               <div className="rounded-xl bg-rose-500/15 border border-rose-400/40 px-4 py-2.5 flex items-center justify-between gap-3 text-xs text-rose-200">
                 <div className="flex items-center gap-2 min-w-0">
@@ -889,6 +869,25 @@ export function MainApp() {
         </div>
       ) : (
         <>
+          {/* 工作台顶部操作行（与下方内容共用同一区域）：左侧返回列表与标题，右侧 4+1 个功能按钮 */}
+          <div className="px-5 pt-3 pb-2.5 border-b border-white/5 flex items-center justify-between gap-4 shrink-0">
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                type="button"
+                onClick={() => void backToHome()}
+                title="返回历史记录主页"
+                className="h-9 px-3 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs text-slate-200 inline-flex items-center gap-1.5 shrink-0"
+              >
+                <ArrowLeft className="w-3.5 h-3.5 text-brand-400" />
+                <span>返回列表</span>
+              </button>
+              <span className="text-sm font-medium text-slate-200 truncate">
+                {currentConvTitle}
+              </span>
+            </div>
+            {toolbarButtons}
+          </div>
+
           {/* 详情与录制工作台：左侧是播放与字幕，右侧是总结 */}
           <div className="flex-1 flex min-h-0 overflow-hidden">
         <main className="flex-1 flex flex-col min-w-0 relative">

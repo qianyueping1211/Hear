@@ -44,6 +44,7 @@ export function WaveformPlayer() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const sysGainRef = useRef<GainNode | null>(null);
   const micGainRef = useRef<GainNode | null>(null);
+  const lastHandledSeekNonceRef = useRef(0);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
   // 录音结束后（idle 且有音频文件）才从 Rust 后端加载 WAV 字节供回放；新录音录制中或暂停中不提供播放
@@ -79,17 +80,20 @@ export function WaveformPlayer() {
     readRecordingAudio,
   ]);
 
-  // 响应显式跳转请求（点波形、点字幕句子、快退/快进）
+  // 响应显式跳转请求（点波形、点字幕句子、快退/快进）：仅在 seekNonce 变化时才执行，避免暂停再继续时跳回上次点击位置
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !audioUrl || seekNonce === 0) return;
+    if (lastHandledSeekNonceRef.current === seekNonce) return;
+    lastHandledSeekNonceRef.current = seekNonce;
     audio.currentTime = Math.max(0, seekTargetMs / 1000);
-    if (playback.isPlaying) {
+    if (useHearStore.getState().playback.isPlaying) {
+      ensureWebAudioGraph();
       void audio.play().catch(() => {});
     }
-  }, [seekNonce, seekTargetMs, audioUrl, playback.isPlaying]);
+  }, [seekNonce, seekTargetMs, audioUrl]);
 
-  // 同步播放/暂停、倍速与分轨独立音量（左声道=系统内录/对方，右声道=麦克风/我）
+  // 同步播放/暂停、倍速与分轨独立音量（左声道=系统内录/对方，右声道=麦克风/我；不随实时 captureMode 静音右声道）
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -97,14 +101,11 @@ export function WaveformPlayer() {
     if (sysGainRef.current && micGainRef.current) {
       audio.volume = 1.0;
       sysGainRef.current.gain.value = Math.max(0, Math.min(1.5, playback.systemVolume));
-      micGainRef.current.gain.value =
-        captureMode === "dual_mix"
-          ? Math.max(0, Math.min(1.5, playback.micVolume))
-          : 0.0;
+      micGainRef.current.gain.value = Math.max(0, Math.min(1.5, playback.micVolume));
     } else {
       audio.volume = Math.max(0, Math.min(1, playback.systemVolume));
     }
-  }, [playback.speed, playback.systemVolume, playback.micVolume, captureMode, audioUrl]);
+  }, [playback.speed, playback.systemVolume, playback.micVolume, audioUrl]);
 
   const ensureWebAudioGraph = () => {
     const audio = audioRef.current;
@@ -126,10 +127,7 @@ export function WaveformPlayer() {
       const sysGain = ctx.createGain();
       const micGain = ctx.createGain();
       sysGain.gain.value = Math.max(0, Math.min(1.5, playback.systemVolume));
-      micGain.gain.value =
-        captureMode === "dual_mix"
-          ? Math.max(0, Math.min(1.5, playback.micVolume))
-          : 0.0;
+      micGain.gain.value = Math.max(0, Math.min(1.5, playback.micVolume));
       source.connect(splitter);
       splitter.connect(sysGain, 0);
       splitter.connect(micGain, 1);

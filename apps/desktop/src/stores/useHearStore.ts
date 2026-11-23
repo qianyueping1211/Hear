@@ -471,7 +471,10 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     set((s) => ({ settingsOpen, activeSettingsTab: tab ?? s.activeSettingsTab })),
 
   loadConversation: async (id) => {
-    set({ sessionError: null, sessionNotice: null });
+    stopActiveCloneAudio();
+    cloneWavCache.clear();
+    cloneInflight.clear();
+    set({ sessionError: null, sessionNotice: null, cloneStates: {} });
     try {
       const conv = await tauriInvoke<SavedConversation>("load_conversation", { id });
       if (conv) {
@@ -1015,6 +1018,10 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       return existing.promise;
     }
     set((s) => ({ cloneStates: { ...s.cloneStates, [id]: "cloning" } }));
+    const entry: { text: string; promise: Promise<Uint8Array | null> } = {
+      text: trimmed,
+      promise: Promise.resolve(null),
+    };
     const promise = (async (): Promise<Uint8Array | null> => {
       try {
         const raw = await tauriInvoke<ArrayBuffer | Uint8Array>(
@@ -1025,6 +1032,10 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
             lang,
           }
         );
+        // 若期间 Whisper 二次校对或手动修改已发起更新版本的克隆任务，丢弃过期结果，避免覆盖新译文缓存
+        if (cloneInflight.get(id) !== entry) {
+          return null;
+        }
         if (raw) {
           const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
           if (bytes.byteLength > 44) {
@@ -1038,12 +1049,17 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       } catch {
         // 克隆不可用时标记为 ready，点击小喇叭会平滑使用系统语音播放
       } finally {
-        cloneInflight.delete(id);
+        if (cloneInflight.get(id) === entry) {
+          cloneInflight.delete(id);
+        }
       }
-      set((s) => ({ cloneStates: { ...s.cloneStates, [id]: "ready" } }));
+      if (cloneInflight.get(id) === undefined) {
+        set((s) => ({ cloneStates: { ...s.cloneStates, [id]: "ready" } }));
+      }
       return null;
     })();
-    cloneInflight.set(id, { text: trimmed, promise });
+    entry.promise = promise;
+    cloneInflight.set(id, entry);
     return promise;
   },
 

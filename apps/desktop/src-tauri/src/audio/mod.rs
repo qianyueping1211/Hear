@@ -1449,11 +1449,23 @@ impl LiveCaptureHandle {
                         };
 
                         let seg_uuid = format!("seg-{}-{}", segment_id, uuid::Uuid::new_v4());
-                        // 缓存本句原始 16kHz 单声道 WAV 字节，供录制过程中随时调用 Qwen3-TTS 原声克隆
-                        rt.segment_wavs
-                            .lock()
-                            .await
-                            .insert(seg_uuid.clone(), wav.clone());
+                        // 缓存本句原始 16kHz 单声道 WAV 字节，供录制过程中随时调用 Qwen3-TTS 原声克隆与单击播放原音（上限 64 条防止长会议内存膨胀）
+                        {
+                            let mut wav_map = rt.segment_wavs.lock().await;
+                            if wav_map.len() >= 64 {
+                                let keep_ids: std::collections::HashSet<String> = {
+                                    let snap = rt.snapshot.lock().await;
+                                    snap.segments
+                                        .iter()
+                                        .rev()
+                                        .take(48)
+                                        .map(|s| s.id.clone())
+                                        .collect()
+                                };
+                                wav_map.retain(|k, _| keep_ids.contains(k));
+                            }
+                            wav_map.insert(seg_uuid.clone(), wav.clone());
+                        }
 
                         let (recent_ctx, preview_baseline): (Vec<(String, String)>, Option<String>) = {
                             let snap = rt.snapshot.lock().await;
@@ -1591,6 +1603,7 @@ impl LiveCaptureHandle {
                                     let src_lang_c = actual_src.clone();
                                     let dst_lang_c = actual_dst.clone();
                                     let glossary_c = glossary.clone();
+                                    let recent_ctx_c = recent_ctx.clone();
                                     let orig_src_c = source_text.clone();
                                     let seg_uuid_c = seg_uuid.clone();
                                     tauri::async_runtime::spawn(async move {
@@ -1646,11 +1659,12 @@ impl LiveCaptureHandle {
                                         if !should_retranslate {
                                             return;
                                         }
-                                        let prompt_c = build_translation_prompt(
+                                        let prompt_c = build_translation_prompt_with_context(
                                             &clean_ref,
                                             &src_lang_c,
                                             &dst_lang_c,
                                             &glossary_c,
+                                            &recent_ctx_c,
                                         );
                                         if let Ok(raw_tr) = rt_corr
                                             .cloud
