@@ -300,6 +300,8 @@ pub struct LocalServerInstallStatus {
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
     pub app_version: String,
+    pub active_conversation_id: String,
+    pub conversations: Vec<crate::history_store::ConversationMeta>,
     pub mode: SessionMode,
     pub source_lang: String,
     pub target_lang: String,
@@ -326,6 +328,8 @@ impl Default for AppSnapshot {
     fn default() -> Self {
         Self {
             app_version: env!("CARGO_PKG_VERSION").to_string(),
+            active_conversation_id: format!("conv-{}", uuid::Uuid::new_v4()),
+            conversations: Vec::new(),
             mode: SessionMode::Idle,
             source_lang: "en".to_string(),
             target_lang: "zh".to_string(),

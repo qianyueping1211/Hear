@@ -2,11 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowDownCircle,
+  ArrowLeft,
   ArrowUpCircle,
+  Calendar,
   Check,
+  Clock,
   Copy,
   Download,
   FileAudio,
+  History,
   Info,
   Lock,
   Mic,
@@ -69,6 +73,9 @@ export function MainApp() {
     testingCloud,
     updateInfo,
     playback,
+    ttsSettings,
+    conversations,
+    viewMode,
     searchQuery,
     summaryOpen,
     summaryTemplateId,
@@ -80,9 +87,14 @@ export function MainApp() {
     setSearchQuery,
     setSummaryOpen,
     setSummaryTemplateId,
+    backToHome,
     setSettingsOpen,
+    loadConversation,
+    renameConversation,
+    deleteConversation,
     setLanguagePair,
     setCaptureMode,
+    startRecording,
     clearRecording,
     seekPlayback,
     toggleSubtitleVisible,
@@ -102,6 +114,9 @@ export function MainApp() {
   const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
   const [speakerDraft, setSpeakerDraft] = useState("");
   const [speakerApplyAll, setSpeakerApplyAll] = useState(true);
+  const [historySearch, setHistorySearch] = useState("");
+  const [renamingConvId, setRenamingConvId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const listRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
@@ -260,6 +275,18 @@ export function MainApp() {
       {/* 顶部控制栏 */}
       <header className="h-14 border-b border-white/10 bg-surface-900/90 px-4 flex items-center justify-between gap-3 shrink-0">
         <div className="flex items-center gap-2.5 min-w-0">
+          {viewMode === "workspace" && (
+            <button
+              type="button"
+              onClick={() => void backToHome()}
+              title="返回历史记录主页"
+              className="px-2.5 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs text-slate-200 flex items-center gap-1.5 shrink-0"
+            >
+              <ArrowLeft className="w-3.5 h-3.5 text-brand-400" />
+              <span>返回列表</span>
+            </button>
+          )}
+
           <div className="font-semibold tracking-wide text-white flex items-center gap-2 shrink-0">
             <span className="w-2.5 h-2.5 rounded-full bg-brand-500 inline-block" />
             听见 Hear
@@ -312,15 +339,17 @@ export function MainApp() {
             </button>
           </div>
 
-          <button
-            disabled={mode === "batch_processing"}
-            onClick={() => void importMediaFile()}
-            title="选择本地 WAV/MP3/MP4 等音视频文件，批量生成双语字幕与时间轴"
-            className="px-2.5 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 disabled:opacity-50 text-xs text-slate-200 flex items-center gap-1.5"
-          >
-            <FileAudio className="w-3.5 h-3.5 text-sky-400" />
-            {mode === "batch_processing" ? "批量转写中…" : "导入音视频"}
-          </button>
+          {viewMode === "workspace" && (
+            <button
+              disabled={mode === "batch_processing"}
+              onClick={() => void importMediaFile()}
+              title="选择本地 WAV/MP3/MP4 等音视频文件，批量生成双语字幕与时间轴"
+              className="px-2.5 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 disabled:opacity-50 text-xs text-slate-200 flex items-center gap-1.5"
+            >
+              <FileAudio className="w-3.5 h-3.5 text-sky-400" />
+              {mode === "batch_processing" ? "批量转写中…" : "导入音视频"}
+            </button>
+          )}
         </div>
 
         {/* 右侧：新版本提醒 + 服务状态胶囊 + 悬浮字幕 + 总结 + 设置 */}
@@ -367,17 +396,19 @@ export function MainApp() {
             <PanelTop className="w-4 h-4" />
           </button>
 
-          <button
-            onClick={() => setSummaryOpen(!summaryOpen)}
-            title="展开 / 收起一键总结面板"
-            className={`p-2 rounded-lg border ${
-              summaryOpen
-                ? "bg-purple-500/20 border-purple-500/40 text-purple-300"
-                : "bg-surface-800 border-white/10 text-slate-400 hover:text-white"
-            }`}
-          >
-            <PanelRight className="w-4 h-4" />
-          </button>
+          {viewMode === "workspace" && (
+            <button
+              onClick={() => setSummaryOpen(!summaryOpen)}
+              title="展开 / 收起一键总结面板"
+              className={`p-2 rounded-lg border ${
+                summaryOpen
+                  ? "bg-purple-500/20 border-purple-500/40 text-purple-300"
+                  : "bg-surface-800 border-white/10 text-slate-400 hover:text-white"
+              }`}
+            >
+              <PanelRight className="w-4 h-4" />
+            </button>
+          )}
 
           <button
             onClick={() => setSettingsOpen(true)}
@@ -389,8 +420,305 @@ export function MainApp() {
         </div>
       </header>
 
-      {/* 主体：时间轴字幕流 + 右侧一键总结 */}
-      <div className="flex-1 flex min-h-0 overflow-hidden">
+      {viewMode === "home" ? (
+        /* 默认主页：顶部 3 张快捷功能卡片（开始录音 / 导入文件 / 悬浮字幕） + 下方「最近文件」历史列表 */
+        <div className="flex-1 overflow-y-auto px-8 py-7">
+          <div className="max-w-5xl mx-auto space-y-7">
+            {sessionError && (
+              <div className="rounded-xl bg-rose-500/15 border border-rose-400/40 px-4 py-2.5 flex items-center justify-between gap-3 text-xs text-rose-200">
+                <div className="flex items-center gap-2 min-w-0">
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                  <span className="break-all leading-relaxed">{sessionError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={clearSessionError}
+                  className="p-1 rounded hover:bg-white/10 text-rose-300"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* 顶部 3 大快捷入口卡片 */}
+            <div className="grid grid-cols-3 gap-5">
+              {/* 1. 开始录音 */}
+              <button
+                type="button"
+                onClick={() => void startRecording(true)}
+                className="group relative h-28 rounded-2xl bg-gradient-to-br from-slate-800 via-slate-900 to-slate-950 border border-brand-500/35 hover:border-brand-400 shadow-lg hover:shadow-brand-500/15 px-6 flex items-center justify-between overflow-hidden text-left transition"
+              >
+                <div className="z-10 space-y-1">
+                  <div className="text-base font-semibold text-white group-hover:text-brand-200 transition">
+                    开始录音
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    实时识别与双语翻译
+                  </div>
+                </div>
+                <div className="relative w-28 h-20 rounded-xl bg-white/5 border border-white/10 -mr-2 translate-y-2 rotate-[-4deg] group-hover:rotate-0 transition flex items-center px-3">
+                  <div className="w-9 h-9 rounded-full bg-brand-500 shadow-md shadow-brand-500/40 flex items-center justify-center text-white">
+                    <Mic className="w-4 h-4" />
+                  </div>
+                  <div className="ml-2.5 flex-1 space-y-1.5">
+                    <div className="h-1.5 w-10 rounded-full bg-white/30" />
+                    <div className="h-1.5 w-7 rounded-full bg-white/15" />
+                  </div>
+                </div>
+              </button>
+
+              {/* 2. 导入文件 */}
+              <button
+                type="button"
+                disabled={mode === "batch_processing"}
+                onClick={() => void importMediaFile()}
+                className="group relative h-28 rounded-2xl bg-surface-900/90 hover:bg-surface-800/90 border border-white/10 hover:border-sky-400/40 shadow px-6 flex items-center justify-between overflow-hidden text-left transition disabled:opacity-50"
+              >
+                <div className="z-10 space-y-1">
+                  <div className="text-base font-semibold text-slate-100 group-hover:text-white transition">
+                    导入文件
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    音视频转写与会议纪要
+                  </div>
+                </div>
+                <div className="relative w-28 h-20 rounded-xl bg-surface-800/90 border border-white/10 -mr-2 translate-y-2 rotate-[-3deg] group-hover:rotate-0 transition flex items-center px-3">
+                  <div className="w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-400/30 flex items-center justify-center text-sky-400">
+                    <FileAudio className="w-4 h-4" />
+                  </div>
+                  <div className="ml-2.5 flex-1 space-y-1.5">
+                    <div className="h-1.5 w-11 rounded-full bg-slate-600" />
+                    <div className="h-1.5 w-8 rounded-full bg-slate-700" />
+                  </div>
+                </div>
+              </button>
+
+              {/* 3. 悬浮字幕 */}
+              <button
+                type="button"
+                onClick={() => void toggleSubtitleVisible()}
+                className={`group relative h-28 rounded-2xl border shadow px-6 flex items-center justify-between overflow-hidden text-left transition ${
+                  subtitleStyle.visible
+                    ? "bg-brand-500/15 border-brand-400/50"
+                    : "bg-surface-900/90 hover:bg-surface-800/90 border-white/10 hover:border-brand-400/40"
+                }`}
+              >
+                <div className="z-10 space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-base font-semibold text-slate-100 group-hover:text-white transition">
+                      悬浮字幕
+                    </span>
+                    {subtitleStyle.visible && (
+                      <span className="px-1.5 py-0.5 rounded-full bg-brand-500/30 text-brand-200 text-[10px]">
+                        已开启
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    {subtitleStyle.visible ? "点击隐藏桌面同传字幕" : "桌面置顶双语同传字幕"}
+                  </div>
+                </div>
+                <div className="relative w-28 h-20 rounded-xl bg-surface-800/90 border border-white/10 -mr-2 translate-y-2 rotate-[-3deg] group-hover:rotate-0 transition flex flex-col justify-center px-3 space-y-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2 h-1.5 rounded-full bg-brand-400" />
+                    <span className="h-1.5 w-14 rounded-full bg-slate-500" />
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-2 h-1.5 rounded-full bg-emerald-400" />
+                    <span className="h-1.5 w-10 rounded-full bg-slate-600" />
+                  </div>
+                </div>
+              </button>
+            </div>
+
+            {/* 下方：最近文件列表 */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-semibold text-slate-300">最近文件</h2>
+                  {(conversations?.length ?? 0) > 0 && (
+                    <span className="px-2 py-0.5 rounded-full bg-surface-800 border border-white/10 text-[11px] text-slate-400">
+                      {conversations?.length}
+                    </span>
+                  )}
+                </div>
+                <div className="relative w-72">
+                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={historySearch}
+                    onChange={(e) => setHistorySearch(e.target.value)}
+                    placeholder="搜索会议标题或内容摘要…"
+                    className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-surface-900 border border-white/10 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-brand-500"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-3.5">
+                {(conversations ?? [])
+                  .filter((c) => {
+                    const q = historySearch.trim().toLowerCase();
+                    if (!q) return true;
+                    return (
+                      c.title.toLowerCase().includes(q) ||
+                      c.preview.toLowerCase().includes(q)
+                    );
+                  })
+                  .map((c) => {
+                    const isRenaming = renamingConvId === c.id;
+                    const dt = new Date(c.updatedAtMs);
+                    const dateStr = `${String(dt.getMonth() + 1).padStart(2, "0")}-${String(
+                      dt.getDate()
+                    ).padStart(2, "0")} ${String(dt.getHours()).padStart(2, "0")}:${String(
+                      dt.getMinutes()
+                    ).padStart(2, "0")}`;
+                    const durMs = c.durationMs ?? 0;
+                    const durStr = formatTimestamp(durMs);
+
+                    return (
+                      <div
+                        key={c.id}
+                        onClick={() => {
+                          if (!isRenaming) {
+                            void loadConversation(c.id);
+                          }
+                        }}
+                        className="group rounded-2xl bg-surface-900/85 hover:bg-surface-800/85 border border-white/10 hover:border-brand-400/40 p-5 flex items-center justify-between gap-6 cursor-pointer shadow-sm transition"
+                      >
+                        <div className="flex-1 min-w-0 space-y-2.5">
+                          {isRenaming ? (
+                            <div
+                              className="flex items-center gap-2 max-w-lg"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <input
+                                value={renameDraft}
+                                onChange={(e) => setRenameDraft(e.target.value)}
+                                className="flex-1 rounded-lg bg-surface-950 border border-brand-500 px-3 py-1.5 text-sm text-white focus:outline-none"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (renameDraft.trim()) {
+                                    void renameConversation(c.id, renameDraft.trim());
+                                  }
+                                  setRenamingConvId(null);
+                                }}
+                                className="px-3 py-1.5 rounded-lg bg-brand-500 text-white text-xs font-medium"
+                              >
+                                保存
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setRenamingConvId(null)}
+                                className="px-2.5 py-1.5 rounded-lg bg-surface-800 text-slate-300 text-xs"
+                              >
+                                取消
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2.5">
+                              <h3 className="text-base font-bold text-white group-hover:text-brand-200 truncate transition">
+                                {c.title}
+                              </h3>
+                              {c.hasSummary && (
+                                <span className="px-2 py-0.5 rounded-md bg-purple-500/15 border border-purple-400/30 text-purple-300 text-[11px] shrink-0">
+                                  已生成总结
+                                </span>
+                              )}
+                            </div>
+                          )}
+
+                          <p className="text-xs text-slate-400 leading-relaxed line-clamp-2">
+                            <span className="text-slate-600 font-serif mr-1">“</span>
+                            {c.preview || "点击进入查看完整录音回放、双语转写字幕与会议总结纪要。"}
+                          </p>
+
+                          <div className="flex items-center justify-between gap-4 pt-0.5 text-xs text-slate-500">
+                            <div className="flex items-center gap-4">
+                              <span className="flex items-center gap-1 font-mono">
+                                <Clock className="w-3.5 h-3.5 text-slate-500" />
+                                {durStr}
+                              </span>
+                              <span className="flex items-center gap-1">
+                                <Calendar className="w-3.5 h-3.5 text-slate-500" />
+                                {dateStr} · 客户端
+                              </span>
+                              <span className="px-2 py-0.5 rounded bg-surface-800 text-slate-400 text-[11px]">
+                                {c.langPair} · {c.segmentCount} 句
+                              </span>
+                            </div>
+
+                            <div
+                              className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setRenamingConvId(c.id);
+                                  setRenameDraft(c.title);
+                                }}
+                                title="重命名"
+                                className="px-2 py-1 rounded hover:bg-white/10 text-slate-400 hover:text-white flex items-center gap-1"
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                                <span>重命名</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void deleteConversation(c.id)}
+                                title="删除"
+                                className="px-2 py-1 rounded hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 flex items-center gap-1"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>删除</span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* 右侧：缩略纪要卡片图示（对标参考图右侧叠层文档视觉） */}
+                        <div className="relative w-24 h-20 shrink-0 hidden sm:flex items-center justify-center">
+                          <div className="absolute w-16 h-20 rounded-xl bg-surface-800/70 border border-white/10 rotate-6 translate-x-1.5" />
+                          <div className="relative w-16 h-20 rounded-xl bg-surface-800 border border-white/15 -rotate-3 p-2.5 flex flex-col justify-between shadow">
+                            <div className="space-y-1">
+                              <div className="h-1.5 w-8 rounded-full bg-brand-400/70" />
+                              <div className="h-1 w-11 rounded-full bg-slate-500/60" />
+                              <div className="h-1 w-9 rounded-full bg-slate-600/60" />
+                              <div className="h-1 w-10 rounded-full bg-slate-600/50" />
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="w-2 h-2 rounded-full bg-emerald-400/70" />
+                              <span className="text-[9px] font-mono text-slate-400">
+                                {c.hasSummary ? "AI 纪要" : "双语"}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                {(conversations?.length ?? 0) === 0 && (
+                  <div className="rounded-2xl border border-dashed border-white/10 bg-surface-900/40 py-16 px-6 text-center space-y-3">
+                    <History className="w-9 h-9 text-slate-600 mx-auto" />
+                    <div className="text-sm font-medium text-slate-300">
+                      暂无最近录音或导入文件
+                    </div>
+                    <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+                      点击上方「开始录音」启动实时语音识别与双语翻译，或点击「导入文件」转写本地音视频。每次录音与总结都会自动保存在此，点击即可进入左侧播放、右侧总结详情页。
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* 详情与录制工作台：左侧是播放与字幕，右侧是总结 */}
+          <div className="flex-1 flex min-h-0 overflow-hidden">
         <main className="flex-1 flex flex-col min-w-0 relative">
           <div className="h-11 border-b border-white/5 px-4 flex items-center justify-between gap-3 bg-surface-950/60">
             <div className="relative flex-1 max-w-sm">
@@ -533,12 +861,17 @@ export function MainApp() {
                         itemRefs.current[seg.id] = el;
                       }}
                       onClick={() => {
-                        if (!isEditing && !isEditingSpeaker && playback.hasAudio) {
+                        if (
+                          !isEditing &&
+                          !isEditingSpeaker &&
+                          mode === "idle" &&
+                          playback.hasAudio
+                        ) {
                           void seekPlayback(seg.startMs, true);
                         }
                       }}
                       className={`group rounded-xl border p-3.5 transition ${
-                        playback.hasAudio ? "cursor-pointer" : ""
+                        mode === "idle" && playback.hasAudio ? "cursor-pointer" : ""
                       } ${
                         isActive
                           ? "bg-brand-500/15 border-brand-400/50 shadow-sm"
@@ -612,7 +945,13 @@ export function MainApp() {
                                 seg.targetLang
                               )
                             }
-                            title={isSpeaking ? "停止朗读译文" : "朗读本句译文"}
+                            title={
+                              isSpeaking
+                                ? "停止朗读译文"
+                                : ttsSettings.useVoiceClone && playback.hasAudio
+                                  ? "使用原声克隆朗读本句译文"
+                                  : "朗读本句译文"
+                            }
                             className={`px-2 py-1 rounded flex items-center gap-1 transition ${
                               isSpeaking
                                 ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/40"
@@ -886,9 +1225,12 @@ export function MainApp() {
             </div>
           </aside>
         )}
-      </div>
+          </div>
 
-      <WaveformPlayer />
+          <WaveformPlayer />
+        </>
+      )}
+
       <SettingsModal />
     </div>
   );

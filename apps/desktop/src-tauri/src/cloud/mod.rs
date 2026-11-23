@@ -257,6 +257,31 @@ impl HearCloudClient {
         preview: bool,
         token: Option<&str>,
     ) -> Result<(String, String), String> {
+        let (text, lang, _) = self
+            .transcribe_wav_staged(
+                raw_address,
+                wav_bytes,
+                languages,
+                fallback_lang,
+                preview,
+                None,
+                token,
+            )
+            .await?;
+        Ok((text, lang))
+    }
+
+    /// 双阶段语音识别（支持 X-ASR-Stage: first / correct，返回 (识别文本, 识别语种, 是否支持后台 Whisper 二次精修)）
+    pub async fn transcribe_wav_staged(
+        &self,
+        raw_address: &str,
+        wav_bytes: Vec<u8>,
+        languages: &str,
+        fallback_lang: &str,
+        preview: bool,
+        stage: Option<&str>,
+        token: Option<&str>,
+    ) -> Result<(String, String, bool), String> {
         let base_url = normalize_service_url(raw_address)?;
         let url = format!("{}/v1/asr", base_url);
         let mut req = self
@@ -268,6 +293,9 @@ impl HearCloudClient {
             .body(wav_bytes);
         if preview {
             req = req.header("X-ASR-Preview", "1");
+        }
+        if let Some(st) = stage {
+            req = req.header("X-ASR-Stage", st);
         }
         req = self.apply_headers(req, token);
 
@@ -308,7 +336,93 @@ impl HearCloudClient {
             .unwrap_or(fallback_lang)
             .trim()
             .to_lowercase();
-        Ok((text, if lang.is_empty() { fallback_lang.to_string() } else { lang }))
+        let can_correct = val
+            .get("can_correct")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        Ok((
+            text,
+            if lang.is_empty() {
+                fallback_lang.to_string()
+            } else {
+                lang
+            },
+            can_correct,
+        ))
+    }
+
+    /// 声音克隆语音合成（先上传参考音频到 /v1/clone/reference 获取 id，再调用 /v1/clone 返回 WAV 音频字节）
+    pub async fn clone_voice(
+        &self,
+        raw_address: &str,
+        text: &str,
+        lang: &str,
+        reference_wav: Option<Vec<u8>>,
+        reference_text: &str,
+        token: Option<&str>,
+    ) -> Result<Vec<u8>, String> {
+        let base_url = normalize_service_url(raw_address)?;
+        let mut ref_id: Option<String> = None;
+
+        if let Some(wav) = reference_wav {
+            if !wav.is_empty() {
+                let ref_url = format!("{}/v1/clone/reference", base_url);
+                let req = self.apply_headers(
+                    self.http
+                        .post(&ref_url)
+                        .header("Content-Type", "audio/wav")
+                        .body(wav),
+                    token,
+                );
+                if let Ok(resp) = req.timeout(Duration::from_secs(12)).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(val) = resp.json::<serde_json::Value>().await {
+                            ref_id = val.get("id").and_then(|v| v.as_str()).map(str::to_string);
+                        }
+                    }
+                }
+            }
+        }
+
+        let clone_url = format!("{}/v1/clone", base_url);
+        let mut payload = serde_json::json!({
+            "text": text,
+            "lang": lang,
+        });
+        if let Some(rid) = ref_id {
+            payload["reference_id"] = serde_json::Value::String(rid);
+            if !reference_text.trim().is_empty() {
+                payload["reference_text"] = serde_json::Value::String(reference_text.trim().to_string());
+            }
+        }
+
+        let req = self.apply_headers(
+            self.http
+                .post(&clone_url)
+                .header("X-Hear-Audio", "wav")
+                .json(&payload),
+            token,
+        );
+        let resp = req
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| format!("声音克隆请求失败：{}", e))?;
+
+        if !resp.status().is_success() {
+            let code = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("声音克隆返回 HTTP {}：{}", code, body));
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("读取声音克隆音频失败：{}", e))?;
+        if bytes.len() < 44 {
+            return Err("声音克隆返回的音频数据为空".to_string());
+        }
+        Ok(bytes.to_vec())
     }
 
     /// 流式 SSE 文本翻译（逐字回调，降低桌面悬浮字幕首字延迟）

@@ -98,6 +98,33 @@ impl StreamingWavRecorder {
     }
 }
 
+/// 从已录制的 16 kHz 单声道 16-bit PCM WAV 文件中截取 [start_ms, end_ms] 音频片段并封装为独立 WAV（供 Qwen3-TTS 声音克隆作参考音频）
+pub fn slice_wav_range_16k_mono(path: &Path, start_ms: u64, end_ms: u64) -> Option<Vec<u8>> {
+    if end_ms <= start_ms {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let (samples, _, _) = decode_wav_to_16k_mono(&bytes).ok()?;
+    let start_idx = ((start_ms * 16_000) / 1000) as usize;
+    let mut end_idx = ((end_ms * 16_000) / 1000) as usize;
+    if start_idx >= samples.len() {
+        return None;
+    }
+    end_idx = end_idx.min(samples.len());
+    if end_idx <= start_idx {
+        return None;
+    }
+    // 钳制在 0.8s ~ 8.0s 之间，确保 Qwen3-TTS 参考音频时长适中
+    let min_samples = 12_800; // 0.8s
+    let max_samples = 16_000 * 8; // 8.0s
+    let slice = &samples[start_idx..end_idx];
+    if slice.len() < min_samples {
+        return None;
+    }
+    let capped = &slice[..slice.len().min(max_samples)];
+    Some(encode_wav_16k_mono(capped))
+}
+
 /// 将 16 kHz 单声道 f32 采样编码为标准 16-bit PCM WAV 字节数组（供 /v1/asr 上传）
 pub fn encode_wav_16k_mono(samples: &[f32]) -> Vec<u8> {
     let data_bytes = (samples.len() * 2) as u32;

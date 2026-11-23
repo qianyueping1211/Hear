@@ -100,7 +100,19 @@ final class SummaryService {
                 bgGuard.end()
             }
             do {
-                let text = try await LLMClient.complete(provider, key: apiKey, model: model, system: system, user: user)
+                let text = try await LLMClient.completeStream(
+                    provider,
+                    key: apiKey,
+                    model: model,
+                    system: system,
+                    user: user
+                ) { partial in
+                    store.updateSummary(
+                        conversationID,
+                        templateID: templateID,
+                        SummaryRecord(status: .generating, content: partial, model: model)
+                    )
+                }
                 store.updateSummary(conversationID, templateID: templateID,
                                     SummaryRecord(status: .done, content: text, model: model))
                 hearLog("总结：「\(template.title)」完成，用时 \(Int(Date().timeIntervalSince(t0)))s")

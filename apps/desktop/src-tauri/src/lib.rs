@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod cloud;
 pub mod config_store;
+pub mod history_store;
 pub mod local_server;
 pub mod logger;
 pub mod platform;
@@ -28,6 +29,7 @@ pub struct AppRuntime {
     pub snapshot: Mutex<AppSnapshot>,
     pub cloud: HearCloudClient,
     pub capture: Mutex<Option<audio::LiveCaptureHandle>>,
+    pub summary_markdown: Mutex<String>,
 }
 
 impl AppRuntime {
@@ -36,6 +38,7 @@ impl AppRuntime {
             snapshot: Mutex::new(AppSnapshot::default()),
             cloud: HearCloudClient::new(),
             capture: Mutex::new(None),
+            summary_markdown: Mutex::new(String::new()),
         }
     }
 
@@ -51,6 +54,32 @@ impl AppRuntime {
             }
         };
         save_config(app, &cfg);
+    }
+
+    pub async fn save_history(&self, app: &AppHandle) {
+        let summary_md = self.summary_markdown.lock().await.clone();
+        let metas = {
+            let mut snap = self.snapshot.lock().await;
+            if snap.segments.is_empty() && !snap.playback.has_audio {
+                return;
+            }
+            let conv_id = snap.active_conversation_id.clone();
+            let src_lang = snap.source_lang.clone();
+            let dst_lang = snap.target_lang.clone();
+            let segs = snap.segments.clone();
+            let updated = history_store::save_current_conversation(
+                app,
+                &conv_id,
+                &src_lang,
+                &dst_lang,
+                &segs,
+                &summary_md,
+                &mut snap.playback,
+            );
+            snap.conversations = updated.clone();
+            updated
+        };
+        let _ = app.emit("history:updated", &metas);
     }
 }
 
@@ -173,9 +202,12 @@ async fn stop_recording_impl(
     if let Some(handle) = cap_guard.take() {
         let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
     }
-    let mut snap = rt.snapshot.lock().await;
-    snap.mode = SessionMode::Idle;
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.mode = SessionMode::Idle;
+    }
     let _ = app.emit("session:mode", SessionMode::Idle);
+    rt.save_history(app).await;
     Ok(SessionMode::Idle)
 }
 
@@ -250,13 +282,162 @@ async fn read_recording_audio(
 }
 
 #[tauri::command]
-async fn clear_recording(rt: State<'_, Arc<AppRuntime>>) -> Result<(), String> {
+async fn clear_recording(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<(), String> {
+    rt.save_history(&app).await;
+    *rt.summary_markdown.lock().await = String::new();
     let mut snap = rt.snapshot.lock().await;
+    snap.active_conversation_id = format!("conv-{}", uuid::Uuid::new_v4());
     snap.segments.clear();
     snap.live_partial_source.clear();
     snap.live_partial_translation.clear();
     snap.playback = Default::default();
     Ok(())
+}
+
+#[tauri::command]
+async fn list_conversations(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<Vec<history_store::ConversationMeta>, String> {
+    let metas = history_store::list_metas(&app);
+    rt.snapshot.lock().await.conversations = metas.clone();
+    Ok(metas)
+}
+
+#[tauri::command]
+async fn load_conversation(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    id: String,
+) -> Result<history_store::SavedConversation, String> {
+    // 若当前正在录音，先停止并保存当前会话
+    {
+        let mut cap = rt.capture.lock().await;
+        if let Some(handle) = cap.take() {
+            let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
+        }
+    }
+    rt.save_history(&app).await;
+
+    let conv = history_store::load_conversation(&app, &id)?;
+    *rt.summary_markdown.lock().await = conv.summary_markdown.clone();
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.mode = SessionMode::Idle;
+        snap.active_conversation_id = conv.meta.id.clone();
+        snap.segments = conv.segments.clone();
+        snap.live_partial_source.clear();
+        snap.live_partial_translation.clear();
+        snap.playback = conv.playback.clone();
+        snap.playback.is_playing = false;
+        snap.playback.position_ms = 0;
+    }
+    let _ = app.emit("session:mode", SessionMode::Idle);
+    let _ = app.emit("recording:ready", &conv.playback);
+    Ok(conv)
+}
+
+#[tauri::command]
+async fn rename_conversation(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    id: String,
+    title: String,
+) -> Result<Vec<history_store::ConversationMeta>, String> {
+    let metas = history_store::rename_conversation(&app, &id, &title)?;
+    rt.snapshot.lock().await.conversations = metas.clone();
+    let _ = app.emit("history:updated", &metas);
+    Ok(metas)
+}
+
+#[tauri::command]
+async fn delete_conversation(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    id: String,
+) -> Result<Vec<history_store::ConversationMeta>, String> {
+    let metas = history_store::delete_conversation(&app, &id)?;
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.conversations = metas.clone();
+        if snap.active_conversation_id == id {
+            snap.active_conversation_id = format!("conv-{}", uuid::Uuid::new_v4());
+            snap.segments.clear();
+            snap.live_partial_source.clear();
+            snap.live_partial_translation.clear();
+            snap.playback = Default::default();
+        }
+    }
+    let _ = app.emit("history:updated", &metas);
+    Ok(metas)
+}
+
+#[tauri::command]
+async fn clone_segment_speech(
+    rt: State<'_, Arc<AppRuntime>>,
+    id: String,
+    text: String,
+    lang: String,
+) -> Result<tauri::ipc::Response, String> {
+    let trimmed = text.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("朗读文本为空".to_string());
+    }
+    let (clone_url, clone_tok, audio_path, start_ms, end_ms, ref_text) = {
+        let snap = rt.snapshot.lock().await;
+        let (addr, tok) = match snap.service_config.clone_source {
+            EngineSource::Local => (
+                snap.service_config.local_service_address.trim().to_string(),
+                snap.service_config.local_access_token.clone(),
+            ),
+            EngineSource::Cloud => (
+                snap.service_config.cloud_service_address.trim().to_string(),
+                snap.service_config.cloud_access_token.clone(),
+            ),
+        };
+        if addr.is_empty() {
+            return Err("未配置声音复刻服务地址".to_string());
+        }
+        let wav_path = snap
+            .playback
+            .audio_path
+            .clone()
+            .ok_or_else(|| "当前没有可用于声音复刻的原始录音文件".to_string())?;
+        let seg = snap
+            .segments
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| "未找到对应的字幕段落".to_string())?;
+        (
+            addr,
+            tok,
+            wav_path,
+            seg.start_ms,
+            seg.end_ms,
+            seg.source_text.clone(),
+        )
+    };
+
+    let ref_wav = tokio::task::spawn_blocking(move || {
+        recorder::slice_wav_range_16k_mono(Path::new(&audio_path), start_ms, end_ms)
+    })
+    .await
+    .map_err(|e| format!("切片参考音频异常：{}", e))?
+    .ok_or_else(|| "参考音频时长不足（需至少 0.35 秒）".to_string())?;
+
+    let tok_opt = if clone_tok.trim().is_empty() {
+        None
+    } else {
+        Some(clone_tok.as_str())
+    };
+    let wav_bytes = rt
+        .cloud
+        .clone_voice(&clone_url, ref_wav, &ref_text, &trimmed, &lang, tok_opt)
+        .await?;
+    Ok(tauri::ipc::Response::new(wav_bytes))
 }
 
 #[tauri::command]
@@ -657,6 +838,7 @@ async fn retranslate_segment(
     if let Some(seg) = updated {
         let _ = app.emit("segment:upsert", seg);
     }
+    rt.save_history(&app).await;
     Ok(())
 }
 
@@ -684,6 +866,7 @@ async fn update_segment_translation(
     if let Some(seg) = updated {
         let _ = app.emit("segment:upsert", seg);
     }
+    rt.save_history(&app).await;
     Ok(())
 }
 
@@ -722,6 +905,7 @@ async fn update_segment_speaker(
     for seg in changed {
         let _ = app.emit("segment:upsert", seg);
     }
+    rt.save_history(&app).await;
     Ok(())
 }
 
@@ -839,7 +1023,9 @@ async fn generate_summary(
     if final_md.is_empty() {
         return Err("模型未返回总结内容，请检查模型服务状态".to_string());
     }
+    *rt.summary_markdown.lock().await = final_md.clone();
     let _ = app.emit("summary:delta", &final_md);
+    rt.save_history(&app).await;
     Ok(final_md)
 }
 
@@ -962,8 +1148,13 @@ async fn import_media_file(
         .map_err(|e| format!("写入导入音频缓存失败：{}", e))?;
     let saved_path_str = saved_path.to_string_lossy().to_string();
 
+    // 若当前已有会话内容，先保存历史并切换到新会话 ID
+    rt.save_history(&app).await;
+    *rt.summary_markdown.lock().await = String::new();
+
     let pb = {
         let mut snap = rt.snapshot.lock().await;
+        snap.active_conversation_id = format!("conv-{}", uuid::Uuid::new_v4());
         snap.mode = SessionMode::BatchProcessing;
         snap.segments.clear();
         snap.live_partial_source.clear();
@@ -1109,6 +1300,7 @@ async fn import_media_file(
             snap.live_partial_source.clear();
             snap.live_partial_translation.clear();
         }
+        rt_bg.save_history(&app_bg).await;
         let _ = app_bg.emit(
             "subtitle:partial",
             serde_json::json!({ "source": "", "translation": "" }),
@@ -1221,6 +1413,7 @@ pub fn run() {
 
             let install_status =
                 local_server::inspect_install_dir(&local_server::default_install_dir(app.handle()));
+            let initial_conversations = history_store::list_metas(app.handle());
             {
                 let mut snap = runtime_setup.snapshot.blocking_lock();
                 snap.service_config = loaded.service_config;
@@ -1229,6 +1422,7 @@ pub fn run() {
                 snap.glossary = loaded.glossary;
                 snap.update_config = loaded.update_config;
                 snap.local_server_install = install_status;
+                snap.conversations = initial_conversations;
             }
 
             setup_tray(app.handle())?;
@@ -1420,6 +1614,11 @@ pub fn run() {
             toggle_recording,
             read_recording_audio,
             clear_recording,
+            list_conversations,
+            load_conversation,
+            rename_conversation,
+            delete_conversation,
+            clone_segment_speech,
             seek_playback,
             set_playback_playing,
             set_playback_speed,

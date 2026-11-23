@@ -669,6 +669,7 @@ mod win_wasapi {
                                         snap.playback.clone()
                                     };
                                     let _ = app_pause.emit("recording:ready", pb);
+                                    rt_pause.save_history(&app_pause).await;
                                 });
                             }
                         }
@@ -809,6 +810,7 @@ mod win_wasapi {
                                 snap.playback.clone()
                             };
                             let _ = app_done.emit("recording:ready", pb);
+                            rt_done.save_history(&app_done).await;
                         });
                     }
                 }
@@ -1172,27 +1174,29 @@ impl LiveCaptureHandle {
                         }
                         let t0 = Instant::now();
                         let wav = encode_wav_16k_mono(&samples);
-                        let (source_text, detected_lang) = match rt
+                        let (source_text, detected_lang, can_correct) = match rt
                             .cloud
-                            .transcribe_wav(
+                            .transcribe_wav_staged(
                                 &asr_url,
-                                wav,
+                                wav.clone(),
                                 &languages_hdr,
                                 &src_lang,
                                 false,
+                                Some("first"),
                                 asr_token_opt,
                             )
                             .await
                         {
-                            Ok(pair) => {
+                            Ok(triple) => {
                                 logger::info(format!(
-                                    "[asr] seg={} ms={} lang={} chars={}",
+                                    "[asr:first] seg={} ms={} lang={} chars={} can_correct={}",
                                     segment_id,
                                     t0.elapsed().as_millis(),
-                                    pair.1,
-                                    pair.0.chars().count()
+                                    triple.1,
+                                    triple.0.chars().count(),
+                                    triple.2
                                 ));
-                                pair
+                                triple
                             }
                             Err(err) => {
                                 logger::error(format!("[asr] seg={} failed: {}", segment_id, err));
@@ -1316,6 +1320,109 @@ impl LiveCaptureHandle {
                                     "subtitle:partial",
                                     serde_json::json!({ "source": "", "translation": "" }),
                                 );
+                                rt.save_history(&app).await;
+
+                                // 若服务端为 sensevoice+whisper 双阶段模式，后台静默触发 Whisper 二次精修（不阻塞后续新句）
+                                if can_correct {
+                                    let rt_corr = rt.clone();
+                                    let app_corr = app.clone();
+                                    let asr_url_c = asr_url.clone();
+                                    let asr_tok_c = asr_tok.clone();
+                                    let mt_url_c = mt_url.clone();
+                                    let mt_tok_c = mt_tok.clone();
+                                    let langs_c = languages_hdr.clone();
+                                    let src_lang_c = actual_src.clone();
+                                    let dst_lang_c = actual_dst.clone();
+                                    let glossary_c = glossary.clone();
+                                    let orig_src_c = source_text.clone();
+                                    let seg_uuid_c = seg_uuid.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        let a_opt = if asr_tok_c.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(asr_tok_c.as_str())
+                                        };
+                                        let m_opt = if mt_tok_c.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(mt_tok_c.as_str())
+                                        };
+                                        let Ok((refined, _, _)) = rt_corr
+                                            .cloud
+                                            .transcribe_wav_staged(
+                                                &asr_url_c,
+                                                wav,
+                                                &langs_c,
+                                                &src_lang_c,
+                                                false,
+                                                Some("correct"),
+                                                a_opt,
+                                            )
+                                            .await
+                                        else {
+                                            return;
+                                        };
+                                        let clean_ref = refined.trim().to_string();
+                                        if clean_ref.is_empty() || clean_ref == orig_src_c.trim() {
+                                            return;
+                                        }
+                                        // 仅在用户尚未手动改过该句时应用 Whisper 后台精修
+                                        let should_retranslate = {
+                                            let mut snap = rt_corr.snapshot.lock().await;
+                                            if let Some(s) =
+                                                snap.segments.iter_mut().find(|s| s.id == seg_uuid_c)
+                                            {
+                                                if s.is_edited == Some(true) {
+                                                    false
+                                                } else {
+                                                    s.baseline_translated =
+                                                        Some(s.translated_text.clone());
+                                                    s.source_text = clean_ref.clone();
+                                                    s.is_edited = Some(true);
+                                                    let _ = app_corr.emit("segment:upsert", &*s);
+                                                    true
+                                                }
+                                            } else {
+                                                false
+                                            }
+                                        };
+                                        if !should_retranslate {
+                                            return;
+                                        }
+                                        let prompt_c = build_translation_prompt(
+                                            &clean_ref,
+                                            &src_lang_c,
+                                            &dst_lang_c,
+                                            &glossary_c,
+                                        );
+                                        if let Ok(raw_tr) = rt_corr
+                                            .cloud
+                                            .translate_stream(&mt_url_c, &prompt_c, false, m_opt, |_| {})
+                                            .await
+                                        {
+                                            let tr_clean = clean_translation_output(&raw_tr);
+                                            if !tr_clean.is_empty() {
+                                                let mut updated_seg = None;
+                                                {
+                                                    let mut snap = rt_corr.snapshot.lock().await;
+                                                    if let Some(s) = snap
+                                                        .segments
+                                                        .iter_mut()
+                                                        .find(|s| s.id == seg_uuid_c)
+                                                    {
+                                                        s.translated_text = tr_clean;
+                                                        s.status = "final".to_string();
+                                                        updated_seg = Some(s.clone());
+                                                    }
+                                                }
+                                                if let Some(u) = updated_seg {
+                                                    let _ = app_corr.emit("segment:upsert", &u);
+                                                    rt_corr.save_history(&app_corr).await;
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
                             }
                             Err(err) => {
                                 logger::error(format!("[mt] seg={} failed: {}", segment_id, err));

@@ -38,11 +38,16 @@ export function WaveformPlayer() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
-  // 录音文件就绪（暂停刷盘或结束录音）时从 Rust 后端加载真实 WAV 字节并绑定到 HTMLAudioElement
+  // 录音结束后（idle 且有音频文件）才从 Rust 后端加载 WAV 字节供回放；新录音录制中或暂停中不提供播放
   useEffect(() => {
     let revoked = false;
     let objectUrl: string | null = null;
-    if (!playback.hasAudio || !playback.audioPath || mode === "recording") {
+    if (
+      !playback.hasAudio ||
+      !playback.audioPath ||
+      mode === "recording" ||
+      mode === "paused"
+    ) {
       setAudioUrl(null);
       return;
     }
@@ -132,11 +137,12 @@ export function WaveformPlayer() {
       Math.max(48, Math.floor(width / 4))
     );
     const barW = width / barCount;
-    const progress = isRecording
-      ? 1.0
-      : playback.durationMs > 0
-      ? Math.max(0, Math.min(1, playback.positionMs / playback.durationMs))
-      : 0;
+    const progress =
+      isRecording || isPaused
+        ? 1.0
+        : playback.durationMs > 0
+        ? Math.max(0, Math.min(1, playback.positionMs / playback.durationMs))
+        : 0;
 
     for (let i = 0; i < barCount; i++) {
       const srcIdx = Math.floor((i / barCount) * peaks.length);
@@ -179,9 +185,7 @@ export function WaveformPlayer() {
   ]);
 
   const canSeek =
-    (mode === "idle" || mode === "paused") &&
-    playback.hasAudio &&
-    playback.durationMs > 0;
+    mode === "idle" && playback.hasAudio && playback.durationMs > 0;
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!canSeek) return;
@@ -211,14 +215,14 @@ export function WaveformPlayer() {
         className="hidden"
       />
 
-      {/* 左侧主控区：按 4 种状态（未开始 / 正在录音 / 已暂停 / 已结束回放）差异化呈现 */}
+      {/* 左侧主控区：录制中（暂停+结束）、已暂停（继续+结束，无播放按钮）、已结束回放（快退+播放+快进+新录音） */}
       <div className="flex items-center gap-2 shrink-0">
         {mode === "recording" ? (
           <>
             <button
               type="button"
               onClick={() => void pauseRecording()}
-              title="暂停实时录音（保留已录音频与字幕，暂停期间可试听，随时可继续）"
+              title="暂停当前录音"
               className="px-3.5 py-2 rounded-full bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-semibold flex items-center gap-1.5 shadow transition"
             >
               <Pause className="w-3.5 h-3.5 fill-current" />
@@ -227,7 +231,7 @@ export function WaveformPlayer() {
             <button
               type="button"
               onClick={() => void stopRecording()}
-              title="结束本轮录音并生成完整可回放音频"
+              title="结束本轮录音并进入回放与总结"
               className="px-3.5 py-2 rounded-full bg-rose-500 hover:bg-rose-600 text-white text-xs font-semibold flex items-center gap-1.5 shadow transition"
             >
               <Square className="w-3.5 h-3.5 fill-current" />
@@ -239,35 +243,21 @@ export function WaveformPlayer() {
             <button
               type="button"
               onClick={() => void resumeRecording()}
-              title="从暂停处无缝继续录音"
-              className="px-3.5 py-2 rounded-full bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold flex items-center gap-1.5 shadow transition"
+              title="从暂停处无缝继续"
+              className="px-4 py-2 rounded-full bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold flex items-center gap-1.5 shadow transition"
             >
               <Mic className="w-3.5 h-3.5" />
-              继续录音
+              继续
             </button>
             <button
               type="button"
               onClick={() => void stopRecording()}
-              title="结束本轮录音并进入完整回放模式"
-              className="px-3 py-2 rounded-full bg-rose-500/90 hover:bg-rose-600 text-white text-xs font-medium flex items-center gap-1.5 transition"
+              title="结束本轮录音并生成完整回放音频"
+              className="px-3.5 py-2 rounded-full bg-rose-500/90 hover:bg-rose-600 text-white text-xs font-semibold flex items-center gap-1.5 transition"
             >
-              <Square className="w-3 h-3 fill-current" />
+              <Square className="w-3.5 h-3.5 fill-current" />
               结束
             </button>
-            {playback.hasAudio && (
-              <button
-                type="button"
-                onClick={() => void togglePlayback()}
-                title="试听目前已录片段"
-                className="w-9 h-9 rounded-full bg-surface-800 border border-white/15 hover:bg-surface-700 text-amber-300 flex items-center justify-center"
-              >
-                {playback.isPlaying ? (
-                  <Pause className="w-3.5 h-3.5" />
-                ) : (
-                  <Play className="w-3.5 h-3.5 ml-0.5" />
-                )}
-              </button>
-            )}
           </>
         ) : playback.hasAudio ? (
           <>
@@ -312,7 +302,7 @@ export function WaveformPlayer() {
             <button
               type="button"
               onClick={() => void startRecording(true)}
-              title="清空当前回放并开启新一轮实时录音"
+              title="开启新一轮实时录音"
               className="ml-1 px-3 py-1.5 rounded-full bg-surface-800 border border-white/15 hover:bg-brand-500 hover:border-brand-400 text-xs text-slate-200 hover:text-white flex items-center gap-1.5 transition"
             >
               <Mic className="w-3.5 h-3.5 text-rose-400" />
@@ -345,8 +335,7 @@ export function WaveformPlayer() {
             </span>
           ) : mode === "paused" ? (
             <span className="text-amber-300 font-semibold">
-              已暂停 · {formatTimestamp(playback.positionMs)} /{" "}
-              {formatTimestamp(playback.durationMs)}
+              已暂停 · {formatTimestamp(playback.durationMs)}
             </span>
           ) : (
             <span>{formatTimestamp(playback.positionMs)}</span>
@@ -356,10 +345,10 @@ export function WaveformPlayer() {
             {mode === "recording"
               ? "正在实时采集并识别翻译… 可随时点击左侧「暂停」或「结束」"
               : mode === "paused"
-              ? "录音已暂停：点击波形或字幕可试听已录片段，点击「继续录音」无缝接着录"
+              ? "录音已暂停：点击左侧「继续」无缝接着录制，或点击「结束」进入回放与总结"
               : playback.hasAudio
-              ? "录音已结束：点击波形或任意字幕卡片即可精准跳转回听"
-              : "点击左侧「开始录音」启动实时翻译，或点击顶部「导入音视频」生成字幕"}
+              ? "点击波形或任意字幕卡片即可精准跳转录音位置"
+              : "点击左侧「开始录音」启动实时翻译"}
           </span>
 
           <span>{formatTimestamp(playback.durationMs)}</span>
@@ -372,26 +361,61 @@ export function WaveformPlayer() {
               ? "cursor-pointer"
               : mode === "recording"
               ? "ring-1 ring-rose-500/30"
+              : mode === "paused"
+              ? "ring-1 ring-amber-500/30"
               : "opacity-50"
           }`}
         />
       </div>
 
-      {/* 右侧：倍速 & 音量控制 */}
-      <div className="flex items-center gap-3 shrink-0">
-        <button
-          disabled={!canSeek}
-          onClick={nextSpeed}
-          title="回放倍速"
-          className="px-2.5 py-1 rounded-md bg-surface-800 border border-white/10 text-xs font-mono text-slate-200 hover:bg-surface-700 disabled:opacity-35"
-        >
-          {playback.speed.toFixed(2).replace(/\.00$/, ".0")}x
-        </button>
+      {/* 右侧：仅在录音已结束且可回放时显示倍速与音量控制；录制/暂停期间不显示播放控件 */}
+      {canSeek && (
+        <div className="flex items-center gap-3 shrink-0">
+          <button
+            onClick={nextSpeed}
+            title="回放倍速"
+            className="px-2.5 py-1 rounded-md bg-surface-800 border border-white/10 text-xs font-mono text-slate-200 hover:bg-surface-700"
+          >
+            {playback.speed.toFixed(2).replace(/\.00$/, ".0")}x
+          </button>
 
-        {captureMode === "dual_mix" ? (
-          <div className="flex items-center gap-2 text-xs text-slate-400">
-            <label className="flex items-center gap-1" title="回放音量">
-              <span>对方</span>
+          {captureMode === "dual_mix" ? (
+            <div className="flex items-center gap-2 text-xs text-slate-400">
+              <label className="flex items-center gap-1" title="回放音量">
+                <span>对方</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={playback.systemVolume}
+                  onChange={(e) =>
+                    setTrackVolumes(Number(e.target.value), playback.micVolume)
+                  }
+                  className="w-16 accent-brand-500"
+                />
+              </label>
+              <label className="flex items-center gap-1" title="麦克风音轨音量">
+                <span>我</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={playback.micVolume}
+                  onChange={(e) =>
+                    setTrackVolumes(
+                      playback.systemVolume,
+                      Number(e.target.value)
+                    )
+                  }
+                  className="w-16 accent-emerald-400"
+                />
+              </label>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 text-slate-400">
+              <Volume2 className="w-4 h-4" />
               <input
                 type="range"
                 min={0}
@@ -401,41 +425,12 @@ export function WaveformPlayer() {
                 onChange={(e) =>
                   setTrackVolumes(Number(e.target.value), playback.micVolume)
                 }
-                className="w-16 accent-brand-500"
+                className="w-20 accent-brand-500"
               />
-            </label>
-            <label className="flex items-center gap-1" title="麦克风音轨音量">
-              <span>我</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={playback.micVolume}
-                onChange={(e) =>
-                  setTrackVolumes(playback.systemVolume, Number(e.target.value))
-                }
-                className="w-16 accent-emerald-400"
-              />
-            </label>
-          </div>
-        ) : (
-          <div className="flex items-center gap-1.5 text-slate-400">
-            <Volume2 className="w-4 h-4" />
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={playback.systemVolume}
-              onChange={(e) =>
-                setTrackVolumes(Number(e.target.value), playback.micVolume)
-              }
-              className="w-20 accent-brand-500"
-            />
-          </div>
-        )}
-      </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

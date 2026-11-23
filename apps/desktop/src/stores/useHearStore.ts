@@ -3,10 +3,12 @@ import type {
   AppSnapshot,
   AudioCaptureMode,
   AudioSourceOption,
+  ConversationMeta,
   EngineSource,
   LocalServerInstallStatus,
   LocalServerProgress,
   RecordingPlaybackState,
+  SavedConversation,
   ServiceConfig,
   ServiceProbeResult,
   SessionMode,
@@ -17,6 +19,24 @@ import type {
   UpdateCheckResult,
   UpdateConfig,
 } from "../types/hear";
+
+let activeCloneAudio: HTMLAudioElement | null = null;
+let activeCloneUrl: string | null = null;
+function stopActiveCloneAudio() {
+  if (activeCloneAudio) {
+    try {
+      activeCloneAudio.pause();
+      activeCloneAudio.src = "";
+    } catch {
+      // ignore
+    }
+    activeCloneAudio = null;
+  }
+  if (activeCloneUrl) {
+    URL.revokeObjectURL(activeCloneUrl);
+    activeCloneUrl = null;
+  }
+}
 
 const isTauriRuntime = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -133,6 +153,8 @@ interface HearStoreState extends AppSnapshot {
   summaryTemplateId: string;
   summaryMarkdown: string;
   summaryGenerating: boolean;
+  viewMode: "home" | "workspace";
+  historyOpen: boolean;
   settingsOpen: boolean;
   activeSettingsTab: "server" | "subtitle" | "audio" | "general" | "system";
   testingLocal: boolean;
@@ -152,7 +174,13 @@ interface HearStoreState extends AppSnapshot {
   setSearchQuery: (q: string) => void;
   setSummaryOpen: (open: boolean) => void;
   setSummaryTemplateId: (id: string) => void;
+  setViewMode: (view: "home" | "workspace") => void;
+  backToHome: () => Promise<void>;
+  setHistoryOpen: (open: boolean) => void;
   setSettingsOpen: (open: boolean, tab?: HearStoreState["activeSettingsTab"]) => void;
+  loadConversation: (id: string) => Promise<void>;
+  renameConversation: (id: string, title: string) => Promise<void>;
+  deleteConversation: (id: string) => Promise<void>;
 
   setLanguagePair: (src: string, dst: string, lockSrc: boolean) => Promise<void>;
   setCaptureMode: (mode: AudioCaptureMode, appPid?: number) => Promise<void>;
@@ -206,7 +234,9 @@ interface HearStoreState extends AppSnapshot {
 }
 
 export const useHearStore = create<HearStoreState>((set, get) => ({
-  appVersion: "0.1.9",
+  appVersion: "0.1.10",
+  activeConversationId: "",
+  conversations: [],
   mode: "idle" as SessionMode,
   sourceLang: "en",
   targetLang: "zh",
@@ -242,6 +272,8 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   summaryTemplateId: "meeting",
   summaryMarkdown: "",
   summaryGenerating: false,
+  viewMode: "home",
+  historyOpen: false,
   settingsOpen: false,
   activeSettingsTab: "server",
   testingLocal: false,
@@ -321,7 +353,15 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         set({ audioLevel: ev.payload });
       });
       await listen<SessionMode>("session:mode", (ev) => {
-        set({ mode: ev.payload });
+        set((s) => ({
+          mode: ev.payload,
+          viewMode:
+            ev.payload === "recording" ||
+            ev.payload === "paused" ||
+            ev.payload === "batch_processing"
+              ? "workspace"
+              : s.viewMode,
+        }));
       });
       await listen<string>("session:error", (ev) => {
         set({ sessionError: ev.payload });
@@ -344,6 +384,9 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       await listen<string>("summary:delta", (ev) => {
         set({ summaryMarkdown: ev.payload, summaryOpen: true });
       });
+      await listen<ConversationMeta[]>("history:updated", (ev) => {
+        set({ conversations: ev.payload });
+      });
       await listen("shortcut:copy_latest", () => {
         const segs = get().segments;
         const last = segs[segs.length - 1];
@@ -361,8 +404,90 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setSummaryOpen: (summaryOpen) => set({ summaryOpen }),
   setSummaryTemplateId: (summaryTemplateId) => set({ summaryTemplateId }),
+  setViewMode: (viewMode) => set({ viewMode }),
+  backToHome: async () => {
+    stopActiveCloneAudio();
+    if (get().playback.isPlaying) {
+      await get().setPlaybackPlaying(false);
+    }
+    if (get().mode === "recording" || get().mode === "paused") {
+      await get().stopRecording();
+    }
+    set({ viewMode: "home", historyOpen: false });
+  },
+  setHistoryOpen: (historyOpen) => set({ historyOpen }),
   setSettingsOpen: (settingsOpen, tab) =>
     set((s) => ({ settingsOpen, activeSettingsTab: tab ?? s.activeSettingsTab })),
+
+  loadConversation: async (id) => {
+    set({ sessionError: null, sessionNotice: null });
+    try {
+      const conv = await tauriInvoke<SavedConversation>("load_conversation", { id });
+      if (conv) {
+        set({
+          viewMode: "workspace",
+          activeConversationId: conv.meta.id,
+          mode: "idle",
+          segments: conv.segments,
+          summaryMarkdown: conv.summaryMarkdown || "",
+          summaryOpen: true,
+          playback: {
+            ...conv.playback,
+            isPlaying: false,
+            positionMs: 0,
+          },
+          livePartialSource: "",
+          livePartialTranslation: "",
+          historyOpen: false,
+        });
+      }
+    } catch (err) {
+      set({
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  renameConversation: async (id, title) => {
+    try {
+      const metas = await tauriInvoke<ConversationMeta[]>("rename_conversation", {
+        id,
+        title,
+      });
+      if (metas) {
+        set({ conversations: metas });
+      }
+    } catch (err) {
+      set({
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  deleteConversation: async (id) => {
+    try {
+      const wasActive = get().activeConversationId === id;
+      const metas = await tauriInvoke<ConversationMeta[]>("delete_conversation", { id });
+      if (metas) {
+        set({
+          conversations: metas,
+          ...(wasActive
+            ? {
+                segments: [],
+                summaryMarkdown: "",
+                playback: DEFAULT_PLAYBACK,
+                livePartialSource: "",
+                livePartialTranslation: "",
+              }
+            : {}),
+        });
+      }
+    } catch (err) {
+      set({
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
 
   setLanguagePair: async (sourceLang, targetLang, lockSourceLang) => {
     set({ sourceLang, targetLang, lockSourceLang });
@@ -375,17 +500,22 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   },
 
   startRecording: async (fresh = false) => {
-    set({ sessionError: null, sessionNotice: null });
+    set({
+      sessionError: null,
+      sessionNotice: null,
+      viewMode: "workspace",
+      summaryOpen: true,
+    });
     if (fresh) {
       await get().clearRecording();
     }
     if (!isTauriRuntime()) {
-      set({ mode: "recording" });
+      set({ mode: "recording", viewMode: "workspace" });
       return;
     }
     try {
       const mode = await tauriInvoke<SessionMode>("start_recording");
-      if (mode) set({ mode });
+      if (mode) set({ mode, viewMode: "workspace" });
     } catch (err) {
       set({
         mode: "idle",
@@ -826,10 +956,47 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       get().stopSpeakingSegment();
       return;
     }
+    stopActiveCloneAudio();
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
     set({ speakingSegmentId: id });
+
+    // 若用户开启了 Qwen3-TTS 原声克隆且在桌面端，优先使用该句原音切片进行原声复刻朗读
+    if (isTauriRuntime() && get().ttsSettings.useVoiceClone && get().playback.hasAudio) {
+      try {
+        const raw = await tauriInvoke<ArrayBuffer | Uint8Array>("clone_segment_speech", {
+          id,
+          text: trimmed,
+          lang,
+        });
+        if (raw && get().speakingSegmentId === id) {
+          const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+          if (bytes.byteLength > 44) {
+            const copy = new Uint8Array(bytes.byteLength);
+            copy.set(bytes);
+            const blob = new Blob([copy.buffer], { type: "audio/wav" });
+            const url = URL.createObjectURL(blob);
+            activeCloneUrl = url;
+            const audio = new Audio(url);
+            activeCloneAudio = audio;
+            audio.onended = () => {
+              stopActiveCloneAudio();
+              if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
+            };
+            audio.onerror = () => {
+              stopActiveCloneAudio();
+              if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
+            };
+            await audio.play();
+            return;
+          }
+        }
+      } catch {
+        // 原声克隆不可用或参考音频过短时，平滑回退到系统语音合成
+      }
+    }
+
     const bcp47Map: Record<string, string> = {
       zh: "zh-CN",
       en: "en-US",
@@ -869,6 +1036,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   },
 
   stopSpeakingSegment: () => {
+    stopActiveCloneAudio();
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
@@ -926,7 +1094,12 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         ],
       });
       if (!selected || Array.isArray(selected)) return;
-      set({ segments: [], summaryMarkdown: "" });
+      set({
+        viewMode: "workspace",
+        summaryOpen: true,
+        segments: [],
+        summaryMarkdown: "",
+      });
       await tauriInvoke("import_media_file", { filePath: selected });
     } catch (err) {
       set({

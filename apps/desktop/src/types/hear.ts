@@ -145,8 +145,30 @@ export interface LocalServerProgress {
   message: string;
 }
 
+export interface ConversationMeta {
+  id: string;
+  title: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  durationMs?: number;
+  segmentCount: number;
+  preview: string;
+  langPair: string;
+  hasAudio: boolean;
+  hasSummary: boolean;
+}
+
+export interface SavedConversation {
+  meta: ConversationMeta;
+  segments: SubtitleSegment[];
+  summaryMarkdown: string;
+  playback: RecordingPlaybackState;
+}
+
 export interface AppSnapshot {
   appVersion: string;
+  activeConversationId?: string;
+  conversations?: ConversationMeta[];
   mode: SessionMode;
   sourceLang: string;
   targetLang: string;

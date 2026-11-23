@@ -439,6 +439,103 @@ enum LLMClient {
         return t
     }
 
+    /// 流式发送一次对话（SSE），边生成边回调增量正文；若服务端不支持流式则自动回退到普通请求
+    static func completeStream(_ p: LLMProvider, key: String, model: String,
+                               system: String, user: String,
+                               onPartial: @Sendable @MainActor (String) -> Void) async throws -> String {
+        let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        try checkCredentials(p, key: cleanKey)
+        var req: URLRequest
+        let body: [String: Any]
+        switch p.kind {
+        case .openai:
+            req = URLRequest(url: try url(p.baseURL, "/chat/completions"))
+            if !cleanKey.isEmpty { req.setValue("Bearer \(cleanKey)", forHTTPHeaderField: "Authorization") }
+            var payload: [String: Any] = [
+                "model": model,
+                "stream": true,
+                "messages": [["role": "system", "content": system],
+                             ["role": "user", "content": user]]
+            ]
+            if !isReasoningModel(model) {
+                payload["temperature"] = 0.3
+            }
+            body = payload
+        case .anthropic:
+            req = URLRequest(url: try url(p.baseURL, "/v1/messages"))
+            if !cleanKey.isEmpty { req.setValue(cleanKey, forHTTPHeaderField: "x-api-key") }
+            req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            let lowerModel = model.lowercased()
+            let maxTokens = (lowerModel.contains("claude-3-opus")
+                || lowerModel.contains("claude-3-sonnet")
+                || lowerModel.contains("claude-3-haiku")) ? 4096 : 8192
+            body = ["model": model,
+                    "max_tokens": maxTokens,
+                    "stream": true,
+                    "system": system,
+                    "messages": [["role": "user", "content": user]]]
+        }
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.timeoutInterval = 300
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (bytes, resp) = try await session.bytes(for: req)
+        let httpResp = resp as? HTTPURLResponse
+        let code = httpResp?.statusCode ?? 0
+        guard (200..<300).contains(code) else {
+            var errBytes = Data()
+            for try await b in bytes {
+                errBytes.append(b)
+                if errBytes.count >= 1024 { break }
+            }
+            throw LLMError.http(code, String(decoding: errBytes, as: UTF8.self))
+        }
+
+        var accumulated = ""
+        var lastEmit = Date.distantPast
+        for try await line in bytes.lines {
+            try Task.checkCancellation()
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("data:") else { continue }
+            let payloadStr = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            if payloadStr == "[DONE]" || payloadStr.isEmpty { continue }
+            guard let data = payloadStr.data(using: .utf8),
+                  let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                continue
+            }
+            var deltaText: String?
+            switch p.kind {
+            case .openai:
+                let choice = (json["choices"] as? [[String: Any]])?.first
+                let delta = choice?["delta"] as? [String: Any]
+                deltaText = delta?["content"] as? String
+            case .anthropic:
+                if (json["type"] as? String) == "content_block_delta",
+                   let delta = json["delta"] as? [String: Any] {
+                    deltaText = delta["text"] as? String
+                }
+            }
+            if let d = deltaText, !d.isEmpty {
+                accumulated += d
+                if Date().timeIntervalSince(lastEmit) >= 0.16 {
+                    let cleaned = stripThinking(accumulated).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !cleaned.isEmpty {
+                        lastEmit = Date()
+                        await onPartial(cleaned)
+                    }
+                }
+            }
+        }
+
+        let finalCleaned = stripThinking(accumulated).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !finalCleaned.isEmpty {
+            return finalCleaned
+        }
+        // 若网关未按 SSE 返回（例如把 stream:true 当普通 JSON 返回），回退调用非流式接口
+        return try await complete(p, key: key, model: model, system: system, user: user)
+    }
+
     /// 推理模型可能把思考过程放在 <think>…</think> 里，总结里不需要
     static func stripThinking(_ s: String) -> String {
         var out = s

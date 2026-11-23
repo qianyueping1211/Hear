@@ -1781,7 +1781,7 @@ def main():
     else:
         AUTH_MODE = "off"
     srv = MixedServer((HOST, PORT), Handler, ctx)
-    srv.request_policy = RequestPolicy(MAX_BODY, int(os.environ.get("HEAR_MAX_INFLIGHT", "3")), token,
+    srv.request_policy = RequestPolicy(MAX_BODY, int(os.environ.get("HEAR_MAX_INFLIGHT", "4")), token,
                                        allow_loopback_http=ALLOW_LOOPBACK_HTTP, authenticator=AUTH,
                                        local_secret=LOCAL_SECRET or None)
     log("服务起来了，监听 %s:%d（%s）" % (HOST, PORT, "仅本机" if HOST in ("127.0.0.1", "::1", "localhost") else "局域网共享"))
