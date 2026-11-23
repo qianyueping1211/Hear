@@ -365,16 +365,16 @@ export function MainApp() {
 
   return (
     <div className="h-screen w-screen flex flex-col bg-surface-950 text-slate-100">
-      {/* 顶部控制栏：加高留白、不重复写产品名称、不放双路混合与导入按钮；语种切换移至右侧云端服务之前 */}
-      <header className="h-16 border-b border-white/10 bg-surface-900/90 px-6 flex items-center justify-between gap-4 shrink-0">
+      {/* 顶部控制栏：加高留白、不重复写产品名称、不放双路混合与导入按钮；语种切换移至右侧云端服务之前，右侧按钮统一高度 */}
+      <header className="h-[72px] border-b border-white/10 bg-surface-900/90 px-6 flex items-center justify-between gap-4 shrink-0">
         <div className="flex items-center gap-3 min-w-0">
-          {viewMode === "workspace" ? (
+          {viewMode === "workspace" && (
             <>
               <button
                 type="button"
                 onClick={() => void backToHome()}
                 title="返回历史记录主页"
-                className="px-3 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs text-slate-200 flex items-center gap-1.5 shrink-0"
+                className="h-9 px-3 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs text-slate-200 inline-flex items-center gap-1.5 shrink-0"
               >
                 <ArrowLeft className="w-3.5 h-3.5 text-brand-400" />
                 <span>返回列表</span>
@@ -383,27 +383,23 @@ export function MainApp() {
                 {currentConvTitle}
               </span>
             </>
-          ) : (
-            <span className="text-xs text-slate-400">
-              选择上方功能卡片开启实时翻译或导入转写，点击下方历史记录可回放原音与查看总结
-            </span>
           )}
         </div>
 
-        {/* 右侧：新版本提醒 + 语种切换（位于服务状态之前）+ 服务状态胶囊 + 悬浮字幕 + 总结 + 设置 */}
+        {/* 右侧：新版本提醒 + 语种切换（位于服务状态之前）+ 服务状态胶囊 + 悬浮字幕 + 总结 + 设置（全部统一 h-9 高度） */}
         <div className="flex items-center gap-2 shrink-0">
           {updateInfo?.hasUpdate && (
             <button
               onClick={() => setSettingsOpen(true, "system")}
               title={`发现新版本 v${updateInfo.latestVersion}，点击查看更新说明并一键更新`}
-              className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30 text-xs flex items-center gap-1.5"
+              className="h-9 px-3 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30 text-xs inline-flex items-center gap-1.5"
             >
               <ArrowUpCircle className="w-3.5 h-3.5" />
               <span>新版本 v{updateInfo.latestVersion}</span>
             </button>
           )}
 
-          <div className="flex items-center gap-1 rounded-lg bg-surface-800 border border-white/10 px-2.5 py-1.5 text-xs">
+          <div className="h-9 flex items-center gap-1 rounded-lg bg-surface-800 border border-white/10 px-2.5 text-xs">
             <select
               value={sourceLang}
               onChange={(e) => void setLanguagePair(e.target.value, targetLang, lockSourceLang)}
@@ -441,7 +437,7 @@ export function MainApp() {
           <div
             onClick={() => setSettingsOpen(true, "server")}
             title={serviceBadge.tooltip}
-            className="px-2.5 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs flex items-center gap-1.5 cursor-pointer"
+            className="h-9 px-3 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs inline-flex items-center gap-1.5 cursor-pointer"
           >
             <span className={`w-2 h-2 rounded-full ${serviceBadge.dotClass}`} />
             <span>{serviceBadge.statusText}</span>
@@ -460,7 +456,7 @@ export function MainApp() {
           <button
             onClick={() => void toggleSubtitleVisible()}
             title="显示 / 隐藏悬浮字幕窗 (Ctrl+Shift+S)"
-            className={`p-2 rounded-lg border ${
+            className={`h-9 w-9 rounded-lg border inline-flex items-center justify-center ${
               subtitleStyle.visible
                 ? "bg-brand-500/20 border-brand-500/40 text-brand-400"
                 : "bg-surface-800 border-white/10 text-slate-400 hover:text-white"
@@ -473,7 +469,7 @@ export function MainApp() {
             <button
               onClick={() => setSummaryOpen(!summaryOpen)}
               title="展开 / 收起一键总结面板"
-              className={`p-2 rounded-lg border ${
+              className={`h-9 w-9 rounded-lg border inline-flex items-center justify-center ${
                 summaryOpen
                   ? "bg-purple-500/20 border-purple-500/40 text-purple-300"
                   : "bg-surface-800 border-white/10 text-slate-400 hover:text-white"
@@ -486,7 +482,7 @@ export function MainApp() {
           <button
             onClick={() => setSettingsOpen(true)}
             title="模型服务、悬浮字幕样式与音频设置"
-            className="p-2 rounded-lg bg-surface-800 border border-white/10 text-slate-300 hover:text-white"
+            className="h-9 w-9 rounded-lg bg-surface-800 border border-white/10 text-slate-300 hover:text-white inline-flex items-center justify-center"
           >
             <Settings className="w-4 h-4" />
           </button>
