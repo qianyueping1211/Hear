@@ -142,6 +142,7 @@ export function MainApp() {
     sessionNotice,
     speakingSegmentId,
     preparingCloneSegmentId,
+    cloneStates,
     segments,
     livePartialSource,
     livePartialTranslation,
@@ -183,6 +184,7 @@ export function MainApp() {
     testServiceConnection,
     editSegmentSource,
     editSegmentSpeaker,
+    playSegmentOriginal,
     speakSegment,
     generateSummary,
     importMediaFile,
@@ -201,6 +203,7 @@ export function MainApp() {
   const [renameDraft, setRenameDraft] = useState("");
   const listRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const clickTimerRef = useRef<number | null>(null);
 
   const knownSpeakers = useMemo(() => {
     const set = new Set<string>(["我", "对方"]);
@@ -969,8 +972,14 @@ export function MainApp() {
                   const isEditing = editingId === seg.id;
                   const isEditingSpeaker = editingSpeakerId === seg.id;
                   const isSpeaking = speakingSegmentId === seg.id;
-                  const isPreparingClone = preparingCloneSegmentId === seg.id;
+                  const cloneState = cloneStates[seg.id];
+                  const isPreparingClone =
+                    !isSpeaking &&
+                    (preparingCloneSegmentId === seg.id || cloneState === "cloning");
                   const isRecordingMode = mode === "recording" || mode === "paused";
+                  const canSpeakTranslation =
+                    Boolean(seg.translatedText?.trim()) &&
+                    seg.translatedText !== "翻译中…";
                   const speakerText =
                     seg.speakerLabel ?? (seg.channel === "mic" ? "我" : "对方");
                   const diffParts =
@@ -980,6 +989,14 @@ export function MainApp() {
                       ? computeTranslationDiff(seg.baselineTranslated, seg.translatedText)
                       : null;
 
+                  const commitSourceEdit = () => {
+                    const trimmed = editSourceDraft.trim();
+                    if (trimmed && trimmed !== seg.sourceText) {
+                      void editSegmentSource(seg.id, trimmed);
+                    }
+                    setEditingId(null);
+                  };
+
                   return (
                     <div
                       key={seg.id}
@@ -988,17 +1005,24 @@ export function MainApp() {
                       }}
                       onClick={() => {
                         if (isEditing || isEditingSpeaker) return;
-                        if (isRecordingMode) {
-                          // 录制过程中：点击卡片播放译文（Qwen3-TTS 原声克隆）
-                          void speakSegment(
-                            seg.id,
-                            seg.translatedText || seg.sourceText,
-                            seg.targetLang
-                          );
-                        } else if (playback.hasAudio) {
-                          // 结束录制或查看历史记录时：点击卡片播放该句原始录音（原文原音）
-                          void seekPlayback(seg.startMs, true);
+                        if (clickTimerRef.current !== null) {
+                          window.clearTimeout(clickTimerRef.current);
                         }
+                        // 稍微延迟区分单击（播放原文）与双击（修改原文）
+                        clickTimerRef.current = window.setTimeout(() => {
+                          clickTimerRef.current = null;
+                          void playSegmentOriginal(seg.id);
+                        }, 210);
+                      }}
+                      onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        if (clickTimerRef.current !== null) {
+                          window.clearTimeout(clickTimerRef.current);
+                          clickTimerRef.current = null;
+                        }
+                        setEditingSpeakerId(null);
+                        setEditingId(seg.id);
+                        setEditSourceDraft(seg.sourceText);
                       }}
                       className={`group rounded-xl border p-3.5 transition cursor-pointer ${
                         isActive
@@ -1206,19 +1230,31 @@ export function MainApp() {
                         </div>
                       )}
 
-                      {/* 修改原文面板（对标 iOS SourceEditor：只校对原文，下方只读展示最新译文对照，点保存并重译） */}
+                      {/* 修改原文面板（双击对话进入，离开输入框自动保存并重译，按 Esc 取消） */}
                       {isEditing ? (
                         <div
                           className="mt-2 rounded-lg bg-surface-950/90 border border-brand-500/50 p-3 space-y-2.5"
                           onClick={(e) => e.stopPropagation()}
+                          onDoubleClick={(e) => e.stopPropagation()}
                         >
                           <div className="space-y-1">
                             <label className="text-[11px] text-slate-300 font-medium">
-                              修改原文
+                              修改原文（离开输入框自动保存并重译，Esc 取消）
                             </label>
                             <input
+                              autoFocus
                               value={editSourceDraft}
                               onChange={(e) => setEditSourceDraft(e.target.value)}
+                              onBlur={commitSourceEdit}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  commitSourceEdit();
+                                } else if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  setEditingId(null);
+                                }
+                              }}
                               className="w-full rounded bg-surface-900 border border-white/15 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-brand-500"
                             />
                           </div>
@@ -1235,21 +1271,19 @@ export function MainApp() {
                           <div className="flex items-center justify-end gap-2 pt-0.5">
                             <button
                               type="button"
-                              onClick={() => setEditingId(null)}
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                setEditingId(null);
+                              }}
                               className="px-3 py-1.5 rounded bg-surface-800 text-slate-300 text-xs"
                             >
                               取消
                             </button>
                             <button
                               type="button"
-                              onClick={() => {
-                                if (
-                                  editSourceDraft.trim() &&
-                                  editSourceDraft.trim() !== seg.sourceText
-                                ) {
-                                  void editSegmentSource(seg.id, editSourceDraft.trim());
-                                }
-                                setEditingId(null);
+                              onMouseDown={(e) => {
+                                e.preventDefault();
+                                commitSourceEdit();
                               }}
                               className="px-3 py-1.5 rounded bg-brand-500 hover:bg-brand-600 text-white text-xs font-medium flex items-center gap-1"
                             >
@@ -1272,23 +1306,65 @@ export function MainApp() {
                             )}
                           </div>
 
-                          {/* 译文：若存在边说边译初稿或校对前基线译文，对修正后的词句使用高亮色区分（对标 iOS TranslationRevision） */}
-                          <div className="text-sm font-medium text-white mt-1 leading-relaxed">
-                            {diffParts
-                              ? diffParts.map((part, pIdx) =>
-                                  part.changed ? (
-                                    <span
-                                      key={pIdx}
-                                      className="text-amber-300 font-semibold"
-                                      title={`修正前：${seg.baselineTranslated}`}
-                                    >
-                                      {part.text}
-                                    </span>
-                                  ) : (
-                                    <span key={pIdx}>{part.text}</span>
+                          {/* 译文 + 末尾三态小喇叭（克隆中转圈 / 声音准备好了灰色喇叭 / 播放中绿色喇叭，对标 iOS） */}
+                          <div className="text-sm font-medium text-white mt-1 leading-relaxed flex items-baseline gap-1.5 flex-wrap">
+                            <span>
+                              {diffParts
+                                ? diffParts.map((part, pIdx) =>
+                                    part.changed ? (
+                                      <span
+                                        key={pIdx}
+                                        className="text-amber-300 font-semibold"
+                                        title={`修正前：${seg.baselineTranslated}`}
+                                      >
+                                        {part.text}
+                                      </span>
+                                    ) : (
+                                      <span key={pIdx}>{part.text}</span>
+                                    )
                                   )
-                                )
-                              : seg.translatedText}
+                                : seg.translatedText}
+                            </span>
+                            {canSpeakTranslation && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void speakSegment(
+                                    seg.id,
+                                    seg.translatedText || seg.sourceText,
+                                    seg.targetLang
+                                  );
+                                }}
+                                onDoubleClick={(e) => e.stopPropagation()}
+                                title={
+                                  isPreparingClone
+                                    ? "正在克隆原声…"
+                                    : isSpeaking
+                                    ? "正在播放译文（点击停止）"
+                                    : cloneState === "ready"
+                                    ? "原声已就绪，点击播放译文"
+                                    : "点击播放译文"
+                                }
+                                className={`inline-flex items-center justify-center p-1 rounded-full align-middle transition ${
+                                  isSpeaking
+                                    ? "text-emerald-400 bg-emerald-500/15"
+                                    : isPreparingClone
+                                    ? "text-slate-400"
+                                    : "text-slate-400 hover:text-white hover:bg-white/10"
+                                }`}
+                              >
+                                {isPreparingClone ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <Volume2
+                                    className={`w-4 h-4 ${
+                                      isSpeaking ? "animate-pulse" : ""
+                                    }`}
+                                  />
+                                )}
+                              </button>
+                            )}
                           </div>
                         </>
                       )}

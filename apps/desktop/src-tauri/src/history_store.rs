@@ -215,17 +215,75 @@ pub fn save_current_conversation(
     metas
 }
 
+pub fn synthesize_peaks_from_segments(segments: &[SubtitleSegment], duration_ms: u64) -> Vec<f32> {
+    let total_ms = duration_ms
+        .max(segments.last().map(|s| s.end_ms).unwrap_or(0))
+        .max(1000);
+    let bar_count = 120usize;
+    let mut peaks = vec![0.08f32; bar_count];
+    for (idx, p) in peaks.iter_mut().enumerate() {
+        let t_ms = ((idx as u64) * total_ms) / (bar_count as u64);
+        if let Some(seg) = segments
+            .iter()
+            .find(|s| t_ms >= s.start_ms && t_ms <= s.end_ms.max(s.start_ms + 300))
+        {
+            let span = (seg.end_ms.saturating_sub(seg.start_ms)).max(300) as f32;
+            let rel = (t_ms.saturating_sub(seg.start_ms) as f32) / span;
+            let env = (rel * std::f32::consts::PI).sin().max(0.25);
+            let jitter = (((idx * 37 + seg.seq as usize * 13) % 19) as f32) / 19.0;
+            *p = (0.28 + env * 0.45 + jitter * 0.22).clamp(0.18, 0.95);
+        }
+    }
+    peaks
+}
+
 pub fn load_conversation(app: &AppHandle, id: &str) -> Result<SavedConversation, String> {
     let dir = conversations_dir(app);
     let path = conv_json_path(&dir, id);
     let raw = fs::read_to_string(&path).map_err(|e| format!("读取历史会话失败：{}", e))?;
     let mut conv: SavedConversation =
         serde_json::from_str(&raw).map_err(|e| format!("解析历史会话失败：{}", e))?;
-    if let Some(ref audio_p) = conv.playback.audio_path {
-        if !Path::new(audio_p).is_file() {
-            conv.playback.has_audio = false;
-            conv.playback.audio_path = None;
+    let fallback_wav = conv_wav_path(&dir, id);
+    let valid_path = conv
+        .playback
+        .audio_path
+        .as_ref()
+        .filter(|p| Path::new(p).is_file())
+        .cloned()
+        .or_else(|| {
+            if fallback_wav.is_file() {
+                Some(fallback_wav.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        });
+
+    if let Some(audio_p) = valid_path {
+        conv.playback.has_audio = true;
+        conv.playback.audio_path = Some(audio_p.clone());
+        if conv.playback.peaks.is_empty() || conv.playback.duration_ms == 0 {
+            if let Ok(bytes) = fs::read(&audio_p) {
+                if let Ok((_, dur, peaks)) = crate::recorder::decode_wav_to_16k_mono(&bytes) {
+                    if dur > 0 {
+                        conv.playback.duration_ms = dur;
+                    }
+                    if !peaks.is_empty() {
+                        conv.playback.peaks = peaks;
+                    }
+                }
+            }
         }
+    } else {
+        conv.playback.has_audio = false;
+        conv.playback.audio_path = None;
+    }
+
+    if conv.playback.duration_ms == 0 {
+        conv.playback.duration_ms = conv.segments.last().map(|s| s.end_ms).unwrap_or(0);
+    }
+    if conv.playback.peaks.is_empty() && !conv.segments.is_empty() {
+        conv.playback.peaks =
+            synthesize_peaks_from_segments(&conv.segments, conv.playback.duration_ms);
     }
     Ok(conv)
 }

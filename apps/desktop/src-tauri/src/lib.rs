@@ -313,11 +313,22 @@ async fn stop_recording_impl(
     if let Some(handle) = cap_guard.take() {
         let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
     }
-    {
+    let pb = {
         let mut snap = rt.snapshot.lock().await;
         snap.mode = SessionMode::Idle;
-    }
+        if snap.playback.duration_ms == 0 && !snap.segments.is_empty() {
+            snap.playback.duration_ms = snap.segments.last().map(|s| s.end_ms).unwrap_or(0);
+        }
+        if snap.playback.peaks.is_empty() && !snap.segments.is_empty() {
+            snap.playback.peaks = history_store::synthesize_peaks_from_segments(
+                &snap.segments,
+                snap.playback.duration_ms,
+            );
+        }
+        snap.playback.clone()
+    };
     let _ = app.emit("session:mode", SessionMode::Idle);
+    let _ = app.emit("recording:ready", &pb);
     rt.save_history(app).await;
     rt.spawn_auto_title(app.clone());
     Ok(SessionMode::Idle)
@@ -645,6 +656,47 @@ async fn clone_segment_speech(
             Err(first_err)
         }
     }
+}
+
+#[tauri::command]
+async fn read_segment_original_wav(
+    rt: State<'_, Arc<AppRuntime>>,
+    id: String,
+) -> Result<tauri::ipc::Response, String> {
+    if let Some(w) = rt.segment_wavs.lock().await.get(&id).cloned() {
+        if w.len() > 44 {
+            return Ok(tauri::ipc::Response::new(w));
+        }
+    }
+    let (audio_path, start_ms, end_ms, pref_ch) = {
+        let snap = rt.snapshot.lock().await;
+        let wav_path = snap
+            .playback
+            .audio_path
+            .clone()
+            .ok_or_else(|| "当前没有该句的原始录音文件".to_string())?;
+        let seg = snap
+            .segments
+            .iter()
+            .find(|s| s.id == id)
+            .ok_or_else(|| "未找到对应的字幕段落".to_string())?;
+        let ch = match seg.channel {
+            AudioChannel::System => Some(0usize),
+            AudioChannel::Mic => Some(1usize),
+            AudioChannel::File => None,
+        };
+        (wav_path, seg.start_ms, seg.end_ms, ch)
+    };
+    let sliced = tokio::task::spawn_blocking(move || {
+        recorder::slice_wav_range_16k_mono(Path::new(&audio_path), start_ms, end_ms, pref_ch)
+            .or_else(|| {
+                recorder::slice_wav_range_16k_mono(Path::new(&audio_path), start_ms, end_ms, None)
+            })
+    })
+    .await
+    .map_err(|e| format!("切片原音异常：{}", e))?
+    .ok_or_else(|| "未能截取该句原音".to_string())?;
+    Ok(tauri::ipc::Response::new(sliced))
 }
 
 #[tauri::command]
@@ -1889,6 +1941,7 @@ pub fn run() {
             rename_conversation,
             delete_conversation,
             clone_segment_speech,
+            read_segment_original_wav,
             seek_playback,
             set_playback_playing,
             set_playback_speed,

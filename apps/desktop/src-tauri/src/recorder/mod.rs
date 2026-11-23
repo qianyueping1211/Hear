@@ -121,9 +121,9 @@ pub fn slice_wav_range_16k_mono(
     if end_idx <= start_idx {
         return None;
     }
-    // 钳制在 0.8s ~ 8.0s 之间，确保 Qwen3-TTS 参考音频时长适中
-    let min_samples = 12_800; // 0.8s
-    let max_samples = 16_000 * 8; // 8.0s
+    // 钳制在 0.2s ~ 10.0s 之间，确保短句原音播放与参考音频切片均能正常截取
+    let min_samples = 3_200; // 0.2s
+    let max_samples = 16_000 * 10; // 10.0s
     let slice = &samples[start_idx..end_idx];
     if slice.len() < min_samples {
         return None;

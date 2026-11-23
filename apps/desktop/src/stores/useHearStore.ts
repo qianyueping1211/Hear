@@ -22,6 +22,12 @@ import type {
 
 let activeCloneAudio: HTMLAudioElement | null = null;
 let activeCloneUrl: string | null = null;
+const cloneWavCache = new Map<string, { text: string; wav: Uint8Array }>();
+const cloneInflight = new Map<
+  string,
+  { text: string; promise: Promise<Uint8Array | null> }
+>();
+
 function stopActiveCloneAudio() {
   if (activeCloneAudio) {
     try {
@@ -147,6 +153,7 @@ interface HearStoreState extends AppSnapshot {
   sessionNotice: string | null;
   speakingSegmentId: string | null;
   preparingCloneSegmentId: string | null;
+  cloneStates: Record<string, "cloning" | "ready">;
   seekNonce: number;
   seekTargetMs: number;
   searchQuery: string;
@@ -230,6 +237,12 @@ interface HearStoreState extends AppSnapshot {
     applyToSameSpeaker: boolean
   ) => Promise<void>;
   speakSegment: (id: string, text: string, lang: string) => Promise<void>;
+  prepareSegmentClone: (
+    id: string,
+    text: string,
+    lang: string
+  ) => Promise<Uint8Array | null>;
+  playSegmentOriginal: (id: string) => Promise<void>;
   stopSpeakingSegment: () => void;
   generateSummary: () => Promise<void>;
   importMediaFile: () => Promise<void>;
@@ -238,7 +251,7 @@ interface HearStoreState extends AppSnapshot {
 }
 
 export const useHearStore = create<HearStoreState>((set, get) => ({
-  appVersion: "0.1.11",
+  appVersion: "0.1.12",
   activeConversationId: "",
   conversations: [],
   mode: "idle" as SessionMode,
@@ -270,6 +283,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   sessionNotice: null,
   speakingSegmentId: null,
   preparingCloneSegmentId: null,
+  cloneStates: {},
   seekNonce: 0,
   seekTargetMs: 0,
   searchQuery: "",
@@ -323,6 +337,20 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
           }
           return { segments: [...state.segments, ev.payload] };
         });
+        // 对标 iOS：句子翻译完成时自动在后台发起 Qwen3-TTS 声音克隆预合成，驱动小喇叭从「克隆中」变为「声音准备好了」
+        const seg = ev.payload;
+        if (
+          seg.status === "final" &&
+          seg.translatedText.trim() &&
+          seg.translatedText !== "翻译中…" &&
+          get().ttsSettings.useVoiceClone
+        ) {
+          void get().prepareSegmentClone(
+            seg.id,
+            seg.translatedText.trim(),
+            seg.targetLang
+          );
+        }
       });
       await listen<{ source: string; translation: string }>("subtitle:partial", (ev) => {
         set({
@@ -972,6 +1000,95 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     });
   },
 
+  prepareSegmentClone: async (id, text, lang) => {
+    const trimmed = text.trim();
+    if (!trimmed || !isTauriRuntime()) return null;
+    const cached = cloneWavCache.get(id);
+    if (cached && cached.text === trimmed) {
+      if (get().cloneStates[id] !== "ready") {
+        set((s) => ({ cloneStates: { ...s.cloneStates, [id]: "ready" } }));
+      }
+      return cached.wav;
+    }
+    const existing = cloneInflight.get(id);
+    if (existing && existing.text === trimmed) {
+      return existing.promise;
+    }
+    set((s) => ({ cloneStates: { ...s.cloneStates, [id]: "cloning" } }));
+    const promise = (async (): Promise<Uint8Array | null> => {
+      try {
+        const raw = await tauriInvoke<ArrayBuffer | Uint8Array>(
+          "clone_segment_speech",
+          {
+            id,
+            text: trimmed,
+            lang,
+          }
+        );
+        if (raw) {
+          const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+          if (bytes.byteLength > 44) {
+            const copy = new Uint8Array(bytes.byteLength);
+            copy.set(bytes);
+            cloneWavCache.set(id, { text: trimmed, wav: copy });
+            set((s) => ({ cloneStates: { ...s.cloneStates, [id]: "ready" } }));
+            return copy;
+          }
+        }
+      } catch {
+        // 克隆不可用时标记为 ready，点击小喇叭会平滑使用系统语音播放
+      } finally {
+        cloneInflight.delete(id);
+      }
+      set((s) => ({ cloneStates: { ...s.cloneStates, [id]: "ready" } }));
+      return null;
+    })();
+    cloneInflight.set(id, { text: trimmed, promise });
+    return promise;
+  },
+
+  playSegmentOriginal: async (id) => {
+    const seg = get().segments.find((s) => s.id === id);
+    if (!seg) return;
+    get().stopSpeakingSegment();
+    // 若已结束录音或处于历史会话且整轨音频就绪，直接定位到底部播放器对应位置播放原文原音
+    if (get().mode === "idle" && get().playback.hasAudio) {
+      await get().seekPlayback(seg.startMs, true);
+      return;
+    }
+    // 录制过程中（或未开启整轨回放）：从后端内存/切片读取该句原始 16kHz 录音并直接播放原音
+    if (isTauriRuntime()) {
+      try {
+        const raw = await tauriInvoke<ArrayBuffer | Uint8Array>(
+          "read_segment_original_wav",
+          { id }
+        );
+        if (raw) {
+          const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+          if (bytes.byteLength > 44) {
+            const copy = new Uint8Array(bytes.byteLength);
+            copy.set(bytes);
+            const blob = new Blob([copy.buffer], { type: "audio/wav" });
+            const url = URL.createObjectURL(blob);
+            activeCloneUrl = url;
+            const audio = new Audio(url);
+            activeCloneAudio = audio;
+            audio.onended = () => {
+              stopActiveCloneAudio();
+            };
+            audio.onerror = () => {
+              stopActiveCloneAudio();
+            };
+            await audio.play();
+            return;
+          }
+        }
+      } catch {
+        // ignore and fallback
+      }
+    }
+  },
+
   speakSegment: async (id, text, lang) => {
     const trimmed = text.trim();
     if (!trimmed) return;
@@ -985,42 +1102,34 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     }
     set({ speakingSegmentId: id });
 
-    // 若开启了 Qwen3-TTS 原声克隆且在桌面端，录制过程中或已录音会话均优先调用服务端 /v1/clone/reference + /v1/clone
+    // 若开启了 Qwen3-TTS 原声克隆且在桌面端，优先使用预克隆缓存或等待克隆完成后播放
     if (isTauriRuntime() && get().ttsSettings.useVoiceClone) {
       set({ preparingCloneSegmentId: id });
       try {
-        const raw = await tauriInvoke<ArrayBuffer | Uint8Array>("clone_segment_speech", {
-          id,
-          text: trimmed,
-          lang,
-        });
+        const wav = await get().prepareSegmentClone(id, trimmed, lang);
         if (get().speakingSegmentId === id) {
           set({ preparingCloneSegmentId: null });
         }
-        if (raw && get().speakingSegmentId === id) {
-          const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
-          if (bytes.byteLength > 44) {
-            const copy = new Uint8Array(bytes.byteLength);
-            copy.set(bytes);
-            const blob = new Blob([copy.buffer], { type: "audio/wav" });
-            const url = URL.createObjectURL(blob);
-            activeCloneUrl = url;
-            const audio = new Audio(url);
-            activeCloneAudio = audio;
-            audio.onended = () => {
-              stopActiveCloneAudio();
-              if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
-            };
-            audio.onerror = () => {
-              stopActiveCloneAudio();
-              if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
-            };
-            await audio.play();
-            return;
-          }
+        if (wav && wav.byteLength > 44 && get().speakingSegmentId === id) {
+          const copy = new Uint8Array(wav.byteLength);
+          copy.set(wav);
+          const blob = new Blob([copy.buffer], { type: "audio/wav" });
+          const url = URL.createObjectURL(blob);
+          activeCloneUrl = url;
+          const audio = new Audio(url);
+          activeCloneAudio = audio;
+          audio.onended = () => {
+            stopActiveCloneAudio();
+            if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
+          };
+          audio.onerror = () => {
+            stopActiveCloneAudio();
+            if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
+          };
+          await audio.play();
+          return;
         }
       } catch {
-        // 原声克隆不可用时，平滑回退到系统语音合成
         if (get().preparingCloneSegmentId === id) {
           set({ preparingCloneSegmentId: null });
         }

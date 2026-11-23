@@ -21,6 +21,7 @@ export function WaveformPlayer() {
     audioLevel,
     captureMode,
     audioSources,
+    segments,
     playback,
     seekNonce,
     seekTargetMs,
@@ -184,18 +185,61 @@ export function WaveformPlayer() {
 
     const isRecording = mode === "recording";
     const isPaused = mode === "paused";
-    const peaks =
-      playback.peaks.length > 0 ? playback.peaks : new Array(80).fill(0.08);
+    const rawPeaks = playback.peaks;
+    let maxRawPeak = 0;
+    for (let k = 0; k < rawPeaks.length; k++) {
+      if (rawPeaks[k] > maxRawPeak) maxRawPeak = rawPeaks[k];
+    }
+
+    let peaks: number[];
+    if (rawPeaks.length > 0 && maxRawPeak >= 0.0015) {
+      const normBase = Math.max(maxRawPeak, 0.015);
+      peaks = rawPeaks.map((p) => {
+        if (p < 0.001) return 0.08;
+        const ratio = Math.min(1, p / normBase);
+        return Math.max(0.1, Math.min(0.96, Math.pow(ratio, 0.62)));
+      });
+    } else if (segments.length > 0) {
+      // 若历史记录或刚结束的会话缺少原始峰值采样，根据对话句子时间轴自动生成高对比度声纹图
+      const totalMs = Math.max(
+        playback.durationMs,
+        segments[segments.length - 1]?.endMs ?? 0,
+        1000
+      );
+      const count = 120;
+      peaks = new Array(count).fill(0.08);
+      for (let idx = 0; idx < count; idx++) {
+        const tMs = (idx * totalMs) / count;
+        const seg = segments.find(
+          (s) => tMs >= s.startMs && tMs <= Math.max(s.endMs, s.startMs + 350)
+        );
+        if (seg) {
+          const span = Math.max(350, seg.endMs - seg.startMs);
+          const rel = Math.max(0, Math.min(1, (tMs - seg.startMs) / span));
+          const env = Math.max(0.25, Math.sin(rel * Math.PI));
+          const jitter = ((idx * 37 + seg.seq * 13) % 19) / 19;
+          peaks[idx] = Math.max(
+            0.18,
+            Math.min(0.95, 0.28 + env * 0.45 + jitter * 0.22)
+          );
+        }
+      }
+    } else {
+      peaks = new Array(80).fill(0.08);
+    }
+
     const barCount = Math.min(
-      Math.max(peaks.length, 48),
-      Math.max(48, Math.floor(width / 4))
+      Math.max(peaks.length, 64),
+      Math.max(64, Math.floor(width / 4))
     );
     const barW = width / barCount;
+    const totalDurMs =
+      playback.durationMs || (segments[segments.length - 1]?.endMs ?? 0);
     const progress =
       isRecording || isPaused
         ? 1.0
-        : playback.durationMs > 0
-        ? Math.max(0, Math.min(1, playback.positionMs / playback.durationMs))
+        : totalDurMs > 0
+        ? Math.max(0, Math.min(1, playback.positionMs / totalDurMs))
         : 0;
 
     for (let i = 0; i < barCount; i++) {
@@ -216,6 +260,9 @@ export function WaveformPlayer() {
       } else if (isPaused) {
         ctx.fillStyle =
           ratio <= progress ? "#fbbf24" : "rgba(251, 191, 36, 0.30)";
+      } else if (playback.hasAudio || segments.length > 0) {
+        ctx.fillStyle =
+          ratio <= progress ? "#60a5fa" : "rgba(96, 165, 250, 0.42)";
       } else {
         ctx.fillStyle =
           ratio <= progress ? "#60a5fa" : "rgba(148, 163, 184, 0.28)";
@@ -224,7 +271,7 @@ export function WaveformPlayer() {
     }
 
     // 指针（录音中在最右端脉冲，回放/暂停态在当前播放位置）
-    if (isRecording || playback.hasAudio) {
+    if (isRecording || playback.hasAudio || segments.length > 0) {
       const px = Math.min(width - 2, Math.max(1, progress * width));
       ctx.fillStyle = isRecording ? "#fda4af" : "#f8fafc";
       ctx.fillRect(px - 1, 0, 2, height);
@@ -232,6 +279,7 @@ export function WaveformPlayer() {
   }, [
     mode,
     audioLevel,
+    segments,
     playback.peaks,
     playback.positionMs,
     playback.durationMs,
@@ -417,6 +465,8 @@ export function WaveformPlayer() {
               ? "ring-1 ring-rose-500/30"
               : mode === "paused"
               ? "ring-1 ring-amber-500/30"
+              : segments.length > 0 || playback.peaks.length > 0
+              ? ""
               : "opacity-50"
           }`}
         />

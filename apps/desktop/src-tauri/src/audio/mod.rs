@@ -876,7 +876,9 @@ mod win_wasapi {
 
                     if last_live_tick.elapsed().as_millis() >= 300 {
                         last_live_tick = Instant::now();
+                        let _ = rec.flush_header();
                         let dur = rec.duration_ms();
+                        let full_peaks = rec.peaks.clone();
                         let tail_peaks: Vec<f32> = rec
                             .peaks
                             .iter()
@@ -887,6 +889,17 @@ mod win_wasapi {
                             .into_iter()
                             .rev()
                             .collect();
+                        let path_str = rec_path.to_string_lossy().to_string();
+                        let rt_tick = rt.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let mut snap = rt_tick.snapshot.lock().await;
+                            snap.playback.has_audio = dur > 0;
+                            snap.playback.audio_path = Some(path_str);
+                            snap.playback.duration_ms = dur;
+                            if !full_peaks.is_empty() {
+                                snap.playback.peaks = full_peaks;
+                            }
+                        });
                         let _ = app.emit(
                             "recording:live_tick",
                             serde_json::json!({
@@ -945,21 +958,15 @@ mod win_wasapi {
             if let Some(rec) = recorder.take() {
                 if let Ok((path, duration_ms, peaks)) = rec.finalize() {
                     if duration_ms > 0 {
-                        let rt_done = rt.clone();
-                        let app_done = app.clone();
                         let path_str = path.to_string_lossy().to_string();
-                        tauri::async_runtime::spawn(async move {
-                            let pb = {
-                                let mut snap = rt_done.snapshot.lock().await;
-                                snap.playback.has_audio = true;
-                                snap.playback.audio_path = Some(path_str);
-                                snap.playback.duration_ms = duration_ms;
-                                snap.playback.peaks = peaks;
-                                snap.playback.clone()
-                            };
-                            let _ = app_done.emit("recording:ready", pb);
-                            rt_done.save_history(&app_done).await;
-                        });
+                        let mut snap = rt.snapshot.blocking_lock();
+                        snap.playback.has_audio = true;
+                        snap.playback.audio_path = Some(path_str);
+                        snap.playback.duration_ms = duration_ms;
+                        snap.playback.peaks = peaks;
+                        let pb = snap.playback.clone();
+                        drop(snap);
+                        let _ = app.emit("recording:ready", pb);
                     }
                 }
             }
