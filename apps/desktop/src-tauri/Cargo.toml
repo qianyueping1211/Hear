@@ -1,6 +1,6 @@
 [package]
 name = "hear-desktop"
-version = "0.1.4"
+version = "0.1.5"
 description = "听见 (Hear) 跨平台桌面实时翻译与悬浮字幕客户端"
 authors = ["Hear"]
 edition = "2021"
@@ -23,6 +23,7 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

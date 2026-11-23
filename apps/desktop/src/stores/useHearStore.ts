@@ -4,6 +4,8 @@ import type {
   AudioCaptureMode,
   AudioSourceOption,
   EngineSource,
+  LocalServerInstallStatus,
+  LocalServerProgress,
   RecordingPlaybackState,
   ServiceConfig,
   ServiceProbeResult,
@@ -47,7 +49,7 @@ export const SUMMARY_TEMPLATES: SummaryTemplateOption[] = [
 ];
 
 const DEFAULT_STYLE: SubtitleStyle = {
-  visible: true,
+  visible: false,
   clickThrough: false,
   excludeFromCapture: true,
   layout: "bilingual",
@@ -111,6 +113,13 @@ const DEFAULT_UPDATE_CONFIG: UpdateConfig = {
   autoCheckOnStartup: true,
 };
 
+const DEFAULT_LOCAL_SERVER_INSTALL: LocalServerInstallStatus = {
+  installed: false,
+  installDir: "",
+  hasBundledRuntime: false,
+  hasModels: false,
+};
+
 interface HearStoreState extends AppSnapshot {
   audioSources: AudioSourceOption[];
   audioLevel: number;
@@ -123,6 +132,10 @@ interface HearStoreState extends AppSnapshot {
   activeSettingsTab: "server" | "subtitle" | "audio" | "general" | "system";
   testingLocal: boolean;
   testingCloud: boolean;
+  localServerBusy: "install" | "reinstall" | "uninstall" | null;
+  localServerProgress: LocalServerProgress | null;
+  localServerMessage: string | null;
+  localServerError: string | null;
   checkingUpdate: boolean;
   downloadingUpdate: boolean;
   updateDownloadProgress: { downloaded: number; total: number } | null;
@@ -152,6 +165,11 @@ interface HearStoreState extends AppSnapshot {
     overrideAddress?: string,
     overrideToken?: string
   ) => Promise<ServiceProbeResult | null>;
+  refreshLocalServerInstallStatus: () => Promise<void>;
+  installLocalServer: () => Promise<void>;
+  reinstallLocalServer: () => Promise<void>;
+  uninstallLocalServer: (removeModels: boolean) => Promise<void>;
+  openLocalServerDir: () => Promise<void>;
   saveUpdateConfig: (patch: Partial<UpdateConfig>) => Promise<UpdateConfig>;
   checkForUpdates: (override?: UpdateConfig) => Promise<UpdateCheckResult | null>;
   downloadAndInstallUpdate: () => Promise<void>;
@@ -165,7 +183,7 @@ interface HearStoreState extends AppSnapshot {
 }
 
 export const useHearStore = create<HearStoreState>((set, get) => ({
-  appVersion: "0.1.4",
+  appVersion: "0.1.5",
   mode: "idle" as SessionMode,
   sourceLang: "en",
   targetLang: "zh",
@@ -178,6 +196,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   serviceConfig: DEFAULT_SERVICE_CONFIG,
   localStatus: DEFAULT_PROBE,
   cloudStatus: DEFAULT_PROBE,
+  localServerInstall: DEFAULT_LOCAL_SERVER_INSTALL,
   ttsSettings: DEFAULT_TTS,
   playback: DEFAULT_PLAYBACK,
   glossary: "",
@@ -199,6 +218,10 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   activeSettingsTab: "server",
   testingLocal: false,
   testingCloud: false,
+  localServerBusy: null,
+  localServerProgress: null,
+  localServerMessage: null,
+  localServerError: null,
   checkingUpdate: false,
   downloadingUpdate: false,
   updateDownloadProgress: null,
@@ -250,6 +273,12 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       });
       await listen<ServiceProbeResult>("service:cloud_status", (ev) => {
         set({ cloudStatus: ev.payload });
+      });
+      await listen<LocalServerInstallStatus>("local_server:install_status", (ev) => {
+        set({ localServerInstall: ev.payload });
+      });
+      await listen<LocalServerProgress>("local_server:progress", (ev) => {
+        set({ localServerProgress: ev.payload });
       });
       await listen<SubtitleStyle>("subtitle:style", (ev) => {
         set({ subtitleStyle: ev.payload });
@@ -372,6 +401,114 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     } finally {
       if (target === "local") set({ testingLocal: false });
       else set({ testingCloud: false });
+    }
+  },
+
+  refreshLocalServerInstallStatus: async () => {
+    const status = await tauriInvoke<LocalServerInstallStatus>(
+      "get_local_server_install_status"
+    );
+    if (status) set({ localServerInstall: status });
+  },
+
+  installLocalServer: async () => {
+    set({
+      localServerBusy: "install",
+      localServerError: null,
+      localServerMessage: null,
+      localServerProgress: {
+        action: "install",
+        stage: "checking",
+        downloaded: 0,
+        total: 0,
+        message: "正在准备安装本机模型服务…",
+      },
+    });
+    try {
+      const status = await tauriInvoke<LocalServerInstallStatus>("install_local_server");
+      if (status) {
+        set({
+          localServerInstall: status,
+          localServerMessage: `本机模型服务${
+            status.installedVersion ? ` v${status.installedVersion}` : ""
+          } 已安装完成（内置 faster-whisper / sherpa-onnx）`,
+        });
+      }
+    } catch (err) {
+      set({
+        localServerError: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      set({ localServerBusy: null, localServerProgress: null });
+    }
+  },
+
+  reinstallLocalServer: async () => {
+    set({
+      localServerBusy: "reinstall",
+      localServerError: null,
+      localServerMessage: null,
+      localServerProgress: {
+        action: "reinstall",
+        stage: "checking",
+        downloaded: 0,
+        total: 0,
+        message: "正在准备重新安装本机模型服务（保留已下载模型）…",
+      },
+    });
+    try {
+      const status = await tauriInvoke<LocalServerInstallStatus>("reinstall_local_server");
+      if (status) {
+        set({
+          localServerInstall: status,
+          localServerMessage: `本机模型服务${
+            status.installedVersion ? ` v${status.installedVersion}` : ""
+          } 已重新安装完成（原有模型文件已保留）`,
+        });
+      }
+    } catch (err) {
+      set({
+        localServerError: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      set({ localServerBusy: null, localServerProgress: null });
+    }
+  },
+
+  uninstallLocalServer: async (removeModels) => {
+    set({
+      localServerBusy: "uninstall",
+      localServerError: null,
+      localServerMessage: null,
+    });
+    try {
+      const status = await tauriInvoke<LocalServerInstallStatus>("uninstall_local_server", {
+        removeModels,
+      });
+      if (status) {
+        set({
+          localServerInstall: status,
+          localServerMessage: removeModels
+            ? "已彻底卸载本机模型服务及已下载的模型文件"
+            : "已卸载本机模型服务（已下载的模型权重文件已保留）",
+        });
+      }
+    } catch (err) {
+      set({
+        localServerError: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      set({ localServerBusy: null });
+    }
+  },
+
+  openLocalServerDir: async () => {
+    try {
+      await tauriInvoke("open_local_server_dir");
+    } catch (err) {
+      set({
+        localServerError: err instanceof Error ? err.message : String(err),
+      });
     }
   },
 

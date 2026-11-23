@@ -27,7 +27,7 @@ struct GhAsset {
     browser_download_url: String,
 }
 
-fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
+pub(crate) fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
     let clean = s
         .trim()
         .trim_start_matches("win-v")
@@ -41,7 +41,7 @@ fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-fn clean_repo(raw: &str) -> String {
+pub(crate) fn clean_repo(raw: &str) -> String {
     let trimmed = raw
         .trim()
         .trim_start_matches("https://github.com/")

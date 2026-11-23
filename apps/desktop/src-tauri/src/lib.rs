@@ -1,5 +1,6 @@
 pub mod cloud;
 pub mod config_store;
+pub mod local_server;
 pub mod platform;
 pub mod recorder;
 pub mod state;
@@ -9,9 +10,9 @@ pub mod vad;
 use cloud::HearCloudClient;
 use config_store::{load_config, save_config, PersistedConfig};
 use state::{
-    AppSnapshot, AudioCaptureMode, AudioSourceOption, EngineSource, ServiceConfig,
-    ServiceProbeResult, SessionMode, SubtitleStyle, TtsOutputSettings, UpdateCheckResult,
-    UpdateConfig,
+    AppSnapshot, AudioCaptureMode, AudioSourceOption, EngineSource, LocalServerInstallStatus,
+    ServiceConfig, ServiceProbeResult, SessionMode, SubtitleStyle, TtsOutputSettings,
+    UpdateCheckResult, UpdateConfig,
 };
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
@@ -324,6 +325,84 @@ async fn open_github_url(url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn get_local_server_install_status(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<LocalServerInstallStatus, String> {
+    let dir = local_server::default_install_dir(&app);
+    let status = local_server::inspect_install_dir(&dir);
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.local_server_install = status.clone();
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+async fn install_local_server(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<LocalServerInstallStatus, String> {
+    let dir = local_server::default_install_dir(&app);
+    let update_cfg = rt.snapshot.lock().await.update_config.clone();
+    let app_clone = app.clone();
+    let status = local_server::install_or_reinstall(&dir, &update_cfg, false, |progress| {
+        let _ = app_clone.emit("local_server:progress", &progress);
+    })
+    .await?;
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.local_server_install = status.clone();
+    }
+    let _ = app.emit("local_server:install_status", &status);
+    Ok(status)
+}
+
+#[tauri::command]
+async fn reinstall_local_server(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<LocalServerInstallStatus, String> {
+    let dir = local_server::default_install_dir(&app);
+    let update_cfg = rt.snapshot.lock().await.update_config.clone();
+    let app_clone = app.clone();
+    let status = local_server::install_or_reinstall(&dir, &update_cfg, true, |progress| {
+        let _ = app_clone.emit("local_server:progress", &progress);
+    })
+    .await?;
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.local_server_install = status.clone();
+    }
+    let _ = app.emit("local_server:install_status", &status);
+    Ok(status)
+}
+
+#[tauri::command]
+async fn uninstall_local_server(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    remove_models: bool,
+) -> Result<LocalServerInstallStatus, String> {
+    let dir = local_server::default_install_dir(&app);
+    let status = tokio::task::spawn_blocking(move || local_server::uninstall(&dir, remove_models))
+        .await
+        .map_err(|e| format!("卸载任务异常：{}", e))??;
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.local_server_install = status.clone();
+    }
+    let _ = app.emit("local_server:install_status", &status);
+    Ok(status)
+}
+
+#[tauri::command]
+async fn open_local_server_dir(app: AppHandle) -> Result<(), String> {
+    let dir = local_server::default_install_dir(&app);
+    local_server::open_install_dir(&dir)
+}
+
+#[tauri::command]
 async fn set_tts_settings(
     app: AppHandle,
     rt: State<'_, Arc<AppRuntime>>,
@@ -515,6 +594,8 @@ pub fn run() {
             let auto_check = loaded.update_config.auto_check_on_startup;
             let update_cfg = loaded.update_config.clone();
 
+            let install_status =
+                local_server::inspect_install_dir(&local_server::default_install_dir(app.handle()));
             {
                 let mut snap = runtime_setup.snapshot.blocking_lock();
                 snap.service_config = loaded.service_config;
@@ -522,11 +603,14 @@ pub fn run() {
                 snap.tts_settings = loaded.tts_settings;
                 snap.glossary = loaded.glossary;
                 snap.update_config = loaded.update_config;
+                snap.local_server_install = install_status;
             }
 
             setup_tray(app.handle())?;
             if let Some(sub) = app.get_webview_window("subtitle") {
-                if !initial_style.visible {
+                if initial_style.visible {
+                    let _ = sub.show();
+                } else {
                     let _ = sub.hide();
                 }
                 let _ = platform::apply_overlay_traits(
@@ -570,6 +654,11 @@ pub fn run() {
             check_for_updates,
             download_and_install_update,
             open_github_url,
+            get_local_server_install_status,
+            install_local_server,
+            reinstall_local_server,
+            uninstall_local_server,
+            open_local_server_dir,
             set_tts_settings,
             set_glossary,
             retranslate_segment,

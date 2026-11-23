@@ -6,14 +6,17 @@ import {
   Cloud,
   Download,
   ExternalLink,
+  FolderOpen,
   Laptop,
   Loader2,
   Palette,
   RefreshCw,
+  RotateCcw,
   Save,
   Server,
   Shield,
   Sliders,
+  Trash2,
   Volume2,
   X,
 } from "lucide-react";
@@ -137,8 +140,13 @@ export function SettingsModal() {
     serviceConfig,
     localStatus,
     cloudStatus,
+    localServerInstall,
     testingLocal,
     testingCloud,
+    localServerBusy,
+    localServerProgress,
+    localServerMessage,
+    localServerError,
     subtitleStyle,
     ttsSettings,
     glossary,
@@ -150,6 +158,11 @@ export function SettingsModal() {
     updateDownloadError,
     saveServiceConfig,
     testServiceConnection,
+    refreshLocalServerInstallStatus,
+    installLocalServer,
+    reinstallLocalServer,
+    uninstallLocalServer,
+    openLocalServerDir,
     saveUpdateConfig,
     checkForUpdates,
     downloadAndInstallUpdate,
@@ -168,6 +181,8 @@ export function SettingsModal() {
   const [ghToken, setGhToken] = useState(updateConfig.githubToken);
   const [autoCheck, setAutoCheck] = useState(updateConfig.autoCheckOnStartup);
   const [savedHint, setSavedHint] = useState<"local" | "cloud" | "system" | null>(null);
+  const [confirmUninstall, setConfirmUninstall] = useState(false);
+  const [removeModelsOnUninstall, setRemoveModelsOnUninstall] = useState(false);
 
   useEffect(() => {
     if (settingsOpen) {
@@ -179,8 +194,10 @@ export function SettingsModal() {
       setGhToken(updateConfig.githubToken);
       setAutoCheck(updateConfig.autoCheckOnStartup);
       setSavedHint(null);
+      setConfirmUninstall(false);
+      void refreshLocalServerInstallStatus();
     }
-  }, [settingsOpen, serviceConfig, updateConfig]);
+  }, [settingsOpen, serviceConfig, updateConfig, refreshLocalServerInstallStatus]);
 
   if (!settingsOpen) return null;
 
@@ -302,8 +319,193 @@ export function SettingsModal() {
                     本机模型服务
                   </div>
                   <span className="text-[11px] text-slate-400">
-                    由服务端自行启动与管理，客户端仅连接并检测状态
+                    服务端独立运行，客户端支持一键部署包管理与状态检测
                   </span>
+                </div>
+
+                {/* 本机模型服务端安装包管理：一键安装 / 重新安装 / 卸载 */}
+                <div className="rounded-lg bg-surface-950/80 border border-white/10 p-3 space-y-2.5 text-xs">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span
+                        className={`w-2 h-2 rounded-full shrink-0 ${
+                          localServerInstall.installed ? "bg-emerald-400" : "bg-slate-500"
+                        }`}
+                      />
+                      <span className="font-medium text-slate-200">
+                        {localServerInstall.installed
+                          ? `已安装本机模型服务${
+                              localServerInstall.installedVersion
+                                ? ` v${localServerInstall.installedVersion}`
+                                : ""
+                            }`
+                          : "尚未在本机安装模型服务端"}
+                      </span>
+                      {localServerInstall.installed && localServerInstall.hasBundledRuntime && (
+                        <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[11px]">
+                          内置 faster-whisper / sherpa-onnx
+                        </span>
+                      )}
+                    </div>
+                    {localServerInstall.installDir && (
+                      <span
+                        className="text-[11px] font-mono text-slate-500 truncate max-w-[260px]"
+                        title={localServerInstall.installDir}
+                      >
+                        {localServerInstall.installDir}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {!localServerInstall.installed ? (
+                      <button
+                        type="button"
+                        disabled={localServerBusy !== null}
+                        onClick={() => void installLocalServer()}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        {localServerBusy === "install" ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Download className="w-3.5 h-3.5" />
+                        )}
+                        {localServerBusy === "install" ? "正在安装…" : "一键安装模型服务"}
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          disabled={localServerBusy !== null}
+                          onClick={() => {
+                            setConfirmUninstall(false);
+                            void reinstallLocalServer();
+                          }}
+                          title="下载并覆盖最新服务端整合包（自动保留已下载的模型权重与证书）"
+                          className="px-3 py-1.5 rounded-lg bg-brand-500/90 hover:bg-brand-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50"
+                        >
+                          {localServerBusy === "reinstall" ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <RotateCcw className="w-3.5 h-3.5" />
+                          )}
+                          {localServerBusy === "reinstall" ? "正在重装…" : "一键重新安装"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={localServerBusy !== null}
+                          onClick={() => setConfirmUninstall((v) => !v)}
+                          className="px-3 py-1.5 rounded-lg bg-rose-500/15 border border-rose-400/30 hover:bg-rose-500/25 text-rose-300 flex items-center gap-1.5 disabled:opacity-50"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          一键卸载
+                        </button>
+                      </>
+                    )}
+
+                    {localServerInstall.installed && (
+                      <button
+                        type="button"
+                        onClick={() => void openLocalServerDir()}
+                        title="打开安装目录，双击 start-hear-cloud.bat 启动本机服务"
+                        className="px-2.5 py-1.5 rounded-lg bg-surface-900 border border-white/10 hover:bg-white/5 text-slate-300 flex items-center gap-1.5"
+                      >
+                        <FolderOpen className="w-3.5 h-3.5" />
+                        打开服务端目录
+                      </button>
+                    )}
+                  </div>
+
+                  {/* 卸载二次确认栏 */}
+                  {confirmUninstall && localServerInstall.installed && (
+                    <div className="rounded-md bg-rose-950/40 border border-rose-400/30 p-2.5 space-y-2">
+                      <div className="text-rose-200">
+                        确认卸载本机模型服务？卸载前请确保已关闭正在运行的服务端窗口。
+                      </div>
+                      <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={removeModelsOnUninstall}
+                          onChange={(e) => setRemoveModelsOnUninstall(e.target.checked)}
+                          className="w-3.5 h-3.5 accent-rose-500"
+                        />
+                        同时删除已下载的模型权重文件（server/models，不勾选则保留以便下次重装免重下）
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={localServerBusy !== null}
+                          onClick={async () => {
+                            setConfirmUninstall(false);
+                            await uninstallLocalServer(removeModelsOnUninstall);
+                          }}
+                          className="px-3 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white font-medium disabled:opacity-50"
+                        >
+                          {localServerBusy === "uninstall" ? "正在卸载…" : "确认卸载"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmUninstall(false)}
+                          className="px-2.5 py-1 rounded bg-surface-800 text-slate-300 hover:text-white"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 下载与解压进度条 */}
+                  {localServerProgress && (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-[11px] text-sky-300 font-mono">
+                        <span className="truncate pr-2">{localServerProgress.message}</span>
+                        {localServerProgress.stage === "downloading" && (
+                          <span className="shrink-0">
+                            {(localServerProgress.downloaded / 1048576).toFixed(1)} MB
+                            {localServerProgress.total > 0
+                              ? ` / ${(localServerProgress.total / 1048576).toFixed(1)} MB (${Math.round(
+                                  (localServerProgress.downloaded / localServerProgress.total) * 100
+                                )}%)`
+                              : ""}
+                          </span>
+                        )}
+                      </div>
+                      <div className="h-1.5 rounded-full bg-surface-800 overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-500 transition-all"
+                          style={{
+                            width:
+                              localServerProgress.stage === "downloading" &&
+                              localServerProgress.total > 0
+                                ? `${Math.min(
+                                    100,
+                                    Math.round(
+                                      (localServerProgress.downloaded /
+                                        localServerProgress.total) *
+                                        100
+                                    )
+                                  )}%`
+                                : localServerProgress.stage === "extracting"
+                                ? "92%"
+                                : "30%",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {localServerMessage && !localServerError && (
+                    <div className="text-[11px] text-emerald-300">{localServerMessage}</div>
+                  )}
+                  {localServerError && (
+                    <div className="text-[11px] text-rose-300 break-all">{localServerError}</div>
+                  )}
+
+                  <div className="text-[11px] text-slate-500 leading-relaxed">
+                    {localServerInstall.installed
+                      ? "安装完成后请点击「打开服务端目录」，双击 start-hear-cloud.bat 启动本机服务，再点击下方「测试连接」验证三模型状态。"
+                      : "一键安装会自动拉取最新内置 Python + faster-whisper + sherpa-onnx 的服务端整合包，无需手工装依赖（私有仓库请先在「系统与更新」填写 GitHub Token）。"}
+                  </div>
                 </div>
 
                 <div className="space-y-2">

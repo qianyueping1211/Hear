@@ -89,7 +89,7 @@ pub struct SubtitleStyle {
 impl Default for SubtitleStyle {
     fn default() -> Self {
         Self {
-            visible: true,
+            visible: false,
             click_through: false,
             exclude_from_capture: true,
             layout: SubtitleLayoutMode::Bilingual,
@@ -284,6 +284,17 @@ impl Default for UpdateCheckResult {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LocalServerInstallStatus {
+    pub installed: bool,
+    pub install_dir: String,
+    pub installed_version: Option<String>,
+    pub has_bundled_runtime: bool,
+    pub has_models: bool,
+    pub launcher_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
@@ -302,6 +313,7 @@ pub struct AppSnapshot {
     pub service_config: ServiceConfig,
     pub local_status: ServiceProbeResult,
     pub cloud_status: ServiceProbeResult,
+    pub local_server_install: LocalServerInstallStatus,
     pub tts_settings: TtsOutputSettings,
     pub playback: RecordingPlaybackState,
     pub glossary: String,
@@ -327,6 +339,7 @@ impl Default for AppSnapshot {
             service_config: ServiceConfig::default(),
             local_status: ServiceProbeResult::default(),
             cloud_status: ServiceProbeResult::default(),
+            local_server_install: LocalServerInstallStatus::default(),
             tts_settings: TtsOutputSettings::default(),
             playback: RecordingPlaybackState::default(),
             glossary: String::new(),

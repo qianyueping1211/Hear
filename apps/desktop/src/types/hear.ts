@@ -128,6 +128,23 @@ export interface UpdateCheckResult {
   error?: string;
 }
 
+export interface LocalServerInstallStatus {
+  installed: boolean;
+  installDir: string;
+  installedVersion?: string;
+  hasBundledRuntime: boolean;
+  hasModels: boolean;
+  launcherPath?: string;
+}
+
+export interface LocalServerProgress {
+  action: "install" | "reinstall" | "uninstall";
+  stage: "checking" | "downloading" | "extracting" | "cleaning" | "done";
+  downloaded: number;
+  total: number;
+  message: string;
+}
+
 export interface AppSnapshot {
   appVersion: string;
   mode: SessionMode;
@@ -144,6 +161,7 @@ export interface AppSnapshot {
   serviceConfig: ServiceConfig;
   localStatus: ServiceProbeResult;
   cloudStatus: ServiceProbeResult;
+  localServerInstall: LocalServerInstallStatus;
   ttsSettings: TtsOutputSettings;
   playback: RecordingPlaybackState;
   glossary: string;
