@@ -14,14 +14,14 @@ final class SessionClonePipeline {
 
     func remember(_ id: UUID, samples: [Float], text: String, enabled: Bool) {
         let seconds = Double(samples.count) / 16_000
-        if enabled && (1.5...12).contains(seconds) {
-            references[id] = (samples, text)
+        if seconds >= 0.6 {
+            // 超过 10 秒自动截取前 10 秒作为参考音，避免长句直接丢弃样本退回系统朗读
+            let clipped = seconds > 10.0 ? Array(samples.prefix(160_000)) : samples
+            references[id] = (clipped, text)
             issues[id] = nil
         } else {
             references[id] = nil
-            issues[id] = enabled
-                ? (seconds > 12 ? "这句太长，没有完整的参考样本" : "这句太短，没有完整的参考样本")
-                : "录音的时候声音克隆开关是关的"
+            issues[id] = enabled ? "这句太短，尝试复用同语种上一句参考音" : nil
         }
         referenceOrder.removeAll { $0 == id }
         referenceOrder.append(id)
@@ -38,8 +38,15 @@ final class SessionClonePipeline {
         if let own = references[item.id] {
             return (own.samples, hasText(own.text) ? own.text : item.sourceText)
         }
-        guard let speaker = item.speakerID, let index = items.firstIndex(where: { $0.id == item.id }) else { return nil }
-        for earlier in items[..<index].reversed() where earlier.speakerID == speaker && earlier.source == item.source {
+        guard let index = items.firstIndex(where: { $0.id == item.id }) else { return nil }
+        // 1. 优先复用同一说话人且同语种的前文参考音
+        if let speaker = item.speakerID {
+            for earlier in items[..<index].reversed() where earlier.speakerID == speaker && earlier.source == item.source {
+                if let ref = references[earlier.id], hasText(ref.text) { return ref }
+            }
+        }
+        // 2. 未开启说话人区分或同说话人无前文样本时，兜底复用同语种最近一句的参考音（短词如 OK/谢谢 也能克隆）
+        for earlier in items[..<index].reversed() where earlier.source == item.source {
             if let ref = references[earlier.id], hasText(ref.text) { return ref }
         }
         return nil

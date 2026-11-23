@@ -79,14 +79,6 @@ final class LiveSession: ObservableObject {
             else { stopReading() }
         }
     }
-    /// 手机扬声器模式下，聆听过程中也自动播报（默认关闭，开启后播报期间自动静音麦克风并留 400ms 尾音保护）
-    @Published var speakerAutoSpeak: Bool {
-        didSet {
-            guard speakerAutoSpeak != oldValue else { return }
-            save("speakerAutoSpeak", speakerAutoSpeak)
-            if speakerAutoSpeak { readIndex = items.count }
-        }
-    }
     @Published var showReadingIcon: Bool { didSet { save("showReadingIcon", showReadingIcon) } }
     @Published var chineseDisplayLanguage = ChineseDisplayLanguage(
         rawValue: UserDefaults.standard.string(forKey: ChineseDisplayLanguage.preferenceKey) ?? ""
@@ -540,7 +532,6 @@ final class LiveSession: ObservableObject {
         langA = Language.find(d.string(forKey: "langA") ?? "zh")
         langB = Language.find(d.string(forKey: "langB") ?? "en")
         speakOutput = d.object(forKey: "speakOutput") as? Bool ?? true
-        speakerAutoSpeak = d.object(forKey: "speakerAutoSpeak") as? Bool ?? false
         showReadingIcon = d.object(forKey: "showReadingIcon") as? Bool ?? true
         liveActivityOnlyTranslation =
             d.object(forKey: "liveActivityOnlyTranslation") as? Bool ?? false
@@ -1760,8 +1751,6 @@ final class LiveSession: ObservableObject {
         if outputMode == .headphones, !hasHeadphones { outputMode = .speaker }
         headsetConnected = hasHeadphones
         if inputSource == "headset", !hasHeadphones { inputSource = "phone" }   // 没耳机就用手机麦克风
-        // 扬声器模式：默认聆听期间不播放，若开启「扬声器模式聆听时自动播报」则允许边听边播（播报时静音麦克风）
-        if outputMode == .speaker && !speakerAutoSpeak { stopReading() }
         if feedback { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
         activity = "正在打开麦克风…"
         if saveFullRecording {
@@ -1953,7 +1942,6 @@ final class LiveSession: ObservableObject {
         }
         guard inputFinishToken == token else { return }
         stop(readAfter: false, keepTranslations: true)
-        if readAfter { kickReader() }
     }
 
     /// readAfter：停止后是否接着朗读没读的句子（只有用户自己点停止时才读）
@@ -2014,7 +2002,8 @@ final class LiveSession: ObservableObject {
         flushPartial()
         partial = ""; partialTranslation = ""; partialTranslationTarget = nil; partialSource = nil
         finishUnfinished()
-        if wasRunning && readAfter { kickReader() }   // 停止聆听后，从上次没读完的地方接着读
+        // 录音结束后不再自动补读（仅在聆听中由「自动朗读译文」开关统一控制）
+        readIndex = items.count
         if pendingLocalSwitch {
             pendingLocalSwitch = false
             Task { await switchToLocal() }
@@ -2225,8 +2214,9 @@ final class LiveSession: ObservableObject {
     /// 只有「要不要出声」这一件事受后台影响：
     /// 翻译、声音克隆的请求在后台照旧发出去（电脑那边照常干活）。
     private var autoReadAllowed: Bool {
-        // 在后台（切到别的 App 了）不朗读：用户不在跟前听，吵得慌
-        !inBackground && speakOutput && (outputMode == .headphones || !isRunning || speakerAutoSpeak)
+        // 仅在正在聆听且开启「自动朗读译文」时自动播报（扬声器与耳机统一受 speakOutput 控制）；
+        // 录音结束后不再自动补读。
+        !inBackground && speakOutput && isRunning
     }
 
     /// 有新译文或状态变化时调用：能读就从 readIndex 开始往后读
@@ -3686,8 +3676,6 @@ final class LiveSession: ObservableObject {
         setLanguagePair(left: a, right: b)
         let so = d.object(forKey: "speakOutput") as? Bool ?? true
         if so != speakOutput { speakOutput = so }
-        let sas = d.object(forKey: "speakerAutoSpeak") as? Bool ?? false
-        if sas != speakerAutoSpeak { speakerAutoSpeak = sas }
         let showIcon = d.object(forKey: "showReadingIcon") as? Bool ?? true
         if showIcon != showReadingIcon { showReadingIcon = showIcon }
         let liveActivityOnly =

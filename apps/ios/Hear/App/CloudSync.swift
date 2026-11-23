@@ -61,7 +61,6 @@ final class CloudSync: ObservableObject {
         // 它会和其他设置一起写进 iCloud 云盘「听见」文件夹；口令泄露时到 Token 管理后台撤销即可。
         "cloudAccessToken",
         "saveFullRecording",
-        "speakerAutoSpeak",
     ]
     private static let settingKeys = legacySettingKeys + addedSettingKeys
 

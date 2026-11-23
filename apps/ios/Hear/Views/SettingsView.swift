@@ -238,7 +238,7 @@ struct SettingsView: View {
 
                 // MARK: 朗读
                 Section {
-                    Toggle("朗读译文", isOn: $session.speakOutput)
+                    Toggle("自动朗读译文", isOn: $session.speakOutput)
                     Picker("声音输出位置", selection: outputBinding) {
                         Text("手机扬声器").tag(AudioOutput.speaker)
                         Text("耳机").tag(AudioOutput.headphones)
@@ -260,8 +260,6 @@ struct SettingsView: View {
                             Text(session.langB.name).tag("B")
                             Text("不播放").tag("off")
                         }
-                    } else if session.speakOutput {
-                        Toggle("外放聆听时自动播报", isOn: $session.speakerAutoSpeak)
                     }
                     Toggle("显示声音图标", isOn: $session.showReadingIcon)
                     Toggle("声音克隆", isOn: $session.voiceClone)
