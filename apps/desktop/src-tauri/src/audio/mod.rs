@@ -1325,15 +1325,22 @@ impl LiveCaptureHandle {
                         {
                             let clean_src = text.trim().to_string();
                             if !clean_src.is_empty() {
-                                {
+                                // 保留已有预览译文，避免每次增量识别都闪回「正在翻译…」造成界面跳动
+                                let keep_tr = {
                                     let mut snap = rt.snapshot.lock().await;
                                     snap.live_partial_source = clean_src.clone();
-                                }
+                                    let prev = snap.live_partial_translation.trim().to_string();
+                                    if prev.is_empty() {
+                                        "正在翻译…".to_string()
+                                    } else {
+                                        prev
+                                    }
+                                };
                                 let _ = app.emit(
                                     "subtitle:partial",
                                     serde_json::json!({
                                         "source": clean_src,
-                                        "translation": "正在翻译…"
+                                        "translation": keep_tr
                                     }),
                                 );
                                 // 边说边译：说话过程中实时调用预览翻译，流式更新译文预览
@@ -1537,15 +1544,16 @@ impl LiveCaptureHandle {
                         {
                             let mut snap = rt.snapshot.lock().await;
                             snap.segments.push(seg.clone());
-                            snap.live_partial_source = source_text.clone();
-                            snap.live_partial_translation = seg.translated_text.clone();
+                            // 该句已转为正式对话卡片：立刻清空下方「实时识别中…」虚线预览框，避免上下同时显示重复原文
+                            snap.live_partial_source.clear();
+                            snap.live_partial_translation.clear();
                         }
                         let _ = app.emit("segment:upsert", &seg);
                         let _ = app.emit(
                             "subtitle:partial",
                             serde_json::json!({
-                                "source": source_text,
-                                "translation": "翻译中…"
+                                "source": "",
+                                "translation": ""
                             }),
                         );
 
@@ -1558,7 +1566,6 @@ impl LiveCaptureHandle {
                             &recent_ctx,
                         );
                         let app_stream = app.clone();
-                        let src_for_cb = source_text.clone();
                         let mut seg_cb = seg.clone();
 
                         match rt
@@ -1566,15 +1573,8 @@ impl LiveCaptureHandle {
                             .translate_stream(&mt_url, &prompt, false, mt_token_opt, |partial_raw| {
                                 let cleaned = clean_translation_output(partial_raw);
                                 if !cleaned.is_empty() {
-                                    seg_cb.translated_text = cleaned.clone();
+                                    seg_cb.translated_text = cleaned;
                                     let _ = app_stream.emit("segment:upsert", &seg_cb);
-                                    let _ = app_stream.emit(
-                                        "subtitle:partial",
-                                        serde_json::json!({
-                                            "source": src_for_cb,
-                                            "translation": cleaned
-                                        }),
-                                    );
                                 }
                             })
                             .await

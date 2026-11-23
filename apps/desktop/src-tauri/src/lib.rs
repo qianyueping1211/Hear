@@ -740,7 +740,20 @@ async fn play_cloned_segment_to_device(
     lang: String,
     target: String,
 ) -> Result<(), String> {
-    let wav_bytes = synthesize_cloned_segment_wav(&app, rt.inner(), &id, &text, &lang).await?;
+    let _ = app.emit(
+        "tts:state",
+        serde_json::json!({ "id": id, "state": "cloning" }),
+    );
+    let wav_bytes = match synthesize_cloned_segment_wav(&app, rt.inner(), &id, &text, &lang).await {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = app.emit(
+                "tts:state",
+                serde_json::json!({ "id": id, "state": "ready" }),
+            );
+            return Err(e);
+        }
+    };
     let (device_name, should_mute_mic) = {
         let snap = rt.snapshot.lock().await;
         let seg_ch = snap.segments.iter().find(|s| s.id == id).map(|s| s.channel);
@@ -787,19 +800,28 @@ async fn play_cloned_segment_to_device(
         // 提前 40ms 让采集线程排空缓冲并丢弃未成形片段
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     }
+    let _ = app.emit(
+        "tts:state",
+        serde_json::json!({ "id": id, "state": "playing" }),
+    );
     let cancel_for_play = cancel.clone();
     let res = tokio::task::spawn_blocking(move || {
         audio::output::play_wav_to_device(&wav_bytes, &device_name, cancel_for_play)
     })
     .await
-    .map_err(|e| format!("播放线程异常：{}", e))?;
+    .map_err(|e| format!("播放线程异常：{}", e));
+
+    let _ = app.emit(
+        "tts:state",
+        serde_json::json!({ "id": id, "state": "ready" }),
+    );
 
     if should_mute_mic {
         // 留 450ms 声卡回环缓冲与房间残响消散窗口再恢复收音，彻底杜绝回声回传
         tokio::time::sleep(std::time::Duration::from_millis(450)).await;
         rt.mic_muted.store(false, Ordering::Relaxed);
     }
-    res
+    res?
 }
 
 /// 将指定（或最近一条 >= 1 秒的我的麦克风）录音片段锁定为「我的声纹样本」，开会同传时从第一句起直接复用

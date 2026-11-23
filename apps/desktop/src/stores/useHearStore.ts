@@ -23,6 +23,8 @@ import type {
 
 let activeCloneAudio: HTMLAudioElement | null = null;
 let activeCloneUrl: string | null = null;
+let tauriListenersRegistered = false;
+const autoSpokenSegmentIds = new Set<string>();
 const cloneWavCache = new Map<string, { text: string; wav: Uint8Array }>();
 const cloneInflight = new Map<
   string,
@@ -343,8 +345,36 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     if (typeof hasSample === "boolean") {
       set({ hasMyVoiceSample: hasSample });
     }
-    if (isTauriRuntime()) {
+    if (isTauriRuntime() && !tauriListenersRegistered) {
+      tauriListenersRegistered = true;
       const { listen } = await import("@tauri-apps/api/event");
+      await listen<{ id: string; state: "cloning" | "playing" | "ready" }>(
+        "tts:state",
+        (ev) => {
+          const { id, state: ttsState } = ev.payload;
+          if (ttsState === "cloning") {
+            set((s) => ({
+              cloneStates: { ...s.cloneStates, [id]: "cloning" },
+              preparingCloneSegmentId: id,
+            }));
+          } else if (ttsState === "playing") {
+            set((s) => ({
+              cloneStates: { ...s.cloneStates, [id]: "ready" },
+              preparingCloneSegmentId:
+                s.preparingCloneSegmentId === id ? null : s.preparingCloneSegmentId,
+              speakingSegmentId: id,
+            }));
+          } else {
+            set((s) => ({
+              cloneStates: { ...s.cloneStates, [id]: "ready" },
+              preparingCloneSegmentId:
+                s.preparingCloneSegmentId === id ? null : s.preparingCloneSegmentId,
+              speakingSegmentId:
+                s.speakingSegmentId === id ? null : s.speakingSegmentId,
+            }));
+          }
+        }
+      );
       await listen<SubtitleSegment>("segment:upsert", (ev) => {
         set((state) => {
           const idx = state.segments.findIndex((s) => s.id === ev.payload.id);
@@ -369,34 +399,30 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
           const autoOther =
             tts.enabled && tts.autoSpeakOther && seg.channel === "system";
           if (autoMyMic || autoOther) {
+            // 每条对话只自动播报一次，防止 Whisper 二次精修或重复事件导致同一句反复朗读
+            if (autoSpokenSegmentIds.has(seg.id)) {
+              return;
+            }
+            autoSpokenSegmentIds.add(seg.id);
             const target =
               tts.routingMode === "meeting" && seg.channel === "mic"
                 ? "meeting_mic"
                 : "local";
             set((s) => ({
               cloneStates: { ...s.cloneStates, [seg.id]: "cloning" },
-              speakingSegmentId: seg.id,
             }));
             void tauriInvoke("play_cloned_segment_to_device", {
               id: seg.id,
               text: seg.translatedText.trim(),
               lang: seg.targetLang,
               target,
-            })
-              .then(() => {
-                set((s) => ({
-                  cloneStates: { ...s.cloneStates, [seg.id]: "ready" },
-                  speakingSegmentId:
-                    s.speakingSegmentId === seg.id ? null : s.speakingSegmentId,
-                }));
-              })
-              .catch(() => {
-                set((s) => ({
-                  cloneStates: { ...s.cloneStates, [seg.id]: "ready" },
-                  speakingSegmentId:
-                    s.speakingSegmentId === seg.id ? null : s.speakingSegmentId,
-                }));
-              });
+            }).catch(() => {
+              set((s) => ({
+                cloneStates: { ...s.cloneStates, [seg.id]: "ready" },
+                speakingSegmentId:
+                  s.speakingSegmentId === seg.id ? null : s.speakingSegmentId,
+              }));
+            });
           } else {
             void get().prepareSegmentClone(
               seg.id,
@@ -528,6 +554,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     stopActiveCloneAudio();
     cloneWavCache.clear();
     cloneInflight.clear();
+    autoSpokenSegmentIds.clear();
     set({ sessionError: null, sessionNotice: null, cloneStates: {} });
     try {
       const conv = await tauriInvoke<SavedConversation>("load_conversation", { id });
@@ -1182,7 +1209,8 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         (tts.muteMicWhileSpeaking && get().mode === "recording");
 
       if (needsDeviceRoute) {
-        set({ preparingCloneSegmentId: id });
+        // 先标记克隆中，等后端 tts:state=playing 事件真正开始发声时再点亮绿色播放喇叭
+        set({ speakingSegmentId: null, preparingCloneSegmentId: id });
         try {
           const target =
             tts.routingMode === "meeting" && seg?.channel === "mic"
@@ -1194,13 +1222,6 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
             lang,
             target,
           });
-          set((s) => ({
-            cloneStates: { ...s.cloneStates, [id]: "ready" },
-            preparingCloneSegmentId:
-              s.preparingCloneSegmentId === id ? null : s.preparingCloneSegmentId,
-            speakingSegmentId:
-              s.speakingSegmentId === id ? null : s.speakingSegmentId,
-          }));
           return;
         } catch {
           if (get().preparingCloneSegmentId === id) {
