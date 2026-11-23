@@ -1863,6 +1863,7 @@ mod tests {
             }
         });
         assert!(frames_seen >= 5 && frames_seen <= 7, "frames={}", frames_seen);
-        assert!(speech_frames >= 5);
+        // 连续 3 帧抗键盘敲击起振保护后，剩余帧均应触发人声
+        assert!(speech_frames >= 3, "speech_frames={}", speech_frames);
     }
 }
