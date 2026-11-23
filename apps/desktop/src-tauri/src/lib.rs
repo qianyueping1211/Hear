@@ -34,6 +34,10 @@ pub struct AppRuntime {
     pub segment_wavs: Mutex<std::collections::HashMap<String, Vec<u8>>>,
     /// 声音克隆单并发闸门：防止多句预克隆或用户点击并发打到服务端触发 503 SERVICE_BUSY
     pub clone_gate: Mutex<()>,
+    /// 面对面播报译文时临时静音麦克风采集，防止扬声器声音回环录入
+    pub mic_muted: Arc<AtomicBool>,
+    /// 当前正在通过指定输出设备（如虚拟麦克风）播放的 TTS 取消标记
+    pub tts_cancel: Mutex<Option<Arc<AtomicBool>>>,
     pub import_cancel: AtomicBool,
 }
 
@@ -46,6 +50,8 @@ impl AppRuntime {
             summary_markdown: Mutex::new(String::new()),
             segment_wavs: Mutex::new(std::collections::HashMap::new()),
             clone_gate: Mutex::new(()),
+            mic_muted: Arc::new(AtomicBool::new(false)),
+            tts_cancel: Mutex::new(None),
             import_cancel: AtomicBool::new(false),
         }
     }
@@ -503,13 +509,19 @@ async fn delete_conversation(
     Ok(metas)
 }
 
-#[tauri::command]
-async fn clone_segment_speech(
-    rt: State<'_, Arc<AppRuntime>>,
-    id: String,
-    text: String,
-    lang: String,
-) -> Result<tauri::ipc::Response, String> {
+fn my_voice_ref_paths(app: &AppHandle) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let dir = app.path().app_data_dir().ok()?;
+    let _ = std::fs::create_dir_all(&dir);
+    Some((dir.join("my_voice_ref.wav"), dir.join("my_voice_ref.txt")))
+}
+
+async fn synthesize_cloned_segment_wav(
+    app: &AppHandle,
+    rt: &Arc<AppRuntime>,
+    id: &str,
+    text: &str,
+    lang: &str,
+) -> Result<Vec<u8>, String> {
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
         return Err("朗读文本为空".to_string());
@@ -556,15 +568,31 @@ async fn clone_segment_speech(
         )
     };
 
-    // 1. 优先从内存 segment_wavs 取本句（或同声道最近一句 >= 0.6s）的纯净 16kHz 单声道 WAV
+    // 0. 若该句来自我的麦克风，且用户已锁定「我的声纹样本」，优先复用该高质固定参考音
     let mut ref_wav: Option<Vec<u8>> = None;
     let mut ref_text = seg_info
         .as_ref()
         .map(|s| s.source_text.clone())
         .unwrap_or_default();
-    {
+    if seg_info.as_ref().map(|s| s.channel) == Some(AudioChannel::Mic) {
+        if let Some((wav_p, txt_p)) = my_voice_ref_paths(app) {
+            if let Ok(bytes) = std::fs::read(&wav_p) {
+                if bytes.len() > 19_200 {
+                    ref_wav = Some(bytes);
+                    if let Ok(t) = std::fs::read_to_string(&txt_p) {
+                        if !t.trim().is_empty() {
+                            ref_text = t.trim().to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 1. 优先从内存 segment_wavs 取本句（或同声道最近一句 >= 0.6s）的纯净 16kHz 单声道 WAV
+    if ref_wav.is_none() {
         let wav_map = rt.segment_wavs.lock().await;
-        if let Some(w) = wav_map.get(&id) {
+        if let Some(w) = wav_map.get(id) {
             if w.len() >= 19_200 {
                 ref_wav = Some(w.clone());
             }
@@ -581,7 +609,7 @@ async fn clone_segment_speech(
             }
         }
         if ref_wav.is_none() {
-            if let Some(w) = wav_map.get(&id) {
+            if let Some(w) = wav_map.get(id) {
                 if w.len() > 44 {
                     ref_wav = Some(w.clone());
                 }
@@ -637,14 +665,14 @@ async fn clone_segment_speech(
         .clone_voice(
             primary_target,
             &trimmed,
-            &lang,
+            lang,
             ref_wav.clone(),
             &ref_text,
             primary_token,
         )
         .await
     {
-        Ok(wav_bytes) => Ok(tauri::ipc::Response::new(wav_bytes)),
+        Ok(wav_bytes) => Ok(wav_bytes),
         Err(first_err) => {
             if !primary_url.is_empty() && !fallback_url.is_empty() && primary_url != fallback_url {
                 let f_tok_opt = if fallback_tok.trim().is_empty() {
@@ -654,15 +682,180 @@ async fn clone_segment_speech(
                 };
                 if let Ok(wav_bytes) = rt
                     .cloud
-                    .clone_voice(&fallback_url, &trimmed, &lang, ref_wav, &ref_text, f_tok_opt)
+                    .clone_voice(&fallback_url, &trimmed, lang, ref_wav, &ref_text, f_tok_opt)
                     .await
                 {
-                    return Ok(tauri::ipc::Response::new(wav_bytes));
+                    return Ok(wav_bytes);
                 }
             }
             Err(first_err)
         }
     }
+}
+
+#[tauri::command]
+async fn clone_segment_speech(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    id: String,
+    text: String,
+    lang: String,
+) -> Result<tauri::ipc::Response, String> {
+    let wav = synthesize_cloned_segment_wav(&app, rt.inner(), &id, &text, &lang).await?;
+    Ok(tauri::ipc::Response::new(wav))
+}
+
+#[tauri::command]
+async fn list_output_devices() -> Result<Vec<audio::output::OutputAudioDevice>, String> {
+    tokio::task::spawn_blocking(audio::output::list_output_devices)
+        .await
+        .map_err(|e| format!("枚举输出设备失败：{}", e))
+}
+
+#[tauri::command]
+async fn set_mic_muted(rt: State<'_, Arc<AppRuntime>>, muted: bool) -> Result<(), String> {
+    rt.mic_muted.store(muted, Ordering::Relaxed);
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_device_tts(rt: State<'_, Arc<AppRuntime>>) -> Result<(), String> {
+    if let Some(flag) = rt.tts_cancel.lock().await.take() {
+        flag.store(true, Ordering::Relaxed);
+    }
+    rt.mic_muted.store(false, Ordering::Relaxed);
+    Ok(())
+}
+
+/// 合成克隆语音并直接输出到指定声卡设备（支持会议同传将我的克隆译文送到 VB-Cable 虚拟麦，或面对面播报并自动静音麦防回声）
+#[tauri::command]
+async fn play_cloned_segment_to_device(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    id: String,
+    text: String,
+    lang: String,
+    target: String,
+) -> Result<(), String> {
+    let wav_bytes = synthesize_cloned_segment_wav(&app, rt.inner(), &id, &text, &lang).await?;
+    let (device_name, should_mute_mic) = {
+        let snap = rt.snapshot.lock().await;
+        let seg_ch = snap.segments.iter().find(|s| s.id == id).map(|s| s.channel);
+        let tts = &snap.tts_settings;
+        let is_meeting = tts.routing_mode == "meeting";
+        let dev = match target.as_str() {
+            "meeting_mic" => {
+                if !tts.meeting_mic_output_device_id.trim().is_empty() {
+                    tts.meeting_mic_output_device_id.clone()
+                } else {
+                    tts.output_device_id.clone()
+                }
+            }
+            "local" => tts.output_device_id.clone(),
+            _ => {
+                if is_meeting && seg_ch == Some(AudioChannel::Mic) && !tts.meeting_mic_output_device_id.trim().is_empty() {
+                    tts.meeting_mic_output_device_id.clone()
+                } else {
+                    tts.output_device_id.clone()
+                }
+            }
+        };
+        // 会议模式发到独立虚拟麦时不静音我的麦（或由虚拟声卡隔离）；面对面外放时按开关自动静音麦防回声
+        let mute_mic = !is_meeting && tts.mute_mic_while_speaking;
+        (dev, mute_mic)
+    };
+
+    // 取消上一段仍在播放的设备输出
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut slot = rt.tts_cancel.lock().await;
+        if let Some(prev) = slot.replace(cancel.clone()) {
+            prev.store(true, Ordering::Relaxed);
+        }
+    }
+
+    if should_mute_mic {
+        rt.mic_muted.store(true, Ordering::Relaxed);
+    }
+    let cancel_for_play = cancel.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        audio::output::play_wav_to_device(&wav_bytes, &device_name, cancel_for_play)
+    })
+    .await
+    .map_err(|e| format!("播放线程异常：{}", e))?;
+
+    if should_mute_mic {
+        // 留 220ms 尾音消散窗口再恢复麦克风收音，避免房间残响被录进去
+        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        rt.mic_muted.store(false, Ordering::Relaxed);
+    }
+    res
+}
+
+/// 将指定（或最近一条 >= 1 秒的我的麦克风）录音片段锁定为「我的声纹样本」，开会同传时从第一句起直接复用
+#[tauri::command]
+async fn save_my_voice_sample(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    segment_id: Option<String>,
+) -> Result<bool, String> {
+    let (wav_p, txt_p) = my_voice_ref_paths(&app).ok_or_else(|| "无法访问应用数据目录".to_string())?;
+    let (chosen_id, chosen_text, audio_path_opt, seg_opt) = {
+        let snap = rt.snapshot.lock().await;
+        let seg = if let Some(ref sid) = segment_id {
+            snap.segments.iter().find(|s| &s.id == sid).cloned()
+        } else {
+            snap.segments
+                .iter()
+                .rev()
+                .find(|s| s.channel == AudioChannel::Mic && s.end_ms.saturating_sub(s.start_ms) >= 1000)
+                .or_else(|| snap.segments.iter().rev().find(|s| s.channel == AudioChannel::Mic))
+                .cloned()
+        };
+        match seg {
+            Some(s) => (s.id.clone(), s.source_text.clone(), snap.playback.audio_path.clone(), Some(s)),
+            None => return Err("当前会话中还没有你的麦克风录音片段，请先说一句 2~5 秒的话".to_string()),
+        }
+    };
+
+    let mut wav_bytes = rt.segment_wavs.lock().await.get(&chosen_id).cloned();
+    if wav_bytes.as_ref().map(|w| w.len()).unwrap_or(0) <= 44 {
+        if let (Some(ap), Some(seg)) = (audio_path_opt, seg_opt) {
+            wav_bytes = tokio::task::spawn_blocking(move || {
+                recorder::slice_wav_range_16k_mono(Path::new(&ap), seg.start_ms, seg.end_ms, Some(1))
+                    .or_else(|| recorder::slice_wav_range_16k_mono(Path::new(&ap), seg.start_ms, seg.end_ms, None))
+            })
+            .await
+            .ok()
+            .flatten();
+        }
+    }
+    let bytes = wav_bytes.filter(|w| w.len() > 19_200).ok_or_else(|| {
+        "未找到足够长的麦克风音频片段（建议 2~5 秒）".to_string()
+    })?;
+    std::fs::write(&wav_p, &bytes).map_err(|e| format!("保存声纹样本失败：{}", e))?;
+    let _ = std::fs::write(&txt_p, chosen_text.trim());
+    logger::info(format!("[voice] 已保存我的固定声纹样本：{} bytes", bytes.len()));
+    Ok(true)
+}
+
+#[tauri::command]
+async fn get_my_voice_sample_status(app: AppHandle) -> Result<bool, String> {
+    if let Some((wav_p, _)) = my_voice_ref_paths(&app) {
+        if let Ok(meta) = std::fs::metadata(&wav_p) {
+            return Ok(meta.len() > 19_200);
+        }
+    }
+    Ok(false)
+}
+
+#[tauri::command]
+async fn clear_my_voice_sample(app: AppHandle) -> Result<(), String> {
+    if let Some((wav_p, txt_p)) = my_voice_ref_paths(&app) {
+        let _ = std::fs::remove_file(&wav_p);
+        let _ = std::fs::remove_file(&txt_p);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1949,6 +2142,13 @@ pub fn run() {
             rename_conversation,
             delete_conversation,
             clone_segment_speech,
+            list_output_devices,
+            set_mic_muted,
+            stop_device_tts,
+            play_cloned_segment_to_device,
+            save_my_voice_sample,
+            get_my_voice_sample_status,
+            clear_my_voice_sample,
             read_segment_original_wav,
             seek_playback,
             set_playback_playing,

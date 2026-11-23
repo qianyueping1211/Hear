@@ -7,6 +7,7 @@ import type {
   EngineSource,
   LocalServerInstallStatus,
   LocalServerProgress,
+  OutputAudioDevice,
   RecordingPlaybackState,
   SavedConversation,
   ServiceConfig,
@@ -117,7 +118,12 @@ const DEFAULT_PROBE: ServiceProbeResult = {
 const DEFAULT_TTS: TtsOutputSettings = {
   enabled: false,
   useVoiceClone: true,
+  routingMode: "face_to_face",
   outputDeviceId: "default",
+  meetingMicOutputDeviceId: "",
+  muteMicWhileSpeaking: true,
+  autoSpeakMyMic: false,
+  autoSpeakOther: false,
   duckOriginalAudio: true,
   duckRatio: 0.25,
 };
@@ -154,6 +160,8 @@ interface HearStoreState extends AppSnapshot {
   speakingSegmentId: string | null;
   preparingCloneSegmentId: string | null;
   cloneStates: Record<string, "cloning" | "ready">;
+  outputDevices: OutputAudioDevice[];
+  hasMyVoiceSample: boolean;
   seekNonce: number;
   seekTargetMs: number;
   searchQuery: string;
@@ -244,6 +252,9 @@ interface HearStoreState extends AppSnapshot {
   ) => Promise<Uint8Array | null>;
   playSegmentOriginal: (id: string) => Promise<void>;
   stopSpeakingSegment: () => void;
+  refreshOutputDevices: () => Promise<void>;
+  saveMyVoiceSample: (segmentId?: string) => Promise<boolean>;
+  clearMyVoiceSample: () => Promise<void>;
   generateSummary: () => Promise<void>;
   importMediaFile: () => Promise<void>;
   cancelImportMedia: () => Promise<void>;
@@ -284,6 +295,8 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   speakingSegmentId: null,
   preparingCloneSegmentId: null,
   cloneStates: {},
+  outputDevices: [],
+  hasMyVoiceSample: false,
   seekNonce: 0,
   seekTargetMs: 0,
   searchQuery: "",
@@ -319,11 +332,16 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         tts = { ...tts, useVoiceClone: true };
         void tauriInvoke("set_tts_settings", { settings: tts });
       }
-      set({ ...snap, ttsSettings: tts });
+      set({ ...snap, ttsSettings: { ...DEFAULT_TTS, ...tts } });
     }
     const sources = await tauriInvoke<AudioSourceOption[]>("list_audio_sources");
     if (sources && sources.length > 0) {
       set({ audioSources: sources });
+    }
+    await get().refreshOutputDevices();
+    const hasSample = await tauriInvoke<boolean>("get_my_voice_sample_status");
+    if (typeof hasSample === "boolean") {
+      set({ hasMyVoiceSample: hasSample });
     }
     if (isTauriRuntime()) {
       const { listen } = await import("@tauri-apps/api/event");
@@ -345,11 +363,47 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
           seg.translatedText !== "翻译中…" &&
           get().ttsSettings.useVoiceClone
         ) {
-          void get().prepareSegmentClone(
-            seg.id,
-            seg.translatedText.trim(),
-            seg.targetLang
-          );
+          const tts = get().ttsSettings;
+          const autoMyMic =
+            tts.enabled && tts.autoSpeakMyMic && seg.channel === "mic";
+          const autoOther =
+            tts.enabled && tts.autoSpeakOther && seg.channel === "system";
+          if (autoMyMic || autoOther) {
+            const target =
+              tts.routingMode === "meeting" && seg.channel === "mic"
+                ? "meeting_mic"
+                : "local";
+            set((s) => ({
+              cloneStates: { ...s.cloneStates, [seg.id]: "cloning" },
+              speakingSegmentId: seg.id,
+            }));
+            void tauriInvoke("play_cloned_segment_to_device", {
+              id: seg.id,
+              text: seg.translatedText.trim(),
+              lang: seg.targetLang,
+              target,
+            })
+              .then(() => {
+                set((s) => ({
+                  cloneStates: { ...s.cloneStates, [seg.id]: "ready" },
+                  speakingSegmentId:
+                    s.speakingSegmentId === seg.id ? null : s.speakingSegmentId,
+                }));
+              })
+              .catch(() => {
+                set((s) => ({
+                  cloneStates: { ...s.cloneStates, [seg.id]: "ready" },
+                  speakingSegmentId:
+                    s.speakingSegmentId === seg.id ? null : s.speakingSegmentId,
+                }));
+              });
+          } else {
+            void get().prepareSegmentClone(
+              seg.id,
+              seg.translatedText.trim(),
+              seg.targetLang
+            );
+          }
         }
       });
       await listen<{ source: string; translation: string }>("subtitle:partial", (ev) => {
@@ -1118,8 +1172,43 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     }
     set({ speakingSegmentId: id });
 
-    // 若开启了 Qwen3-TTS 原声克隆且在桌面端，优先使用预克隆缓存或等待克隆完成后播放
+    // 若开启了 Qwen3-TTS 原声克隆且在桌面端，优先使用指定设备输出（会议虚拟麦 / 物理耳机 / 面对面自动静音麦）
     if (isTauriRuntime() && get().ttsSettings.useVoiceClone) {
+      const tts = get().ttsSettings;
+      const seg = get().segments.find((s) => s.id === id);
+      const needsDeviceRoute =
+        tts.routingMode === "meeting" ||
+        (tts.outputDeviceId && tts.outputDeviceId !== "default") ||
+        (tts.muteMicWhileSpeaking && get().mode === "recording");
+
+      if (needsDeviceRoute) {
+        set({ preparingCloneSegmentId: id });
+        try {
+          const target =
+            tts.routingMode === "meeting" && seg?.channel === "mic"
+              ? "meeting_mic"
+              : "local";
+          await tauriInvoke("play_cloned_segment_to_device", {
+            id,
+            text: trimmed,
+            lang,
+            target,
+          });
+          set((s) => ({
+            cloneStates: { ...s.cloneStates, [id]: "ready" },
+            preparingCloneSegmentId:
+              s.preparingCloneSegmentId === id ? null : s.preparingCloneSegmentId,
+            speakingSegmentId:
+              s.speakingSegmentId === id ? null : s.speakingSegmentId,
+          }));
+          return;
+        } catch {
+          if (get().preparingCloneSegmentId === id) {
+            set({ preparingCloneSegmentId: null });
+          }
+        }
+      }
+
       set({ preparingCloneSegmentId: id });
       try {
         const wav = await get().prepareSegmentClone(id, trimmed, lang);
@@ -1134,12 +1223,24 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
           activeCloneUrl = url;
           const audio = new Audio(url);
           activeCloneAudio = audio;
+          const muteMic =
+            get().ttsSettings.muteMicWhileSpeaking && get().mode === "recording";
+          if (muteMic) void tauriInvoke("set_mic_muted", { muted: true });
+          const releaseMute = () => {
+            if (muteMic) {
+              window.setTimeout(() => {
+                void tauriInvoke("set_mic_muted", { muted: false });
+              }, 220);
+            }
+          };
           audio.onended = () => {
             stopActiveCloneAudio();
+            releaseMute();
             if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
           };
           audio.onerror = () => {
             stopActiveCloneAudio();
+            releaseMute();
             if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
           };
           await audio.play();
@@ -1192,10 +1293,61 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
 
   stopSpeakingSegment: () => {
     stopActiveCloneAudio();
+    if (isTauriRuntime()) {
+      void tauriInvoke("stop_device_tts");
+    }
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
     set({ speakingSegmentId: null, preparingCloneSegmentId: null });
+  },
+
+  refreshOutputDevices: async () => {
+    if (!isTauriRuntime()) return;
+    try {
+      const devices = await tauriInvoke<OutputAudioDevice[]>("list_output_devices");
+      if (devices) {
+        set({ outputDevices: devices });
+        // 如果用户还没选过会议虚拟麦，且系统里检测到了 VB-Cable / Virtual 设备，自动预填方便一键开启会议同传
+        const tts = get().ttsSettings;
+        if (!tts.meetingMicOutputDeviceId) {
+          const virt = devices.find((d) => d.isVirtual);
+          if (virt) {
+            const next = { ...tts, meetingMicOutputDeviceId: virt.id };
+            set({ ttsSettings: next });
+            void tauriInvoke("set_tts_settings", { settings: next });
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  },
+
+  saveMyVoiceSample: async (segmentId) => {
+    if (!isTauriRuntime()) return false;
+    try {
+      const ok = await tauriInvoke<boolean>("save_my_voice_sample", {
+        segmentId: segmentId ?? null,
+      });
+      if (ok) {
+        set({
+          hasMyVoiceSample: true,
+          sessionNotice: "已锁定「我的声纹样本」，会议与面对面克隆将优先复用你的声纹。",
+        });
+        return true;
+      }
+      return false;
+    } catch (e) {
+      set({ sessionError: String(e) });
+      return false;
+    }
+  },
+
+  clearMyVoiceSample: async () => {
+    if (!isTauriRuntime()) return;
+    await tauriInvoke("clear_my_voice_sample");
+    set({ hasMyVoiceSample: false });
   },
 
   generateSummary: async () => {

@@ -79,10 +79,24 @@ export interface ServiceProbeResult {
   error?: string;
 }
 
+export type TtsRoutingMode = "face_to_face" | "meeting";
+
+export interface OutputAudioDevice {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  isVirtual: boolean;
+}
+
 export interface TtsOutputSettings {
   enabled: boolean;
   useVoiceClone: boolean;
+  routingMode: TtsRoutingMode;
   outputDeviceId: string;
+  meetingMicOutputDeviceId: string;
+  muteMicWhileSpeaking: boolean;
+  autoSpeakMyMic: boolean;
+  autoSpeakOther: boolean;
   duckOriginalAudio: boolean;
   duckRatio: number;
 }

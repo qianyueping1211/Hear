@@ -1,3 +1,5 @@
+pub mod output;
+
 use crate::logger;
 use crate::recorder::{encode_wav_16k_mono, StreamingWavRecorder};
 use crate::state::{AudioCaptureMode, AudioChannel, EngineSource, SubtitleSegment};
@@ -824,7 +826,12 @@ mod win_wasapi {
                 }
 
                 let mut level = 0.0f32;
+                let mic_muted_now = rt.mic_muted.load(Ordering::Relaxed);
                 for lane in &mut lanes {
+                    if lane.channel == AudioChannel::Mic && mic_muted_now {
+                        lane.discard_packets();
+                        continue;
+                    }
                     let l = lane.drain_packets(&seg_tx);
                     if l > level {
                         level = l;

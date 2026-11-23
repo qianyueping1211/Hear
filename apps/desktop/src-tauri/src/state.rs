@@ -180,7 +180,18 @@ impl Default for ServiceProbeResult {
 pub struct TtsOutputSettings {
     pub enabled: bool,
     pub use_voice_clone: bool,
+    /// 使用场景："face_to_face"（面对面交流，播给身边人听并静音麦防回声）| "meeting"（会议同传，对方译文送耳机，我的克隆译文送虚拟麦克风）
+    pub routing_mode: String,
+    /// 本地收听输出设备名（"default" 表示系统默认耳机/扬声器）
     pub output_device_id: String,
+    /// 会议同传时把「克隆我的译文」送给对方（腾讯会议/Teams/微信）的虚拟麦克风输入设备（如 CABLE Input）
+    pub meeting_mic_output_device_id: String,
+    /// 面对面播报译文时自动静音麦克风，避免喇叭声回环录入
+    pub mute_mic_while_speaking: bool,
+    /// 我说的话翻译完成后自动克隆并播报（面对面播给老外，会议模式送给虚拟麦克风）
+    pub auto_speak_my_mic: bool,
+    /// 对方说的话翻译完成后自动播报到我的耳机
+    pub auto_speak_other: bool,
     pub duck_original_audio: bool,
     pub duck_ratio: f32,
 }
@@ -190,7 +201,12 @@ impl Default for TtsOutputSettings {
         Self {
             enabled: false,
             use_voice_clone: true,
+            routing_mode: "face_to_face".to_string(),
             output_device_id: "default".to_string(),
+            meeting_mic_output_device_id: String::new(),
+            mute_mic_while_speaking: true,
+            auto_speak_my_mic: false,
+            auto_speak_other: false,
             duck_original_audio: true,
             duck_ratio: 0.25,
         }

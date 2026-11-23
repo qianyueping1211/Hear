@@ -188,6 +188,7 @@ export function MainApp() {
     editSegmentSpeaker,
     playSegmentOriginal,
     speakSegment,
+    updateTtsSettings,
     generateSummary,
     importMediaFile,
     cancelImportMedia,
@@ -416,6 +417,61 @@ export function MainApp() {
           <span>新版本 v{updateInfo.latestVersion}</span>
         </button>
       )}
+
+      {/* 语言转换前面的「声音克隆」快捷开关（开/关 + 面对面/会议同传模式切换） */}
+      <div className="h-9 inline-flex items-center rounded-lg border border-white/10 bg-surface-800 overflow-hidden text-xs">
+        <button
+          type="button"
+          onClick={() =>
+            void updateTtsSettings({
+              useVoiceClone: !ttsSettings.useVoiceClone,
+            })
+          }
+          title={
+            ttsSettings.useVoiceClone
+              ? "声音克隆已开启（点击关闭）"
+              : "声音克隆已关闭（点击开启）"
+          }
+          className={`h-full px-2.5 inline-flex items-center gap-1.5 transition ${
+            ttsSettings.useVoiceClone
+              ? "bg-brand-500/25 text-brand-300 hover:bg-brand-500/35"
+              : "text-slate-400 hover:text-white hover:bg-white/5"
+          }`}
+        >
+          <Volume2 className="w-3.5 h-3.5" />
+          <span>声音克隆</span>
+        </button>
+        {ttsSettings.useVoiceClone && (
+          <button
+            type="button"
+            onClick={() => {
+              const nextMode =
+                ttsSettings.routingMode === "meeting" ? "face_to_face" : "meeting";
+              if (
+                nextMode === "meeting" &&
+                !ttsSettings.meetingMicOutputDeviceId
+              ) {
+                void updateTtsSettings({ routingMode: nextMode });
+                setSettingsOpen(true, "audio");
+              } else {
+                void updateTtsSettings({ routingMode: nextMode });
+              }
+            }}
+            title={
+              ttsSettings.routingMode === "meeting"
+                ? "当前：会议同传模式（我的克隆译文送到虚拟麦克风，对方译文送到耳机；点击切回面对面）"
+                : "当前：面对面模式（播报克隆译文给身边人听并自动静音麦防回声；点击切换到会议同传）"
+            }
+            className={`h-full px-2 border-l border-white/10 text-[11px] font-medium transition ${
+              ttsSettings.routingMode === "meeting"
+                ? "bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30"
+                : "text-slate-300 hover:text-white hover:bg-white/5"
+            }`}
+          >
+            {ttsSettings.routingMode === "meeting" ? "会议同传" : "面对面"}
+          </button>
+        )}
+      </div>
 
       <div className="h-9 flex items-center gap-1 rounded-lg bg-surface-800 border border-white/10 px-2.5 text-xs">
         <select

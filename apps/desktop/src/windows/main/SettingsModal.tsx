@@ -158,6 +158,11 @@ export function SettingsModal() {
     localServerError,
     subtitleStyle,
     ttsSettings,
+    outputDevices,
+    hasMyVoiceSample,
+    refreshOutputDevices,
+    saveMyVoiceSample,
+    clearMyVoiceSample,
     glossary,
     updateConfig,
     updateInfo,
@@ -838,59 +843,253 @@ export function SettingsModal() {
           )}
 
           {activeSettingsTab === "audio" && (
-            <div className="rounded-xl bg-surface-800/60 border border-white/10 p-4 space-y-4">
-              <label className="flex items-center justify-between">
-                <div>
-                  <div className="font-medium text-white">开启桌面译文朗读（默认关闭，仅看字幕）</div>
-                  <div className="text-xs text-slate-400">
-                    系统内录会自动排除听见自身进程树音频，防止朗读声回环录入。
+            <div className="space-y-4">
+              {/* 场景切换：场景1 面对面 vs 场景2 会议同传 */}
+              <div className="rounded-xl bg-surface-800/60 border border-white/10 p-4 space-y-3">
+                <div className="font-semibold text-white">同传与声音克隆使用场景</div>
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => updateTtsSettings({ routingMode: "face_to_face" })}
+                    className={`p-3 rounded-lg border text-left space-y-1 transition ${
+                      ttsSettings.routingMode !== "meeting"
+                        ? "bg-brand-500/20 border-brand-400/60 text-white"
+                        : "bg-surface-900/70 border-white/10 text-slate-300 hover:border-white/20"
+                    }`}
+                  >
+                    <div className="font-semibold">场景 1：面对面交流</div>
+                    <div className="text-[11px] text-slate-400 leading-relaxed">
+                      我和老外在一起：把我说的中文克隆成英文外放给对方听，播报期间自动静音麦克风防止回声。
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateTtsSettings({ routingMode: "meeting" })}
+                    className={`p-3 rounded-lg border text-left space-y-1 transition ${
+                      ttsSettings.routingMode === "meeting"
+                        ? "bg-emerald-500/20 border-emerald-400/60 text-white"
+                        : "bg-surface-900/70 border-white/10 text-slate-300 hover:border-white/20"
+                    }`}
+                  >
+                    <div className="font-semibold">场景 2：会议同传（腾讯会议 / Teams / 微信）</div>
+                    <div className="text-[11px] text-slate-400 leading-relaxed">
+                      对方说外语 → 翻译送到我的耳机；我说中文 → 克隆我的英文送到虚拟麦克风给会议对方听。
+                    </div>
+                  </button>
+                </div>
+
+                {/* 输出设备路由配置 */}
+                <div className="pt-2 space-y-3 border-t border-white/10">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-slate-200">输出设备路由</span>
+                    <button
+                      type="button"
+                      onClick={() => void refreshOutputDevices()}
+                      className="px-2.5 py-1 rounded bg-surface-900 border border-white/10 hover:bg-surface-700 text-[11px] text-slate-300"
+                    >
+                      刷新设备列表
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2.5 text-xs">
+                    <label className="space-y-1">
+                      <span className="text-slate-300">
+                        {ttsSettings.routingMode === "meeting"
+                          ? "我收听对方译文的设备（物理耳机/扬声器）"
+                          : "译文播报输出设备"}
+                      </span>
+                      <select
+                        value={ttsSettings.outputDeviceId || "default"}
+                        onChange={(e) =>
+                          updateTtsSettings({ outputDeviceId: e.target.value })
+                        }
+                        className="w-full rounded-lg bg-surface-900 border border-white/10 px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500"
+                      >
+                        <option value="default">系统默认扬声器 / 耳机</option>
+                        {outputDevices.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                            {d.isDefault ? "（默认）" : ""}
+                            {d.isVirtual ? "（虚拟声卡）" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    {ttsSettings.routingMode === "meeting" && (
+                      <div className="space-y-2">
+                        <label className="space-y-1 block">
+                          <span className="text-emerald-300 font-medium">
+                            把「克隆我的译文」送给会议对方的虚拟麦克风设备（如 VB-Cable Input）
+                          </span>
+                          <select
+                            value={ttsSettings.meetingMicOutputDeviceId || ""}
+                            onChange={(e) =>
+                              updateTtsSettings({
+                                meetingMicOutputDeviceId: e.target.value,
+                              })
+                            }
+                            className="w-full rounded-lg bg-surface-900 border border-emerald-500/30 px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-400"
+                          >
+                            <option value="">（未选择：暂退回默认设备）</option>
+                            {outputDevices.map((d) => (
+                              <option key={d.id} value={d.id}>
+                                {d.name}
+                                {d.isVirtual ? " ★ 推荐虚拟声卡" : ""}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        {!outputDevices.some((d) => d.isVirtual) ? (
+                          <div className="rounded-lg bg-amber-500/10 border border-amber-400/30 p-2.5 text-[11px] text-amber-200 leading-relaxed">
+                            未检测到虚拟声卡（如 VB-Cable）。要让腾讯会议 / Teams / 微信只听到你克隆后的译文而不听到原声，请先安装免费的 VB-Cable 虚拟声卡，然后在此处选择 <span className="font-mono">CABLE Input</span>，并在会议软件里把麦克风设为 <span className="font-mono">CABLE Output</span>。
+                          </div>
+                        ) : (
+                          <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200 leading-relaxed">
+                            已检测到虚拟声卡！请在腾讯会议 / Teams / 微信的「麦克风」中选择对应的 <span className="font-mono">CABLE Output</span>，对方即可只听到用你声音克隆出的译文。
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
-                <input
-                  type="checkbox"
-                  checked={ttsSettings.enabled}
-                  onChange={(e) => updateTtsSettings({ enabled: e.target.checked })}
-                  className="w-4 h-4 accent-brand-500"
-                />
-              </label>
+              </div>
 
-              <label className="flex items-center justify-between">
-                <span>优先使用 Qwen3-TTS 声音克隆（不可用时自动退回系统语音）</span>
-                <input
-                  type="checkbox"
-                  checked={ttsSettings.useVoiceClone}
-                  onChange={(e) => updateTtsSettings({ useVoiceClone: e.target.checked })}
-                  className="w-4 h-4 accent-brand-500"
-                />
-              </label>
+              {/* 声音克隆与自动播报开关 */}
+              <div className="rounded-xl bg-surface-800/60 border border-white/10 p-4 space-y-3.5">
+                <label className="flex items-center justify-between">
+                  <div>
+                    <div className="font-medium text-white">开启自动译文朗读总开关</div>
+                    <div className="text-xs text-slate-400">
+                      开启后可在下方按需启用「我说的话自动克隆播报」与「对方译文自动播报」。
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={ttsSettings.enabled}
+                    onChange={(e) => updateTtsSettings({ enabled: e.target.checked })}
+                    className="w-4 h-4 accent-brand-500"
+                  />
+                </label>
 
-              <label className="flex items-center justify-between">
-                <span>播报译文时平滑压低原音频（Audio Ducking）</span>
-                <input
-                  type="checkbox"
-                  disabled={!ttsSettings.enabled}
-                  checked={ttsSettings.duckOriginalAudio}
-                  onChange={(e) =>
-                    updateTtsSettings({ duckOriginalAudio: e.target.checked })
-                  }
-                  className="w-4 h-4 accent-brand-500 disabled:opacity-35"
-                />
-              </label>
+                <label className="flex items-center justify-between">
+                  <span>优先使用 Qwen3-TTS 声音克隆（不可用时自动退回系统语音）</span>
+                  <input
+                    type="checkbox"
+                    checked={ttsSettings.useVoiceClone}
+                    onChange={(e) => updateTtsSettings({ useVoiceClone: e.target.checked })}
+                    className="w-4 h-4 accent-brand-500"
+                  />
+                </label>
 
-              <div className="flex items-center justify-between">
-                <span>压低目标音量：{Math.round(ttsSettings.duckRatio * 100)}%</span>
-                <input
-                  type="range"
-                  disabled={!ttsSettings.enabled || !ttsSettings.duckOriginalAudio}
-                  min={0.1}
-                  max={0.8}
-                  step={0.05}
-                  value={ttsSettings.duckRatio}
-                  onChange={(e) =>
-                    updateTtsSettings({ duckRatio: Number(e.target.value) })
-                  }
-                  className="w-48 accent-brand-500 disabled:opacity-35"
-                />
+                <label className="flex items-center justify-between">
+                  <span>
+                    我说的话译完自动克隆播报（
+                    {ttsSettings.routingMode === "meeting" ? "送给会议虚拟麦" : "面对面外放"}）
+                  </span>
+                  <input
+                    type="checkbox"
+                    disabled={!ttsSettings.enabled}
+                    checked={ttsSettings.autoSpeakMyMic}
+                    onChange={(e) =>
+                      updateTtsSettings({ autoSpeakMyMic: e.target.checked })
+                    }
+                    className="w-4 h-4 accent-brand-500 disabled:opacity-35"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between">
+                  <span>对方说的话译完自动播报到我的耳机</span>
+                  <input
+                    type="checkbox"
+                    disabled={!ttsSettings.enabled}
+                    checked={ttsSettings.autoSpeakOther}
+                    onChange={(e) =>
+                      updateTtsSettings({ autoSpeakOther: e.target.checked })
+                    }
+                    className="w-4 h-4 accent-brand-500 disabled:opacity-35"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between">
+                  <span>面对面播报译文时自动静音麦克风（防回声循环）</span>
+                  <input
+                    type="checkbox"
+                    checked={ttsSettings.muteMicWhileSpeaking}
+                    onChange={(e) =>
+                      updateTtsSettings({ muteMicWhileSpeaking: e.target.checked })
+                    }
+                    className="w-4 h-4 accent-brand-500"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between">
+                  <span>播报译文时平滑压低原音频（Audio Ducking）</span>
+                  <input
+                    type="checkbox"
+                    disabled={!ttsSettings.enabled}
+                    checked={ttsSettings.duckOriginalAudio}
+                    onChange={(e) =>
+                      updateTtsSettings({ duckOriginalAudio: e.target.checked })
+                    }
+                    className="w-4 h-4 accent-brand-500 disabled:opacity-35"
+                  />
+                </label>
+
+                <div className="flex items-center justify-between">
+                  <span>压低目标音量：{Math.round(ttsSettings.duckRatio * 100)}%</span>
+                  <input
+                    type="range"
+                    disabled={!ttsSettings.enabled || !ttsSettings.duckOriginalAudio}
+                    min={0.1}
+                    max={0.8}
+                    step={0.05}
+                    value={ttsSettings.duckRatio}
+                    onChange={(e) =>
+                      updateTtsSettings({ duckRatio: Number(e.target.value) })
+                    }
+                    className="w-48 accent-brand-500 disabled:opacity-35"
+                  />
+                </div>
+              </div>
+
+              {/* 固定我的声纹样本（开会免首句提取延迟） */}
+              <div className="rounded-xl bg-surface-800/60 border border-white/10 p-4 flex items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="font-medium text-white flex items-center gap-2">
+                    <span>我的固定声纹样本</span>
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-[11px] ${
+                        hasMyVoiceSample
+                          ? "bg-emerald-500/20 text-emerald-300"
+                          : "bg-surface-900 text-slate-400"
+                      }`}
+                    >
+                      {hasMyVoiceSample ? "已锁定" : "未设置"}
+                    </span>
+                  </div>
+                  <div className="text-xs text-slate-400">
+                    录音中说一句 2~5 秒清晰的话后点击锁定，开会同传时从第一句起就用你的原声克隆。
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => void saveMyVoiceSample()}
+                    className="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-white text-xs font-medium"
+                  >
+                    用最近一句锁定
+                  </button>
+                  {hasMyVoiceSample && (
+                    <button
+                      type="button"
+                      onClick={() => void clearMyVoiceSample()}
+                      className="px-2.5 py-1.5 rounded-lg bg-surface-900 border border-white/10 text-slate-300 hover:text-rose-300 text-xs"
+                    >
+                      清除
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}
