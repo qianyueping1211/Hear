@@ -34,8 +34,10 @@ pub struct AppRuntime {
     pub segment_wavs: Mutex<std::collections::HashMap<String, Vec<u8>>>,
     /// 声音克隆单并发闸门：防止多句预克隆或用户点击并发打到服务端触发 503 SERVICE_BUSY
     pub clone_gate: Mutex<()>,
-    /// 面对面播报译文时临时静音麦克风采集，防止扬声器声音回环录入
+    /// 面对面播报译文时临时静音全路采集，防止扬声器声音经麦克风或系统内录回环录入
     pub mic_muted: Arc<AtomicBool>,
+    /// 串行播放闸门：保证多句连续自动播报按顺序逐句播放且不互相提前解除静音
+    pub tts_play_gate: Mutex<()>,
     /// 当前正在通过指定输出设备（如虚拟麦克风）播放的 TTS 取消标记
     pub tts_cancel: Mutex<Option<Arc<AtomicBool>>>,
     pub import_cancel: AtomicBool,
@@ -51,6 +53,7 @@ impl AppRuntime {
             segment_wavs: Mutex::new(std::collections::HashMap::new()),
             clone_gate: Mutex::new(()),
             mic_muted: Arc::new(AtomicBool::new(false)),
+            tts_play_gate: Mutex::new(()),
             tts_cancel: Mutex::new(None),
             import_cancel: AtomicBool::new(false),
         }
@@ -760,12 +763,17 @@ async fn play_cloned_segment_to_device(
                 }
             }
         };
-        // 会议模式发到独立虚拟麦时不静音我的麦（或由虚拟声卡隔离）；面对面外放时按开关自动静音麦防回声
-        let mute_mic = !is_meeting && tts.mute_mic_while_speaking;
-        (dev, mute_mic)
+        // 会议模式发到独立虚拟麦时不静音采集；面对面外放（或发往物理扬声器）时静音全部采集通道防回声与内录回传
+        let routed_to_virtual_mic =
+            is_meeting && target == "meeting_mic" && !tts.meeting_mic_output_device_id.trim().is_empty()
+            || (is_meeting && target == "auto" && seg_ch == Some(AudioChannel::Mic) && !tts.meeting_mic_output_device_id.trim().is_empty());
+        let mute_capture = !routed_to_virtual_mic && tts.mute_mic_while_speaking;
+        (dev, mute_capture)
     };
 
-    // 取消上一段仍在播放的设备输出
+    // 串行排队播报：避免连续多句自动播报互相掐断或提前解除静音
+    let _play_guard = rt.tts_play_gate.lock().await;
+
     let cancel = Arc::new(AtomicBool::new(false));
     {
         let mut slot = rt.tts_cancel.lock().await;
@@ -776,6 +784,8 @@ async fn play_cloned_segment_to_device(
 
     if should_mute_mic {
         rt.mic_muted.store(true, Ordering::Relaxed);
+        // 提前 40ms 让采集线程排空缓冲并丢弃未成形片段
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
     }
     let cancel_for_play = cancel.clone();
     let res = tokio::task::spawn_blocking(move || {
@@ -785,8 +795,8 @@ async fn play_cloned_segment_to_device(
     .map_err(|e| format!("播放线程异常：{}", e))?;
 
     if should_mute_mic {
-        // 留 220ms 尾音消散窗口再恢复麦克风收音，避免房间残响被录进去
-        tokio::time::sleep(std::time::Duration::from_millis(220)).await;
+        // 留 450ms 声卡回环缓冲与房间残响消散窗口再恢复收音，彻底杜绝回声回传
+        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
         rt.mic_muted.store(false, Ordering::Relaxed);
     }
     res

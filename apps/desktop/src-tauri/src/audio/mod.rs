@@ -269,6 +269,12 @@ impl LaneProcessor {
         }
     }
 
+    fn discard_current(&mut self) {
+        self.frame_buf.clear();
+        self.hangover = 0;
+        self.segmenter.discard_current();
+    }
+
     fn push_interleaved<F>(&mut self, interleaved: &[f32], mut on_frame: F)
     where
         F: FnMut(&[f32], bool, f32, Option<SegmentEvent>),
@@ -826,12 +832,18 @@ mod win_wasapi {
                 }
 
                 let mut level = 0.0f32;
-                let mic_muted_now = rt.mic_muted.load(Ordering::Relaxed);
-                for lane in &mut lanes {
-                    if lane.channel == AudioChannel::Mic && mic_muted_now {
+                let tts_muted_now = rt.mic_muted.load(Ordering::Relaxed);
+                if tts_muted_now {
+                    // 面对面外放播报译文期间：同时屏蔽 Mic 与 System（WASAPI Loopback）两路采集并丢弃半截 VAD 缓冲，
+                    // 防止电脑扬声器播出的克隆译文经系统内录或麦克风回传重复识别。
+                    for lane in &mut lanes {
                         lane.discard_packets();
-                        continue;
+                        lane.processor.discard_current();
                     }
+                    std::thread::sleep(Duration::from_millis(12));
+                    continue;
+                }
+                for lane in &mut lanes {
                     let l = lane.drain_packets(&seg_tx);
                     if l > level {
                         level = l;

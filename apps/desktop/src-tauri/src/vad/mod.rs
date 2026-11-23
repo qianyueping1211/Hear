@@ -110,6 +110,15 @@ impl Segmenter {
         None
     }
 
+    /// 丢弃当前正在累积的语音与预卷缓冲（播报译文静音期间调用，避免回声残片拼成误识别）
+    pub fn discard_current(&mut self) {
+        self.in_speech = false;
+        self.silence_frames = 0;
+        self.frames_since_partial = 0;
+        self.speech.clear();
+        self.preroll.clear();
+    }
+
     pub fn flush_final(&mut self) -> Option<SegmentEvent> {
         if !self.in_speech || self.speech.is_empty() {
             return None;
