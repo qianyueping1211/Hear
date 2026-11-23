@@ -736,6 +736,7 @@ final class LiveSession: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.inBackground = false
+                self.refreshHeadset()
                 // 回到前台：把后台攒下的译文接着读出来
                 self.kickReader()
             }
@@ -768,9 +769,23 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 朗读输出（扬声器 / 耳机）
 
-    /// 刷新“是否连着耳机”（设置页用来决定能不能选耳机麦克风）
+    /// 刷新“是否连着耳机”，并在耳机已断开时实时同步回手机扬声器与手机麦克风
     func refreshHeadset() {
         headsetConnected = AudioRoute.headphonesLikelyConnected()
+        guard !headsetConnected else { return }
+        let usedHeadsetOutput = outputMode == .headphones
+        let usedHeadsetInput = inputSource == "headset"
+        if usedHeadsetOutput {
+            outputMode = .speaker
+            if isRunning { stopReading() }
+            AudioRoute.apply(.speaker)
+        }
+        if usedHeadsetInput {
+            inputSource = "phone"
+        }
+        if usedHeadsetOutput || usedHeadsetInput {
+            hearLog("耳机已断开，收音或朗读已自动改回手机")
+        }
     }
 
     /// 切换声音来源；正在聆听时马上重新接麦克风
@@ -794,22 +809,10 @@ final class LiveSession: ObservableObject {
             AudioRoute.apply(.headphones)
             if switched { hearLog("检测到耳机，朗读改为耳机") }
             kickReader()
-        case .oldDeviceUnavailable:
+        case .oldDeviceUnavailable, .categoryChange, .override, .routeConfigurationChange:
             refreshHeadset()
-            guard !headsetConnected else { return }
-            let usedHeadsetOutput = outputMode == .headphones
-            let usedHeadsetInput = inputSource == "headset"
-            if usedHeadsetOutput {
-                outputMode = .speaker
-                if isRunning { stopReading() }
-                AudioRoute.apply(.speaker)
-            }
-            if usedHeadsetInput { inputSource = "phone" }
-            if usedHeadsetOutput || usedHeadsetInput {
-                hearLog("耳机已断开，收音或朗读改回手机")
-            }
         default:
-            break
+            refreshHeadset()
         }
     }
 
