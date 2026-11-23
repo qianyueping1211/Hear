@@ -383,7 +383,7 @@ final class CloudSync: ObservableObject {
         scheduleSync(delay: 0)
     }
 
-    private func scheduleSync(delay: Double) {
+    func scheduleSync(delay: Double) {
         guard enabled else { return }
         pending?.cancel()
         pending = Task { [weak self] in
