@@ -435,7 +435,7 @@ async fn clone_segment_speech(
     };
     let wav_bytes = rt
         .cloud
-        .clone_voice(&clone_url, ref_wav, &ref_text, &trimmed, &lang, tok_opt)
+        .clone_voice(&clone_url, &trimmed, &lang, Some(ref_wav), &ref_text, tok_opt)
         .await?;
     Ok(tauri::ipc::Response::new(wav_bytes))
 }
