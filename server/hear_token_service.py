@@ -158,7 +158,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Strict-Transport-Security", "max-age=31536000")
 
     def _send(self, status, body=b"", content_type="application/json; charset=utf-8", headers=None):
-        if not getattr(self, "_body_read", True) and (self.headers.get("Content-Length") or "0") != "0":
+        if not getattr(self, "_body_read", True) and (
+            (self.headers.get("Content-Length") or "0") != "0" or self.headers.get("Transfer-Encoding")
+        ):
             # 请求体没读：这条连接不能再复用
             self.close_connection = True
         try:
@@ -254,10 +256,13 @@ class Handler(BaseHTTPRequestHandler):
             return True
         host = self.headers.get("Host") or ""
         try:
-            netloc = urlsplit(origin).netloc
+            parsed = urlsplit(origin)
         except ValueError:
             return False
-        return netloc.lower() == host.lower() or origin in self.server.allowed_origins
+        if origin in self.server.allowed_origins:
+            return True
+        expected_scheme = "https" if (self.server.tls or self.server.secure_cookie) else "http"
+        return parsed.scheme.lower() == expected_scheme and parsed.netloc.lower() == host.lower()
 
     # ------------------------------------------------------------ 分发
 
@@ -697,7 +702,14 @@ def cmd_gen_cert(store, args):
             .not_valid_after(now + datetime.timedelta(days=825))
             .add_extension(x509.SubjectAlternativeName(names), critical=False)
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.KeyUsage(
+                digital_signature=True, content_commitment=False, key_encipherment=False,
+                data_encipherment=False, key_agreement=True, key_cert_sign=False,
+                crl_sign=False, encipher_only=False, decipher_only=False,
+            ), critical=True)
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()), critical=False)
             .sign(key, hashes.SHA256()))
     for path in (args.cert, args.key):
         if os.path.exists(path):

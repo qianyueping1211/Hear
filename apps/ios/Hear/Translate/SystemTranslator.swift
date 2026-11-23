@@ -9,12 +9,13 @@ import Translation
 ///  2) 语言包必须装好。装语言包只有一个办法：给视图挂 `.translationTask`，
 ///     由系统来弹下载框；自己 new 一个 TranslationSession 只能翻译“已经装好”的语言，
 ///     没装的话翻译时会报 unsupportedSourceLanguage。
-final class SystemTranslator {
+actor SystemTranslator {
     enum Availability { case installed, needsDownload, unsupported }
 
     /// 苹果翻译支持的语言标识（系统自己列出来的，最准）
     private var supportedIDs: [Locale.Language] = []
     private var supportedLoaded = false
+    private var loadTask: Task<[Locale.Language], Never>?
 
     /// 每个语言最后用的标识（找过一次就记下来）
     private var resolved: [String: Locale.Language] = [:]
@@ -22,11 +23,22 @@ final class SystemTranslator {
     /// 已经建好的会话（按方向缓存）
     private var sessions: [String: AnyObject] = [:]
 
-    /// 读一次系统支持的语言列表
+    /// 读一次系统支持的语言列表（并发调用共享同一 Task，避免未加载完就置位）
     func loadSupportedLanguages() async {
-        guard !supportedLoaded else { return }
-        supportedLoaded = true
-        supportedIDs = await LanguageAvailability().supportedLanguages
+        if supportedLoaded { return }
+        let task: Task<[Locale.Language], Never>
+        if let existing = loadTask {
+            task = existing
+        } else {
+            let created = Task { await LanguageAvailability().supportedLanguages }
+            loadTask = created
+            task = created
+        }
+        let langs = await task.value
+        if !supportedLoaded {
+            supportedIDs = langs
+            supportedLoaded = true
+        }
     }
 
     /// 这个语言在苹果翻译里对应哪个写法。

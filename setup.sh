@@ -22,6 +22,7 @@ bash scripts/prepare_assets.sh
 
 # 免费 Apple ID 要求 Bundle ID 全球唯一，这里用你的 Mac 用户名生成一个
 USER_SAFE=$(echo "${USER:-me}" | tr -cd 'a-zA-Z0-9' | tr 'A-Z' 'a-z')
+[ -n "$USER_SAFE" ] || USER_SAFE="me"
 export BUNDLE_ID="${BUNDLE_ID:-com.${USER_SAFE}.hear}"
 export TEAM_ID="${TEAM_ID:-}"
 

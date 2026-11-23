@@ -188,6 +188,13 @@ def _loopback(host):
         return False
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """禁止管理 API 跟随 3xx 重定向，防止网关 Bearer 凭据被转发到第三方或降级目标。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
+
+
 class ManagedAuthenticator:
     mode = "managed"
 
@@ -217,8 +224,9 @@ class ManagedAuthenticator:
         self._log = logger or (lambda message: None)
         if opener is None:
             context = ssl.create_default_context(cafile=ca_file) if ca_file else ssl.create_default_context()
-            # 内部 API 直连，不走系统代理，也不允许代理缓存顶替在线检查
+            # 内部 API 直连，不走系统代理、禁止跟随 3xx 重定向，也不允许代理缓存顶替在线检查
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
+                                                 _NoRedirectHandler(),
                                                  urllib.request.HTTPSHandler(context=context))
         self._opener = opener
         self._lock = threading.Lock()

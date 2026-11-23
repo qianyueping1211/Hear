@@ -31,6 +31,10 @@ $env:PYTHONIOENCODING = "utf-8"
 # 打印一行中文，自己看一眼显示正不正常（还是乱码就是这个控制台代码页的问题）
 Write-Host "  中文显示测试：听见（正常应该就是这行字）" -ForegroundColor DarkGray
 try { [Console]::Out.Flush() } catch {}
+function Say($t)  { Write-Host "==> $t" -ForegroundColor Cyan }
+function Step($t) { Write-Host "    $t" -ForegroundColor DarkGray }
+function Die($t)  { Write-Host "!! $t" -ForegroundColor Red; exit 1 }
+function Quote-Arg([string]$a) { if ($a -match '[\s"]') { '"' + ($a -replace '"', '\"') + '"' } else { $a } }
 $tempCloud = $null      # 临时服务进程（出错时要停掉）
 $cloud = $null          # 正式服务进程
 $ServerDir = $PSScriptRoot                                  # ...\Hear\server
@@ -340,10 +344,6 @@ function Stop-HearOwnedProcess($Process) {
     }
 }
 
-function Say($t)  { Write-Host "==> $t" -ForegroundColor Cyan }
-function Step($t) { Write-Host "    $t" -ForegroundColor DarkGray }
-function Die($t)  { Write-Host "!! $t" -ForegroundColor Red; exit 1 }
-
 # 云端服务依赖的模块缺一个就起不来。旧版 start-hear-cloud.bat 的下载清单里没有新模块，
 # 会出现"hear_cloud.py 是新的、hear_auth.py 不存在"的情况，这里提前说清楚。
 $missingModules = @(@("hear_cloud.py", "hear_auth.py", "hear_http.py", "hear_speaker.py") |
@@ -531,9 +531,9 @@ function Show-LanInfo($port) {
         Write-Host "      通用服务地址 = 上面的 https://电脑IP:8000" -ForegroundColor DarkGray
         Write-Host "      （只填电脑IP:8000 也行，App 会自己补上 https://）" -ForegroundColor DarkGray
         Write-Host ""
-        Write-Host "  想单独连某个模型服务（一般不用）：" -ForegroundColor DarkGray
+        Write-Host "  想单独连某个模型服务（一般不用，直接走 HTTP）：" -ForegroundColor DarkGray
         foreach ($c in $choices) {
-            Write-Host ("      https://{0}:{1}  翻译模型      https://{0}:{2}  克隆模型" -f $c.IP, $script:MtPort, $script:ClonePort) -ForegroundColor DarkGray
+            Write-Host ("      http://{0}:{1}  翻译模型      http://{0}:{2}  克隆模型" -f $c.IP, $script:MtPort, $script:ClonePort) -ForegroundColor DarkGray
         }
         Write-Host ""
         Write-Host "  （手机和电脑要连同一个 Wi-Fi）" -ForegroundColor DarkGray
@@ -615,7 +615,7 @@ function Get-GpuDevice($exe) {
     $names = @()
     foreach ($line in ($out -split "`r?`n")) {
         # 设备行长这样："  Vulkan0: NVIDIA GeForce RTX 4090 (24564 MiB, ...)"
-        if ($line -match '^\s*([^:\s]+):') { $names += $Matches[1] }
+        if ($line -match '^\s*((?:Vulkan|CUDA|ROCm|HIP|SYCL|OpenCL|Metal)\d*):') { $names += $Matches[1] }
     }
     $names = @($names | Where-Object { $_ -ne "CPU" -and $_ -ne "" })
     if ($names.Count -eq 0) { return $null }
@@ -776,11 +776,11 @@ if ($want.Count -gt 0) {
             $url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LlamaTag/$name"
         }
         $zip = Join-Path $BinDir $name
-        # GitHub 打不开的话换代理再试
+        # GitHub 打不开的话换代理再试（保留完整原始 URL）
         $mirrors = @($url)
         if ($url -like "https://github.com/*") {
-            $mirrors += ($url -replace "^https://github.com", "https://gh-proxy.com")
-            $mirrors += ($url -replace "^https://github.com", "https://ghproxy.net")
+            $mirrors += "https://gh-proxy.com/$url"
+            $mirrors += "https://ghproxy.net/$url"
         }
         Get-File $mirrors $zip | Out-Null
         Say "解压 $name"
@@ -999,7 +999,7 @@ $procs = @()
 # 把模型端口暴露到局域网没有好处（谁都能来连）。
 # 确实需要直连时设 HEAR_OPEN_MODEL_PORTS=1。
 $ModelHost = if ($OpenModelPorts) { "0.0.0.0" } else { "127.0.0.1" }
-$mtArgs = @("-m", (Join-Path $ModelDir $MtFile),
+$mtArgs = @("-m", (Quote-Arg (Join-Path $ModelDir $MtFile)),
              "--host", $ModelHost, "--port", $MtPort, "-c", $Context, "--no-warmup")
 if ($MtDevice -eq "NPU") {
     # OpenVINO 后端：NPU 只支持无状态执行，-np 只能是 1，-c 必须明确给
@@ -1018,8 +1018,8 @@ $mt = Start-Process -FilePath $mtServer -ArgumentList $mtArgs -PassThru -NoNewWi
 $procs += $mt
 Add-ProcessToHearJob $mt
 Record-HearProcess $mt
-$cloneArgs = @("-m", (Join-Path $ModelDir $CloneModelFile),
-                "--mmproj", (Join-Path $ModelDir $CloneMmprojFile),
+$cloneArgs = @("-m", (Quote-Arg (Join-Path $ModelDir $CloneModelFile)),
+                "--mmproj", (Quote-Arg (Join-Path $ModelDir $CloneMmprojFile)),
                 "--host", $ModelHost, "--port", $ClonePort, "-c", $Context, "--no-warmup")
 if ($CloneDevice -eq "GPU") { $cloneArgs += "--device", $gpuDevice }
 
@@ -1067,7 +1067,7 @@ if (-not $mtOk -and $MtDevice -ne "CPU") {
     Start-Sleep -Seconds 2
     $cpuMt = Server-For "CPU"
     if ($cpuMt) {
-        $cpuArgs = @("-m", (Join-Path $ModelDir $MtFile),
+        $cpuArgs = @("-m", (Quote-Arg (Join-Path $ModelDir $MtFile)),
                      "--host", $ModelHost, "--port", $MtPort, "-c", $Context, "--no-warmup")
         $mt = Start-Process -FilePath $cpuMt -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $mtLog -RedirectStandardError "$mtLog.err"
@@ -1084,8 +1084,8 @@ if (-not $cloneOk -and $CloneDevice -ne "CPU") {
     Start-Sleep -Seconds 2
     $cpuClone = Server-For "CPU"
     if ($cpuClone) {
-        $cpuArgs = @("-m", (Join-Path $ModelDir $CloneModelFile),
-                     "--mmproj", (Join-Path $ModelDir $CloneMmprojFile),
+        $cpuArgs = @("-m", (Quote-Arg (Join-Path $ModelDir $CloneModelFile)),
+                     "--mmproj", (Quote-Arg (Join-Path $ModelDir $CloneMmprojFile)),
                      "--host", $ModelHost, "--port", $ClonePort, "-c", $Context, "--no-warmup")
         $clone = Start-Process -FilePath $cpuClone -ArgumentList $cpuArgs -PassThru -NoNewWindow `
                 -RedirectStandardOutput $cloneLog -RedirectStandardError "$cloneLog.err"
@@ -1164,21 +1164,23 @@ if ($authModeNow -eq "managed") {
 }
 Write-Host ""
 
-# 代码页还原（.bat 后面还要用 GBK 的中文）
-try { if ($OrigCodePage) { chcp $OrigCodePage > $null } } catch {}
-
-if ($cloud) {
-    if ($cloud.HasExited) {
-        Write-Host "!! 云端服务退出了（退出码 $($cloud.ExitCode)），原因看上面的红色报错。" -ForegroundColor Red
-        # 退出码非 0，BAT 窗口才会停住等你看报错，不会一闪就关
-        exit 1
-    }
-    else {
-        Wait-Process -Id $cloud.Id
-        $cloud.Refresh()
-        if ($cloud.ExitCode -ne 0) {
+# 在服务运行期间保持 UTF-8 代码页避免中文日志乱码，仅在退出前还原原代码页（.bat 后续用 GBK）
+try {
+    if ($cloud) {
+        if ($cloud.HasExited) {
             Write-Host "!! 云端服务退出了（退出码 $($cloud.ExitCode)），原因看上面的红色报错。" -ForegroundColor Red
+            # 退出码非 0，BAT 窗口才会停住等你看报错，不会一闪就关
             exit 1
         }
+        else {
+            Wait-Process -Id $cloud.Id
+            $cloud.Refresh()
+            if ($cloud.ExitCode -ne 0) {
+                Write-Host "!! 云端服务退出了（退出码 $($cloud.ExitCode)），原因看上面的红色报错。" -ForegroundColor Red
+                exit 1
+            }
+        }
     }
+} finally {
+    try { if ($OrigCodePage) { chcp $OrigCodePage > $null } } catch {}
 }

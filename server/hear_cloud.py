@@ -120,6 +120,41 @@ AUTH = None
 AUTH_MODE = "legacy" if REQUIRE_TOKEN else "off"
 
 
+def _write_private_bytes(path, data):
+    """使用最小权限（0o600）临时文件原子写入敏感文件（私钥、口令等）。"""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    tmp = "%s.tmp.%s" % (path, secrets.token_hex(6))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.name != "nt":
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _sanitize_log_value(value, limit=64):
+    """清洗外部传入用于日志的字符串，防止换行/控制符日志注入。"""
+    text = str(value or "")
+    cleaned = "".join(ch if 32 <= ord(ch) < 127 else "?" for ch in text)
+    return cleaned[:limit]
+
+
 def access_token():
     """这个服务的访问口令（第一次用的时候生成一个，存下来）。"""
     try:
@@ -130,12 +165,7 @@ def access_token():
             if t:
                 return t
         t = secrets.token_hex(16)
-        with open(ACCESS_TOKEN_FILE, "w", encoding="utf-8") as f:
-            f.write(t)
-        try:
-            os.chmod(ACCESS_TOKEN_FILE, 0o600)
-        except Exception:
-            pass
+        _write_private_bytes(ACCESS_TOKEN_FILE, t.encode("utf-8"))
         return t
     except Exception as e:
         log("访问口令生成不了：%s" % e)
@@ -347,6 +377,8 @@ _whisper_inference_lock = threading.Lock()
 def get_sensevoice():
     """懒加载 sherpa-onnx 的 SenseVoice（ONNX，CPU 也能跑）"""
     global _sense
+    if os.environ.get("HEAR_SENSEVOICE", "1").strip().lower() in ("0", "off", "false", "no"):
+        return None
     if _sense is not None:
         return _sense
     with _sense_lock:
@@ -787,30 +819,38 @@ def backend_model(url):
 
 # ---------------------------------------------------------------- HTTP
 
-# 参考音频缓存：同一段参考音频只从手机传一次，后面每句话只带一个 id。
-#
-# 每句话都重传一遍参考音频的话，一段 10 秒的参考就是几百 KB，
-# 一场对话下来白白占掉手机的流量，电脑那边的带宽也被占着——
-# 手机自己的网络都可能被拖累。只留最近 8 段，内存占用可控。
-_REF_CACHE = {}
+# 参考音频缓存：同一段参考音频只从客户端传一次，后面每句话只带一个 id。
+# 按调用方隔离归属、限制单条最大 8 MB、采用 LRU 最多缓存 32 条并缓存 base64 避免重复编码。
+MAX_REF_WAV_BYTES = 8 * 1024 * 1024
+MAX_REF_CACHE_ITEMS = 32
+_REF_CACHE = {}   # rid -> {"owner": str, "b64": str, "size": int}
 _REF_ORDER = []
 _REF_LOCK = threading.Lock()
 
 
-def ref_put(wav_bytes):
+def ref_put(wav_bytes, owner=""):
     rid = os.urandom(8).hex()
+    b64 = base64.b64encode(wav_bytes).decode("ascii")
     with _REF_LOCK:
-        _REF_CACHE[rid] = wav_bytes
+        _REF_CACHE[rid] = {"owner": owner, "b64": b64, "size": len(wav_bytes)}
         _REF_ORDER.append(rid)
-        while len(_REF_ORDER) > 8:
+        while len(_REF_ORDER) > MAX_REF_CACHE_ITEMS:
             old = _REF_ORDER.pop(0)
             _REF_CACHE.pop(old, None)
     return rid
 
 
-def ref_get(rid):
+def ref_get(rid, owner=""):
     with _REF_LOCK:
-        return _REF_CACHE.get(rid)
+        entry = _REF_CACHE.get(rid)
+        if not entry:
+            return None
+        if entry["owner"] and owner and entry["owner"] != owner:
+            return None
+        if rid in _REF_ORDER:
+            _REF_ORDER.remove(rid)
+            _REF_ORDER.append(rid)
+        return entry["b64"]
 
 
 class Handler(RequestHandler):
@@ -1212,6 +1252,14 @@ a{color:#007aff;text-decoration:none}
 
     # -- 声音克隆 --
 
+    def _caller_owner(self):
+        """用于隔离参考音频缓存的调用方标识（口令哈希优先，否则客户端 IP）。"""
+        import hashlib
+        tok = (self.headers.get("X-Hear-Token") or "").strip()
+        if tok:
+            return "tok:" + hashlib.sha256(tok.encode("utf-8")).hexdigest()[:16]
+        return "ip:" + (self.client_address[0] if self.client_address else "")
+
     def clone_reference(self, body):
         """存一段参考音频，返回一个 id；后面的克隆请求只带 id 就行。"""
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -1223,7 +1271,13 @@ a{color:#007aff;text-decoration:none}
             except Exception:
                 self._error("参考音频格式不对", 400)
                 return
+            if not isinstance(req, dict):
+                self._error("参考音频请求体必须是 JSON 对象", 400)
+                return
             b64 = req.get("reference_wav", "")
+            if not isinstance(b64, str):
+                self._error("reference_wav 必须是字符串", 400)
+                return
             try:
                 wav = base64.b64decode(b64) if b64 else b""
             except Exception:
@@ -1232,7 +1286,10 @@ a{color:#007aff;text-decoration:none}
         if not wav:
             self._error("参考音频是空的", 400)
             return
-        rid = ref_put(wav)
+        if len(wav) > MAX_REF_WAV_BYTES:
+            self._error("参考音频超过 8 MB 上限", 413)
+            return
+        rid = ref_put(wav, owner=self._caller_owner())
         log("参考音频已存：%s（%d 字节）" % (rid, len(wav)))
         self._send_json({"id": rid})
 
@@ -1245,26 +1302,42 @@ a{color:#007aff;text-decoration:none}
             # /v1/clone/reference，路径会落到这里）：说清楚，别抛一屏乱码
             self._error("这个接口要的是 JSON（不是 wav）", 400)
             return
-        # 参考音频：手机上先传过一次（/v1/clone/reference），
+        if not isinstance(req, dict):
+            self._error("克隆请求体必须是 JSON 对象", 400)
+            return
+        # 参考音频：先传过一次（/v1/clone/reference），
         # 后面每句话只带 reference_id，不用再传几百 KB。
         ref_b64 = ""
         rid = req.get("reference_id") or ""
+        if rid and not isinstance(rid, str):
+            self._error("reference_id 必须是字符串", 400)
+            return
         if rid:
-            wav = ref_get(rid)
-            if wav:
-                ref_b64 = base64.b64encode(wav).decode("ascii")
+            cached_b64 = ref_get(rid, owner=self._caller_owner())
+            if cached_b64:
+                ref_b64 = cached_b64
             else:
-                # 服务重启过，缓存里的参考音频没了：让手机重新传一次
-                log("参考音频 id 不认识：%s" % rid)
-                self._error("参考音频 id 不认识，请重新上传", 404)
+                # 服务重启过，缓存里的参考音频没了：让客户端重新传一次
+                log("参考音频 id 不认识：%s" % _sanitize_log_value(rid))
+                self._error("参考音频 id 不认识，请重新上传", 404, error_code="REFERENCE_NOT_FOUND")
                 return
         else:
-            ref_b64 = req.get("reference_wav", "")
+            raw_ref = req.get("reference_wav", "")
+            if not isinstance(raw_ref, str):
+                self._error("reference_wav 必须是字符串", 400)
+                return
+            ref_b64 = raw_ref
+        text_in = req.get("text", "")
+        lang_in = req.get("lang", "")
+        ref_text_in = req.get("reference_text", "")
+        if not isinstance(text_in, str) or not isinstance(lang_in, str) or not isinstance(ref_text_in, str):
+            self._error("text / lang / reference_text 必须是字符串", 400)
+            return
         payload = {
-            "input": req.get("text", ""),
-            "lang": req.get("lang", ""),
+            "input": text_in,
+            "lang": lang_in,
             "speaker_ref_b64": ref_b64,
-            "speaker_ref_text": req.get("reference_text", ""),
+            "speaker_ref_text": ref_text_in,
         }
         payload = {k: v for k, v in payload.items() if v}
         # 采样参数必须和手机本地完全一致（top_k 20 / top_p 0.6 / 用模型默认温度）。
@@ -1407,15 +1480,21 @@ def ensure_root(report=log):
             .not_valid_before(now - datetime.timedelta(days=1))
             .not_valid_after(now + datetime.timedelta(days=3650))
             .add_extension(x509.BasicConstraints(ca=True, path_length=1), critical=True)
+            .add_extension(x509.KeyUsage(
+                digital_signature=True, content_commitment=False, key_encipherment=False,
+                data_encipherment=False, key_agreement=False, key_cert_sign=True,
+                crl_sign=True, encipher_only=False, decipher_only=False,
+            ), critical=True)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()), critical=False)
             .sign(key, hashes.SHA256())
         )
         with open(ROOT_CERT, "wb") as f:
             f.write(cert.public_bytes(serialization.Encoding.PEM))
-        with open(ROOT_KEY, "wb") as f:
-            f.write(key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption()))
+        _write_private_bytes(ROOT_KEY, key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()))
         report("签发根证书生成好了：%s" % ROOT_CERT)
         return (cert, key)
     except Exception as e:
@@ -1526,6 +1605,7 @@ def ensure_cert(force=False, report=log):
             pass
         san += [x509.IPAddress(i) for i in ips]
         now = datetime.datetime.now(datetime.timezone.utc)
+        signer_pub = root[0].public_key() if root else key.public_key()
         cert = (
             x509.CertificateBuilder()
             .subject_name(name).issuer_name(issuer)
@@ -1535,7 +1615,14 @@ def ensure_cert(force=False, report=log):
             .not_valid_after(now + datetime.timedelta(days=365))
             .add_extension(x509.SubjectAlternativeName(san), critical=False)
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.KeyUsage(
+                digital_signature=True, content_commitment=False, key_encipherment=True,
+                data_encipherment=False, key_agreement=False, key_cert_sign=False,
+                crl_sign=False, encipher_only=False, decipher_only=False,
+            ), critical=True)
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(signer_pub), critical=False)
             .sign(signer, hashes.SHA256())
         )
         # 证书文件里带上签发根：客户端要能顺着链找到它
@@ -1544,11 +1631,10 @@ def ensure_cert(force=False, report=log):
             pem += root[0].public_bytes(serialization.Encoding.PEM)
         with open(TLS_CERT, "wb") as f:
             f.write(pem)
-        with open(TLS_KEY, "wb") as f:
-            f.write(key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption()))
+        _write_private_bytes(TLS_KEY, key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()))
         report("自签证书生成好了：%s" % TLS_CERT)
         return True
     except Exception as e:
@@ -1590,15 +1676,29 @@ class MixedServer(ThreadingHTTPServer):
     def __init__(self, addr, handler, ssl_context=None):
         super().__init__(addr, handler)
         self.ssl_context = ssl_context
+        self._conn_slots = threading.BoundedSemaphore(int(os.environ.get("HEAR_MAX_CONNECTIONS", "64")))
+
+    def process_request(self, request, client_address):
+        if not self._conn_slots.acquire(blocking=False):
+            self._close(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._conn_slots.release()
+            raise
 
     def process_request_thread(self, request, client_address):
         # ThreadingHTTPServer 会给每个连接起一个线程跑这里，
         # 握手放在线程里做，accept 线程只管收连接
-        if self.ssl_context is not None:
-            request = self._wrap_tls(request)
-            if request is None:
-                return
-        super().process_request_thread(request, client_address)
+        try:
+            if self.ssl_context is not None:
+                request = self._wrap_tls(request)
+                if request is None:
+                    return
+            super().process_request_thread(request, client_address)
+        finally:
+            self._conn_slots.release()
 
     def _wrap_tls(self, sock):
         """看第一个字节判断是 http 还是 https；是 https 就套上 TLS。"""

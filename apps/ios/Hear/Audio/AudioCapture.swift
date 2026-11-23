@@ -340,7 +340,7 @@ final class AudioCapture {
         // 重则把输入节点搞成半坏状态、麦克风根本起不来。
         // 所以顺序是：停会话 → 设语音增强 → 再按"要麦克风"把会话激活。
         if input.isVoiceProcessingEnabled != voiceProcessing {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            AudioRoute.deactivateForReconfiguration()
             do { try input.setVoiceProcessingEnabled(voiceProcessing) }
             catch { hearLog("语音增强设置失败：\(error)", .warning) }
         }
@@ -377,7 +377,8 @@ final class AudioCapture {
                 engine.stop()
                 removeTap()
                 if input.isVoiceProcessingEnabled {
-                    // 个别情况下语音增强启动失败：关掉再试一次
+                    // 关掉语音增强前必须先停用音频会话（Apple 要求）
+                    AudioRoute.deactivateForReconfiguration()
                     try? input.setVoiceProcessingEnabled(false)
                 }
                 AudioRoute.reset()

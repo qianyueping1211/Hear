@@ -168,10 +168,15 @@ def test_health(url, insecure):
     return True
 
 
-def test_translate(url, text, insecure):
+def auth_headers(token):
+    return {"X-Hear-Token": token.strip()} if token and token.strip() else None
+
+
+def test_translate(url, text, insecure, token=""):
     say("== 文本翻译 ==")
     body = json.dumps({"prompt": text, "src": "zh", "dst": "en"}).encode("utf-8")
-    code, data, dt = request(url + "/v1/translate", method="POST", body=body, timeout=180, insecure=insecure)
+    code, data, dt = request(url + "/v1/translate", method="POST", body=body,
+                             headers=auth_headers(token), timeout=180, insecure=insecure)
     if code != 200:
         say("   失败：%s %s" % (code, data[:300].decode("utf-8", "replace")))
         return False
@@ -183,12 +188,13 @@ def test_translate(url, text, insecure):
     return bool(out)
 
 
-def test_asr(url, wav, insecure):
+def test_asr(url, wav, insecure, token=""):
     say("== 语音识别 ==")
     raw, rate = read_wav_mono16k(wav)
     # 服务端要的是原始 wav（跟 App 发的一样），不是 JSON
     body = make_wav(raw, rate)
-    code, data, dt = request(url + "/v1/asr", method="POST", body=body, timeout=600,
+    code, data, dt = request(url + "/v1/asr", method="POST", body=body,
+                             headers=auth_headers(token), timeout=600,
                              insecure=insecure, content_type="audio/wav")
     if code != 200:
         say("   失败：%s %s" % (code, data[:300].decode("utf-8", "replace")))
@@ -206,18 +212,20 @@ def base64_of(raw):
     return base64.b64encode(raw).decode("ascii")
 
 
-def test_clone(url, wav, text, outfile, insecure):
+def test_clone(url, wav, text, outfile, insecure, token=""):
     say("== 声音克隆（中文声音 + 英文文字）==")
     raw, rate = read_wav_mono16k(wav)
+    ref_wav = make_wav(raw, rate)
     body = json.dumps({
         "text": text,
         "lang": "english",
-        "reference_wav": base64_of(raw),
+        "reference_wav": base64_of(ref_wav),
         "reference_text": "",
     }).encode("utf-8")
-    say("   参考音频：%s（%d 字节，%d Hz 单声道）" % (os.path.basename(wav), len(raw), rate))
+    say("   参考音频：%s（%d 字节 WAV，%d Hz 单声道）" % (os.path.basename(wav), len(ref_wav), rate))
     say("   要念的文字：%s" % text)
-    code, data, dt = request(url + "/v1/clone", method="POST", body=body, timeout=900, insecure=insecure)
+    code, data, dt = request(url + "/v1/clone", method="POST", body=body,
+                             headers=auth_headers(token), timeout=900, insecure=insecure)
     if code != 200:
         say("   失败：%s %s" % (code, data[:300].decode("utf-8", "replace")))
         return False
@@ -261,8 +269,11 @@ def main():
     ap.add_argument("--text", default="Hello, this is a test of the voice clone service.",
                     help="要念的文字")
     ap.add_argument("--out", default="clone_out.wav", help="克隆出来的音频存哪（默认 clone_out.wav）")
+    ap.add_argument("--token", default=os.environ.get("HEAR_TOKEN", ""), help="访问口令 X-Hear-Token")
     ap.add_argument("--insecure", action="store_true", default=True, help="不校验证书（自签证书要用）")
+    ap.add_argument("--verify", action="store_true", default=False, help="严格校验 HTTPS 证书")
     args = ap.parse_args()
+    insecure = args.insecure and not args.verify
 
     url = args.url.rstrip("/")
     say("服务地址：%s" % url)
@@ -274,11 +285,11 @@ def main():
     skipped = []
 
     if args.what in ("health", "all"):
-        (passed if test_health(url, args.insecure) else failed).append("服务状态")
+        (passed if test_health(url, insecure) else failed).append("服务状态")
         say("")
 
     if args.what in ("translate", "all"):
-        (passed if test_translate(url, "你好，今天天气怎么样？", args.insecure)
+        (passed if test_translate(url, "你好，今天天气怎么样？", insecure, args.token)
          else failed).append("文本翻译")
         say("")
 
@@ -288,7 +299,7 @@ def main():
             say("   跳过（要一个 --wav 音频文件）")
             skipped.append("语音识别")
         else:
-            (passed if test_asr(url, args.wav, args.insecure) else failed).append("语音识别")
+            (passed if test_asr(url, args.wav, insecure, args.token) else failed).append("语音识别")
         say("")
 
     if args.what in ("clone", "all"):
@@ -298,7 +309,7 @@ def main():
             say("   例如：python test_api.py clone --wav 中文.wav --text \"Hello there\"")
             skipped.append("声音克隆")
         else:
-            (passed if test_clone(url, args.wav, args.text, args.out, args.insecure)
+            (passed if test_clone(url, args.wav, args.text, args.out, insecure, args.token)
              else failed).append("声音克隆")
         say("")
 

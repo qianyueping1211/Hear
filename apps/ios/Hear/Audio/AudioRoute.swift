@@ -13,13 +13,20 @@ enum AudioRoute {
     ]
 
     /// 声音来源：false = 手机麦克风（默认），true = 耳机麦克风
-    static var useHeadsetMic = false
+    private static var _useHeadsetMic = false
+    static var useHeadsetMic: Bool {
+        get { sessionLock.lock(); defer { sessionLock.unlock() }; return _useHeadsetMic }
+        set { sessionLock.lock(); defer { sessionLock.unlock() }; _useHeadsetMic = newValue }
+    }
 
     /// 用户选的输出方式（扬声器 / 耳机）。
     /// 记下来是为了：重新激活音频会话以后再把它应用回去。
     /// setCategory 会把"输出到哪"重置成 .defaultToSpeaker（扬声器），
     /// 戴着耳机时声音就从手机喇叭出来了，耳机里听不到。
-    static private(set) var lastOutput: AudioOutput = .speaker
+    private static var _lastOutput: AudioOutput = .speaker
+    static var lastOutput: AudioOutput {
+        sessionLock.lock(); defer { sessionLock.unlock() }; return _lastOutput
+    }
     /// 上一次真正应用过的输出方式（用来避免重复改路由）
     private static var appliedOutput: AudioOutput?
 
@@ -79,13 +86,18 @@ enum AudioRoute {
             return
         }
         // 不放声音：类别降回 .playback，不占麦克风。
-        // 会话本身的启停交给别的地方管（停用会话要几百毫秒，不能在这里做）。
-        let opts: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
-        if s.category != .playback || s.categoryOptions != opts {
-            try? s.setCategory(.playback, mode: .default, options: opts)
-            appliedOutput = nil
+        // 注意：.defaultToSpeaker / .allowBluetoothA2DP 仅合法于 .playAndRecord，
+        // 传给 .playback 会报 OSStatus -50（BadParam），导致停录后仍锁在 .playAndRecord 占着麦克风。
+        // .playback 使用 options: [] 时系统默认即支持扬声器与蓝牙 A2DP。
+        if s.category != .playback || !s.categoryOptions.isEmpty {
+            do {
+                try s.setCategory(.playback, mode: .default, options: [])
+                appliedOutput = nil
+            } catch {
+                hearLog("音频会话降级为 .playback 失败：\(error)", .warning)
+            }
         }
-        apply(lastOutput)
+        apply(_lastOutput)
     }
 
     /// 设置为“可录音 + 可播放”（旧入口，现在按当前状态来）
@@ -120,15 +132,26 @@ enum AudioRoute {
         try? s.setActive(false, options: .notifyOthersOnDeactivation)
     }
 
+    /// 仅用于切换语音增强等重配置前临时停用会话，并同步递增停用代数
+    static func deactivateForReconfiguration() {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        genLock.lock(); deactivateGen += 1; genLock.unlock()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        appliedOutput = nil
+    }
+
     /// 按“声音来源”选择麦克风（已经是想要的就不动）。
     /// 返回 true 表示真的换了麦克风（换了的话输出路由也会被重置）。
     @discardableResult
     static func applyInput() -> Bool {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
         let s = AVAudioSession.sharedInstance()
         let headsetPorts: Set<AVAudioSession.Port> = [.bluetoothHFP, .headsetMic, .usbAudio]
         let inputs = s.availableInputs ?? []
         let want: AVAudioSessionPortDescription?
-        if useHeadsetMic {
+        if _useHeadsetMic {
             want = inputs.first { headsetPorts.contains($0.portType) }
         } else {
             want = inputs.first { $0.portType == .builtInMic }
@@ -149,13 +172,16 @@ enum AudioRoute {
     /// 硬件拒绝启动（'nope'）多半是会话状态和实际路由对不上了，
     /// 彻底关掉再打开一次，麦克风通常就能正常起来。
     static func reset() {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        genLock.lock(); deactivateGen += 1; genLock.unlock()
         let s = AVAudioSession.sharedInstance()
         try? s.setActive(false, options: .notifyOthersOnDeactivation)
         try? s.setActive(true)
         applyInput()
         // 会话重置以后输出路由也丢了，再应用一次
         appliedOutput = nil
-        apply(lastOutput)
+        apply(_lastOutput)
     }
 
     private static func routeHasHeadphones() -> Bool {
@@ -165,13 +191,19 @@ enum AudioRoute {
     /// 检测是否连接了耳机。
     /// 输出被强制到扬声器时，当前路由里看不到耳机，所以临时取消强制再检查一次。
     static func detectHeadphones() -> Bool {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
         if routeHasHeadphones() { return true }
         let s = AVAudioSession.sharedInstance()
         let was = appliedOutput
-        try? s.overrideOutputAudioPort(.none)
+        if s.category == .playAndRecord {
+            try? s.overrideOutputAudioPort(.none)
+        }
         let found = routeHasHeadphones()
         // 恢复原来的设置
-        if let was { try? s.overrideOutputAudioPort(was == .speaker ? .speaker : .none) }
+        if s.category == .playAndRecord, let was {
+            try? s.overrideOutputAudioPort(was == .speaker ? .speaker : .none)
+        }
         return found
     }
 
@@ -183,18 +215,24 @@ enum AudioRoute {
     static func apply(_ output: AudioOutput) {
         sessionLock.lock()
         defer { sessionLock.unlock() }
-        lastOutput = output
-        guard appliedOutput != output else { return }
+        _lastOutput = output
         let s = AVAudioSession.sharedInstance()
-        switch output {
-        case .speaker:
-            // 强制走扬声器（插着耳机也走扬声器）
-            try? s.overrideOutputAudioPort(.speaker)
-            appliedOutput = .speaker
-        case .headphones:
-            // 取消强制，系统就会走耳机（没插耳机时按 .defaultToSpeaker 走扬声器）
-            try? s.overrideOutputAudioPort(.none)
-            appliedOutput = .headphones
+        // overrideOutputAudioPort(.speaker) 仅在 .playAndRecord 类别下合法
+        guard s.category == .playAndRecord else {
+            appliedOutput = nil
+            return
+        }
+        guard appliedOutput != output else { return }
+        do {
+            switch output {
+            case .speaker:
+                try s.overrideOutputAudioPort(.speaker)
+            case .headphones:
+                try s.overrideOutputAudioPort(.none)
+            }
+            appliedOutput = output
+        } catch {
+            hearLog("切换音频输出路由失败：\(error)", .warning)
         }
     }
 

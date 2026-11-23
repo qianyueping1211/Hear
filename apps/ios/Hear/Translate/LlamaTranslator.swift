@@ -51,14 +51,14 @@ private final class TranslationGPUAccess: @unchecked Sendable {
 actor LlamaTranslator {
     private enum Backend: String { case cpu = "CPU", metal = "GPU" }
     private struct GPUUnavailable: Error {}
-    private let stopFlag = CancelFlag()
+    private let cancelEpoch = EpochCounter()
     private let previewEpoch = EpochCounter()
     private let gpuAccess = TranslationGPUAccess()
 
     nonisolated func setGPUAllowed(_ allowed: Bool) { gpuAccess.setAllowed(allowed) }
 
-    /// 立刻停止正在进行的翻译（不用等 actor 空闲）
-    nonisolated func cancelCurrent() { stopFlag.set() }
+    /// 立刻停止正在进行的翻译（不用等 actor 空闲；使用单调代数避免后续排队任务误清除取消信号）
+    nonisolated func cancelCurrent() { cancelEpoch.bump() }
 
     /// 只停止实时预览的翻译（整句翻译不受影响），让整句翻译马上开始
     nonisolated func cancelPreview() { previewEpoch.bump() }
@@ -209,10 +209,11 @@ actor LlamaTranslator {
         try Task.checkCancellation()
         if let epoch, epoch != previewEpoch.value { throw CancellationError() }
         guard let path = loadedPath else { throw TranslatorError.notLoaded }
-        stopFlag.reset()
+        let myCancelEpoch = cancelEpoch.value
         var shown = ""
         return try withBackend(path: path) { gpuEpoch in
-            try self.decode(userPrompt, maxNewTokens: maxNewTokens, previewEpoch: epoch, gpuEpoch: gpuEpoch) { text in
+            try self.decode(userPrompt, maxNewTokens: maxNewTokens, previewEpoch: epoch,
+                            cancelEpoch: myCancelEpoch, gpuEpoch: gpuEpoch) { text in
                 // If the CPU retries a sentence, keep the readable draft until it catches up.
                 guard text.count >= shown.count, text != shown else { return }
                 shown = text
@@ -221,12 +222,46 @@ actor LlamaTranslator {
         }
     }
 
+    /// 增量 UTF-8 解码：只保留尾部 1~3 字节合法的未完多字节序列，其余立即容错解码，
+    /// 避免单个异常字节 token 导致整句后续译文永久卡死在 pending 里被丢弃。
+    private static func splitValidUTF8Prefix(_ bytes: [UInt8]) -> (String, [UInt8]) {
+        guard !bytes.isEmpty else { return ("", []) }
+        let count = bytes.count
+        var tail = 0
+        // 最多回看最后 3 个字节，检查是否为尚未收齐的合法 UTF-8 多字节序列前导
+        let maxCheck = min(3, count)
+        for len in 1...maxCheck {
+            let b = bytes[count - len]
+            if b & 0x80 == 0 {
+                break // ASCII 字节，末尾完整
+            }
+            if (b & 0xC0) == 0x80 {
+                continue // 续字节，继续往前找前导字节
+            }
+            let expected: Int
+            if (b & 0xE0) == 0xC0 { expected = 2 }
+            else if (b & 0xF0) == 0xE0 { expected = 3 }
+            else if (b & 0xF8) == 0xF0 { expected = 4 }
+            else { expected = 0 }
+            if expected > len {
+                tail = len
+            }
+            break
+        }
+        let splitAt = count - tail
+        if splitAt == 0 { return ("", bytes) }
+        let decoded = String(decoding: bytes[0..<splitAt], as: UTF8.self)
+        let remainder = tail > 0 ? Array(bytes[splitAt..<count]) : []
+        return (decoded, remainder)
+    }
+
     private func decode(_ userPrompt: String, maxNewTokens: Int, previewEpoch epoch: Int?,
-                        gpuEpoch: Int?, onUpdate: (String) -> Void) throws -> String {
+                        cancelEpoch myCancelEpoch: Int, gpuEpoch: Int?,
+                        onUpdate: (String) -> Void) throws -> String {
         guard let ctx, let vocab, let sampler else { throw TranslatorError.notLoaded }
         func checkWork() throws {
             try Task.checkCancellation()
-            if stopFlag.isSet { throw CancellationError() }
+            if cancelEpoch.value != myCancelEpoch { throw CancellationError() }
             if let epoch, epoch != previewEpoch.value { throw CancellationError() }
             try checkGPU(gpuEpoch)
         }
@@ -282,9 +317,10 @@ actor LlamaTranslator {
             if llama_vocab_is_eog(vocab, tok) { break }
 
             pending += piece(tok)
-            if let s = String(data: Data(pending), encoding: .utf8) {
-                output += s
-                pending.removeAll()
+            let (chunk, rest) = Self.splitValidUTF8Prefix(pending)
+            if !chunk.isEmpty {
+                output += chunk
+                pending = rest
                 onUpdate(Self.clean(output))
             }
             if index + 1 == maxNewTokens { break }
@@ -304,6 +340,10 @@ actor LlamaTranslator {
             try checkWork()
             guard rc == 0 else { throw TranslatorError.decodeFailed(stage: "output", status: rc) }
             pos += 1
+        }
+        if !pending.isEmpty {
+            output += String(decoding: pending, as: UTF8.self)
+            pending.removeAll()
         }
         try checkWork()
         return Self.clean(output)

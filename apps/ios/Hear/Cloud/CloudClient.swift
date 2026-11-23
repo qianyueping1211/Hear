@@ -53,7 +53,7 @@ extension Notification.Name {
 ///   · **严格模式**（可选）：只认配对过的那台电脑的证书。
 ///     手机上确认一次它的"签发根"指纹，之后它重签证书（换网络、换 IP）也照样认，
 ///     但别的电脑拿别的证书来，一律拒绝。
-final class LocalServerTrust: NSObject, URLSessionDelegate {
+final class LocalServerTrust: NSObject, URLSessionTaskDelegate {
     static let shared = LocalServerTrust()
 
     /// 用户自己在设置里填的服务地址（他自己的电脑）。
@@ -129,12 +129,20 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
         super.init()
     }
 
+    private static func effectivePort(for url: URL) -> Int {
+        if let port = url.port { return port }
+        return url.scheme?.lowercased() == "http" ? 80 : 443
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        guard pairingHost == nil, let original = task.originalRequest?.url, let next = request.url,
-              original.scheme == next.scheme, original.host == next.host,
-              (original.port ?? 443) == (next.port ?? 443) else {
+        // 配对、核验指定根或严格模式下禁止任何 3xx 重定向，防止口令或语音被转发到第三方
+        guard pairingHost == nil, verifiedRoot == nil, !Self.strictModeEnabled,
+              let original = task.originalRequest?.url, let next = request.url,
+              original.scheme?.lowercased() == next.scheme?.lowercased(),
+              original.host?.lowercased() == next.host?.lowercased(),
+              Self.effectivePort(for: original) == Self.effectivePort(for: next) else {
             completionHandler(nil)
             return
         }
@@ -156,14 +164,16 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
         return pinnedRoot
     }
 
-    /// 严格模式：用配对过的签发根验这张证书
+    /// 严格模式：用配对过的签发根验这张证书（保留服务端发来的完整证书链以支持中间 CA）
     /// （根没配对、或者不是这个根签的，一律不认）
-    private static func evaluateAgainstRoot(_ cert: SecCertificate, host: String, root: Data?) -> SecTrust? {
+    private static func evaluateAgainstRoot(_ serverTrust: SecTrust, host: String, root: Data?) -> SecTrust? {
         guard let root, let rootCert = SecCertificateCreateWithData(nil, root as CFData) else { return nil }
+        let chain = (SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate]) ?? []
+        guard !chain.isEmpty else { return nil }
         var t: SecTrust?
         // 这次要检查主机名：地址填错了也得发现
         let policy = SecPolicyCreateSSL(true, host as CFString)
-        guard SecTrustCreateWithCertificates(cert, policy, &t) == errSecSuccess, let trust = t else { return nil }
+        guard SecTrustCreateWithCertificates(chain as CFArray, policy, &t) == errSecSuccess, let trust = t else { return nil }
         SecTrustSetAnchorCertificates(trust, [rootCert] as CFArray)
         SecTrustSetAnchorCertificatesOnly(trust, true)   // 只认这个根，不要系统那些
         var err: CFError?
@@ -188,8 +198,7 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
         }
         if let verifiedRoot {
             guard host.lowercased() == enteredHost,
-                  let leaf = SecTrustGetCertificateAtIndex(trust, 0),
-                  let verified = Self.evaluateAgainstRoot(leaf, host: host, root: verifiedRoot) else {
+                  let verified = Self.evaluateAgainstRoot(trust, host: host, root: verifiedRoot) else {
                 completionHandler(.cancelAuthenticationChallenge, nil)
                 return
             }
@@ -200,8 +209,7 @@ final class LocalServerTrust: NSObject, URLSessionDelegate {
         // 公网地址照常走系统证书校验（不能因为开了严格模式就把公网服务也毙了）。
         // 配对中的这一次是例外：还没确认指纹，先让它连上（只取证书，不发内容）。
         if Self.strictModeEnabled, !isPairingRequest, userLocal {
-            if let cert = SecTrustGetCertificateAtIndex(trust, 0),
-               let strictTrust = Self.evaluateAgainstRoot(cert, host: host, root: Self.pinnedRootData()) {
+            if let strictTrust = Self.evaluateAgainstRoot(trust, host: host, root: Self.pinnedRootData()) {
                 // 严格模式：这台电脑的证书过了（根是配对过的那个）
                 completionHandler(.useCredential, URLCredential(trust: strictTrust))
             } else {
@@ -570,7 +578,16 @@ actor CloudClient {
                     }
                     return (data, response)
                 } catch let e as URLError {
-                    if Task.isCancelled || e.code == .cancelled { throw CancellationError() }
+                    if Task.isCancelled { throw CancellationError() }
+                    if e.code == .cancelled {
+                        // 非任务取消导致的 URLError.cancelled 多为严格模式/TLS 证书拒绝或重定向拦截，
+                        // 不能转成 CancellationError 静默吞掉，必须向界面报错并允许回退。
+                        let msg = LocalServerTrust.strictModeEnabled
+                            ? "严格模式拒绝了该服务器证书，请核对服务身份或在设置中解除配对"
+                            : "连接被中止或证书校验未通过"
+                        if inferenceDeadline != nil { throw CloudError.inferenceInterrupted(msg) }
+                        throw CloudError.net(msg)
+                    }
                     if Self.isLocalNetworkDenied(e) {
                         hearLog("本地网络权限被拒绝：\(path)", .warning)
                         NotificationCenter.default.post(name: .hearLocalNetworkDenied, object: nil)

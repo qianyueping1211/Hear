@@ -935,6 +935,32 @@ struct CloudEditSheet: View {
                     Text(target.title)
                 }
 
+                // 严格模式配对状态与解绑入口（换电脑或重装服务端时可随时切回兼容模式）
+                if case .service = target, session.cloudStrictMode {
+                    Section {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label("已开启严格模式（只信任已配对的服务身份）", systemImage: "checkmark.shield")
+                                .font(.footnote.weight(.medium))
+                                .foregroundStyle(.green)
+                            if !session.cloudRootFingerprint.isEmpty {
+                                Text("签发根指纹：\(session.cloudRootFingerprint)")
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                        Button("解除配对并切回兼容模式", role: .destructive) {
+                            session.cloudStrictMode = false
+                            status = "已解除严格模式配对，切回兼容模式"
+                            Task { await session.refreshCloudStatus() }
+                        }
+                    } header: {
+                        Text("服务身份校验")
+                    } footer: {
+                        Text("更换电脑、重装服务端或重新签发根证书后，请先解除配对再重新连接。")
+                    }
+                }
+
                 // 测试连接放最后
                 Section {
                     HStack {

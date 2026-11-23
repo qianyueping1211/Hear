@@ -1,6 +1,29 @@
 import Foundation
 import UIKit
 
+/// 线程安全的 UIBackgroundTask 持有者，避免 @Sendable 过期回调捕获可变局部变量
+@MainActor
+private final class SummaryBackgroundGuard {
+    private var id: UIBackgroundTaskIdentifier = .invalid
+    var task: Task<Void, Never>?
+
+    func begin() {
+        id = UIApplication.shared.beginBackgroundTask(withName: "summary") { [weak self] in
+            Task { @MainActor in
+                self?.task?.cancel()
+                self?.end()
+            }
+        }
+    }
+
+    func end() {
+        guard id != .invalid else { return }
+        let current = id
+        id = .invalid
+        UIApplication.shared.endBackgroundTask(current)
+    }
+}
+
 /// 在后台调用大模型生成总结，结果存进对话文件
 @MainActor
 final class SummaryService {
@@ -58,8 +81,6 @@ final class SummaryService {
         running.insert(key)
         hearLog("总结：开始生成「\(template.title)」，模型 \(provider.name) / \(model)，共 \(conv.items.count) 句")
 
-        // 切到后台时向系统多要一些运行时间
-        let bg = UIApplication.shared.beginBackgroundTask(withName: "summary") {}
         let system = """
         \(template.prompt)
 
@@ -69,16 +90,24 @@ final class SummaryService {
         let user = Self.transcript(conv)
         let t0 = Date()
 
-        Task {
+        // 切到后台时向系统申请额外运行时间，到期必须主动取消请求并结束后台任务，防止被 iOS 看门狗强杀
+        let bgGuard = SummaryBackgroundGuard()
+        bgGuard.begin()
+
+        bgGuard.task = Task {
             defer {
                 running.remove(key)
-                UIApplication.shared.endBackgroundTask(bg)
+                bgGuard.end()
             }
             do {
                 let text = try await LLMClient.complete(provider, key: apiKey, model: model, system: system, user: user)
                 store.updateSummary(conversationID, templateID: templateID,
                                     SummaryRecord(status: .done, content: text, model: model))
                 hearLog("总结：「\(template.title)」完成，用时 \(Int(Date().timeIntervalSince(t0)))s")
+            } catch is CancellationError {
+                store.updateSummary(conversationID, templateID: templateID,
+                                    SummaryRecord(status: .failed, error: "切到后台超时已中止，请回到 App 后重试", model: model))
+                hearLog("总结已中止（后台运行配额到期）", .warning)
             } catch {
                 store.updateSummary(conversationID, templateID: templateID,
                                     SummaryRecord(status: .failed, error: error.localizedDescription, model: model))

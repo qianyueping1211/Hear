@@ -226,6 +226,8 @@ class Store:
         self.path = path
         self.clock = clock
         self._local = threading.local()
+        self._snapshot_cache_lock = threading.Lock()
+        self._snapshot_cache = {}  # gateway_id -> (revision, cutoff_bucket, items, etag)
         directory = os.path.dirname(os.path.abspath(path))
         os.makedirs(directory, exist_ok=True)
 
@@ -241,11 +243,7 @@ class Store:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 10000")
-            try:
-                connection.execute("PRAGMA journal_mode = WAL")
-            except sqlite3.OperationalError:
-                pass
-            connection.execute("PRAGMA synchronous = FULL")
+            connection.execute("PRAGMA synchronous = NORMAL")
             self._local.connection = connection
         return connection
 
@@ -255,14 +253,21 @@ class Store:
         connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         try:
             yield connection
-        except BaseException:
-            connection.execute("ROLLBACK")
-            raise
-        else:
             connection.execute("COMMIT")
+        except BaseException:
+            if connection.in_transaction:
+                try:
+                    connection.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            raise
 
     def migrate(self):
         connection = self.conn()
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError:
+            pass
         connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_us INTEGER NOT NULL)")
         current = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
         applied = []
@@ -276,7 +281,8 @@ class Store:
                 connection.execute("INSERT INTO schema_migrations VALUES (?, ?)", (version, self.now()))
                 connection.execute("COMMIT")
             except BaseException:
-                connection.execute("ROLLBACK")
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
                 raise
             applied.append(version)
         if os.name != "nt":
@@ -291,14 +297,32 @@ class Store:
         return self.conn().execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
 
     def backup(self, destination):
-        """在线一致性备份（服务运行中也可以执行）。"""
+        """在线一致性备份（服务运行中也可以执行），使用最小权限临时文件原子落盘。"""
         if os.path.exists(destination):
             raise FileExistsError(destination)
-        target = sqlite3.connect(destination)
+        directory = os.path.dirname(os.path.abspath(destination))
+        os.makedirs(directory, exist_ok=True)
+        tmp = "%s.tmp.%s" % (destination, secrets.token_hex(6))
+        if os.name != "nt":
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.close(fd)
+        target = sqlite3.connect(tmp)
         try:
             self.conn().backup(target)
-        finally:
+        except BaseException:
             target.close()
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        target.close()
+        if os.name != "nt":
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+        os.replace(tmp, destination)
         return destination
 
     # ------------------------------------------------------------ 审计
@@ -502,32 +526,44 @@ class Store:
         return row["gateway_id"] if row else None
 
     def snapshot(self, gateway_id):
-        """同一个事务里读修订号和 Token 记录，保证两者一致。"""
+        """同一个事务里读修订号和 Token 记录，按 (gateway_id, revision) 缓存避免重复全表扫描。"""
         now = self.now()
+        cutoff = now - SNAPSHOT_HISTORY_US
+        # 每小时刷新一次历史窗口边界，兼顾过期记录清理与高命中缓存
+        cutoff_bucket = cutoff // (3600 * 1000000)
         with self.tx() as connection:
             row = connection.execute("SELECT revision FROM gateways WHERE gateway_id = ?", (gateway_id,)).fetchone()
             if row is None:
                 raise StoreError(404, "NOT_FOUND", "没有这个网关")
-            tokens = connection.execute(
-                "SELECT token_id, user_id, sha256, starts_us, expires_us, revoked_us FROM tokens"
-                " WHERE gateway_id = ? AND MIN(COALESCE(revoked_us, expires_us), expires_us) >= ?"
-                " ORDER BY token_id", (gateway_id, now - SNAPSHOT_HISTORY_US)).fetchall()
+            revision = row["revision"]
             connection.execute("UPDATE gateways SET snapshot_requests = snapshot_requests + 1, last_snapshot_us = ?"
                                " WHERE gateway_id = ?", (now, gateway_id))
-        items = [{
-            "token_id": token["token_id"],
-            "user_id": token["user_id"],
-            "sha256": token["sha256"],
-            "starts_at": format_time(token["starts_us"]),
-            "expires_at": format_time(token["expires_us"]),
-            "revoked_at": format_time(token["revoked_us"]),
-        } for token in tokens]
-        content = json.dumps({"revision": row["revision"], "tokens": items}, sort_keys=True,
-                             separators=(",", ":")).encode()
-        etag = '"%s"' % hashlib.sha256(content).hexdigest()[:40]
+            with self._snapshot_cache_lock:
+                cached = self._snapshot_cache.get(gateway_id)
+            if cached and cached[0] == revision and cached[1] == cutoff_bucket:
+                items, etag = cached[2], cached[3]
+            else:
+                tokens = connection.execute(
+                    "SELECT token_id, user_id, sha256, starts_us, expires_us, revoked_us FROM tokens"
+                    " WHERE gateway_id = ? AND expires_us >= ?"
+                    " AND (revoked_us IS NULL OR revoked_us >= ?)"
+                    " ORDER BY token_id", (gateway_id, cutoff, cutoff)).fetchall()
+                items = [{
+                    "token_id": token["token_id"],
+                    "user_id": token["user_id"],
+                    "sha256": token["sha256"],
+                    "starts_at": format_time(token["starts_us"]),
+                    "expires_at": format_time(token["expires_us"]),
+                    "revoked_at": format_time(token["revoked_us"]),
+                } for token in tokens]
+                content = json.dumps({"revision": revision, "tokens": items}, sort_keys=True,
+                                     separators=(",", ":")).encode()
+                etag = '"%s"' % hashlib.sha256(content).hexdigest()[:40]
+                with self._snapshot_cache_lock:
+                    self._snapshot_cache[gateway_id] = (revision, cutoff_bucket, items, etag)
         body = {
             "gateway_id": gateway_id,
-            "revision": row["revision"],
+            "revision": revision,
             "generated_at": format_time(now),
             "digest_algorithm": "sha256",
             "tokens": items,
@@ -581,31 +617,51 @@ class Store:
 
     def list_users(self, search=None, status=None, limit=None, cursor=None):
         limit = parse_limit(limit)
+        now = self.now()
         where, params = [], []
         if status in (None, ""):
-            where.append("status <> 'deleted'")
+            where.append("u.status <> 'deleted'")
         elif status == "all":
             pass
         elif status in USER_STATUSES:
-            where.append("status = ?")
+            where.append("u.status = ?")
             params.append(status)
         else:
             raise invalid("status", "status 只能是 active、disabled、deleted 或 all")
         if search:
             pattern = "%" + search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-            where.append("(username LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')")
+            where.append("(u.username LIKE ? ESCAPE '\\' OR u.display_name LIKE ? ESCAPE '\\')")
             params += [pattern, pattern]
         seq = decode_cursor(cursor)
         if seq is not None:
-            where.append("rowid < ?")
+            where.append("u.rowid < ?")
             params.append(seq)
-        sql = "SELECT rowid AS seq, * FROM users"
+        sql = (
+            "SELECT u.rowid AS seq, u.*,"
+            " COUNT(t.token_id) AS token_count,"
+            " COALESCE(SUM(CASE WHEN t.token_id IS NOT NULL AND t.revoked_us IS NULL AND t.starts_us <= ? AND t.expires_us > ? THEN 1 ELSE 0 END), 0) AS active_token_count,"
+            " COALESCE(SUM(CASE WHEN t.token_id IS NOT NULL AND t.revoked_us IS NULL AND t.starts_us > ? THEN 1 ELSE 0 END), 0) AS scheduled_token_count"
+            " FROM users u LEFT JOIN tokens t ON t.user_id = u.user_id"
+        )
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY rowid DESC LIMIT ?"
+        sql += " GROUP BY u.user_id ORDER BY u.rowid DESC LIMIT ?"
         connection = self.conn()
-        rows = connection.execute(sql, params + [limit + 1]).fetchall()
-        items = [self.user_view(row, connection) for row in rows[:limit]]
+        rows = connection.execute(sql, [now, now, now] + params + [limit + 1]).fetchall()
+        items = [{
+            "user_id": row["user_id"],
+            "username": row["username"],
+            "display_name": row["display_name"],
+            "notes": row["notes"],
+            "status": row["status"],
+            "token_count": row["token_count"] or 0,
+            "active_token_count": row["active_token_count"] or 0,
+            "scheduled_token_count": row["scheduled_token_count"] or 0,
+            "created_at": format_time(row["created_us"]),
+            "updated_at": format_time(row["updated_us"]),
+            "disabled_at": format_time(row["disabled_us"]),
+            "deleted_at": format_time(row["deleted_us"]),
+        } for row in rows[:limit]]
         return {"items": items, "next_cursor": encode_cursor(rows[limit - 1]["seq"]) if len(rows) > limit else None}
 
     def get_user(self, user_id):

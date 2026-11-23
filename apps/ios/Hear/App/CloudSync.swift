@@ -65,6 +65,7 @@ final class CloudSync: ObservableObject {
 
     private var bag = Set<AnyCancellable>()
     private var pending: Task<Void, Never>?
+    private var bgTaskID: UIBackgroundTaskIdentifier = .invalid
     private var applyingCloud = false
     /// 下一次同步强制上传设置（不管两边谁新）
     private var forcePushSettings = false
@@ -422,7 +423,28 @@ final class CloudSync: ObservableObject {
             return
         }
         syncing = true
-        defer { syncing = false }
+        // 退后台同步期间持文件协调锁，必须向系统申请后台任务时间并妥善处理到期回调，避免 0xdead10cc 强杀
+        if bgTaskID != .invalid {
+            UIApplication.shared.endBackgroundTask(bgTaskID)
+            bgTaskID = .invalid
+        }
+        bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "icloud-sync") { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.pending?.cancel()
+                if self.bgTaskID != .invalid {
+                    UIApplication.shared.endBackgroundTask(self.bgTaskID)
+                    self.bgTaskID = .invalid
+                }
+            }
+        }
+        defer {
+            syncing = false
+            if bgTaskID != .invalid {
+                UIApplication.shared.endBackgroundTask(bgTaskID)
+                bgTaskID = .invalid
+            }
+        }
         // 先把老文件夹「听见同步」的内容搬过来，再建 conversations
         migrateLegacyFolder(to: dir)
         let convDir = dir.appendingPathComponent("conversations", isDirectory: true)

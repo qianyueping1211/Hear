@@ -77,43 +77,50 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate {
         // 只是放声音：会话用 .playback，不占麦克风
         // （占着麦克风的话，手机上录屏、录音机就录不到了）
         AudioRoute.speaking = true
-        try? AudioRoute.updateSession()
+        // 收音期间不动会话，防止打断正在运行的麦克风
+        if !AudioRoute.capturing { try? AudioRoute.updateSession() }
         let u = AVSpeechUtterance(string: req.text)
         u.voice = req.voice ?? Self.bestVoice(for: req.locale)
         u.pitchMultiplier = req.pitch
         u.rate = AVSpeechUtteranceDefaultSpeechRate
         let engineMode = req.pan != 0
 
-        let gen: Int = queue.sync {
-            generation += 1
-            scheduled = 0; played = 0; finished = false
-            currentPan = req.pan
-            usingEngine = engineMode
-            current = u
-            timedOutGen = nil
-            return generation
-        }
         // 超时：按字数估一个很宽松的时长
         let limit = 5 + Double(req.text.count) * 0.45
+        var gen = 0
 
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-            queue.sync { continuation = c }
+            // 递增代数、重置状态与安装 continuation 合并到同一同步队列块，消除间隙内 stop() 导致挂起
+            gen = queue.sync {
+                generation += 1
+                scheduled = 0; played = 0; finished = false
+                currentPan = req.pan
+                usingEngine = engineMode
+                current = u
+                timedOutGen = nil
+                continuation = c
+                return generation
+            }
+            let currentGen = gen
             if engineMode {
                 synth.write(u) { [weak self] buffer in
-                    self?.receive(buffer, gen: gen)
+                    self?.receive(buffer, gen: currentGen)
                 }
             } else {
                 synth.speak(u)
             }
             queue.asyncAfter(deadline: .now() + limit) { [weak self] in
-                guard let self, gen == self.generation, self.continuation != nil else { return }
+                guard let self, currentGen == self.generation, self.continuation != nil else { return }
                 hearLog("朗读：超过 \(Int(limit)) 秒没有结束，自动跳过", .warning)
                 // 先把等待方叫醒（作废会把代数改掉，顺序反了 resume 就叫不醒了），
                 // 再把这一次播放作废、声音停掉。
-                self.resume(gen)
-                self.stopPlayback(gen: gen, timedOut: true)
+                self.resume(currentGen)
+                self.stopPlayback(gen: currentGen, timedOut: true)
             }
         }
+        // 仅当本次朗读仍是最新一代时才清理 speaking 并回调停用会话，防止旧播报截断新播报
+        let stillCurrent = queue.sync { gen == generation }
+        guard stillCurrent else { return }
         AudioRoute.speaking = false
         // 还在收音的时候不要动音频会话：改会话类别/路由会把正在跑的麦克风打断，
         // 麦克风一断，后面的话就再也识别不到了（以前就是这样：读一句、断一句）。

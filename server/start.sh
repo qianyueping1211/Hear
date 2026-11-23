@@ -52,11 +52,16 @@ fetch "Shlomo426/Qwen3-TTS-12Hz-0.6B-Base-GGUF" "Qwen3-TTS-12Hz-0.6B-Base-Q4_K_M
 fetch "Shlomo426/Qwen3-TTS-12Hz-0.6B-Base-GGUF" "mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf" "$MODEL_DIR/mmproj-Qwen3-TTS-12Hz-0.6B-Base-Q8_0.gguf"
 
 # ---------------------------------------------------------------- 识别模型
-if [ ! -d "$SERVER_DIR/.venv" ]; then
+if [ ! -x "$SERVER_DIR/.venv/bin/python" ]; then
   say "装 faster-whisper（语音识别用）"
-  python3 -m venv "$SERVER_DIR/.venv" || true
-  "$SERVER_DIR/.venv/bin/pip" install --upgrade pip -q || true
-  "$SERVER_DIR/.venv/bin/pip" install -r "$SERVER_DIR/requirements.txt" -q || true
+  rm -rf "$SERVER_DIR/.venv"
+  if python3 -m venv "$SERVER_DIR/.venv"; then
+    "$SERVER_DIR/.venv/bin/pip" install --upgrade pip -q || true
+    "$SERVER_DIR/.venv/bin/pip" install -r "$SERVER_DIR/requirements.txt" -q || true
+  else
+    rm -rf "$SERVER_DIR/.venv"
+    say "创建虚拟环境失败（可尝试安装 python3-venv），暂用系统 python3"
+  fi
 fi
 if [ -x "$SERVER_DIR/.venv/bin/python" ]; then
   PY="$SERVER_DIR/.venv/bin/python"
@@ -107,4 +112,5 @@ echo
 
 export HEAR_PORT="$PORT" HEAR_MT_URL="http://127.0.0.1:$MT_PORT" HEAR_CLONE_URL="http://127.0.0.1:$CLONE_PORT"
 export HEAR_ASR_MODEL="$ASR_MODEL"
-exec "$PY" "$SERVER_DIR/hear_cloud.py"
+# 不使用 exec，确保退出或收到 SIGINT/SIGTERM 时 trap cleanup 能清理所有后台 llama-server
+"$PY" "$SERVER_DIR/hear_cloud.py"

@@ -183,7 +183,7 @@ interface HearStoreState extends AppSnapshot {
 }
 
 export const useHearStore = create<HearStoreState>((set, get) => ({
-  appVersion: "0.1.5",
+  appVersion: "0.1.6",
   mode: "idle" as SessionMode,
   sourceLang: "en",
   targetLang: "zh",

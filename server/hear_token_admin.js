@@ -2,7 +2,11 @@
 // 听见 Token 管理后台。只与同源的 /admin/api/v1 通信；所有用户数据都用 textContent 写入页面。
 (function () {
   const API = "/admin/api/v1";
-  const state = { csrf: null, admin: null, user: null, gateways: [], cursors: {}, editingToken: null, editingUser: null };
+  const state = {
+    csrf: null, admin: null, user: null, gateways: [], cursors: {},
+    editingToken: null, editingUser: null, tokenInitialTimes: null,
+    seq: { users: 0, user: 0, tokens: 0, audit: 0, gateways: 0 },
+  };
   const $ = (id) => document.getElementById(id);
 
   // ---------------------------------------------------------------- 工具
@@ -82,7 +86,9 @@
       tab.dataset.view === view || (view === "user" && tab.dataset.view === "users")));
   }
   function showLogin() {
-    state.csrf = null; state.admin = null;
+    state.csrf = null; state.admin = null; state.user = null;
+    document.querySelectorAll("dialog[open]").forEach((dlg) => { try { dlg.close(); } catch (_) {} });
+    $("secret-value").textContent = "";
     $("nav").hidden = true; $("who").hidden = true;
     show("login");
   }
@@ -128,23 +134,29 @@
   function openUsers() { show("users"); loadUsers(false); }
 
   async function loadUsers(more) {
+    const reqId = ++state.seq.users;
     const body = $("user-rows");
-    const page = await api("GET", "/users" + qs({
-      search: $("user-search").value.trim(), status: $("user-status").value, limit: 50,
-      cursor: more ? state.cursors.users : undefined,
-    }));
-    if (!more) body.replaceChildren();
-    for (const user of page.items) {
-      body.append(el("tr", { class: "click", onclick: () => openUser(user.user_id) },
-        el("td", { class: "mono" }, user.username),
-        el("td", {}, user.display_name || "—"),
-        el("td", {}, pill(user.status, "user")),
-        el("td", {}, `${user.active_token_count} / ${user.token_count}`),
-        el("td", {}, fmt(user.updated_at))));
+    try {
+      const page = await api("GET", "/users" + qs({
+        search: $("user-search").value.trim(), status: $("user-status").value, limit: 50,
+        cursor: more ? state.cursors.users : undefined,
+      }));
+      if (reqId !== state.seq.users) return;
+      if (!more) body.replaceChildren();
+      for (const user of page.items) {
+        body.append(el("tr", { class: "click", onclick: () => openUser(user.user_id) },
+          el("td", { class: "mono" }, user.username),
+          el("td", {}, user.display_name || "—"),
+          el("td", {}, pill(user.status, "user")),
+          el("td", {}, `${user.active_token_count} / ${user.token_count}`),
+          el("td", {}, fmt(user.updated_at))));
+      }
+      if (!body.children.length) body.append(el("tr", {}, el("td", { colspan: 5, class: "empty" }, "没有用户")));
+      state.cursors.users = page.next_cursor;
+      $("user-more").hidden = !page.next_cursor;
+    } catch (error) {
+      if (reqId === state.seq.users) toast(error.message, true);
     }
-    if (!body.children.length) body.append(el("tr", {}, el("td", { colspan: 5, class: "empty" }, "没有用户")));
-    state.cursors.users = page.next_cursor;
-    $("user-more").hidden = !page.next_cursor;
   }
 
   // ---------------------------------------------------------------- 用户详情
@@ -153,52 +165,65 @@
   $("token-more").addEventListener("click", () => loadTokens(true));
 
   async function openUser(userId) {
-    const user = await api("GET", "/users/" + encodeURIComponent(userId));
-    state.user = user;
-    show("user");
-    $("u-title").textContent = user.display_name ? `${user.display_name}（${user.username}）` : user.username;
-    $("u-status").replaceWith(Object.assign(pill(user.status, "user"), { id: "u-status" }));
-    $("u-id").textContent = user.user_id;
-    $("u-notes").textContent = user.notes || "—";
-    $("u-created").textContent = fmt(user.created_at);
-    $("u-updated").textContent = fmt(user.updated_at);
-    $("u-disabled").textContent = fmt(user.disabled_at);
-    const deleted = user.status === "deleted";
-    $("u-edit").disabled = deleted;
-    $("u-delete").disabled = deleted;
-    $("u-toggle").disabled = deleted;
-    $("u-toggle").textContent = user.status === "active" ? "停用" : "重新启用";
-    $("token-new").disabled = user.status !== "active";
-    $("token-new").title = user.status === "active" ? "" : "用户启用后才能签发 Token";
-    loadTokens(false);
+    const reqId = ++state.seq.user;
+    try {
+      const user = await api("GET", "/users/" + encodeURIComponent(userId));
+      if (reqId !== state.seq.user) return;
+      state.user = user;
+      show("user");
+      $("u-title").textContent = user.display_name ? `${user.display_name}（${user.username}）` : user.username;
+      $("u-status").replaceWith(Object.assign(pill(user.status, "user"), { id: "u-status" }));
+      $("u-id").textContent = user.user_id;
+      $("u-notes").textContent = user.notes || "—";
+      $("u-created").textContent = fmt(user.created_at);
+      $("u-updated").textContent = fmt(user.updated_at);
+      $("u-disabled").textContent = fmt(user.disabled_at);
+      const deleted = user.status === "deleted";
+      $("u-edit").disabled = deleted;
+      $("u-delete").disabled = deleted;
+      $("u-toggle").disabled = deleted;
+      $("u-toggle").textContent = user.status === "active" ? "停用" : "重新启用";
+      $("token-new").disabled = user.status !== "active";
+      $("token-new").title = user.status === "active" ? "" : "用户启用后才能签发 Token";
+      loadTokens(false);
+    } catch (error) {
+      if (reqId === state.seq.user) toast(error.message, true);
+    }
   }
 
   async function loadTokens(more) {
+    if (!state.user) return;
+    const reqId = ++state.seq.tokens;
     const body = $("token-rows");
-    const page = await api("GET", `/users/${encodeURIComponent(state.user.user_id)}/tokens` + qs({
-      status: $("token-status").value, limit: 50, cursor: more ? state.cursors.tokens : undefined,
-    }));
-    if (!more) body.replaceChildren();
-    for (const token of page.items) {
-      const editable = token.status === "active" || token.status === "scheduled";
-      const actions = el("td", { class: "write" });
-      if (editable) {
-        actions.append(el("button", { onclick: () => editToken(token) }, "修改"), " ",
-          el("button", { class: "danger", onclick: () => revokeToken(token) }, "撤销"));
+    try {
+      const page = await api("GET", `/users/${encodeURIComponent(state.user.user_id)}/tokens` + qs({
+        status: $("token-status").value, limit: 50, cursor: more ? state.cursors.tokens : undefined,
+      }));
+      if (reqId !== state.seq.tokens) return;
+      if (!more) body.replaceChildren();
+      for (const token of page.items) {
+        const editable = token.status === "active" || token.status === "scheduled";
+        const actions = el("td", { class: "write" });
+        if (editable) {
+          actions.append(el("button", { onclick: () => editToken(token) }, "修改"), " ",
+            el("button", { class: "danger", onclick: () => revokeToken(token) }, "撤销"));
+        }
+        body.append(el("tr", { title: token.token_id },
+          el("td", {}, token.label, el("div", { class: "hint mono" }, token.token_id)),
+          el("td", { class: "mono" }, "…" + token.token_suffix),
+          el("td", { class: "mono" }, token.gateway_id),
+          el("td", {}, pill(token.status), token.revocation_reason ? el("div", { class: "hint" }, token.revocation_reason) : null),
+          el("td", {}, fmt(token.starts_at)),
+          el("td", {}, fmt(token.expires_at)),
+          el("td", {}, fmt(token.invalidated_at)),
+          actions));
       }
-      body.append(el("tr", { title: token.token_id },
-        el("td", {}, token.label, el("div", { class: "hint mono" }, token.token_id)),
-        el("td", { class: "mono" }, "…" + token.token_suffix),
-        el("td", { class: "mono" }, token.gateway_id),
-        el("td", {}, pill(token.status), token.revocation_reason ? el("div", { class: "hint" }, token.revocation_reason) : null),
-        el("td", {}, fmt(token.starts_at)),
-        el("td", {}, fmt(token.expires_at)),
-        el("td", {}, fmt(token.invalidated_at)),
-        actions));
+      if (!body.children.length) body.append(el("tr", {}, el("td", { colspan: 8, class: "empty" }, "没有 Token")));
+      state.cursors.tokens = page.next_cursor;
+      $("token-more").hidden = !page.next_cursor;
+    } catch (error) {
+      if (reqId === state.seq.tokens) toast(error.message, true);
     }
-    if (!body.children.length) body.append(el("tr", {}, el("td", { colspan: 8, class: "empty" }, "没有 Token")));
-    state.cursors.tokens = page.next_cursor;
-    $("token-more").hidden = !page.next_cursor;
   }
 
   // 用户新增 / 编辑
@@ -258,9 +283,11 @@
     $("tz-hint").textContent = `按浏览器时区（${zone}）填写，提交时换算成 UTC；有效条件：开始 ≤ 现在 < 结束。`;
   }
   $("token-new").addEventListener("click", async () => {
-    const gateways = await loadGateways();
+    let gateways;
+    try { gateways = await loadGateways(); } catch (error) { toast(error.message, true); return; }
     if (!gateways.length) { toast("请先在「网关」页登记网关", true); return; }
     state.editingToken = null;
+    state.tokenInitialTimes = null;
     const form = $("token-form");
     form.reset();
     $("token-form-title").textContent = "签发 Token";
@@ -282,8 +309,11 @@
     $("token-gw-label").hidden = true;
     form.gateway_id.required = false;
     form.label.value = token.label;
-    form.starts_at.value = toLocalInput(token.starts_at);
-    form.expires_at.value = toLocalInput(token.expires_at);
+    const startVal = toLocalInput(token.starts_at);
+    const expVal = toLocalInput(token.expires_at);
+    form.starts_at.value = startVal;
+    form.expires_at.value = expVal;
+    state.tokenInitialTimes = { starts_at: startVal, expires_at: expVal };
     $("token-form-error").textContent = "";
     tzHint();
     $("dlg-token").showModal();
@@ -293,12 +323,21 @@
     event.preventDefault();
     const form = event.target;
     try {
-      const body = { label: form.label.value.trim(), starts_at: fromLocalInput(form.starts_at.value), expires_at: fromLocalInput(form.expires_at.value) };
+      const body = { label: form.label.value.trim() };
       if (state.editingToken) {
+        // 仅在起止时间实际改动时才提交时间字段，避免只改备注时误递增网关修订号
+        if (!state.tokenInitialTimes || form.starts_at.value !== state.tokenInitialTimes.starts_at) {
+          body.starts_at = fromLocalInput(form.starts_at.value);
+        }
+        if (!state.tokenInitialTimes || form.expires_at.value !== state.tokenInitialTimes.expires_at) {
+          body.expires_at = fromLocalInput(form.expires_at.value);
+        }
         await api("PATCH", "/tokens/" + encodeURIComponent(state.editingToken.token_id), body);
         $("dlg-token").close();
-        toast("已修改，网关下一轮同步（约 30 秒）后生效");
+        toast(body.starts_at || body.expires_at ? "已修改，网关下一轮同步（约 30 秒）后生效" : "已保存备注");
       } else {
+        body.starts_at = fromLocalInput(form.starts_at.value);
+        body.expires_at = fromLocalInput(form.expires_at.value);
         body.gateway_id = form.gateway_id.value;
         const issued = await api("POST", `/users/${encodeURIComponent(state.user.user_id)}/tokens`, body);
         $("dlg-token").close();
@@ -359,46 +398,58 @@
     return parts;
   }
   async function loadAudit(more) {
+    const reqId = ++state.seq.audit;
     const form = $("audit-filter");
     let since, until;
     try { since = fromLocalInput(form.since.value); until = fromLocalInput(form.until.value); }
     catch (error) { toast(error.message, true); return; }
-    const page = await api("GET", "/audit-events" + qs({
-      action: form.action.value, user_id: form.user_id.value.trim(), token_id: form.token_id.value.trim(),
-      since, until, limit: 50, cursor: more ? state.cursors.audit : undefined,
-    }));
-    const body = $("audit-rows");
-    if (!more) body.replaceChildren();
-    for (const event of page.items) {
-      body.append(el("tr", {},
-        el("td", {}, fmt(event.occurred_at)),
-        el("td", {}, event.actor.username || event.actor.id, el("div", { class: "hint" }, event.actor.type)),
-        el("td", { class: "mono" }, event.action),
-        el("td", { class: "mono" }, event.target_id, event.user_id && event.user_id !== event.target_id ? el("div", { class: "hint" }, event.user_id) : null),
-        el("td", { class: "diff" }, diffText(event.before, event.after))));
+    try {
+      const page = await api("GET", "/audit-events" + qs({
+        action: form.action.value, user_id: form.user_id.value.trim(), token_id: form.token_id.value.trim(),
+        since, until, limit: 50, cursor: more ? state.cursors.audit : undefined,
+      }));
+      if (reqId !== state.seq.audit) return;
+      const body = $("audit-rows");
+      if (!more) body.replaceChildren();
+      for (const event of page.items) {
+        body.append(el("tr", {},
+          el("td", {}, fmt(event.occurred_at)),
+          el("td", {}, event.actor.username || event.actor.id, el("div", { class: "hint" }, event.actor.type)),
+          el("td", { class: "mono" }, event.action),
+          el("td", { class: "mono" }, event.target_id, event.user_id && event.user_id !== event.target_id ? el("div", { class: "hint" }, event.user_id) : null),
+          el("td", { class: "diff" }, diffText(event.before, event.after))));
+      }
+      if (!body.children.length) body.append(el("tr", {}, el("td", { colspan: 5, class: "empty" }, "没有记录")));
+      state.cursors.audit = page.next_cursor;
+      $("audit-more").hidden = !page.next_cursor;
+    } catch (error) {
+      if (reqId === state.seq.audit) toast(error.message, true);
     }
-    if (!body.children.length) body.append(el("tr", {}, el("td", { colspan: 5, class: "empty" }, "没有记录")));
-    state.cursors.audit = page.next_cursor;
-    $("audit-more").hidden = !page.next_cursor;
   }
 
   // ---------------------------------------------------------------- 网关
   async function openGateways() {
+    const reqId = ++state.seq.gateways;
     show("gateways");
-    const gateways = await loadGateways();
-    const body = $("gw-rows");
-    body.replaceChildren();
-    for (const gw of gateways) {
-      body.append(el("tr", {},
-        el("td", { class: "mono" }, gw.gateway_id),
-        el("td", {}, gw.name || "—"),
-        el("td", {}, String(gw.revision)),
-        el("td", {}, String(gw.snapshot_requests)),
-        el("td", {}, fmt(gw.last_snapshot_at)),
-        el("td", {}, fmt(gw.credential_rotated_at)),
-        el("td", { class: "write" }, el("button", { onclick: () => rotateGateway(gw) }, "轮换凭据"))));
+    try {
+      const gateways = await loadGateways();
+      if (reqId !== state.seq.gateways) return;
+      const body = $("gw-rows");
+      body.replaceChildren();
+      for (const gw of gateways) {
+        body.append(el("tr", {},
+          el("td", { class: "mono" }, gw.gateway_id),
+          el("td", {}, gw.name || "—"),
+          el("td", {}, String(gw.revision)),
+          el("td", {}, String(gw.snapshot_requests)),
+          el("td", {}, fmt(gw.last_snapshot_at)),
+          el("td", {}, fmt(gw.credential_rotated_at)),
+          el("td", { class: "write" }, el("button", { onclick: () => rotateGateway(gw) }, "轮换凭据"))));
+      }
+      if (!body.children.length) body.append(el("tr", {}, el("td", { colspan: 7, class: "empty" }, "还没有登记网关")));
+    } catch (error) {
+      if (reqId === state.seq.gateways) toast(error.message, true);
     }
-    if (!body.children.length) body.append(el("tr", {}, el("td", { colspan: 7, class: "empty" }, "还没有登记网关")));
   }
   $("gw-new").addEventListener("click", () => { $("gw-form").reset(); $("gw-form-error").textContent = ""; $("dlg-gateway").showModal(); });
   $("gw-form").addEventListener("submit", async (event) => {

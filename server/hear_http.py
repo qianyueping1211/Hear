@@ -303,11 +303,28 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._reject_without_reading("请求体超过服务上限", 413)
             return
 
+        # 先在占推理槽之前完整读取请求体，避免弱网上传拖垮全局推理并发槽
+        body = self._read_body(route, length)
+        if body is None:
+            return
+
+        # 纯内存缓存参考音频接口不占模型推理槽，避免被慢翻译/克隆阻塞
+        if route == "/v1/clone/reference":
+            try:
+                handler(body)
+            except (ConnectionError, ssl.SSLError):
+                self.close_connection = True
+            except Exception:
+                traceback.print_exc()
+                self._error("参考音频处理失败，请查看服务端日志", 500)
+            return
+
         is_asr_preview = route == "/v1/asr" and self.headers.get("X-ASR-Preview", "").strip() == "1"
         is_mt_preview = route == "/v1/translate" and self.headers.get("X-MT-Preview", "").strip() == "1"
         preview = route if is_asr_preview or is_mt_preview else None
         device_id = (self.headers.get("X-Hear-Device-Id") or "").strip()[:64]
-        preview_key = (device_id, route) if (preview is not None and device_id) else preview
+        preview_scope = device_id or (self.client_address[0] if self.client_address else "")
+        preview_key = (preview_scope, route) if (preview is not None and preview_scope) else preview
         correction = route == "/v1/asr" and self.headers.get("X-ASR-Stage", "").strip() == "correct"
         revision = route == "/v1/translate" and self.headers.get("X-MT-Stage", "").strip() == "revision"
         background = preview is not None or correction or revision or route not in ("/v1/asr", "/v1/translate")
@@ -315,12 +332,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         exclusive = route if route == "/v1/clone" else preview_key
         with policy.reserve(background=background, preview=exclusive) as admitted:
             if not admitted:
-                self._reject_without_reading("推理服务正忙，请稍后重试", 503)
+                self._error("推理服务正忙，请稍后重试", 503)
                 return
             try:
-                body = self._read_body(route, length)
-                if body is not None:
-                    handler(body)
+                handler(body)
             except (ConnectionError, ssl.SSLError):
                 self.close_connection = True
             except TimeoutError:

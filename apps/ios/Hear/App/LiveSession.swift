@@ -400,7 +400,12 @@ final class LiveSession: ObservableObject {
             guard let self, self.isRunning, self.startToken == intent else { return }
             do {
                 try await self.capture.start()
-                guard self.isRunning, self.startToken == intent else { return }
+                guard self.isRunning, self.startToken == intent else {
+                    // 晚于停止或切换模式返回：立即停麦并释放音频会话，防止遗留幽灵麦克风
+                    self.capture.stop()
+                    self.scheduleMicrophoneRelease()
+                    return
+                }
                 AudioRoute.apply(self.outputMode)
             } catch is CancellationError {
                 return
@@ -1222,9 +1227,9 @@ final class LiveSession: ObservableObject {
     func prepareAppleTranslation() {
         guard usingAppleTranslation else { return }
         let a = langA, b = langB
-        systemTranslator.reset()
         appleDownloadAsked = false
         Task {
+            await systemTranslator.reset()
             await systemTranslator.loadSupportedLanguages()
             // 苹果翻译的语言标识得用苹果自己的写法（有的写 "en-US"，有的只写 "en"），
             // 写错了它就当"这个语言不支持"，语言包也下不下来。
@@ -1255,7 +1260,7 @@ final class LiveSession: ObservableObject {
         } else if usingAppleTranslation {
             appleNote = "苹果翻译的语言包没下载好，会改用别的引擎来翻译"
         }
-        systemTranslator.reset()
+        Task { await systemTranslator.reset() }
         hearLog(ok ? "苹果翻译语言包已就绪" : "苹果翻译语言包没有下载", ok ? .info : .warning)
     }
 
@@ -1767,7 +1772,12 @@ final class LiveSession: ObservableObject {
                 return false
             }
         }
-        guard token == startToken else { return false }
+        guard token == startToken else {
+            // 开麦异步排队期间用户已点停止或切模式：立刻停麦，避免系统橙色麦灯常亮
+            capture.stop()
+            scheduleMicrophoneRelease()
+            return false
+        }
         AudioRoute.apply(outputMode)
         isRunning = true
         if !talkMode {
