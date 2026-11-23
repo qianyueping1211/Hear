@@ -468,7 +468,8 @@ def whisper_status():
     if st == "加载中":
         return "加载中（第一次要下识别模型）"
     if st == "失败":
-        return "未安装 faster-whisper"
+        detail = (_whisper_state.get("detail") or "").strip()
+        return ("加载失败：%s" % detail[:80]) if detail else "未安装 faster-whisper"
     return "未加载"
 
 

@@ -1,15 +1,13 @@
 pub mod cloud;
 pub mod platform;
 pub mod recorder;
-pub mod sidecar;
 pub mod state;
 pub mod vad;
 
 use cloud::HearCloudClient;
-use sidecar::LocalEngineManager;
 use state::{
-    AppSnapshot, AudioCaptureMode, AudioSourceOption, ServerSwitches, ServiceStatus, SessionMode,
-    SubtitleStyle, TtsOutputSettings,
+    AppSnapshot, AudioCaptureMode, AudioSourceOption, EngineSource, ServiceConfig,
+    ServiceProbeResult, SessionMode, SubtitleStyle, TtsOutputSettings,
 };
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
@@ -19,7 +17,6 @@ use tokio::sync::Mutex;
 
 pub struct AppRuntime {
     pub snapshot: Mutex<AppSnapshot>,
-    pub engine: Mutex<LocalEngineManager>,
     pub cloud: HearCloudClient,
 }
 
@@ -27,7 +24,6 @@ impl AppRuntime {
     pub fn new() -> Self {
         Self {
             snapshot: Mutex::new(AppSnapshot::default()),
-            engine: Mutex::new(LocalEngineManager::new(8000)),
             cloud: HearCloudClient::new(),
         }
     }
@@ -184,69 +180,41 @@ async fn set_subtitle_style(
     Ok(())
 }
 
+/// 仅保存服务连接配置，不拉起或干预任何服务端进程
 #[tauri::command]
-async fn update_server_switches(
+async fn save_service_config(
+    rt: State<'_, Arc<AppRuntime>>,
+    config: ServiceConfig,
+) -> Result<ServiceConfig, String> {
+    let mut snap = rt.snapshot.lock().await;
+    snap.service_config = config.clone();
+    Ok(config)
+}
+
+/// 测试指定服务地址与口令的连通性及模型就绪状态（只读探测 /health 与 /v1/auth/check）
+#[tauri::command]
+async fn test_service_connection(
     app: AppHandle,
     rt: State<'_, Arc<AppRuntime>>,
-    mut switches: ServerSwitches,
-) -> Result<ServiceStatus, String> {
-    if !switches.local_server_enabled {
-        switches.lan_share_enabled = false;
-    }
+    target: EngineSource,
+    address: String,
+    access_token: String,
+) -> Result<ServiceProbeResult, String> {
+    let result = rt.cloud.test_connection(&address, &access_token).await;
     {
         let mut snap = rt.snapshot.lock().await;
-        snap.switches = switches.clone();
-    }
-    let status = {
-        let mut eng = rt.engine.lock().await;
-        if switches.local_server_enabled {
-            eng.start(&switches)?
-        } else {
-            eng.stop();
-            ServiceStatus::default()
+        match target {
+            EngineSource::Local => {
+                snap.local_status = result.clone();
+                let _ = app.emit("service:local_status", &result);
+            }
+            EngineSource::Cloud => {
+                snap.cloud_status = result.clone();
+                let _ = app.emit("service:cloud_status", &result);
+            }
         }
-    };
-    {
-        let mut snap = rt.snapshot.lock().await;
-        snap.service_status = status.clone();
     }
-    let _ = app.emit("service:status", &status);
-    Ok(status)
-}
-
-#[tauri::command]
-async fn start_local_server(
-    app: AppHandle,
-    rt: State<'_, Arc<AppRuntime>>,
-) -> Result<ServiceStatus, String> {
-    let switches = rt.snapshot.lock().await.switches.clone();
-    let status = rt.engine.lock().await.start(&switches)?;
-    rt.snapshot.lock().await.service_status = status.clone();
-    let _ = app.emit("service:status", &status);
-    Ok(status)
-}
-
-#[tauri::command]
-async fn stop_local_server(
-    app: AppHandle,
-    rt: State<'_, Arc<AppRuntime>>,
-) -> Result<ServiceStatus, String> {
-    rt.engine.lock().await.stop();
-    let status = ServiceStatus::default();
-    rt.snapshot.lock().await.service_status = status.clone();
-    let _ = app.emit("service:status", &status);
-    Ok(status)
-}
-
-#[tauri::command]
-async fn probe_server_health(
-    app: AppHandle,
-    rt: State<'_, Arc<AppRuntime>>,
-) -> Result<ServiceStatus, String> {
-    let status = rt.engine.lock().await.probe_status(&rt.cloud).await;
-    rt.snapshot.lock().await.service_status = status.clone();
-    let _ = app.emit("service:status", &status);
-    Ok(status)
+    Ok(result)
 }
 
 #[tauri::command]
@@ -271,20 +239,19 @@ async fn retranslate_segment(
     id: String,
     new_source: String,
 ) -> Result<(), String> {
-    let (base_url, secret, token, target_lang) = {
+    let (base_url, token, target_lang) = {
         let snap = rt.snapshot.lock().await;
-        let eng = rt.engine.lock().await;
-        let base = if snap.switches.mt_source == state::EngineSource::Local {
-            eng.local_base_url()
-        } else {
-            snap.switches.remote_cloud_address.clone()
+        let (addr, tok) = match snap.service_config.mt_source {
+            EngineSource::Local => (
+                snap.service_config.local_service_address.clone(),
+                snap.service_config.local_access_token.clone(),
+            ),
+            EngineSource::Cloud => (
+                snap.service_config.cloud_service_address.clone(),
+                snap.service_config.cloud_access_token.clone(),
+            ),
         };
-        (
-            base,
-            eng.local_secret().to_string(),
-            snap.switches.remote_access_token.clone(),
-            snap.target_lang.clone(),
-        )
+        (addr, tok, snap.target_lang.clone())
     };
 
     let prompt = format!("Translate to {}: {}", target_lang, new_source);
@@ -294,8 +261,11 @@ async fn retranslate_segment(
             &base_url,
             &prompt,
             false,
-            if token.is_empty() { None } else { Some(&token) },
-            Some(&secret),
+            if token.trim().is_empty() {
+                None
+            } else {
+                Some(&token)
+            },
             |_| {},
         )
         .await?;
@@ -324,14 +294,14 @@ async fn generate_summary(
 ) -> Result<String, String> {
     // Sprint 4 接入完整流式 LLMClient（OpenAI / Anthropic / 本地模型）
     Ok(format!(
-        "### 一键总结预览（模板：{}）\n\n- [00:00] 当前为 Sprint 1 框架联调占位输出，Sprint 4 将接入完整流式 LLM 纪要生成与时间戳锚点。",
+        "### 一键总结预览（模板：{}）\n\n- [00:00] 当前为预览版框架输出，后续将接入完整流式 LLM 纪要生成与时间戳锚点。",
         template_id
     ))
 }
 
 #[tauri::command]
 async fn import_media_file() -> Result<(), String> {
-    // Sprint 4 接入文件选择对话框 + symphonia/ffmpeg 音频提取 + 离线批量转译管线
+    // Sprint 4 接入文件选择对话框 + 音频提取 + 离线批量转译管线
     Ok(())
 }
 
@@ -398,7 +368,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(runtime)
         .setup(|app| {
@@ -420,10 +389,8 @@ pub fn run() {
             set_playback_speed,
             set_track_volumes,
             set_subtitle_style,
-            update_server_switches,
-            start_local_server,
-            stop_local_server,
-            probe_server_health,
+            save_service_config,
+            test_service_connection,
             set_tts_settings,
             set_glossary,
             retranslate_segment,

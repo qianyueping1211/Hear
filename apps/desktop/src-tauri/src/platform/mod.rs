@@ -15,14 +15,6 @@ pub use macos as os;
 pub mod fallback {
     use tauri::WebviewWindow;
 
-    pub struct ChildProcessGuard;
-    impl ChildProcessGuard {
-        pub fn new() -> Self {
-            Self
-        }
-        pub fn attach_pid(&self, _pid: u32) {}
-    }
-
     pub fn apply_subtitle_overlay_traits(
         _window: &WebviewWindow,
         _click_through: bool,

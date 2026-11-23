@@ -82,7 +82,7 @@ jobs:
           Write-Host "OK: 未检测到证书/私钥文件"
           exit 0
 
-      # Windows 版本号独立写在 apps/desktop/VERSION（例如 0.1.1），每次发布前提高该文件
+      # Windows 版本号独立写在 apps/desktop/VERSION（例如 0.1.2），每次发布前提高该文件
       - name: Version
         id: version
         shell: pwsh
@@ -131,25 +131,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
-          cache-dependency-path: server/requirements.txt
 
       - name: Sync apps/desktop/VERSION into package.json, Cargo.toml, tauri.conf.json
         shell: pwsh
         run: python apps/desktop/scripts/sync_desktop_version.py
-
-      - name: Build Python Sidecar (hear-server-x86_64-pc-windows-msvc.exe)
-        shell: pwsh
-        run: |
-          pip install pyinstaller cryptography numpy
-          pyinstaller --onefile --name hear-server-x86_64-pc-windows-msvc `
-            --paths server `
-            --hidden-import hear_http `
-            --hidden-import hear_auth `
-            --hidden-import hear_speaker `
-            server/hear_cloud.py
-          New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries | Out-Null
-          Copy-Item dist/hear-server-x86_64-pc-windows-msvc.exe apps/desktop/src-tauri/binaries/hear-server-x86_64-pc-windows-msvc.exe -Force
 
       - name: Prepare desktop icons & build frontend
         working-directory: apps/desktop
@@ -218,12 +203,12 @@ jobs:
             echo ""
             echo "源代码提交：$(git rev-parse HEAD)"
             echo "构建号：${GITHUB_RUN_NUMBER}"
-            echo "架构：Windows x64（Tauri v2 + 内置 hear-server Sidecar）"
+            echo "架构：Windows x64（Tauri v2 纯客户端，服务端由服务侧独立管理）"
             echo ""
             echo "### 安装"
-            echo "1. 下载下面的 \`${ASSET}\` 并双击安装（支持当前用户无管理员权限安装）"
-            echo "2. 安装后默认仅启用本机回环服务（\`127.0.0.1\`），如需供 iPhone 局域网共用，可在设置中开启「共享给 iPhone」开关"
-            echo "3. 后续更新直接覆盖安装即可，已下载的模型与配置会保留"
+            echo "1. 下载下面的 \`${ASSET}\` 并双击安装（支持当前用户免管理员安装）"
+            echo "2. 在设置中配置本机模型服务地址或远端云端服务地址，并点击「测试连接」验证服务与模型状态"
+            echo "3. 后续更新直接覆盖安装即可"
           } > notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --title "${TITLE}" --notes-file notes.md

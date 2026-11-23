@@ -10,13 +10,13 @@ import {
   PanelRight,
   PanelTop,
   Pencil,
+  RefreshCw,
   Search,
   Settings,
   Sparkles,
   Square,
   Trash2,
   Unlock,
-  Wifi,
 } from "lucide-react";
 import {
   buildMarkdown,
@@ -53,8 +53,11 @@ export function MainApp() {
     livePartialSource,
     livePartialTranslation,
     subtitleStyle,
-    switches,
-    serviceStatus,
+    serviceConfig,
+    localStatus,
+    cloudStatus,
+    testingLocal,
+    testingCloud,
     playback,
     searchQuery,
     summaryOpen,
@@ -72,6 +75,7 @@ export function MainApp() {
     clearRecording,
     seekPlayback,
     toggleSubtitleVisible,
+    testServiceConnection,
     editSegmentSource,
     generateSummary,
     importMediaFile,
@@ -86,6 +90,70 @@ export function MainApp() {
   useEffect(() => {
     void hydrate();
   }, [hydrate]);
+
+  // 汇总当前路由所用服务的连接与模型状态，显示在顶栏胶囊中
+  const serviceBadge = useMemo(() => {
+    const usesLocal =
+      serviceConfig.asrSource === "local" || serviceConfig.mtSource === "local";
+    const usesCloud =
+      serviceConfig.asrSource === "cloud" || serviceConfig.mtSource === "cloud";
+    const checking = (usesLocal && testingLocal) || (usesCloud && testingCloud);
+
+    const routeLabel =
+      usesLocal && usesCloud ? "混合服务" : usesCloud ? "云端服务" : "本机服务";
+
+    const activeStatuses = [
+      ...(usesLocal ? [localStatus] : []),
+      ...(usesCloud ? [cloudStatus] : []),
+    ];
+    const anyTested = activeStatuses.some(
+      (s) => Boolean(s.address || s.error || s.latencyMs > 0)
+    );
+    const allOk = anyTested && activeStatuses.every((s) => s.ok);
+    const asrStatus =
+      serviceConfig.asrSource === "local" ? localStatus : cloudStatus;
+    const mtStatus =
+      serviceConfig.mtSource === "local" ? localStatus : cloudStatus;
+
+    let dotClass = "bg-slate-400";
+    let statusText = `${routeLabel} · 未检测`;
+    if (checking) {
+      dotClass = "bg-amber-400 animate-pulse";
+      statusText = `${routeLabel} · 检测中…`;
+    } else if (allOk) {
+      const modelsReady = asrStatus.asrReady && mtStatus.mtReady;
+      dotClass = modelsReady ? "bg-emerald-400" : "bg-amber-400";
+      statusText = modelsReady
+        ? `${routeLabel} · 就绪`
+        : `${routeLabel} · 已连(加载中)`;
+    } else if (anyTested) {
+      dotClass = "bg-rose-400";
+      statusText = `${routeLabel} · 异常`;
+    }
+
+    const tooltip = [
+      `识别(${serviceConfig.asrSource === "local" ? "本机" : "云端"})：${asrStatus.asrDetail}`,
+      `翻译(${serviceConfig.mtSource === "local" ? "本机" : "云端"})：${mtStatus.mtDetail}`,
+    ].join(" | ");
+
+    return { dotClass, statusText, tooltip, usesLocal, usesCloud, checking };
+  }, [serviceConfig, localStatus, cloudStatus, testingLocal, testingCloud]);
+
+  const handleQuickRefresh = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const tasks: Promise<unknown>[] = [];
+    if (serviceBadge.usesLocal && serviceConfig.localServiceAddress.trim()) {
+      tasks.push(testServiceConnection("local"));
+    }
+    if (serviceBadge.usesCloud && serviceConfig.cloudServiceAddress.trim()) {
+      tasks.push(testServiceConnection("cloud"));
+    }
+    if (tasks.length === 0) {
+      setSettingsOpen(true, "server");
+      return;
+    }
+    await Promise.all(tasks);
+  };
 
   const filteredSegments = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -105,7 +173,6 @@ export function MainApp() {
 
   const activeSegmentId = activeIdx >= 0 ? segments[activeIdx]?.id : null;
 
-  // 播放录音时自动平滑滚动到当前高亮句；录音中自动滚动到底部
   useEffect(() => {
     if (!autoFollow) return;
     if (activeSegmentId && playback.isPlaying) {
@@ -116,7 +183,14 @@ export function MainApp() {
     } else if (mode === "recording" && listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
-  }, [activeSegmentId, playback.isPlaying, mode, segments.length, livePartialTranslation, autoFollow]);
+  }, [
+    activeSegmentId,
+    playback.isPlaying,
+    mode,
+    segments.length,
+    livePartialTranslation,
+    autoFollow,
+  ]);
 
   const downloadBlob = (filename: string, content: string) => {
     const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
@@ -128,7 +202,6 @@ export function MainApp() {
     URL.revokeObjectURL(url);
   };
 
-  /** 把总结里的 [mm:ss] 渲染成可点击的时间锚点，直接跳转录音对应位置 */
   const renderSummaryWithAnchors = (text: string) => {
     const lines = text.split("\n");
     return lines.map((line, lineIdx) => {
@@ -166,7 +239,6 @@ export function MainApp() {
             听见 Hear
           </div>
 
-          {/* 音频源选择 */}
           <select
             value={captureMode}
             onChange={(e) => void setCaptureMode(e.target.value as AudioCaptureMode)}
@@ -179,7 +251,6 @@ export function MainApp() {
             ))}
           </select>
 
-          {/* 语种对 + 锁定源语种 */}
           <div className="flex items-center gap-1 rounded-lg bg-surface-800 border border-white/10 px-2 py-1 text-xs">
             <select
               value={sourceLang}
@@ -253,30 +324,26 @@ export function MainApp() {
           </button>
         </div>
 
-        {/* 右侧：状态胶囊 + 悬浮字幕 + 总结 + 设置 */}
+        {/* 右侧：服务状态胶囊（可点刷新）+ 悬浮字幕 + 总结 + 设置 */}
         <div className="flex items-center gap-1.5 shrink-0">
-          <button
+          <div
             onClick={() => setSettingsOpen(true, "server")}
-            className="px-2.5 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs flex items-center gap-1.5"
+            title={serviceBadge.tooltip}
+            className="px-2.5 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-xs flex items-center gap-1.5 cursor-pointer"
           >
-            <span
-              className={`w-2 h-2 rounded-full ${
-                serviceStatus.running
-                  ? serviceStatus.lanShared
-                    ? "bg-sky-400"
-                    : "bg-emerald-400"
-                  : "bg-amber-400"
-              }`}
-            />
-            <span>
-              {switches.localServerEnabled
-                ? switches.lanShareEnabled
-                  ? "本机+共享中"
-                  : "仅本机服务"
-                : "云端模式"}
-            </span>
-            {switches.lanShareEnabled && <Wifi className="w-3 h-3 text-sky-400" />}
-          </button>
+            <span className={`w-2 h-2 rounded-full ${serviceBadge.dotClass}`} />
+            <span>{serviceBadge.statusText}</span>
+            <button
+              type="button"
+              onClick={(e) => void handleQuickRefresh(e)}
+              title="刷新服务状态"
+              className="ml-0.5 p-0.5 rounded hover:bg-white/10 text-slate-400 hover:text-white"
+            >
+              <RefreshCw
+                className={`w-3 h-3 ${serviceBadge.checking ? "animate-spin" : ""}`}
+              />
+            </button>
+          </div>
 
           <button
             onClick={() => void toggleSubtitleVisible()}
@@ -304,7 +371,7 @@ export function MainApp() {
 
           <button
             onClick={() => setSettingsOpen(true)}
-            title="服务、悬浮字幕与模型设置"
+            title="模型服务、悬浮字幕样式与音频设置"
             className="p-2 rounded-lg bg-surface-800 border border-white/10 text-slate-300 hover:text-white"
           >
             <Settings className="w-4 h-4" />
@@ -314,9 +381,7 @@ export function MainApp() {
 
       {/* 主体：时间轴字幕流 + 右侧一键总结 */}
       <div className="flex-1 flex min-h-0 overflow-hidden">
-        {/* 左/中：完整录音对应的原文 + 译文时间轴 */}
         <main className="flex-1 flex flex-col min-w-0 relative">
-          {/* 工具子栏 */}
           <div className="h-11 border-b border-white/5 px-4 flex items-center justify-between gap-3 bg-surface-950/60">
             <div className="relative flex-1 max-w-sm">
               <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
@@ -357,7 +422,6 @@ export function MainApp() {
             </div>
           </div>
 
-          {/* 字幕时间轴列表 */}
           <div
             ref={listRef}
             onWheel={() => {
@@ -486,12 +550,13 @@ export function MainApp() {
                   );
                 })}
 
-                {/* 实时说话中预览气泡 */}
                 {(livePartialSource || livePartialTranslation) && (
                   <div className="rounded-xl border border-dashed border-brand-400/40 bg-brand-500/5 p-3.5">
                     <div className="text-[11px] text-brand-400 mb-1">实时识别中…</div>
                     <div className="text-xs text-slate-300 italic">{livePartialSource}</div>
-                    <div className="text-sm text-white/90 mt-1">{livePartialTranslation || "…"}</div>
+                    <div className="text-sm text-white/90 mt-1">
+                      {livePartialTranslation || "…"}
+                    </div>
                   </div>
                 )}
               </>
@@ -509,7 +574,6 @@ export function MainApp() {
           )}
         </main>
 
-        {/* 右侧：一键总结抽屉 */}
         {summaryOpen && (
           <aside className="w-80 xl:w-96 border-l border-white/10 bg-surface-900/70 flex flex-col shrink-0">
             <div className="p-3.5 border-b border-white/10 space-y-2.5">
@@ -554,10 +618,7 @@ export function MainApp() {
         )}
       </div>
 
-      {/* 底部：完整录音波形播放器 */}
       <WaveformPlayer />
-
-      {/* 设置与双开关托管弹窗 */}
       <SettingsModal />
     </div>
   );

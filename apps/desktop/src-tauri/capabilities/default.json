@@ -13,7 +13,6 @@
     "core:window:allow-set-ignore-cursor-events",
     "dialog:default",
     "fs:default",
-    "global-shortcut:default",
-    "shell:allow-execute"
+    "global-shortcut:default"
   ]
 }

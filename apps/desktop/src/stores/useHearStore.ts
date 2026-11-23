@@ -3,9 +3,10 @@ import type {
   AppSnapshot,
   AudioCaptureMode,
   AudioSourceOption,
+  EngineSource,
   RecordingPlaybackState,
-  ServerSwitches,
-  ServiceStatus,
+  ServiceConfig,
+  ServiceProbeResult,
   SessionMode,
   SubtitleSegment,
   SubtitleStyle,
@@ -50,6 +51,7 @@ const DEFAULT_STYLE: SubtitleStyle = {
   layout: "bilingual",
   fontSize: 22,
   maxLines: 2,
+  backgroundColor: "#0b0f17",
   backgroundOpacity: 0.72,
   textStroke: true,
   autoFadeSeconds: 0,
@@ -57,32 +59,29 @@ const DEFAULT_STYLE: SubtitleStyle = {
   syncWithPlayback: true,
 };
 
-const DEFAULT_SWITCHES: ServerSwitches = {
-  localServerEnabled: true,
-  lanShareEnabled: false,
+const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
+  localServiceAddress: "https://127.0.0.1:8000",
+  localAccessToken: "",
+  cloudServiceAddress: "",
+  cloudAccessToken: "",
   asrSource: "local",
   mtSource: "local",
   cloneSource: "local",
-  remoteCloudAddress: "",
-  remoteAccessToken: "",
-  remoteStrictFingerprint: "",
 };
 
-const DEFAULT_SERVICE_STATUS: ServiceStatus = {
-  running: false,
-  bindHost: "127.0.0.1",
-  port: 8000,
-  lanShared: false,
-  lanAddresses: [],
-  pairingAddress: "",
-  accessTokenMasked: "",
+const DEFAULT_PROBE: ServiceProbeResult = {
+  ok: false,
+  address: "",
+  latencyMs: 0,
+  summary: "尚未检测连接",
   asrReady: false,
-  asrDetail: "未启动",
+  asrDetail: "未检测",
   mtReady: false,
-  mtDetail: "未启动",
+  mtDetail: "未检测",
   cloneReady: false,
-  cloneDetail: "未启动",
-  streamingMt: true,
+  cloneDetail: "未检测",
+  authMode: "unknown",
+  streamingMt: false,
 };
 
 const DEFAULT_TTS: TtsOutputSettings = {
@@ -114,6 +113,8 @@ interface HearStoreState extends AppSnapshot {
   summaryGenerating: boolean;
   settingsOpen: boolean;
   activeSettingsTab: "server" | "subtitle" | "audio" | "general";
+  testingLocal: boolean;
+  testingCloud: boolean;
 
   hydrate: () => Promise<void>;
   setSearchQuery: (q: string) => void;
@@ -133,10 +134,12 @@ interface HearStoreState extends AppSnapshot {
 
   updateSubtitleStyle: (patch: Partial<SubtitleStyle>) => Promise<void>;
   toggleSubtitleVisible: () => Promise<void>;
-  updateSwitches: (patch: Partial<ServerSwitches>) => Promise<void>;
-  startLocalServer: () => Promise<void>;
-  stopLocalServer: () => Promise<void>;
-  probeHealth: () => Promise<void>;
+  saveServiceConfig: (patch: Partial<ServiceConfig>) => Promise<ServiceConfig>;
+  testServiceConnection: (
+    target: EngineSource,
+    overrideAddress?: string,
+    overrideToken?: string
+  ) => Promise<ServiceProbeResult | null>;
   updateTtsSettings: (patch: Partial<TtsOutputSettings>) => void;
   setGlossary: (text: string) => void;
 
@@ -155,8 +158,9 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   livePartialSource: "",
   livePartialTranslation: "",
   subtitleStyle: DEFAULT_STYLE,
-  switches: DEFAULT_SWITCHES,
-  serviceStatus: DEFAULT_SERVICE_STATUS,
+  serviceConfig: DEFAULT_SERVICE_CONFIG,
+  localStatus: DEFAULT_PROBE,
+  cloudStatus: DEFAULT_PROBE,
   ttsSettings: DEFAULT_TTS,
   playback: DEFAULT_PLAYBACK,
   glossary: "",
@@ -174,6 +178,8 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   summaryGenerating: false,
   settingsOpen: false,
   activeSettingsTab: "server",
+  testingLocal: false,
+  testingCloud: false,
 
   hydrate: async () => {
     const snap = await tauriInvoke<AppSnapshot>("get_snapshot");
@@ -216,8 +222,11 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
           }));
         }
       );
-      await listen<ServiceStatus>("service:status", (ev) => {
-        set({ serviceStatus: ev.payload });
+      await listen<ServiceProbeResult>("service:local_status", (ev) => {
+        set({ localStatus: ev.payload });
+      });
+      await listen<ServiceProbeResult>("service:cloud_status", (ev) => {
+        set({ cloudStatus: ev.payload });
       });
       await listen<SubtitleStyle>("subtitle:style", (ev) => {
         set({ subtitleStyle: ev.payload });
@@ -299,35 +308,42 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     await get().updateSubtitleStyle({ visible: next });
   },
 
-  updateSwitches: async (patch) => {
-    const current = get().switches;
-    const merged: ServerSwitches = { ...current, ...patch };
-    // 关闭「本机模型服务」开关 1 时，强制连带关闭「共享给 iPhone」开关 2
-    if (!merged.localServerEnabled) {
-      merged.lanShareEnabled = false;
-    }
-    set({ switches: merged });
-    const status = await tauriInvoke<ServiceStatus>("update_server_switches", {
-      switches: merged,
+  saveServiceConfig: async (patch) => {
+    const merged: ServiceConfig = { ...get().serviceConfig, ...patch };
+    set({ serviceConfig: merged });
+    const saved = await tauriInvoke<ServiceConfig>("save_service_config", {
+      config: merged,
     });
-    if (status) {
-      set({ serviceStatus: status });
+    return saved ?? merged;
+  },
+
+  testServiceConnection: async (target, overrideAddress, overrideToken) => {
+    const cfg = get().serviceConfig;
+    const address =
+      overrideAddress ??
+      (target === "local" ? cfg.localServiceAddress : cfg.cloudServiceAddress);
+    const accessToken =
+      overrideToken ??
+      (target === "local" ? cfg.localAccessToken : cfg.cloudAccessToken);
+
+    if (target === "local") set({ testingLocal: true });
+    else set({ testingCloud: true });
+
+    try {
+      const result = await tauriInvoke<ServiceProbeResult>("test_service_connection", {
+        target,
+        address,
+        accessToken,
+      });
+      if (result) {
+        if (target === "local") set({ localStatus: result });
+        else set({ cloudStatus: result });
+      }
+      return result;
+    } finally {
+      if (target === "local") set({ testingLocal: false });
+      else set({ testingCloud: false });
     }
-  },
-
-  startLocalServer: async () => {
-    const status = await tauriInvoke<ServiceStatus>("start_local_server");
-    if (status) set({ serviceStatus: status });
-  },
-
-  stopLocalServer: async () => {
-    const status = await tauriInvoke<ServiceStatus>("stop_local_server");
-    if (status) set({ serviceStatus: status });
-  },
-
-  probeHealth: async () => {
-    const status = await tauriInvoke<ServiceStatus>("probe_server_health");
-    if (status) set({ serviceStatus: status });
   },
 
   updateTtsSettings: (patch) => {

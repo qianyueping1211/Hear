@@ -13,6 +13,23 @@ import { findActiveSegmentIndex } from "../../lib/export";
 import { useHearStore } from "../../stores/useHearStore";
 import type { SubtitleStyle } from "../../types/hear";
 
+/** 将 #RRGGBB 与透明度转为 rgba()，并计算是否属于浅色背景以自适应文字对比度 */
+function parseHexBackground(hex: string, opacity: number): {
+  rgba: string;
+  isLight: boolean;
+} {
+  const clean = (hex || "#0b0f17").replace("#", "").trim();
+  const valid = /^[0-9a-fA-F]{6}$/.test(clean) ? clean : "0b0f17";
+  const r = parseInt(valid.slice(0, 2), 16);
+  const g = parseInt(valid.slice(2, 4), 16);
+  const b = parseInt(valid.slice(4, 6), 16);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return {
+    rgba: `rgba(${r}, ${g}, ${b}, ${opacity})`,
+    isLight: luminance > 0.65 && opacity >= 0.45,
+  };
+}
+
 export function SubtitleApp() {
   const {
     mode,
@@ -31,6 +48,15 @@ export function SubtitleApp() {
   useEffect(() => {
     void hydrate();
   }, [hydrate]);
+
+  const bg = useMemo(
+    () =>
+      parseHexBackground(
+        subtitleStyle.backgroundColor,
+        subtitleStyle.backgroundOpacity
+      ),
+    [subtitleStyle.backgroundColor, subtitleStyle.backgroundOpacity]
+  );
 
   // 录音中展示最新 N 条 + 实时预览；回放录音时联动展示当前播放位置对应的句子
   const displayedLines = useMemo(() => {
@@ -99,17 +125,18 @@ export function SubtitleApp() {
     void navigator.clipboard?.writeText(text);
   };
 
-  const strokeClass = subtitleStyle.textStroke ? "subtitle-stroke" : "";
+  const strokeClass = subtitleStyle.textStroke && !bg.isLight ? "subtitle-stroke" : "";
+  const primaryTextClass = bg.isLight ? "text-slate-900" : "text-white";
+  const secondaryTextClass = bg.isLight ? "text-slate-700" : "text-slate-200/85";
+  const borderClass = bg.isLight ? "border-slate-900/15" : "border-white/10";
 
   return (
     <div
       data-tauri-drag-region={!subtitleStyle.clickThrough ? "" : undefined}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      style={{
-        backgroundColor: `rgba(11, 15, 23, ${subtitleStyle.backgroundOpacity})`,
-      }}
-      className="relative h-full w-full rounded-2xl border border-white/10 backdrop-blur-md px-5 py-3 flex flex-col justify-center transition-colors"
+      style={{ backgroundColor: bg.rgba }}
+      className={`relative h-full w-full rounded-2xl border ${borderClass} backdrop-blur-md px-5 py-3 flex flex-col justify-center transition-colors`}
     >
       {/* 悬停迷你工具栏（穿透锁定时不拦截鼠标） */}
       {!subtitleStyle.clickThrough && (
@@ -172,7 +199,7 @@ export function SubtitleApp() {
       {displayedLines.length === 0 ? (
         <div
           data-tauri-drag-region
-          className={`flex items-center justify-center gap-2 text-slate-300/75 text-sm ${strokeClass}`}
+          className={`flex items-center justify-center gap-2 text-sm ${secondaryTextClass} ${strokeClass}`}
         >
           <PanelTop className="w-4 h-4" />
           <span>
@@ -196,10 +223,10 @@ export function SubtitleApp() {
                         ? Math.max(12, Math.round(subtitleStyle.fontSize * 0.72))
                         : Math.max(13, Math.round(subtitleStyle.fontSize * 0.82)),
                   }}
-                  className={`text-slate-200/85 ${strokeClass}`}
+                  className={`${secondaryTextClass} ${strokeClass}`}
                 >
                   {line.speaker && (
-                    <span className="mr-1.5 px-1.5 py-0.5 rounded bg-white/10 text-[11px] not-italic text-sky-300">
+                    <span className="mr-1.5 px-1.5 py-0.5 rounded bg-black/20 text-[11px] not-italic text-sky-400">
                       {line.speaker}
                     </span>
                   )}
@@ -208,7 +235,7 @@ export function SubtitleApp() {
               )}
               <div
                 style={{ fontSize: subtitleStyle.fontSize }}
-                className={`font-semibold text-white ${strokeClass}`}
+                className={`font-semibold ${primaryTextClass} ${strokeClass}`}
               >
                 {line.translation}
               </div>

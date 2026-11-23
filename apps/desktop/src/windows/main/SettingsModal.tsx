@@ -1,44 +1,207 @@
+import { useEffect, useState } from "react";
 import {
+  AlertCircle,
   CheckCircle2,
-  Copy,
+  Cloud,
+  Laptop,
+  Loader2,
+  Palette,
   RefreshCw,
+  Save,
   Server,
   Shield,
   Sliders,
   Volume2,
-  Wifi,
   X,
 } from "lucide-react";
 import { useHearStore } from "../../stores/useHearStore";
-import type { EngineSource, SubtitleLayoutMode } from "../../types/hear";
+import type {
+  EngineSource,
+  ServiceProbeResult,
+  SubtitleLayoutMode,
+} from "../../types/hear";
+
+const BG_COLOR_PRESETS = [
+  { name: "深邃黑", hex: "#0b0f17" },
+  { name: "纯黑", hex: "#000000" },
+  { name: "海军蓝", hex: "#0f172a" },
+  { name: "墨绿", hex: "#06281e" },
+  { name: "炭灰", hex: "#1f2937" },
+  { name: "柔白", hex: "#f8fafc" },
+];
+
+function StatusPanel({ status }: { status: ServiceProbeResult }) {
+  const hasTested = Boolean(status.address || status.error || status.latencyMs > 0);
+  return (
+    <div className="rounded-lg bg-surface-950/80 border border-white/10 p-3 space-y-2.5 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 font-medium">
+          {!hasTested ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-slate-500" />
+              <span className="text-slate-400">{status.summary}</span>
+            </>
+          ) : status.ok ? (
+            <>
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span className="text-emerald-300">{status.summary}</span>
+            </>
+          ) : (
+            <>
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              <span className="text-rose-300">{status.summary}</span>
+            </>
+          )}
+        </div>
+        {hasTested && status.authMode && status.authMode !== "unknown" && (
+          <span className="px-2 py-0.5 rounded bg-white/5 text-[11px] text-slate-400">
+            鉴权：{status.authMode}
+          </span>
+        )}
+      </div>
+
+      {status.authDetail && (
+        <div
+          className={`text-[11px] ${
+            status.authOk === false ? "text-amber-300" : "text-emerald-300/90"
+          }`}
+        >
+          口令状态：{status.authDetail}
+        </div>
+      )}
+
+      {status.error && (
+        <div className="text-[11px] text-rose-300/90 break-all">{status.error}</div>
+      )}
+
+      <div className="grid grid-cols-3 gap-2 pt-0.5">
+        <div className="rounded-md bg-surface-900/90 p-2 border border-white/5">
+          <div className="text-[11px] text-slate-400">语音识别 (ASR)</div>
+          <div
+            className={`mt-1 font-medium truncate ${
+              status.asrReady
+                ? "text-emerald-400"
+                : hasTested
+                ? "text-amber-300"
+                : "text-slate-500"
+            }`}
+            title={status.asrDetail}
+          >
+            {status.asrDetail}
+          </div>
+        </div>
+        <div className="rounded-md bg-surface-900/90 p-2 border border-white/5">
+          <div className="text-[11px] text-slate-400">文本翻译 (MT)</div>
+          <div
+            className={`mt-1 font-medium truncate ${
+              status.mtReady
+                ? "text-emerald-400"
+                : hasTested
+                ? "text-amber-300"
+                : "text-slate-500"
+            }`}
+            title={status.mtDetail}
+          >
+            {status.mtDetail}
+          </div>
+        </div>
+        <div className="rounded-md bg-surface-900/90 p-2 border border-white/5">
+          <div className="text-[11px] text-slate-400">声音克隆 (TTS)</div>
+          <div
+            className={`mt-1 font-medium truncate ${
+              status.cloneReady
+                ? "text-emerald-400"
+                : hasTested
+                ? "text-slate-300"
+                : "text-slate-500"
+            }`}
+            title={status.cloneDetail}
+          >
+            {status.cloneDetail}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function SettingsModal() {
   const {
     settingsOpen,
     activeSettingsTab,
     setSettingsOpen,
-    switches,
-    serviceStatus,
+    serviceConfig,
+    localStatus,
+    cloudStatus,
+    testingLocal,
+    testingCloud,
     subtitleStyle,
     ttsSettings,
     glossary,
-    updateSwitches,
-    startLocalServer,
-    stopLocalServer,
-    probeHealth,
+    saveServiceConfig,
+    testServiceConnection,
     updateSubtitleStyle,
     updateTtsSettings,
     setGlossary,
   } = useHearStore();
 
+  // 使用本地草稿状态，输入过程绝不触发后端请求或任何进程动作
+  const [localAddress, setLocalAddress] = useState(serviceConfig.localServiceAddress);
+  const [localToken, setLocalToken] = useState(serviceConfig.localAccessToken);
+  const [cloudAddress, setCloudAddress] = useState(serviceConfig.cloudServiceAddress);
+  const [cloudToken, setCloudToken] = useState(serviceConfig.cloudAccessToken);
+  const [savedHint, setSavedHint] = useState<"local" | "cloud" | null>(null);
+
+  useEffect(() => {
+    if (settingsOpen) {
+      setLocalAddress(serviceConfig.localServiceAddress);
+      setLocalToken(serviceConfig.localAccessToken);
+      setCloudAddress(serviceConfig.cloudServiceAddress);
+      setCloudToken(serviceConfig.cloudAccessToken);
+      setSavedHint(null);
+    }
+  }, [settingsOpen, serviceConfig]);
+
   if (!settingsOpen) return null;
 
   const tabs: { id: typeof activeSettingsTab; label: string; icon: React.ReactNode }[] = [
-    { id: "server", label: "本机与云端服务", icon: <Server className="w-4 h-4" /> },
+    { id: "server", label: "模型服务与连接", icon: <Server className="w-4 h-4" /> },
     { id: "subtitle", label: "悬浮字幕样式", icon: <Sliders className="w-4 h-4" /> },
     { id: "audio", label: "朗读与原音压低", icon: <Volume2 className="w-4 h-4" /> },
     { id: "general", label: "快捷键与术语表", icon: <Shield className="w-4 h-4" /> },
   ];
+
+  const handleSaveLocal = async () => {
+    await saveServiceConfig({
+      localServiceAddress: localAddress.trim(),
+      localAccessToken: localToken.trim(),
+    });
+    setSavedHint("local");
+    setTimeout(() => setSavedHint((h) => (h === "local" ? null : h)), 2000);
+  };
+
+  const handleTestLocal = async () => {
+    const addr = localAddress.trim();
+    const tok = localToken.trim();
+    await saveServiceConfig({ localServiceAddress: addr, localAccessToken: tok });
+    await testServiceConnection("local", addr, tok);
+  };
+
+  const handleSaveCloud = async () => {
+    await saveServiceConfig({
+      cloudServiceAddress: cloudAddress.trim(),
+      cloudAccessToken: cloudToken.trim(),
+    });
+    setSavedHint("cloud");
+    setTimeout(() => setSavedHint((h) => (h === "cloud" ? null : h)), 2000);
+  };
+
+  const handleTestCloud = async () => {
+    const addr = cloudAddress.trim();
+    const tok = cloudToken.trim();
+    await saveServiceConfig({ cloudServiceAddress: addr, cloudAccessToken: tok });
+    await testServiceConnection("cloud", addr, tok);
+  };
 
   const renderSourceSelect = (
     label: string,
@@ -52,7 +215,7 @@ export function SettingsModal() {
         onChange={(e) => onChange(e.target.value as EngineSource)}
         className="rounded-lg bg-surface-950 border border-white/10 px-3 py-1.5 text-xs text-slate-100"
       >
-        <option value="local">本机托管模型服务</option>
+        <option value="local">本机模型服务</option>
         <option value="cloud">远端云端服务</option>
       </select>
     </div>
@@ -91,172 +254,125 @@ export function SettingsModal() {
         <div className="p-5 overflow-y-auto space-y-5 text-sm">
           {activeSettingsTab === "server" && (
             <>
-              {/* 双开关核心区 */}
-              <div className="rounded-xl bg-surface-800/70 border border-white/10 p-4 space-y-4">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div className="font-semibold text-white flex items-center gap-2">
-                      开关 1：本机模型服务（默认仅限本机访问）
-                      <span
-                        className={`px-2 py-0.5 rounded-full text-[11px] ${
-                          serviceStatus.running
-                            ? "bg-emerald-500/20 text-emerald-300"
-                            : "bg-slate-700 text-slate-300"
-                        }`}
-                      >
-                        {serviceStatus.running
-                          ? `运行中 (${serviceStatus.bindHost}:${serviceStatus.port})`
-                          : "已停止"}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-400 mt-1">
-                      托管现有 server/ 服务（SenseVoice / Whisper / Hy-MT2 / Qwen3-TTS）。关闭局域网共享时严格绑定 127.0.0.1 并使用本机会话密钥，不对外开放端口。
-                    </p>
+              {/* 区块 1：本机模型服务（仅连接与检测，不发起进程管理） */}
+              <div className="rounded-xl bg-surface-800/70 border border-white/10 p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="font-semibold text-white flex items-center gap-2">
+                    <Laptop className="w-4 h-4 text-emerald-400" />
+                    本机模型服务
                   </div>
+                  <span className="text-[11px] text-slate-400">
+                    由服务端自行启动与管理，客户端仅连接并检测状态
+                  </span>
+                </div>
+
+                <div className="space-y-2">
                   <input
-                    type="checkbox"
-                    checked={switches.localServerEnabled}
-                    onChange={(e) =>
-                      void updateSwitches({ localServerEnabled: e.target.checked })
-                    }
-                    className="w-5 h-5 accent-brand-500 mt-0.5 cursor-pointer"
+                    type="text"
+                    placeholder="https://127.0.0.1:8000 或 http://127.0.0.1:8000"
+                    value={localAddress}
+                    onChange={(e) => setLocalAddress(e.target.value)}
+                    className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-brand-500"
+                  />
+                  <input
+                    type="password"
+                    placeholder="访问口令 X-Hear-Token（若本机服务已开启口令校验）"
+                    value={localToken}
+                    onChange={(e) => setLocalToken(e.target.value)}
+                    className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-brand-500"
                   />
                 </div>
 
-                {switches.localServerEnabled && (
-                  <div className="flex items-center gap-2 pt-1">
-                    <button
-                      onClick={() => void startLocalServer()}
-                      className="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-xs text-white"
-                    >
-                      启动 / 重载本机服务
-                    </button>
-                    <button
-                      onClick={() => void stopLocalServer()}
-                      className="px-3 py-1.5 rounded-lg bg-surface-950 border border-white/10 hover:bg-white/5 text-xs text-slate-200"
-                    >
-                      停止服务
-                    </button>
-                    <button
-                      onClick={() => void probeHealth()}
-                      className="px-3 py-1.5 rounded-lg bg-surface-950 border border-white/10 hover:bg-white/5 text-xs text-slate-200 flex items-center gap-1"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" /> 刷新状态
-                    </button>
-                  </div>
-                )}
-
-                <div className="border-t border-white/10 pt-4 flex items-start justify-between gap-4">
-                  <div>
-                    <div className="font-semibold text-white flex items-center gap-2">
-                      <Wifi className="w-4 h-4 text-sky-400" />
-                      开关 2：共享给 iPhone / 局域网设备
-                    </div>
-                    <p className="text-xs text-slate-400 mt-1">
-                      开启后切换监听 0.0.0.0:8000 并强制启用 HTTPS 证书与访问口令；桌面端与 iPhone 共用同一套模型实例与显存，关闭后立即缩回仅本机访问。
-                    </p>
-                  </div>
-                  <input
-                    type="checkbox"
-                    disabled={!switches.localServerEnabled}
-                    checked={switches.lanShareEnabled}
-                    onChange={(e) =>
-                      void updateSwitches({ lanShareEnabled: e.target.checked })
-                    }
-                    className="w-5 h-5 accent-sky-400 mt-0.5 cursor-pointer disabled:opacity-35"
-                  />
-                </div>
-
-                {switches.lanShareEnabled && (
-                  <div className="rounded-lg bg-surface-950/90 border border-sky-500/30 p-3 space-y-2 text-xs">
-                    <div className="text-sky-300 font-medium flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      局域网共享已启用（强制口令 + HTTPS 严格配对）
-                    </div>
-                    <div className="flex items-center justify-between gap-2 bg-surface-900 rounded px-2.5 py-1.5 font-mono text-slate-200">
-                      <span className="truncate">
-                        {serviceStatus.pairingAddress ||
-                          serviceStatus.lanAddresses[0] ||
-                          "启动服务后自动生成局域网配对地址 (#hear-root=...)"}
-                      </span>
-                      {serviceStatus.pairingAddress && (
-                        <button
-                          onClick={() =>
-                            void navigator.clipboard?.writeText(serviceStatus.pairingAddress)
-                          }
-                          className="p-1 rounded hover:bg-white/10 shrink-0"
-                          title="复制 iPhone 专用配对地址"
-                        >
-                          <Copy className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </div>
-                    {serviceStatus.accessTokenMasked && (
-                      <div className="text-slate-400">
-                        访问口令：<span className="font-mono text-slate-200">{serviceStatus.accessTokenMasked}</span>
-                      </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => void handleSaveLocal()}
+                    className="px-3 py-1.5 rounded-lg bg-surface-950 border border-white/10 hover:bg-white/5 text-xs text-slate-200 flex items-center gap-1.5"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    {savedHint === "local" ? "已保存" : "保存配置"}
+                  </button>
+                  <button
+                    disabled={testingLocal}
+                    onClick={() => void handleTestLocal()}
+                    className="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-xs text-white flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    {testingLocal ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
                     )}
-                  </div>
-                )}
-
-                {/* 三个模型就绪态 */}
-                <div className="grid grid-cols-3 gap-2.5 pt-1 text-xs">
-                  <div className="rounded-lg bg-surface-950/70 p-2.5 border border-white/5">
-                    <div className="text-slate-400">语音识别 (ASR)</div>
-                    <div className={`mt-1 font-medium ${serviceStatus.asrReady ? "text-emerald-400" : "text-amber-300"}`}>
-                      {serviceStatus.asrDetail}
-                    </div>
-                  </div>
-                  <div className="rounded-lg bg-surface-950/70 p-2.5 border border-white/5">
-                    <div className="text-slate-400">文本翻译 (MT)</div>
-                    <div className={`mt-1 font-medium ${serviceStatus.mtReady ? "text-emerald-400" : "text-amber-300"}`}>
-                      {serviceStatus.mtDetail}
-                    </div>
-                  </div>
-                  <div className="rounded-lg bg-surface-950/70 p-2.5 border border-white/5">
-                    <div className="text-slate-400">声音克隆 (TTS)</div>
-                    <div className={`mt-1 font-medium ${serviceStatus.cloneReady ? "text-emerald-400" : "text-slate-400"}`}>
-                      {serviceStatus.cloneDetail}
-                    </div>
-                  </div>
+                    {testingLocal ? "正在测试连接…" : "测试连接"}
+                  </button>
                 </div>
+
+                <StatusPanel status={localStatus} />
               </div>
 
-              {/* 三个能力独立选本机/云端 */}
+              {/* 区块 2：远端云端服务 */}
+              <div className="rounded-xl bg-surface-800/70 border border-white/10 p-4 space-y-3">
+                <div className="font-semibold text-white flex items-center gap-2">
+                  <Cloud className="w-4 h-4 text-sky-400" />
+                  远端云端服务地址
+                </div>
+
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    placeholder="https://服务器地址:8000 或带指纹地址 https://...#hear-root=..."
+                    value={cloudAddress}
+                    onChange={(e) => setCloudAddress(e.target.value)}
+                    className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-brand-500"
+                  />
+                  <input
+                    type="password"
+                    placeholder="访问口令 X-Hear-Token（若远端服务开启鉴权）"
+                    value={cloudToken}
+                    onChange={(e) => setCloudToken(e.target.value)}
+                    className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-brand-500"
+                  />
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => void handleSaveCloud()}
+                    className="px-3 py-1.5 rounded-lg bg-surface-950 border border-white/10 hover:bg-white/5 text-xs text-slate-200 flex items-center gap-1.5"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    {savedHint === "cloud" ? "已保存" : "保存配置"}
+                  </button>
+                  <button
+                    disabled={testingCloud}
+                    onClick={() => void handleTestCloud()}
+                    className="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-xs text-white flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    {testingCloud ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                    {testingCloud ? "正在测试连接…" : "测试连接"}
+                  </button>
+                </div>
+
+                <StatusPanel status={cloudStatus} />
+              </div>
+
+              {/* 区块 3：模型路由 */}
               <div className="rounded-xl bg-surface-800/60 border border-white/10 p-4">
-                <div className="font-semibold text-white mb-2">模型路由（各能力独立切换本机 / 云端）</div>
-                {renderSourceSelect("语音识别 (SenseVoice + Whisper)", switches.asrSource, (v) =>
-                  void updateSwitches({ asrSource: v })
+                <div className="font-semibold text-white mb-2">
+                  模型路由（各能力独立选择本机或云端服务）
+                </div>
+                {renderSourceSelect(
+                  "语音识别 (SenseVoice + Whisper)",
+                  serviceConfig.asrSource,
+                  (v) => void saveServiceConfig({ asrSource: v })
                 )}
-                {renderSourceSelect("文本翻译 (Hy-MT2)", switches.mtSource, (v) =>
-                  void updateSwitches({ mtSource: v })
+                {renderSourceSelect("文本翻译 (Hy-MT2)", serviceConfig.mtSource, (v) =>
+                  void saveServiceConfig({ mtSource: v })
                 )}
-                {renderSourceSelect("声音克隆 (Qwen3-TTS)", switches.cloneSource, (v) =>
-                  void updateSwitches({ cloneSource: v })
+                {renderSourceSelect("声音克隆 (Qwen3-TTS)", serviceConfig.cloneSource, (v) =>
+                  void saveServiceConfig({ cloneSource: v })
                 )}
-              </div>
-
-              {/* 远端云端地址 */}
-              <div className="rounded-xl bg-surface-800/60 border border-white/10 p-4 space-y-3">
-                <div className="font-semibold text-white">远端云端服务地址（与 iPhone 共用同一协议）</div>
-                <input
-                  type="text"
-                  placeholder="https://192.168.x.x:8000 或 https://...#hear-root=..."
-                  value={switches.remoteCloudAddress}
-                  onChange={(e) =>
-                    void updateSwitches({ remoteCloudAddress: e.target.value })
-                  }
-                  className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-xs font-mono text-slate-100"
-                />
-                <input
-                  type="password"
-                  placeholder="访问口令 X-Hear-Token（若远端开启鉴权）"
-                  value={switches.remoteAccessToken}
-                  onChange={(e) =>
-                    void updateSwitches({ remoteAccessToken: e.target.value })
-                  }
-                  className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-xs font-mono text-slate-100"
-                />
               </div>
             </>
           )}
@@ -319,7 +435,7 @@ export function SettingsModal() {
                 </label>
               </div>
 
-              <div className="rounded-xl bg-surface-800/60 border border-white/10 p-4 space-y-3">
+              <div className="rounded-xl bg-surface-800/60 border border-white/10 p-4 space-y-3.5">
                 <div className="flex items-center justify-between">
                   <span>排版模式</span>
                   <select
@@ -336,6 +452,71 @@ export function SettingsModal() {
                     <option value="translation_only">仅显示译文</option>
                   </select>
                 </div>
+
+                {/* 背景颜色设置（快捷色板 + 自定义取色器） */}
+                <div className="flex items-center justify-between gap-4">
+                  <span className="flex items-center gap-1.5">
+                    <Palette className="w-4 h-4 text-sky-400" />
+                    背景颜色
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {BG_COLOR_PRESETS.map((preset) => {
+                      const active =
+                        subtitleStyle.backgroundColor.toLowerCase() ===
+                        preset.hex.toLowerCase();
+                      return (
+                        <button
+                          key={preset.hex}
+                          type="button"
+                          title={`${preset.name} (${preset.hex})`}
+                          onClick={() =>
+                            void updateSubtitleStyle({ backgroundColor: preset.hex })
+                          }
+                          style={{ backgroundColor: preset.hex }}
+                          className={`w-6 h-6 rounded-full border-2 transition ${
+                            active
+                              ? "border-brand-400 scale-110"
+                              : "border-white/25 hover:border-white/60"
+                          }`}
+                        />
+                      );
+                    })}
+                    <label
+                      className="flex items-center gap-1.5 pl-1.5 ml-1 border-l border-white/10 cursor-pointer"
+                      title="自定义悬浮字幕背景颜色"
+                    >
+                      <input
+                        type="color"
+                        value={subtitleStyle.backgroundColor}
+                        onChange={(e) =>
+                          void updateSubtitleStyle({ backgroundColor: e.target.value })
+                        }
+                        className="w-7 h-7 rounded bg-transparent border-0 cursor-pointer"
+                      />
+                      <span className="text-xs font-mono text-slate-300 uppercase">
+                        {subtitleStyle.backgroundColor}
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span>背景不透明度：{Math.round(subtitleStyle.backgroundOpacity * 100)}%</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.95}
+                    step={0.05}
+                    value={subtitleStyle.backgroundOpacity}
+                    onChange={(e) =>
+                      void updateSubtitleStyle({
+                        backgroundOpacity: Number(e.target.value),
+                      })
+                    }
+                    className="w-48 accent-brand-500"
+                  />
+                </div>
+
                 <div className="flex items-center justify-between">
                   <span>译文字号：{subtitleStyle.fontSize}px</span>
                   <input
@@ -349,6 +530,7 @@ export function SettingsModal() {
                     className="w-48 accent-brand-500"
                   />
                 </div>
+
                 <div className="flex items-center justify-between">
                   <span>最大显示句数：{subtitleStyle.maxLines} 句</span>
                   <input
@@ -358,22 +540,6 @@ export function SettingsModal() {
                     value={subtitleStyle.maxLines}
                     onChange={(e) =>
                       void updateSubtitleStyle({ maxLines: Number(e.target.value) })
-                    }
-                    className="w-48 accent-brand-500"
-                  />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span>背景不透明度：{Math.round(subtitleStyle.backgroundOpacity * 100)}%</span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={0.95}
-                    step={0.05}
-                    value={subtitleStyle.backgroundOpacity}
-                    onChange={(e) =>
-                      void updateSubtitleStyle({
-                        backgroundOpacity: Number(e.target.value),
-                      })
                     }
                     className="w-48 accent-brand-500"
                   />

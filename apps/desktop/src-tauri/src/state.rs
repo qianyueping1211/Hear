@@ -78,6 +78,7 @@ pub struct SubtitleStyle {
     pub layout: SubtitleLayoutMode,
     pub font_size: u32,
     pub max_lines: usize,
+    pub background_color: String,
     pub background_opacity: f32,
     pub text_stroke: bool,
     pub auto_fade_seconds: u32,
@@ -94,6 +95,7 @@ impl Default for SubtitleStyle {
             layout: SubtitleLayoutMode::Bilingual,
             font_size: 22,
             max_lines: 2,
+            background_color: "#0b0f17".to_string(),
             background_opacity: 0.72,
             text_stroke: true,
             auto_fade_seconds: 0,
@@ -103,74 +105,71 @@ impl Default for SubtitleStyle {
     }
 }
 
+/// 客户端服务连接配置（服务端由服务端独立启动管理，客户端仅保存地址/口令与路由选择）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ServerSwitches {
-    /// 开关 1：本机托管模型服务（默认仅 127.0.0.1）
-    pub local_server_enabled: bool,
-    /// 开关 2：局域网共享给 iPhone / 其他电脑（切换 0.0.0.0 + 强制 HTTPS 与口令）
-    pub lan_share_enabled: bool,
+pub struct ServiceConfig {
+    pub local_service_address: String,
+    pub local_access_token: String,
+    pub cloud_service_address: String,
+    pub cloud_access_token: String,
     pub asr_source: EngineSource,
     pub mt_source: EngineSource,
     pub clone_source: EngineSource,
-    pub remote_cloud_address: String,
-    pub remote_access_token: String,
-    pub remote_strict_fingerprint: String,
 }
 
-impl Default for ServerSwitches {
+impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
-            local_server_enabled: true,
-            lan_share_enabled: false,
+            local_service_address: "https://127.0.0.1:8000".to_string(),
+            local_access_token: String::new(),
+            cloud_service_address: String::new(),
+            cloud_access_token: String::new(),
             asr_source: EngineSource::Local,
             mt_source: EngineSource::Local,
             clone_source: EngineSource::Local,
-            remote_cloud_address: String::new(),
-            remote_access_token: String::new(),
-            remote_strict_fingerprint: String::new(),
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ServiceStatus {
-    pub running: bool,
-    pub bind_host: String,
-    pub port: u16,
-    pub lan_shared: bool,
-    pub lan_addresses: Vec<String>,
-    pub pairing_address: String,
-    pub access_token_masked: String,
+pub struct ServiceProbeResult {
+    pub ok: bool,
+    pub address: String,
+    pub latency_ms: u64,
+    pub summary: String,
     pub asr_ready: bool,
     pub asr_detail: String,
     pub mt_ready: bool,
     pub mt_detail: String,
     pub clone_ready: bool,
     pub clone_detail: String,
+    pub auth_mode: String,
+    pub auth_ok: Option<bool>,
+    pub auth_detail: Option<String>,
     pub streaming_mt: bool,
-    pub last_error: Option<String>,
+    pub error: Option<String>,
 }
 
-impl Default for ServiceStatus {
+impl Default for ServiceProbeResult {
     fn default() -> Self {
         Self {
-            running: false,
-            bind_host: "127.0.0.1".to_string(),
-            port: 8000,
-            lan_shared: false,
-            lan_addresses: Vec::new(),
-            pairing_address: String::new(),
-            access_token_masked: String::new(),
+            ok: false,
+            address: String::new(),
+            latency_ms: 0,
+            summary: "尚未检测连接".to_string(),
             asr_ready: false,
-            asr_detail: "未启动".to_string(),
+            asr_detail: "未检测".to_string(),
             mt_ready: false,
-            mt_detail: "未启动".to_string(),
+            mt_detail: "未检测".to_string(),
             clone_ready: false,
-            clone_detail: "未启动".to_string(),
-            streaming_mt: true,
-            last_error: None,
+            clone_detail: "未检测".to_string(),
+            auth_mode: "unknown".to_string(),
+            auth_ok: None,
+            auth_detail: None,
+            streaming_mt: false,
+            error: None,
         }
     }
 }
@@ -241,8 +240,9 @@ pub struct AppSnapshot {
     pub live_partial_source: String,
     pub live_partial_translation: String,
     pub subtitle_style: SubtitleStyle,
-    pub switches: ServerSwitches,
-    pub service_status: ServiceStatus,
+    pub service_config: ServiceConfig,
+    pub local_status: ServiceProbeResult,
+    pub cloud_status: ServiceProbeResult,
     pub tts_settings: TtsOutputSettings,
     pub playback: RecordingPlaybackState,
     pub glossary: String,
@@ -262,8 +262,9 @@ impl Default for AppSnapshot {
             live_partial_source: String::new(),
             live_partial_translation: String::new(),
             subtitle_style: SubtitleStyle::default(),
-            switches: ServerSwitches::default(),
-            service_status: ServiceStatus::default(),
+            service_config: ServiceConfig::default(),
+            local_status: ServiceProbeResult::default(),
+            cloud_status: ServiceProbeResult::default(),
             tts_settings: TtsOutputSettings::default(),
             playback: RecordingPlaybackState::default(),
             glossary: String::new(),

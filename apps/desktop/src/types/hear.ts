@@ -43,6 +43,7 @@ export interface SubtitleStyle {
   layout: SubtitleLayoutMode;
   fontSize: number;
   maxLines: number;
+  backgroundColor: string;
   backgroundOpacity: number;
   textStroke: boolean;
   autoFadeSeconds: number;
@@ -50,37 +51,32 @@ export interface SubtitleStyle {
   syncWithPlayback: boolean;
 }
 
-export interface ServerSwitches {
-  /** 开关 1：启用本机模型服务（默认仅绑定 127.0.0.1，防外网与局域网未授权访问） */
-  localServerEnabled: boolean;
-  /** 开关 2：允许局域网共享给 iPhone / 其他电脑（切换 0.0.0.0 + 强制 HTTPS 与访问口令） */
-  lanShareEnabled: boolean;
-  /** 三个模型各自选择本机或远端云端 */
+export interface ServiceConfig {
+  localServiceAddress: string;
+  localAccessToken: string;
+  cloudServiceAddress: string;
+  cloudAccessToken: string;
   asrSource: EngineSource;
   mtSource: EngineSource;
   cloneSource: EngineSource;
-  /** 远端云端模式地址（支持 #hear-root=... 严格模式配对地址） */
-  remoteCloudAddress: string;
-  remoteAccessToken: string;
-  remoteStrictFingerprint: string;
 }
 
-export interface ServiceStatus {
-  running: boolean;
-  bindHost: string;
-  port: number;
-  lanShared: boolean;
-  lanAddresses: string[];
-  pairingAddress: string;
-  accessTokenMasked: string;
+export interface ServiceProbeResult {
+  ok: boolean;
+  address: string;
+  latencyMs: number;
+  summary: string;
   asrReady: boolean;
   asrDetail: string;
   mtReady: boolean;
   mtDetail: string;
   cloneReady: boolean;
   cloneDetail: string;
+  authMode: string;
+  authOk?: boolean;
+  authDetail?: string;
   streamingMt: boolean;
-  lastError?: string;
+  error?: string;
 }
 
 export interface TtsOutputSettings {
@@ -88,7 +84,7 @@ export interface TtsOutputSettings {
   useVoiceClone: boolean;
   outputDeviceId: string;
   duckOriginalAudio: boolean;
-  duckRatio: number; // 0.1 - 1.0
+  duckRatio: number;
 }
 
 export interface RecordingPlaybackState {
@@ -100,7 +96,7 @@ export interface RecordingPlaybackState {
   speed: number;
   systemVolume: number;
   micVolume: number;
-  peaks: number[]; // 0..1 归一化波形峰值（每 50ms 一个点）
+  peaks: number[];
 }
 
 export interface SummaryTemplateOption {
@@ -121,8 +117,9 @@ export interface AppSnapshot {
   livePartialSource: string;
   livePartialTranslation: string;
   subtitleStyle: SubtitleStyle;
-  switches: ServerSwitches;
-  serviceStatus: ServiceStatus;
+  serviceConfig: ServiceConfig;
+  localStatus: ServiceProbeResult;
+  cloudStatus: ServiceProbeResult;
   ttsSettings: TtsOutputSettings;
   playback: RecordingPlaybackState;
   glossary: string;
