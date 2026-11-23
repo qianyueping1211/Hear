@@ -253,6 +253,7 @@ struct LaneProcessor {
     segmenter: Segmenter,
     noise_floor: f32,
     hangover: usize,
+    onset_count: usize,
 }
 
 impl LaneProcessor {
@@ -264,14 +265,16 @@ impl LaneProcessor {
             prev_sample: None,
             frame_buf: Vec::with_capacity(VAD_WINDOW_SAMPLES * 2),
             segmenter: Segmenter::new(640, 15),
-            noise_floor: 0.0012,
+            noise_floor: 0.0015,
             hangover: 0,
+            onset_count: 0,
         }
     }
 
     fn discard_current(&mut self) {
         self.frame_buf.clear();
         self.hangover = 0;
+        self.onset_count = 0;
         self.segmenter.discard_current();
     }
 
@@ -345,17 +348,27 @@ impl LaneProcessor {
             let energy: f32 = frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32;
             let rms = energy.sqrt();
 
-            let thresh = (self.noise_floor * 2.4).max(0.0028).min(0.045);
+            // 抗键盘敲击与瞬态点击：提高触发底限并要求连续 3 帧（~96ms）持续过门限才判定为说话开始
+            let thresh = (self.noise_floor * 3.0).max(0.0055).min(0.05);
             let speech_now = rms > thresh;
             let has_speech = if speech_now {
-                self.hangover = 7; // ~224ms 拖尾保护，防止吞尾音
-                true
+                self.onset_count = self.onset_count.saturating_add(1);
+                if self.onset_count >= 3 || self.hangover > 0 {
+                    self.hangover = 7; // ~224ms 拖尾保护，防止吞尾音
+                    true
+                } else {
+                    false
+                }
             } else if self.hangover > 0 {
                 self.hangover -= 1;
+                if self.hangover == 0 {
+                    self.onset_count = 0;
+                }
                 true
             } else {
+                self.onset_count = 0;
                 // 仅在静音时缓慢更新底噪估计
-                self.noise_floor = (self.noise_floor * 0.96 + rms * 0.04).clamp(0.0005, 0.018);
+                self.noise_floor = (self.noise_floor * 0.96 + rms * 0.04).clamp(0.0005, 0.02);
                 false
             };
 

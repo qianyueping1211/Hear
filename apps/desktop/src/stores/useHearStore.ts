@@ -50,6 +50,10 @@ function stopActiveCloneAudio() {
 const isTauriRuntime = () =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+const isSubtitleWindow = () =>
+  typeof window !== "undefined" &&
+  window.location.pathname.toLowerCase().includes("subtitle");
+
 async function tauriInvoke<T>(
   cmd: string,
   args?: Record<string, unknown>
@@ -340,10 +344,12 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     if (sources && sources.length > 0) {
       set({ audioSources: sources });
     }
-    await get().refreshOutputDevices();
-    const hasSample = await tauriInvoke<boolean>("get_my_voice_sample_status");
-    if (typeof hasSample === "boolean") {
-      set({ hasMyVoiceSample: hasSample });
+    if (!isSubtitleWindow()) {
+      await get().refreshOutputDevices();
+      const hasSample = await tauriInvoke<boolean>("get_my_voice_sample_status");
+      if (typeof hasSample === "boolean") {
+        set({ hasMyVoiceSample: hasSample });
+      }
     }
     if (isTauriRuntime() && !tauriListenersRegistered) {
       tauriListenersRegistered = true;
@@ -387,7 +393,9 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         });
         // 对标 iOS：句子翻译完成时自动在后台发起 Qwen3-TTS 声音克隆预合成，驱动小喇叭从「克隆中」变为「声音准备好了」
         const seg = ev.payload;
+        // 悬浮字幕窗口（subtitle.html）只负责展示，绝不触发自动朗读或预克隆，避免主窗+字幕窗各播一遍！
         if (
+          !isSubtitleWindow() &&
           seg.status === "final" &&
           seg.translatedText.trim() &&
           seg.translatedText !== "翻译中…" &&
@@ -416,6 +424,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
               text: seg.translatedText.trim(),
               lang: seg.targetLang,
               target,
+              isAuto: true,
             }).catch(() => {
               set((s) => ({
                 cloneStates: { ...s.cloneStates, [seg.id]: "ready" },
@@ -527,6 +536,16 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
           void navigator.clipboard?.writeText(text);
         }
       });
+    }
+    // 主窗口启动监听就绪后，主动触发一次服务健康检测，避免错过 Rust 启动早期发出的状态事件导致首页显示未就绪
+    if (!isSubtitleWindow() && isTauriRuntime()) {
+      const cfg = get().serviceConfig;
+      if (cfg.localServiceAddress?.trim() && !get().localStatus.ok) {
+        void get().testServiceConnection("local");
+      }
+      if (cfg.cloudServiceAddress?.trim() && !get().cloudStatus.ok) {
+        void get().testServiceConnection("cloud");
+      }
     }
   },
 

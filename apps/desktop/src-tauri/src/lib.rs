@@ -38,6 +38,8 @@ pub struct AppRuntime {
     pub mic_muted: Arc<AtomicBool>,
     /// 串行播放闸门：保证多句连续自动播报按顺序逐句播放且不互相提前解除静音
     pub tts_play_gate: Mutex<()>,
+    /// 进程级自动播报去重集合：防止主窗口与悬浮字幕窗或重复事件对同一句触发两次自动播报
+    pub auto_spoken_ids: Mutex<std::collections::HashSet<String>>,
     /// 当前正在通过指定输出设备（如虚拟麦克风）播放的 TTS 取消标记
     pub tts_cancel: Mutex<Option<Arc<AtomicBool>>>,
     pub import_cancel: AtomicBool,
@@ -54,6 +56,7 @@ impl AppRuntime {
             clone_gate: Mutex::new(()),
             mic_muted: Arc::new(AtomicBool::new(false)),
             tts_play_gate: Mutex::new(()),
+            auto_spoken_ids: Mutex::new(std::collections::HashSet::new()),
             tts_cancel: Mutex::new(None),
             import_cancel: AtomicBool::new(false),
         }
@@ -424,6 +427,7 @@ async fn clear_recording(
     rt.save_history(&app).await;
     *rt.summary_markdown.lock().await = String::new();
     rt.segment_wavs.lock().await.clear();
+    rt.auto_spoken_ids.lock().await.clear();
     let mut snap = rt.snapshot.lock().await;
     snap.active_conversation_id = format!("conv-{}", uuid::Uuid::new_v4());
     snap.segments.clear();
@@ -458,6 +462,7 @@ async fn load_conversation(
     }
     rt.save_history(&app).await;
     rt.segment_wavs.lock().await.clear();
+    rt.auto_spoken_ids.lock().await.clear();
 
     let conv = history_store::load_conversation(&app, &id)?;
     *rt.summary_markdown.lock().await = conv.summary_markdown.clone();
@@ -739,7 +744,14 @@ async fn play_cloned_segment_to_device(
     text: String,
     lang: String,
     target: String,
+    is_auto: Option<bool>,
 ) -> Result<(), String> {
+    if is_auto == Some(true) {
+        let mut spoken = rt.auto_spoken_ids.lock().await;
+        if !spoken.insert(id.clone()) {
+            return Ok(());
+        }
+    }
     let _ = app.emit(
         "tts:state",
         serde_json::json!({ "id": id, "state": "cloning" }),

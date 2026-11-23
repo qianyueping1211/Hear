@@ -30,6 +30,7 @@ pub struct Segmenter {
     preroll: VecDeque<f32>,
     speech: Vec<f32>,
     in_speech: bool,
+    voiced_frames: usize,
     silence_frames: usize,
     frames_since_partial: usize,
     segment_id: u64,
@@ -49,6 +50,7 @@ impl Segmenter {
             preroll: VecDeque::with_capacity(VAD_WINDOW_SAMPLES * 12),
             speech: Vec::with_capacity(VAD_SAMPLE_RATE as usize * 16),
             in_speech: false,
+            voiced_frames: 0,
             silence_frames: 0,
             frames_since_partial: 0,
             segment_id: 0,
@@ -65,6 +67,7 @@ impl Segmenter {
         if !self.in_speech {
             if has_speech {
                 self.in_speech = true;
+                self.voiced_frames = 1;
                 self.silence_frames = 0;
                 self.frames_since_partial = 0;
                 self.segment_id += 1;
@@ -85,6 +88,7 @@ impl Segmenter {
         // 正在说话中
         self.speech.extend_from_slice(frame);
         if has_speech {
+            self.voiced_frames += 1;
             self.silence_frames = 0;
         } else {
             self.silence_frames += 1;
@@ -113,6 +117,7 @@ impl Segmenter {
     /// 丢弃当前正在累积的语音与预卷缓冲（播报译文静音期间调用，避免回声残片拼成误识别）
     pub fn discard_current(&mut self) {
         self.in_speech = false;
+        self.voiced_frames = 0;
         self.silence_frames = 0;
         self.frames_since_partial = 0;
         self.speech.clear();
@@ -123,12 +128,18 @@ impl Segmenter {
         if !self.in_speech || self.speech.is_empty() {
             return None;
         }
+        let voiced = self.voiced_frames;
         let samples = std::mem::take(&mut self.speech);
         let start_ms = samples_to_ms(self.segment_start_sample);
         let end_ms = samples_to_ms(self.total_samples_seen);
         self.in_speech = false;
+        self.voiced_frames = 0;
         self.silence_frames = 0;
         self.frames_since_partial = 0;
+        // 至少包含 5 帧（~160ms）有效人声才提交，过滤键盘敲击、鼠标点击、桌面碰撞等瞬态杂音
+        if voiced < 5 {
+            return None;
+        }
         Some(SegmentEvent::Final {
             segment_id: self.segment_id,
             start_ms,
