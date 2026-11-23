@@ -40,8 +40,14 @@ pub fn save_config(app: &AppHandle, cfg: &PersistedConfig) {
     };
     if let Ok(json) = serde_json::to_string_pretty(cfg) {
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+        if std::fs::write(&tmp, &json).is_ok() {
+            if std::fs::rename(&tmp, &path).is_err() {
+                // Windows 上若杀软/索引短暂占用目标文件，退回直接覆盖写并清理临时文件
+                let _ = std::fs::write(&path, &json);
+                let _ = std::fs::remove_file(&tmp);
+            }
+        } else {
+            let _ = std::fs::write(&path, &json);
         }
     }
 }

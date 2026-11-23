@@ -123,6 +123,7 @@ const DEFAULT_LOCAL_SERVER_INSTALL: LocalServerInstallStatus = {
 interface HearStoreState extends AppSnapshot {
   audioSources: AudioSourceOption[];
   audioLevel: number;
+  sessionError: string | null;
   searchQuery: string;
   summaryOpen: boolean;
   summaryTemplateId: string;
@@ -142,6 +143,7 @@ interface HearStoreState extends AppSnapshot {
   updateDownloadError: string | null;
 
   hydrate: () => Promise<void>;
+  clearSessionError: () => void;
   setSearchQuery: (q: string) => void;
   setSummaryOpen: (open: boolean) => void;
   setSummaryTemplateId: (id: string) => void;
@@ -183,7 +185,7 @@ interface HearStoreState extends AppSnapshot {
 }
 
 export const useHearStore = create<HearStoreState>((set, get) => ({
-  appVersion: "0.1.6",
+  appVersion: "0.1.7",
   mode: "idle" as SessionMode,
   sourceLang: "en",
   targetLang: "zh",
@@ -209,6 +211,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     { id: "dual", label: "双路混合（系统声=对方 / 麦克风=我）", kind: "dual_mix" },
   ],
   audioLevel: 0,
+  sessionError: null,
   searchQuery: "",
   summaryOpen: true,
   summaryTemplateId: "meeting",
@@ -292,9 +295,19 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       await listen<number>("audio:level", (ev) => {
         set({ audioLevel: ev.payload });
       });
+      await listen<SessionMode>("session:mode", (ev) => {
+        set({ mode: ev.payload });
+      });
+      await listen<string>("session:error", (ev) => {
+        set({ sessionError: ev.payload });
+      });
+      await listen<RecordingPlaybackState>("recording:ready", (ev) => {
+        set({ playback: ev.payload });
+      });
     }
   },
 
+  clearSessionError: () => set({ sessionError: null }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setSummaryOpen: (summaryOpen) => set({ summaryOpen }),
   setSummaryTemplateId: (summaryTemplateId) => set({ summaryTemplateId }),
@@ -312,9 +325,23 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   },
 
   toggleRecording: async () => {
-    const nextMode: SessionMode = get().mode === "recording" ? "idle" : "recording";
-    set({ mode: nextMode });
-    await tauriInvoke("toggle_recording");
+    set({ sessionError: null });
+    if (!isTauriRuntime()) {
+      const nextMode: SessionMode = get().mode === "recording" ? "idle" : "recording";
+      set({ mode: nextMode });
+      return;
+    }
+    try {
+      const mode = await tauriInvoke<SessionMode>("toggle_recording");
+      if (mode) {
+        set({ mode });
+      }
+    } catch (err) {
+      set({
+        mode: "idle",
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
   },
 
   clearRecording: async () => {
@@ -323,6 +350,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       livePartialSource: "",
       livePartialTranslation: "",
       summaryMarkdown: "",
+      sessionError: null,
       playback: DEFAULT_PLAYBACK,
     });
     await tauriInvoke("clear_recording");
@@ -522,7 +550,11 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   },
 
   checkForUpdates: async (override) => {
-    set({ checkingUpdate: true, updateDownloadError: null });
+    set({
+      checkingUpdate: true,
+      updateDownloadError: null,
+      ...(override ? { updateConfig: override } : {}),
+    });
     try {
       const res = await tauriInvoke<UpdateCheckResult>("check_for_updates", {
         overrideConfig: override ?? null,

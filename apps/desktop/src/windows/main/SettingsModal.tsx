@@ -6,6 +6,8 @@ import {
   Cloud,
   Download,
   ExternalLink,
+  Eye,
+  EyeOff,
   FolderOpen,
   Laptop,
   Loader2,
@@ -35,6 +37,13 @@ const BG_COLOR_PRESETS = [
   { name: "炭灰", hex: "#1f2937" },
   { name: "柔白", hex: "#f8fafc" },
 ];
+
+function maskSecret(token: string): string {
+  const t = token.trim();
+  if (!t) return "";
+  if (t.length <= 8) return "•".repeat(Math.max(4, t.length));
+  return `${t.slice(0, 4)}••••••${t.slice(-4)}`;
+}
 
 function StatusPanel({ status }: { status: ServiceProbeResult }) {
   const hasTested = Boolean(status.address || status.error || status.latencyMs > 0);
@@ -179,25 +188,35 @@ export function SettingsModal() {
   const [cloudToken, setCloudToken] = useState(serviceConfig.cloudAccessToken);
   const [ghRepo, setGhRepo] = useState(updateConfig.repo);
   const [ghToken, setGhToken] = useState(updateConfig.githubToken);
+  const [showGhToken, setShowGhToken] = useState(false);
   const [autoCheck, setAutoCheck] = useState(updateConfig.autoCheckOnStartup);
   const [savedHint, setSavedHint] = useState<"local" | "cloud" | "system" | null>(null);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [removeModelsOnUninstall, setRemoveModelsOnUninstall] = useState(false);
 
+  // 仅在弹窗打开瞬间同步一次草稿并做只读状态探测，避免保存单项配置时把其它草稿或「已保存」提示冲掉
   useEffect(() => {
-    if (settingsOpen) {
-      setLocalAddress(serviceConfig.localServiceAddress);
-      setLocalToken(serviceConfig.localAccessToken);
-      setCloudAddress(serviceConfig.cloudServiceAddress);
-      setCloudToken(serviceConfig.cloudAccessToken);
-      setGhRepo(updateConfig.repo);
-      setGhToken(updateConfig.githubToken);
-      setAutoCheck(updateConfig.autoCheckOnStartup);
-      setSavedHint(null);
-      setConfirmUninstall(false);
-      void refreshLocalServerInstallStatus();
+    if (!settingsOpen) return;
+    const snap = useHearStore.getState();
+    setLocalAddress(snap.serviceConfig.localServiceAddress);
+    setLocalToken(snap.serviceConfig.localAccessToken);
+    setCloudAddress(snap.serviceConfig.cloudServiceAddress);
+    setCloudToken(snap.serviceConfig.cloudAccessToken);
+    setGhRepo(snap.updateConfig.repo);
+    setGhToken(snap.updateConfig.githubToken);
+    setShowGhToken(false);
+    setAutoCheck(snap.updateConfig.autoCheckOnStartup);
+    setSavedHint(null);
+    setConfirmUninstall(false);
+    void refreshLocalServerInstallStatus();
+    // 若已配置本机地址且本次尚未探测过，打开设置页自动做一次只读 /health 检测
+    const localTested = Boolean(
+      snap.localStatus.address || snap.localStatus.error || snap.localStatus.latencyMs > 0
+    );
+    if (!localTested && snap.serviceConfig.localServiceAddress.trim()) {
+      void testServiceConnection("local");
     }
-  }, [settingsOpen, serviceConfig, updateConfig, refreshLocalServerInstallStatus]);
+  }, [settingsOpen, refreshLocalServerInstallStatus, testServiceConnection]);
 
   if (!settingsOpen) return null;
 
@@ -323,13 +342,17 @@ export function SettingsModal() {
                   </span>
                 </div>
 
-                {/* 本机模型服务端安装包管理：一键安装 / 重新安装 / 卸载 */}
+                {/* 本机模型服务端安装包管理：三态联动（托管已装 / 外部独立服务运行中 / 未安装） */}
                 <div className="rounded-lg bg-surface-950/80 border border-white/10 p-3 space-y-2.5 text-xs">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <div className="flex items-center gap-2 min-w-0">
                       <span
                         className={`w-2 h-2 rounded-full shrink-0 ${
-                          localServerInstall.installed ? "bg-emerald-400" : "bg-slate-500"
+                          localServerInstall.installed
+                            ? "bg-emerald-400"
+                            : localStatus.ok
+                            ? "bg-sky-400"
+                            : "bg-slate-500"
                         }`}
                       />
                       <span className="font-medium text-slate-200">
@@ -339,18 +362,25 @@ export function SettingsModal() {
                                 ? ` v${localServerInstall.installedVersion}`
                                 : ""
                             }`
-                          : "尚未在本机安装模型服务端"}
+                          : localStatus.ok
+                          ? "已检测到外部独立部署的本机服务（运行中）"
+                          : "未在默认目录安装模型服务端"}
                       </span>
                       {localServerInstall.installed && localServerInstall.hasBundledRuntime && (
                         <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[11px]">
                           内置 faster-whisper / sherpa-onnx
                         </span>
                       )}
+                      {!localServerInstall.installed && localStatus.ok && (
+                        <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 text-[11px]">
+                          外部服务已就绪
+                        </span>
+                      )}
                     </div>
                     {localServerInstall.installDir && (
                       <span
                         className="text-[11px] font-mono text-slate-500 truncate max-w-[260px]"
-                        title={localServerInstall.installDir}
+                        title={`客户端默认托管安装目录：${localServerInstall.installDir}`}
                       >
                         {localServerInstall.installDir}
                       </span>
@@ -363,14 +393,22 @@ export function SettingsModal() {
                         type="button"
                         disabled={localServerBusy !== null}
                         onClick={() => void installLocalServer()}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50"
+                        className={`px-3 py-1.5 rounded-lg font-medium flex items-center gap-1.5 disabled:opacity-50 ${
+                          localStatus.ok
+                            ? "bg-surface-900 border border-white/10 hover:bg-white/5 text-slate-300"
+                            : "bg-emerald-600 hover:bg-emerald-500 text-white"
+                        }`}
                       >
                         {localServerBusy === "install" ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
                         ) : (
                           <Download className="w-3.5 h-3.5" />
                         )}
-                        {localServerBusy === "install" ? "正在安装…" : "一键安装模型服务"}
+                        {localServerBusy === "install"
+                          ? "正在安装…"
+                          : localStatus.ok
+                          ? "另行安装一份到客户端默认目录"
+                          : "一键安装模型服务"}
                       </button>
                     ) : (
                       <>
@@ -504,7 +542,9 @@ export function SettingsModal() {
                   <div className="text-[11px] text-slate-500 leading-relaxed">
                     {localServerInstall.installed
                       ? "安装完成后请点击「打开服务端目录」，双击 start-hear-cloud.bat 启动本机服务，再点击下方「测试连接」验证三模型状态。"
-                      : "一键安装会自动拉取最新内置 Python + faster-whisper + sherpa-onnx 的服务端整合包，无需手工装依赖（私有仓库请先在「系统与更新」填写 GitHub Token）。"}
+                      : localStatus.ok
+                      ? "当前已连通你自行部署的本机模型服务，可直接使用，无需重复安装。"
+                      : "一键安装会自动拉取最新内置 Python + faster-whisper + sherpa-onnx 的服务端整合包，无需手工装依赖；若已在其他目录手动运行服务，直接填写下方地址并测试连接即可。"}
                   </div>
                 </div>
 
@@ -935,16 +975,37 @@ export function SettingsModal() {
                     />
                   </div>
                   <div>
-                    <label className="text-xs text-slate-400 block mb-1">
-                      GitHub Token（可选：私有仓库必填，公开仓库可避免 API 限频；持久化保存在本机）
-                    </label>
-                    <input
-                      type="password"
-                      value={ghToken}
-                      onChange={(e) => setGhToken(e.target.value)}
-                      placeholder="github_pat_... 或 ghp_..."
-                      className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-brand-500"
-                    />
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="text-xs text-slate-400">
+                        GitHub Token（可选：私有仓库必填，公开仓库可避免 API 限频；持久化保存在本机）
+                      </label>
+                      {updateConfig.githubToken.trim() && (
+                        <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-mono text-[11px] shrink-0">
+                          已保存：{maskSecret(updateConfig.githubToken)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="relative flex items-center">
+                      <input
+                        type={showGhToken ? "text" : "password"}
+                        value={ghToken}
+                        onChange={(e) => setGhToken(e.target.value)}
+                        placeholder={
+                          updateConfig.githubToken.trim()
+                            ? `已加密保存（${maskSecret(updateConfig.githubToken)}）`
+                            : "github_pat_... 或 ghp_..."
+                        }
+                        className="w-full rounded-lg bg-surface-950 border border-white/10 pl-3 pr-10 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-brand-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowGhToken((v) => !v)}
+                        title={showGhToken ? "隐藏 Token" : "显示 Token"}
+                        className="absolute right-2 p-1 rounded text-slate-400 hover:text-white hover:bg-white/10"
+                      >
+                        {showGhToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
                   </div>
                 </div>
 

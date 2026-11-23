@@ -80,6 +80,18 @@ impl StreamingWavRecorder {
     }
 }
 
+/// 将 16 kHz 单声道 f32 采样编码为标准 16-bit PCM WAV 字节数组（供 /v1/asr 上传）
+pub fn encode_wav_16k_mono(samples: &[f32]) -> Vec<u8> {
+    let data_bytes = (samples.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + samples.len() * 2);
+    let _ = write_wav_header(&mut out, 16_000, 1, data_bytes);
+    for &s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
 fn write_wav_header<W: Write>(
     w: &mut W,
     sample_rate: u32,

@@ -242,6 +242,70 @@ impl HearCloudClient {
         }
     }
 
+    /// 语音识别（POST /v1/asr）：上传 16 kHz 单声道 16-bit PCM WAV，返回 (识别文本, 识别语种)
+    pub async fn transcribe_wav(
+        &self,
+        raw_address: &str,
+        wav_bytes: Vec<u8>,
+        languages: &str,
+        fallback_lang: &str,
+        preview: bool,
+        token: Option<&str>,
+    ) -> Result<(String, String), String> {
+        let base_url = normalize_service_url(raw_address)?;
+        let url = format!("{}/v1/asr", base_url);
+        let mut req = self
+            .http
+            .post(&url)
+            .header("Content-Type", "audio/wav")
+            .header("X-Languages", languages)
+            .header("X-Fallback-Language", fallback_lang)
+            .body(wav_bytes);
+        if preview {
+            req = req.header("X-ASR-Preview", "1");
+        }
+        req = self.apply_headers(req, token);
+
+        let resp = req
+            .timeout(Duration::from_secs(if preview { 8 } else { 45 }))
+            .send()
+            .await
+            .map_err(|e| format!("语音识别请求失败：{}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            let msg = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| {
+                    v.get("message")
+                        .or_else(|| v.get("error"))
+                        .and_then(|s| s.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or(body);
+            return Err(format!("语音识别返回 HTTP {}：{}", status, msg));
+        }
+
+        let val: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析语音识别响应失败：{}", e))?;
+        let text = val
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let lang = val
+            .get("lang")
+            .and_then(|v| v.as_str())
+            .unwrap_or(fallback_lang)
+            .trim()
+            .to_lowercase();
+        Ok((text, if lang.is_empty() { fallback_lang.to_string() } else { lang }))
+    }
+
     /// 流式 SSE 文本翻译（逐字回调，降低桌面悬浮字幕首字延迟）
     pub async fn translate_stream<F>(
         &self,
@@ -261,7 +325,11 @@ impl HearCloudClient {
             "stream": true,
             "max_tokens": if preview { 256 } else { 512 },
         });
-        let mut req = self.http.post(&url).json(&body);
+        let mut req = self
+            .http
+            .post(&url)
+            .header("Accept", "text/event-stream, application/json")
+            .json(&body);
         if preview {
             req = req.header("X-MT-Preview", "1");
         }
@@ -278,18 +346,52 @@ impl HearCloudClient {
             return Err(format!("翻译返回 HTTP {}: {}", status, msg));
         }
 
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+
+        // 兼容旧版或非流式服务端：当返回普通 application/json {"text": "..."} 时直接解析
+        if !content_type.contains("text/event-stream") {
+            let val: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("解析翻译响应失败: {}", e))?;
+            if let Some(err) = val
+                .get("message")
+                .or_else(|| val.get("error"))
+                .and_then(|v| v.as_str())
+            {
+                return Err(format!("翻译失败: {}", err));
+            }
+            let text = val
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !text.is_empty() {
+                on_delta(&text);
+            }
+            return Ok(text);
+        }
+
         let mut stream = resp.bytes_stream();
-        let mut buf = String::new();
+        let mut raw_buf: Vec<u8> = Vec::new();
         let mut full = String::new();
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| format!("读取流式翻译中断: {}", e))?;
-            buf.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(idx) = buf.find('\n') {
-                let line = buf[..idx].trim().to_string();
-                buf.drain(..=idx);
+            raw_buf.extend_from_slice(&bytes);
+            while let Some(pos) = raw_buf.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = raw_buf.drain(..=pos).collect();
+                let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
                 if let Some(payload) = line.strip_prefix("data:") {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload.trim()) {
+                        if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
+                            return Err(format!("流式翻译异常: {}", err));
+                        }
                         if let Some(delta) = val.get("delta").and_then(|v| v.as_str()) {
                             full.push_str(delta);
                             on_delta(&full);

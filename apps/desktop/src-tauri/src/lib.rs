@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod cloud;
 pub mod config_store;
 pub mod local_server;
@@ -23,6 +24,7 @@ use tokio::sync::Mutex;
 pub struct AppRuntime {
     pub snapshot: Mutex<AppSnapshot>,
     pub cloud: HearCloudClient,
+    pub capture: Mutex<Option<audio::LiveCaptureHandle>>,
 }
 
 impl AppRuntime {
@@ -30,6 +32,7 @@ impl AppRuntime {
         Self {
             snapshot: Mutex::new(AppSnapshot::default()),
             cloud: HearCloudClient::new(),
+            capture: Mutex::new(None),
         }
     }
 
@@ -89,15 +92,60 @@ async fn toggle_recording(
     app: AppHandle,
     rt: State<'_, Arc<AppRuntime>>,
 ) -> Result<SessionMode, String> {
-    let mut snap = rt.snapshot.lock().await;
-    snap.mode = if snap.mode == SessionMode::Recording {
-        SessionMode::Idle
-    } else {
-        SessionMode::Recording
+    let mut cap_guard = rt.capture.lock().await;
+
+    // 已在录音：优雅停止采集流、冲刷尾句并落盘录音文件
+    if let Some(handle) = cap_guard.take() {
+        let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
+        let mut snap = rt.snapshot.lock().await;
+        snap.mode = SessionMode::Idle;
+        let _ = app.emit("session:mode", SessionMode::Idle);
+        return Ok(SessionMode::Idle);
+    }
+
+    // 启动前校验路由对应的语音识别与文本翻译服务地址是否已配置
+    let (capture_mode, asr_url, mt_url, asr_is_cloud, mt_is_cloud) = {
+        let snap = rt.snapshot.lock().await;
+        let a_url = match snap.service_config.asr_source {
+            EngineSource::Local => snap.service_config.local_service_address.trim().to_string(),
+            EngineSource::Cloud => snap.service_config.cloud_service_address.trim().to_string(),
+        };
+        let m_url = match snap.service_config.mt_source {
+            EngineSource::Local => snap.service_config.local_service_address.trim().to_string(),
+            EngineSource::Cloud => snap.service_config.cloud_service_address.trim().to_string(),
+        };
+        (
+            snap.capture_mode,
+            a_url,
+            m_url,
+            snap.service_config.asr_source == EngineSource::Cloud,
+            snap.service_config.mt_source == EngineSource::Cloud,
+        )
     };
-    let mode = snap.mode;
-    let _ = app.emit("session:mode", mode);
-    Ok(mode)
+
+    if asr_url.is_empty() {
+        return Err(if asr_is_cloud {
+            "语音识别当前路由到「远端云端服务」，请先在「设置 → 模型服务」填写远端服务地址".to_string()
+        } else {
+            "请先在「设置 → 模型服务」配置本机语音识别服务地址".to_string()
+        });
+    }
+    if mt_url.is_empty() {
+        return Err(if mt_is_cloud {
+            "文本翻译当前路由到「远端云端服务」，请先在「设置 → 模型服务」填写远端服务地址".to_string()
+        } else {
+            "请先在「设置 → 模型服务」配置本机文本翻译服务地址".to_string()
+        });
+    }
+
+    let handle = audio::LiveCaptureHandle::start(app.clone(), rt.inner().clone(), capture_mode)?;
+    *cap_guard = Some(handle);
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.mode = SessionMode::Recording;
+    }
+    let _ = app.emit("session:mode", SessionMode::Recording);
+    Ok(SessionMode::Recording)
 }
 
 #[tauri::command]
@@ -431,7 +479,7 @@ async fn retranslate_segment(
     id: String,
     new_source: String,
 ) -> Result<(), String> {
-    let (base_url, token, target_lang) = {
+    let (base_url, token, source_lang, target_lang, glossary) = {
         let snap = rt.snapshot.lock().await;
         let (addr, tok) = match snap.service_config.mt_source {
             EngineSource::Local => (
@@ -443,11 +491,17 @@ async fn retranslate_segment(
                 snap.service_config.cloud_access_token.clone(),
             ),
         };
-        (addr, tok, snap.target_lang.clone())
+        let seg_langs = snap
+            .segments
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| (s.source_lang.clone(), s.target_lang.clone()))
+            .unwrap_or_else(|| (snap.source_lang.clone(), snap.target_lang.clone()));
+        (addr, tok, seg_langs.0, seg_langs.1, snap.glossary.clone())
     };
 
-    let prompt = format!("Translate to {}: {}", target_lang, new_source);
-    let translated = rt
+    let prompt = audio::build_translation_prompt(&new_source, &source_lang, &target_lang, &glossary);
+    let translated_raw = rt
         .cloud
         .translate_stream(
             &base_url,
@@ -461,6 +515,7 @@ async fn retranslate_segment(
             |_| {},
         )
         .await?;
+    let translated = audio::clean_translation_output(&translated_raw);
 
     let mut updated = None;
     {
