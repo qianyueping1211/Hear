@@ -362,7 +362,8 @@ impl HearCloudClient {
         token: Option<&str>,
     ) -> Result<Vec<u8>, String> {
         let base_url = normalize_service_url(raw_address)?;
-        let cloud_lang = match lang.trim().to_ascii_lowercase().as_str() {
+        let lower_lang = lang.trim().to_ascii_lowercase();
+        let cloud_lang = match lower_lang.as_str() {
             "zh" | "zh-cn" | "zh-tw" => "chinese",
             "en" | "en-us" | "en-gb" => "english",
             "ja" | "ja-jp" => "japanese",
