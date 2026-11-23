@@ -274,30 +274,12 @@ struct LanguageBar: View {
     @EnvironmentObject var session: LiveSession
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button {
-                session.voiceClone.toggle()
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                session.showToast(session.voiceClone ? "声音克隆已开启" : "声音克隆已关闭")
-            } label: {
-                Image(systemName: session.voiceClone ? "person.wave.2.fill" : "person.wave.2")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(session.voiceClone ? Color.white : Color.secondary)
-                    .frame(width: 42, height: 42)
-                    .background(
-                        session.voiceClone ? Color.accentColor : Color(.secondarySystemBackground),
-                        in: RoundedRectangle(cornerRadius: 12)
-                    )
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(session.voiceClone ? "声音克隆已开启" : "声音克隆已关闭")
-            .accessibilityHint("轻点开关声音克隆朗读")
-
+        HStack(spacing: 12) {
             LanguageMenu(selection: $session.langA)
             Button { session.swapLanguages() } label: {
                 Image(systemName: "arrow.left.arrow.right")
                     .font(.headline)
-                    .frame(width: 40, height: 42)
+                    .frame(width: 44, height: 44)
             }
             LanguageMenu(selection: $session.langB)
         }
