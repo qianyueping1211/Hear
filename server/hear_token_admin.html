@@ -41,11 +41,13 @@
       <span class="grow"></span>
       <button id="user-new" class="primary write">新增用户</button>
     </div>
-    <table class="list">
-      <thead><tr><th>用户名</th><th>显示名称</th><th>状态</th><th>Token（可用/全部）</th><th>最近更新</th></tr></thead>
-      <tbody id="user-rows"></tbody>
-    </table>
-    <button id="user-more" class="ghost more" hidden>加载更多</button>
+    <div class="table-scroll">
+      <table class="list">
+        <thead><tr><th>用户名</th><th>显示名称</th><th>状态</th><th>Token（可用/全部）</th><th>最近更新</th></tr></thead>
+        <tbody id="user-rows"></tbody>
+      </table>
+      <button id="user-more" class="ghost more" hidden>加载更多</button>
+    </div>
   </section>
 
   <section id="view-user" hidden>
@@ -77,11 +79,13 @@
       <span class="grow"></span>
       <button id="token-new" class="primary write">签发 Token</button>
     </div>
-    <table class="list">
-      <thead><tr><th>标签</th><th>后缀</th><th>网关</th><th>状态</th><th>生效</th><th>计划结束</th><th>实际失效</th><th></th></tr></thead>
-      <tbody id="token-rows"></tbody>
-    </table>
-    <button id="token-more" class="ghost more" hidden>加载更多</button>
+    <div class="table-scroll">
+      <table class="list">
+        <thead><tr><th>标签</th><th>后缀</th><th>网关</th><th>状态</th><th>生效</th><th>计划结束</th><th>实际失效</th><th></th></tr></thead>
+        <tbody id="token-rows"></tbody>
+      </table>
+      <button id="token-more" class="ghost more" hidden>加载更多</button>
+    </div>
   </section>
 
   <section id="view-audit" hidden>
@@ -99,20 +103,24 @@
       <label class="inline">到<input name="until" type="datetime-local"></label>
       <button type="submit">筛选</button>
     </form>
-    <table class="list">
-      <thead><tr><th>时间</th><th>操作人</th><th>操作</th><th>对象</th><th>变更</th></tr></thead>
-      <tbody id="audit-rows"></tbody>
-    </table>
-    <button id="audit-more" class="ghost more" hidden>加载更多</button>
+    <div class="table-scroll">
+      <table class="list">
+        <thead><tr><th>时间</th><th>操作人</th><th>操作</th><th>对象</th><th>变更</th></tr></thead>
+        <tbody id="audit-rows"></tbody>
+      </table>
+      <button id="audit-more" class="ghost more" hidden>加载更多</button>
+    </div>
   </section>
 
   <section id="view-gateways" hidden>
     <div class="toolbar"><h2>网关</h2><span class="grow"></span><button id="gw-new" class="primary write">登记网关</button></div>
-    <table class="list">
-      <thead><tr><th>gateway_id</th><th>名称</th><th>修订号</th><th>清单请求次数</th><th>最近同步</th><th>凭据轮换</th><th></th></tr></thead>
-      <tbody id="gw-rows"></tbody>
-    </table>
-    <p class="hint">清单请求次数由管理服务计数：健康同步时每个网关约每 30 秒一次，推理和口令检查不会产生请求。</p>
+    <div class="table-scroll">
+      <table class="list">
+        <thead><tr><th>gateway_id</th><th>名称</th><th>修订号</th><th>清单请求次数</th><th>最近同步</th><th>凭据轮换</th><th></th></tr></thead>
+        <tbody id="gw-rows"></tbody>
+      </table>
+      <p class="hint">清单请求次数由管理服务计数：健康同步时每个网关约每 30 秒一次，推理和口令检查不会产生请求。</p>
+    </div>
   </section>
 </main>
 
