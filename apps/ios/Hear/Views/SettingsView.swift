@@ -197,12 +197,7 @@ struct SettingsView: View {
                         Text("耳机麦克风").tag("headset")
                     }
                     Toggle("语音增强（降噪、消除回声）", isOn: $session.voiceProcessing)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Toggle("保存完整录音", isOn: $session.saveFullRecording)
-                        Text("开启后将同一对话中的声音保存为录音文件，可在历史对话中回放原文")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Toggle("保存完整录音", isOn: $session.saveFullRecording)
                     if session.speakerTrackingAvailable {
                         Toggle("实时翻译时区分说话人", isOn: $session.speakerTrackingEnabled)
                     }

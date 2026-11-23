@@ -32,6 +32,8 @@ pub struct AppRuntime {
     pub capture: Mutex<Option<audio::LiveCaptureHandle>>,
     pub summary_markdown: Mutex<String>,
     pub segment_wavs: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    /// 声音克隆单并发闸门：防止多句预克隆或用户点击并发打到服务端触发 503 SERVICE_BUSY
+    pub clone_gate: Mutex<()>,
     pub import_cancel: AtomicBool,
 }
 
@@ -43,6 +45,7 @@ impl AppRuntime {
             capture: Mutex::new(None),
             summary_markdown: Mutex::new(String::new()),
             segment_wavs: Mutex::new(std::collections::HashMap::new()),
+            clone_gate: Mutex::new(()),
             import_cancel: AtomicBool::new(false),
         }
     }
@@ -625,6 +628,9 @@ async fn clone_segment_speech(
     } else {
         Some(fallback_tok.as_str())
     };
+
+    // 串行排队调用服务端克隆，避免多句并发导致服务端返回 503 SERVICE_BUSY
+    let _clone_guard = rt.clone_gate.lock().await;
 
     match rt
         .cloud

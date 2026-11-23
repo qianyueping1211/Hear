@@ -434,40 +434,54 @@ impl HearCloudClient {
             }
         }
 
-        let req = self.apply_headers(
-            self.http
-                .post(&clone_url)
-                .header("X-Hear-Audio", "wav")
-                .json(&payload),
-            token,
-        );
-        let resp = req
-            .timeout(Duration::from_secs(60))
-            .send()
-            .await
-            .map_err(|e| {
-                let msg = format!("声音克隆请求失败：{}", e);
-                crate::logger::error(&msg);
-                msg
-            })?;
+        let backoff_ms = [1200u64, 2000, 3000];
+        let max_attempts = backoff_ms.len() + 1;
+        for attempt in 1..=max_attempts {
+            let req = self.apply_headers(
+                self.http
+                    .post(&clone_url)
+                    .header("X-Hear-Audio", "wav")
+                    .json(&payload),
+                token,
+            );
+            let resp = req
+                .timeout(Duration::from_secs(60))
+                .send()
+                .await
+                .map_err(|e| {
+                    let msg = format!("声音克隆请求失败：{}", e);
+                    crate::logger::error(&msg);
+                    msg
+                })?;
 
-        if !resp.status().is_success() {
+            if resp.status().is_success() {
+                let bytes = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| format!("读取声音克隆音频失败：{}", e))?;
+                if bytes.len() < 44 {
+                    return Err("声音克隆返回的音频数据为空".to_string());
+                }
+                crate::logger::info(format!("[clone] 合成完成: wav_bytes={}", bytes.len()));
+                return Ok(bytes.to_vec());
+            }
+
             let code = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
+            if code == 503 && attempt < max_attempts {
+                let wait = backoff_ms[attempt - 1];
+                crate::logger::warn(format!(
+                    "[clone] 服务端繁忙 (HTTP 503)，{}ms 后重试 ({}/{})",
+                    wait, attempt, max_attempts
+                ));
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                continue;
+            }
             let msg = format!("声音克隆返回 HTTP {}：{}", code, body);
             crate::logger::error(&msg);
             return Err(msg);
         }
-
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| format!("读取声音克隆音频失败：{}", e))?;
-        if bytes.len() < 44 {
-            return Err("声音克隆返回的音频数据为空".to_string());
-        }
-        crate::logger::info(format!("[clone] 合成完成: wav_bytes={}", bytes.len()));
-        Ok(bytes.to_vec())
+        Err("声音克隆重试次数已用尽".to_string())
     }
 
     /// 流式 SSE 文本翻译（逐字回调，降低桌面悬浮字幕首字延迟）
