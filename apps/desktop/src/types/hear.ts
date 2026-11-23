@@ -93,6 +93,7 @@ export interface TtsOutputSettings {
   useVoiceClone: boolean;
   routingMode: TtsRoutingMode;
   outputDeviceId: string;
+  inputDeviceId: string;
   meetingMicOutputDeviceId: string;
   muteMicWhileSpeaking: boolean;
   autoSpeakMyMic: boolean;

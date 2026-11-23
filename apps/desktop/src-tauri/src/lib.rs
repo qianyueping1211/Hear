@@ -731,6 +731,13 @@ async fn list_output_devices() -> Result<Vec<audio::output::OutputAudioDevice>, 
 }
 
 #[tauri::command]
+async fn list_input_devices() -> Result<Vec<audio::output::OutputAudioDevice>, String> {
+    tokio::task::spawn_blocking(audio::output::list_input_devices)
+        .await
+        .map_err(|e| format!("枚举麦克风设备失败：{}", e))
+}
+
+#[tauri::command]
 async fn set_mic_muted(rt: State<'_, Arc<AppRuntime>>, muted: bool) -> Result<(), String> {
     rt.mic_muted.store(muted, Ordering::Relaxed);
     Ok(())
@@ -2262,6 +2269,7 @@ pub fn run() {
             delete_conversation,
             clone_segment_speech,
             list_output_devices,
+            list_input_devices,
             set_mic_muted,
             stop_device_tts,
             play_cloned_segment_to_device,

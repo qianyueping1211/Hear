@@ -63,6 +63,44 @@ pub fn list_output_devices() -> Vec<OutputAudioDevice> {
     out
 }
 
+/// 枚举本机所有麦克风/音频输入设备（支持蓝牙耳机麦、USB 耳机麦、笔记本阵列麦等）
+pub fn list_input_devices() -> Vec<OutputAudioDevice> {
+    let host = cpal::default_host();
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    if let Ok(devices) = host.input_devices() {
+        for dev in devices {
+            if let Ok(name) = dev.name() {
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                let is_default = !default_name.is_empty() && name == default_name;
+                let is_virtual = is_virtual_device_name(&name);
+                out.push(OutputAudioDevice {
+                    id: name.clone(),
+                    name,
+                    is_default,
+                    is_virtual,
+                });
+            }
+        }
+    }
+
+    out.sort_by(|a, b| {
+        b.is_default
+            .cmp(&a.is_default)
+            .then_with(|| a.is_virtual.cmp(&b.is_virtual))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out
+}
+
 /// 解析 16-bit PCM / 32-bit Float WAV 为单声道 f32 采样与采样率
 fn decode_wav_mono_f32(wav: &[u8]) -> Result<(Vec<f32>, u32), String> {
     if wav.len() < 44 || &wav[0..4] != b"RIFF" || &wav[8..12] != b"WAVE" {

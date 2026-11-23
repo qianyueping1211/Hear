@@ -433,26 +433,36 @@ impl LaneProcessor {
             return;
         }
 
-        // 多声道下混：对 4 通道及以上笔记本阵列麦防反相抵消（若均值能量明显低于首通道，则回退首通道）
+        // 多声道转单声道：对 4 通道及以上笔记本/耳机阵列麦（如 Intel SST），统计各声道能量并优先取最强有效声道，避免平均除以 4 导致音量过低
         let mut mono = Vec::with_capacity(frames);
         let mut avg_energy = 0.0f32;
-        let mut ch0_energy = 0.0f32;
+        let mut ch_energies = vec![0.0f32; ch];
         for i in 0..frames {
             let base = i * ch;
             let mut sum = 0.0f32;
             for c in 0..ch {
-                sum += interleaved[base + c];
+                let s = interleaved[base + c];
+                sum += s;
+                ch_energies[c] += s * s;
             }
             let avg = sum / ch as f32;
-            let c0 = interleaved[base];
             avg_energy += avg * avg;
-            ch0_energy += c0 * c0;
             mono.push(avg);
         }
-        if ch > 2 && ch0_energy > 1e-7 && avg_energy < ch0_energy * 0.25 {
-            mono.clear();
-            for i in 0..frames {
-                mono.push(interleaved[i * ch]);
+        if ch >= 2 {
+            let mut best_c = 0usize;
+            let mut best_energy = 0.0f32;
+            for (c, &e) in ch_energies.iter().enumerate() {
+                if e > best_energy {
+                    best_energy = e;
+                    best_c = c;
+                }
+            }
+            if best_energy > 1e-8 && avg_energy < best_energy * 0.55 {
+                mono.clear();
+                for i in 0..frames {
+                    mono.push(interleaved[i * ch + best_c]);
+                }
             }
         }
 
@@ -496,8 +506,8 @@ impl LaneProcessor {
             let energy: f32 = frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32;
             let rms = energy.sqrt();
 
-            // 抗键盘敲击与瞬态点击：提高触发底限并要求连续 3 帧（~96ms）持续过门限才判定为说话开始
-            let thresh = (self.noise_floor * 3.0).max(0.0055).min(0.05);
+            // 抗键盘敲击与瞬态点击：依赖连续 3 帧（~96ms）持续过门限，同时保持 0.0022 低底限以兼容蓝牙/USB 耳机小音量麦克风
+            let thresh = (self.noise_floor * 2.8).max(0.0022).min(0.04);
             let speech_now = rms > thresh;
             let has_speech = if speech_now {
                 self.onset_count = self.onset_count.saturating_add(1);
@@ -516,12 +526,12 @@ impl LaneProcessor {
             } else {
                 self.onset_count = 0;
                 // 仅在静音时缓慢更新底噪估计
-                self.noise_floor = (self.noise_floor * 0.96 + rms * 0.04).clamp(0.0005, 0.02);
+                self.noise_floor = (self.noise_floor * 0.96 + rms * 0.04).clamp(0.0003, 0.015);
                 false
             };
 
             let ev = self.segmenter.push_frame(&frame, has_speech);
-            let level = (rms * 12.0).clamp(0.0, 1.0);
+            let level = (rms * 24.0).clamp(0.0, 1.0);
             on_frame(&frame, has_speech, level, ev);
         }
     }
@@ -542,9 +552,9 @@ mod win_wasapi {
     use std::ffi::c_void;
     use windows::core::GUID;
     use windows::Win32::Media::Audio::{
-        eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
-        MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
-        WAVEFORMATEXTENSIBLE,
+        eCapture, eCommunications, eConsole, eRender, IAudioCaptureClient, IAudioClient,
+        IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
     };
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
@@ -569,8 +579,10 @@ mod win_wasapi {
 
     struct WasapiLane {
         channel: AudioChannel,
-        audio_client: IAudioClient,
-        capture_client: IAudioCaptureClient,
+        audio_client: Option<IAudioClient>,
+        capture_client: Option<IAudioCaptureClient>,
+        cpal_stream: Option<cpal::Stream>,
+        cpal_buf: Option<Arc<std::sync::Mutex<Vec<f32>>>>,
         encoding: SampleEncoding,
         channels: usize,
         sample_rate: u32,
@@ -588,15 +600,21 @@ mod win_wasapi {
             is_loopback: bool,
         ) -> Result<Self, String> {
             let flow = if is_loopback { eRender } else { eCapture };
-            let device = enumerator
-                .GetDefaultAudioEndpoint(flow, eConsole)
-                .map_err(|e| {
-                    if is_loopback {
-                        format!("未找到系统默认播放设备（{:?}）", e)
-                    } else {
-                        format!("未找到默认麦克风设备（{:?}）", e)
-                    }
-                })?;
+            // 麦克风优先取 eCommunications（插上蓝牙/USB 耳机时 Windows 通常把耳机麦设为默认通信设备），失败再退回 eConsole
+            let device = if !is_loopback {
+                enumerator
+                    .GetDefaultAudioEndpoint(flow, eCommunications)
+                    .or_else(|_| enumerator.GetDefaultAudioEndpoint(flow, eConsole))
+            } else {
+                enumerator.GetDefaultAudioEndpoint(flow, eConsole)
+            }
+            .map_err(|e| {
+                if is_loopback {
+                    format!("未找到系统默认播放设备（{:?}）", e)
+                } else {
+                    format!("未找到默认麦克风设备（{:?}）", e)
+                }
+            })?;
 
             let audio_client: IAudioClient = device
                 .Activate(CLSCTX_ALL, None)
@@ -682,9 +700,102 @@ mod win_wasapi {
 
             Ok(Self {
                 channel,
-                audio_client,
-                capture_client,
+                audio_client: Some(audio_client),
+                capture_client: Some(capture_client),
+                cpal_stream: None,
+                cpal_buf: None,
                 encoding,
+                channels: channels.max(1),
+                sample_rate: sample_rate.max(8_000),
+                processor: LaneProcessor::new(sample_rate, channels),
+                rec_queue: std::collections::VecDeque::with_capacity(VAD_SAMPLE_RATE as usize),
+                stat_frames: 0,
+                stat_speech_frames: 0,
+                stat_peak: 0.0,
+            })
+        }
+
+        fn open_cpal_mic(device_name: &str) -> Result<Self, String> {
+            use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+            use cpal::SampleFormat;
+
+            let host = cpal::default_host();
+            let device = host
+                .input_devices()
+                .map_err(|e| format!("枚举麦克风设备失败：{}", e))?
+                .find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
+                .ok_or_else(|| format!("未找到指定麦克风设备「{}」", device_name))?;
+
+            let cfg = device
+                .default_input_config()
+                .map_err(|e| format!("读取麦克风「{}」配置失败：{}", device_name, e))?;
+            let channels = cfg.channels() as usize;
+            let sample_rate = cfg.sample_rate().0;
+            let stream_cfg: cpal::StreamConfig = cfg.clone().into();
+            let buf: Arc<std::sync::Mutex<Vec<f32>>> =
+                Arc::new(std::sync::Mutex::new(Vec::with_capacity(8192)));
+            let buf_cb = buf.clone();
+            let err_fn = |err| logger::warn(format!("[cpal-mic] stream error: {}", err));
+
+            let stream = match cfg.sample_format() {
+                SampleFormat::F32 => device.build_input_stream(
+                    &stream_cfg,
+                    move |data: &[f32], _| {
+                        if let Ok(mut g) = buf_cb.lock() {
+                            if g.len() < 48_000 * 4 {
+                                g.extend_from_slice(data);
+                            }
+                        }
+                    },
+                    err_fn,
+                    None,
+                ),
+                SampleFormat::I16 => device.build_input_stream(
+                    &stream_cfg,
+                    move |data: &[i16], _| {
+                        if let Ok(mut g) = buf_cb.lock() {
+                            if g.len() < 48_000 * 4 {
+                                g.extend(data.iter().map(|&s| s as f32 / 32768.0));
+                            }
+                        }
+                    },
+                    err_fn,
+                    None,
+                ),
+                SampleFormat::U16 => device.build_input_stream(
+                    &stream_cfg,
+                    move |data: &[u16], _| {
+                        if let Ok(mut g) = buf_cb.lock() {
+                            if g.len() < 48_000 * 4 {
+                                g.extend(data.iter().map(|&s| (s as f32 - 32768.0) / 32768.0));
+                            }
+                        }
+                    },
+                    err_fn,
+                    None,
+                ),
+                other => {
+                    return Err(format!("不支持的麦克风采样格式：{:?}", other));
+                }
+            }
+            .map_err(|e| format!("打开麦克风「{}」失败：{}", device_name, e))?;
+
+            stream
+                .play()
+                .map_err(|e| format!("启动麦克风「{}」采集失败：{}", device_name, e))?;
+
+            logger::info(format!(
+                "CPAL 指定麦克风采集已启动: device={} sr={} ch={}",
+                device_name, sample_rate, channels
+            ));
+
+            Ok(Self {
+                channel: AudioChannel::Mic,
+                audio_client: None,
+                capture_client: None,
+                cpal_stream: Some(stream),
+                cpal_buf: Some(buf),
+                encoding: SampleEncoding::F32,
                 channels: channels.max(1),
                 sample_rate: sample_rate.max(8_000),
                 processor: LaneProcessor::new(sample_rate, channels),
@@ -703,8 +814,51 @@ mod win_wasapi {
             let mut max_level = 0.0f32;
             let mut scratch: Vec<f32> = Vec::new();
 
+            if let Some(ref cpal_buf) = self.cpal_buf {
+                if let Ok(mut g) = cpal_buf.lock() {
+                    if !g.is_empty() {
+                        std::mem::swap(&mut scratch, &mut *g);
+                    }
+                }
+                if !scratch.is_empty() {
+                    let nf = scratch.len() / self.channels.max(1);
+                    for &s in &scratch {
+                        let a = s.abs();
+                        if a > self.stat_peak {
+                            self.stat_peak = a;
+                        }
+                    }
+                    self.stat_frames += nf as u64;
+                    let ch = self.channel;
+                    let mut speech_hits = 0u64;
+                    let rec_q = &mut self.rec_queue;
+                    self.processor.push_interleaved_with_aec(
+                        &scratch,
+                        far_end,
+                        |frame, has_speech, level, ev| {
+                            if has_speech {
+                                speech_hits += 1;
+                            }
+                            if level > max_level {
+                                max_level = level;
+                            }
+                            rec_q.extend(frame.iter().copied());
+                            if let Some(event) = ev {
+                                let _ = seg_tx.send(CapturedSegment { channel: ch, event });
+                            }
+                        },
+                    );
+                    self.stat_speech_frames += speech_hits;
+                }
+                return max_level;
+            }
+
+            let Some(ref capture_client) = self.capture_client else {
+                return 0.0;
+            };
+
             loop {
-                let pkt = match self.capture_client.GetNextPacketSize() {
+                let pkt = match capture_client.GetNextPacketSize() {
                     Ok(n) if n > 0 => n,
                     _ => break,
                 };
@@ -713,8 +867,7 @@ mod win_wasapi {
                 let mut data_ptr: *mut u8 = std::ptr::null_mut();
                 let mut num_frames: u32 = 0;
                 let mut buf_flags: u32 = 0;
-                if self
-                    .capture_client
+                if capture_client
                     .GetBuffer(&mut data_ptr, &mut num_frames, &mut buf_flags, None, None)
                     .is_err()
                 {
@@ -765,7 +918,7 @@ mod win_wasapi {
                     }
                 }
 
-                let _ = self.capture_client.ReleaseBuffer(num_frames);
+                let _ = capture_client.ReleaseBuffer(num_frames);
 
                 for &s in &scratch {
                     let a = s.abs();
@@ -799,8 +952,17 @@ mod win_wasapi {
         }
 
         unsafe fn discard_packets(&mut self) {
+            if let Some(ref cpal_buf) = self.cpal_buf {
+                if let Ok(mut g) = cpal_buf.lock() {
+                    g.clear();
+                }
+                return;
+            }
+            let Some(ref capture_client) = self.capture_client else {
+                return;
+            };
             loop {
-                let pkt = match self.capture_client.GetNextPacketSize() {
+                let pkt = match capture_client.GetNextPacketSize() {
                     Ok(n) if n > 0 => n,
                     _ => break,
                 };
@@ -808,14 +970,13 @@ mod win_wasapi {
                 let mut data_ptr: *mut u8 = std::ptr::null_mut();
                 let mut num_frames: u32 = 0;
                 let mut buf_flags: u32 = 0;
-                if self
-                    .capture_client
+                if capture_client
                     .GetBuffer(&mut data_ptr, &mut num_frames, &mut buf_flags, None, None)
                     .is_err()
                 {
                     break;
                 }
-                let _ = self.capture_client.ReleaseBuffer(num_frames);
+                let _ = capture_client.ReleaseBuffer(num_frames);
             }
         }
 
@@ -823,7 +984,10 @@ mod win_wasapi {
             &mut self,
             seg_tx: &tokio_mpsc::UnboundedSender<CapturedSegment>,
         ) {
-            let _ = self.audio_client.Stop();
+            self.cpal_stream = None;
+            if let Some(ref ac) = self.audio_client {
+                let _ = ac.Stop();
+            }
             if let Some(ev) = self.processor.flush_final() {
                 let _ = seg_tx.send(CapturedSegment {
                     channel: self.channel,
@@ -914,14 +1078,35 @@ mod win_wasapi {
                 }
             }
             if want_mic {
-                match WasapiLane::open(&enumerator, AudioChannel::Mic, false) {
+                let chosen_mic = rt
+                    .snapshot
+                    .blocking_lock()
+                    .tts_settings
+                    .input_device_id
+                    .trim()
+                    .to_string();
+                let mic_res = if !chosen_mic.is_empty() && chosen_mic != "default" {
+                    match WasapiLane::open_cpal_mic(&chosen_mic) {
+                        Ok(lane) => Ok(lane),
+                        Err(e) => {
+                            logger::warn(format!("{}，自动回退到系统默认通信麦克风", e));
+                            WasapiLane::open(&enumerator, AudioChannel::Mic, false)
+                        }
+                    }
+                } else {
+                    WasapiLane::open(&enumerator, AudioChannel::Mic, false)
+                };
+                match mic_res {
                     Ok(mut lane) => {
                         lane.processor.enable_aec();
                         lanes.push(lane);
                     }
                     Err(e) => {
                         for l in &mut lanes {
-                            let _ = l.audio_client.Stop();
+                            l.cpal_stream = None;
+                            if let Some(ref ac) = l.audio_client {
+                                let _ = ac.Stop();
+                            }
                         }
                         logger::error(&e);
                         let _ = ready_tx.send(Err(e));

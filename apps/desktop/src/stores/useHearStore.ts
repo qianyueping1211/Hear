@@ -126,6 +126,7 @@ const DEFAULT_TTS: TtsOutputSettings = {
   useVoiceClone: true,
   routingMode: "face_to_face",
   outputDeviceId: "default",
+  inputDeviceId: "default",
   meetingMicOutputDeviceId: "",
   muteMicWhileSpeaking: false,
   autoSpeakMyMic: false,
@@ -167,6 +168,7 @@ interface HearStoreState extends AppSnapshot {
   preparingCloneSegmentId: string | null;
   cloneStates: Record<string, "cloning" | "ready">;
   outputDevices: OutputAudioDevice[];
+  inputDevices: OutputAudioDevice[];
   hasMyVoiceSample: boolean;
   seekNonce: number;
   seekTargetMs: number;
@@ -304,6 +306,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   preparingCloneSegmentId: null,
   cloneStates: {},
   outputDevices: [],
+  inputDevices: [],
   hasMyVoiceSample: false,
   seekNonce: 0,
   seekTargetMs: 0,
@@ -1360,7 +1363,13 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   refreshOutputDevices: async () => {
     if (!isTauriRuntime()) return;
     try {
-      const devices = await tauriInvoke<OutputAudioDevice[]>("list_output_devices");
+      const [devices, inputs] = await Promise.all([
+        tauriInvoke<OutputAudioDevice[]>("list_output_devices"),
+        tauriInvoke<OutputAudioDevice[]>("list_input_devices"),
+      ]);
+      if (inputs) {
+        set({ inputDevices: inputs });
+      }
       if (devices) {
         set({ outputDevices: devices });
         // 如果用户还没选过会议虚拟麦，且系统里检测到了 VB-Cable / Virtual 设备，自动预填方便一键开启会议同传

@@ -162,6 +162,7 @@ export function SettingsModal() {
     subtitleStyle,
     ttsSettings,
     outputDevices,
+    inputDevices,
     hasMyVoiceSample,
     refreshOutputDevices,
     saveRecordedMyVoiceSample,
@@ -898,6 +899,27 @@ export function SettingsModal() {
                   </div>
 
                   <div className="grid grid-cols-1 gap-2.5 text-xs">
+                    <label className="space-y-1">
+                      <span className="text-slate-300">
+                        麦克风输入设备（佩戴蓝牙/USB 耳机时可在此直接指定耳机麦）
+                      </span>
+                      <select
+                        value={ttsSettings.inputDeviceId || "default"}
+                        onChange={(e) =>
+                          updateTtsSettings({ inputDeviceId: e.target.value })
+                        }
+                        className="w-full rounded-lg bg-surface-900 border border-white/10 px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500"
+                      >
+                        <option value="default">自动（优先蓝牙/耳机默认通信麦克风）</option>
+                        {inputDevices.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                            {d.isDefault ? "（系统默认）" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
                     <label className="space-y-1">
                       <span className="text-slate-300">
                         {ttsSettings.routingMode === "meeting"

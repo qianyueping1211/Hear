@@ -184,6 +184,8 @@ pub struct TtsOutputSettings {
     pub routing_mode: String,
     /// 本地收听输出设备名（"default" 表示系统默认耳机/扬声器）
     pub output_device_id: String,
+    /// 麦克风输入设备名（"default" 表示自动优先使用耳机/系统默认通信麦克风）
+    pub input_device_id: String,
     /// 会议同传时把「克隆我的译文」送给对方（腾讯会议/Teams/微信）的虚拟麦克风输入设备（如 CABLE Input）
     pub meeting_mic_output_device_id: String,
     /// 面对面播报译文时自动静音麦克风，避免喇叭声回环录入
@@ -203,6 +205,7 @@ impl Default for TtsOutputSettings {
             use_voice_clone: true,
             routing_mode: "face_to_face".to_string(),
             output_device_id: "default".to_string(),
+            input_device_id: "default".to_string(),
             meeting_mic_output_device_id: String::new(),
             mute_mic_while_speaking: false,
             auto_speak_my_mic: false,
