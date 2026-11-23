@@ -16,6 +16,9 @@ pub struct PersistedConfig {
     pub glossary: String,
     #[serde(default)]
     pub update_config: UpdateConfig,
+    /// v0.1.21 一次性迁移标记：老版本默认勾选了「播报时静音麦克风」，升级到带 NLMS AEC 的版本后自动切为全双工
+    #[serde(default)]
+    pub aec_migrated_v1: bool,
 }
 
 fn config_file_path(app: &AppHandle) -> Option<PathBuf> {
@@ -26,12 +29,24 @@ fn config_file_path(app: &AppHandle) -> Option<PathBuf> {
 
 pub fn load_config(app: &AppHandle) -> PersistedConfig {
     let Some(path) = config_file_path(app) else {
-        return PersistedConfig::default();
+        return PersistedConfig {
+            aec_migrated_v1: true,
+            ..PersistedConfig::default()
+        };
     };
     let Ok(raw) = std::fs::read_to_string(&path) else {
-        return PersistedConfig::default();
+        return PersistedConfig {
+            aec_migrated_v1: true,
+            ..PersistedConfig::default()
+        };
     };
-    serde_json::from_str(&raw).unwrap_or_default()
+    let mut cfg: PersistedConfig = serde_json::from_str(&raw).unwrap_or_default();
+    if !cfg.aec_migrated_v1 {
+        cfg.tts_settings.mute_mic_while_speaking = false;
+        cfg.aec_migrated_v1 = true;
+        save_config(app, &cfg);
+    }
+    cfg
 }
 
 pub fn save_config(app: &AppHandle, cfg: &PersistedConfig) {

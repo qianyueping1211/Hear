@@ -170,15 +170,22 @@ fn resample_linear_to_interleaved(
 }
 
 /// 将 WAV 字节定向播放到指定的输出设备（支持物理耳机/扬声器或 VB-Cable 等虚拟麦克风）
+/// 若传入 `far_end`，则在播放期间按真实播放进度同步推送 16kHz 远端参考样本供麦克风 AEC 实时消除回声。
 pub fn play_wav_to_device(
     wav_bytes: &[u8],
     device_name: &str,
     cancel: Arc<AtomicBool>,
+    far_end: Option<Arc<crate::audio::aec::FarEndReference>>,
 ) -> Result<(), String> {
     let (mono, src_rate) = decode_wav_mono_f32(wav_bytes)?;
     if mono.is_empty() {
         return Ok(());
     }
+    let mono_16k = if far_end.is_some() {
+        resample_linear_to_interleaved(&mono, src_rate, 16_000, 1)
+    } else {
+        Vec::new()
+    };
 
     let host = cpal::default_host();
     let trimmed = device_name.trim();
@@ -326,13 +333,30 @@ pub fn play_wav_to_device(
         .play()
         .map_err(|e| format!("启动音频输出流失败：{}", e))?;
 
-    // 等待播完或被取消（多留 120ms 给声卡硬件缓冲播完尾音）
+    // 等待播完或被取消，同时按 25ms 步长把对应的 16kHz 远端样本同步喂给麦克风 AEC
     let max_wait_ms = ((mono.len() as u64 * 1000) / src_rate as u64) + 2500;
     let mut elapsed = 0u64;
+    let mut far_sent = 0usize;
+    let total_dst = interleaved.len().max(1);
     while !finished.load(Ordering::Relaxed) && !cancel.load(Ordering::Relaxed) && elapsed < max_wait_ms
     {
+        if let Some(ref fe) = far_end {
+            let played_dst = cursor.load(Ordering::Relaxed).min(total_dst);
+            let target_16k = ((played_dst as f64 / total_dst as f64) * mono_16k.len() as f64)
+                .round() as usize;
+            let clamped = target_16k.min(mono_16k.len());
+            if clamped > far_sent {
+                fe.push_16k(&mono_16k[far_sent..clamped]);
+                far_sent = clamped;
+            }
+        }
         std::thread::sleep(Duration::from_millis(25));
         elapsed += 25;
+    }
+    if let Some(ref fe) = far_end {
+        if !cancel.load(Ordering::Relaxed) && far_sent < mono_16k.len() {
+            fe.push_16k(&mono_16k[far_sent..]);
+        }
     }
     if !cancel.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(120));

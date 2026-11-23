@@ -859,7 +859,7 @@ export function SettingsModal() {
                   >
                     <div className="font-semibold">场景 1：面对面交流</div>
                     <div className="text-[11px] text-slate-400 leading-relaxed">
-                      我和老外在一起：把我说的中文克隆成英文外放给对方听，播报期间自动静音麦克风防止回声。
+                      我和老外在一起：把我说的中文克隆成英文外放给对方听，内置全双工回声消除（AEC），边播边说不漏录。
                     </div>
                   </button>
                   <button
@@ -1011,15 +1011,20 @@ export function SettingsModal() {
                   />
                 </label>
 
-                <label className="flex items-center justify-between">
-                  <span>面对面播报译文时自动静音麦克风（防回声循环）</span>
+                <label className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="text-slate-200">播报译文时完全静音麦克风（仅在极端外放回声时开启）</div>
+                    <div className="text-[11px] text-slate-400">
+                      默认关闭：使用全双工声学回声消除（AEC）并自动屏蔽系统内录回环，边播放边说话也能完整录入。
+                    </div>
+                  </div>
                   <input
                     type="checkbox"
                     checked={ttsSettings.muteMicWhileSpeaking}
                     onChange={(e) =>
                       updateTtsSettings({ muteMicWhileSpeaking: e.target.checked })
                     }
-                    className="w-4 h-4 accent-brand-500"
+                    className="w-4 h-4 accent-brand-500 shrink-0"
                   />
                 </label>
 

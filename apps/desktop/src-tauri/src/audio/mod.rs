@@ -1,3 +1,4 @@
+pub mod aec;
 pub mod output;
 
 use crate::logger;
@@ -254,6 +255,7 @@ struct LaneProcessor {
     noise_floor: f32,
     hangover: usize,
     onset_count: usize,
+    aec: Option<aec::AcousticEchoCanceller>,
 }
 
 impl LaneProcessor {
@@ -268,6 +270,13 @@ impl LaneProcessor {
             noise_floor: 0.0015,
             hangover: 0,
             onset_count: 0,
+            aec: None,
+        }
+    }
+
+    fn enable_aec(&mut self) {
+        if self.aec.is_none() {
+            self.aec = Some(aec::AcousticEchoCanceller::new());
         }
     }
 
@@ -278,7 +287,19 @@ impl LaneProcessor {
         self.segmenter.discard_current();
     }
 
-    fn push_interleaved<F>(&mut self, interleaved: &[f32], mut on_frame: F)
+    fn push_interleaved<F>(&mut self, interleaved: &[f32], on_frame: F)
+    where
+        F: FnMut(&[f32], bool, f32, Option<SegmentEvent>),
+    {
+        self.push_interleaved_with_aec(interleaved, None, on_frame);
+    }
+
+    fn push_interleaved_with_aec<F>(
+        &mut self,
+        interleaved: &[f32],
+        far_end: Option<&aec::FarEndReference>,
+        mut on_frame: F,
+    )
     where
         F: FnMut(&[f32], bool, f32, Option<SegmentEvent>),
     {
@@ -342,9 +363,15 @@ impl LaneProcessor {
             self.prev_sample = mono.last().copied();
         }
 
-        // 按严格 512 采样帧做自适应能量 VAD + 断句
+        // 按严格 512 采样帧做自适应能量 VAD + 断句（若麦克风启用全双工 AEC 且扬声器正在播报，先实时抵消回声）
         while self.frame_buf.len() >= VAD_WINDOW_SAMPLES {
-            let frame: Vec<f32> = self.frame_buf.drain(..VAD_WINDOW_SAMPLES).collect();
+            let mut frame: Vec<f32> = self.frame_buf.drain(..VAD_WINDOW_SAMPLES).collect();
+            if let (Some(ref mut canceller), Some(fe)) = (self.aec.as_mut(), far_end) {
+                if fe.is_active() {
+                    let far_frame = fe.pop_frame(frame.len());
+                    canceller.process_frame(&mut frame, &far_frame);
+                }
+            }
             let energy: f32 = frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32;
             let rms = energy.sqrt();
 
@@ -550,6 +577,7 @@ mod win_wasapi {
         unsafe fn drain_packets(
             &mut self,
             seg_tx: &tokio_mpsc::UnboundedSender<CapturedSegment>,
+            far_end: Option<&aec::FarEndReference>,
         ) -> f32 {
             let mut max_level = 0.0f32;
             let mut scratch: Vec<f32> = Vec::new();
@@ -629,7 +657,10 @@ mod win_wasapi {
                 let ch = self.channel;
                 let mut speech_hits = 0u64;
                 let rec_q = &mut self.rec_queue;
-                self.processor.push_interleaved(&scratch, |frame, has_speech, level, ev| {
+                self.processor.push_interleaved_with_aec(
+                    &scratch,
+                    far_end,
+                    |frame, has_speech, level, ev| {
                     if has_speech {
                         speech_hits += 1;
                     }
@@ -763,7 +794,10 @@ mod win_wasapi {
             }
             if want_mic {
                 match WasapiLane::open(&enumerator, AudioChannel::Mic, false) {
-                    Ok(lane) => lanes.push(lane),
+                    Ok(mut lane) => {
+                        lane.processor.enable_aec();
+                        lanes.push(lane);
+                    }
                     Err(e) => {
                         for l in &mut lanes {
                             let _ = l.audio_client.Stop();
@@ -845,10 +879,9 @@ mod win_wasapi {
                 }
 
                 let mut level = 0.0f32;
-                let tts_muted_now = rt.mic_muted.load(Ordering::Relaxed);
-                if tts_muted_now {
-                    // 面对面外放播报译文期间：同时屏蔽 Mic 与 System（WASAPI Loopback）两路采集并丢弃半截 VAD 缓冲，
-                    // 防止电脑扬声器播出的克隆译文经系统内录或麦克风回传重复识别。
+                let hard_muted_now = rt.mic_muted.load(Ordering::Relaxed);
+                if hard_muted_now {
+                    // 半双工硬静音模式：播报期间屏蔽所有采集通道并丢弃半截 VAD 缓冲
                     for lane in &mut lanes {
                         lane.discard_packets();
                         lane.processor.discard_current();
@@ -856,8 +889,21 @@ mod win_wasapi {
                     std::thread::sleep(Duration::from_millis(12));
                     continue;
                 }
+                let sys_tts_muted = rt.system_tts_muted.load(Ordering::Relaxed);
                 for lane in &mut lanes {
-                    let l = lane.drain_packets(&seg_tx);
+                    // 全双工模式：本地扬声器播报译文时只屏蔽 System（防止 WASAPI 内录回传听见自己的声音），
+                    // 麦克风保持全程开启并通过 NLMS AEC 实时抵消扬声器回声，实现边播边说不漏录！
+                    if lane.channel == AudioChannel::System && sys_tts_muted {
+                        lane.discard_packets();
+                        lane.processor.discard_current();
+                        continue;
+                    }
+                    let fe = if lane.channel == AudioChannel::Mic {
+                        Some(rt.aec_far_end.as_ref())
+                    } else {
+                        None
+                    };
+                    let l = lane.drain_packets(&seg_tx, fe);
                     if l > level {
                         level = l;
                     }

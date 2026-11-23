@@ -127,7 +127,7 @@ const DEFAULT_TTS: TtsOutputSettings = {
   routingMode: "face_to_face",
   outputDeviceId: "default",
   meetingMicOutputDeviceId: "",
-  muteMicWhileSpeaking: true,
+  muteMicWhileSpeaking: false,
   autoSpeakMyMic: false,
   autoSpeakOther: false,
   duckOriginalAudio: true,
@@ -1225,7 +1225,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       const needsDeviceRoute =
         tts.routingMode === "meeting" ||
         (tts.outputDeviceId && tts.outputDeviceId !== "default") ||
-        (tts.muteMicWhileSpeaking && get().mode === "recording");
+        get().mode === "recording";
 
       if (needsDeviceRoute) {
         // 先标记克隆中，等后端 tts:state=playing 事件真正开始发声时再点亮绿色播放喇叭

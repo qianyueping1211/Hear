@@ -204,7 +204,7 @@ impl Default for TtsOutputSettings {
             routing_mode: "face_to_face".to_string(),
             output_device_id: "default".to_string(),
             meeting_mic_output_device_id: String::new(),
-            mute_mic_while_speaking: true,
+            mute_mic_while_speaking: false,
             auto_speak_my_mic: false,
             auto_speak_other: false,
             duck_original_audio: true,

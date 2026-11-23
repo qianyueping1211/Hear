@@ -34,8 +34,12 @@ pub struct AppRuntime {
     pub segment_wavs: Mutex<std::collections::HashMap<String, Vec<u8>>>,
     /// 声音克隆单并发闸门：防止多句预克隆或用户点击并发打到服务端触发 503 SERVICE_BUSY
     pub clone_gate: Mutex<()>,
-    /// 面对面播报译文时临时静音全路采集，防止扬声器声音经麦克风或系统内录回环录入
+    /// 强制静音全路采集（仅在用户手动勾选「播报时完全静音麦克风」时启用）
     pub mic_muted: Arc<AtomicBool>,
+    /// 播报译文到本机扬声器/耳机时，仅静音 System 系统内录通道（防 WASAPI Loopback 自回环），麦克风保持开启并走 AEC 回声消除
+    pub system_tts_muted: Arc<AtomicBool>,
+    /// 实时声学回声消除（NLMS AEC）远端参考缓冲：接收本机 TTS 播放的 16kHz 音频用于麦克风实时消回声
+    pub aec_far_end: Arc<audio::aec::FarEndReference>,
     /// 串行播放闸门：保证多句连续自动播报按顺序逐句播放且不互相提前解除静音
     pub tts_play_gate: Mutex<()>,
     /// 进程级自动播报去重集合：防止主窗口与悬浮字幕窗或重复事件对同一句触发两次自动播报
@@ -55,6 +59,8 @@ impl AppRuntime {
             segment_wavs: Mutex::new(std::collections::HashMap::new()),
             clone_gate: Mutex::new(()),
             mic_muted: Arc::new(AtomicBool::new(false)),
+            system_tts_muted: Arc::new(AtomicBool::new(false)),
+            aec_far_end: Arc::new(audio::aec::FarEndReference::new()),
             tts_play_gate: Mutex::new(()),
             auto_spoken_ids: Mutex::new(std::collections::HashSet::new()),
             tts_cancel: Mutex::new(None),
@@ -71,6 +77,7 @@ impl AppRuntime {
                 tts_settings: snap.tts_settings.clone(),
                 glossary: snap.glossary.clone(),
                 update_config: snap.update_config.clone(),
+                aec_migrated_v1: true,
             }
         };
         save_config(app, &cfg);
@@ -732,10 +739,12 @@ async fn stop_device_tts(rt: State<'_, Arc<AppRuntime>>) -> Result<(), String> {
         flag.store(true, Ordering::Relaxed);
     }
     rt.mic_muted.store(false, Ordering::Relaxed);
+    rt.system_tts_muted.store(false, Ordering::Relaxed);
+    rt.aec_far_end.clear();
     Ok(())
 }
 
-/// 合成克隆语音并直接输出到指定声卡设备（支持会议同传将我的克隆译文送到 VB-Cable 虚拟麦，或面对面播报并自动静音麦防回声）
+/// 合成克隆语音并直接输出到指定声卡设备（支持会议同传将我的克隆译文送到 VB-Cable 虚拟麦，或本机播报时仅静音系统内录 + 麦克风实时 NLMS AEC 全双工防回声）
 #[tauri::command]
 async fn play_cloned_segment_to_device(
     app: AppHandle,
@@ -766,7 +775,7 @@ async fn play_cloned_segment_to_device(
             return Err(e);
         }
     };
-    let (device_name, should_mute_mic) = {
+    let (device_name, mute_system_loopback, hard_mute_all) = {
         let snap = rt.snapshot.lock().await;
         let seg_ch = snap.segments.iter().find(|s| s.id == id).map(|s| s.channel);
         let tts = &snap.tts_settings;
@@ -788,12 +797,15 @@ async fn play_cloned_segment_to_device(
                 }
             }
         };
-        // 会议模式发到独立虚拟麦时不静音采集；面对面外放（或发往物理扬声器）时静音全部采集通道防回声与内录回传
+        // 会议模式发到独立虚拟麦时不静音采集也不走扬声器 AEC；
+        // 发往本机扬声器/耳机时：默认仅静音 System 内录通道（防 WASAPI Loopback 自回环），麦克风保持开启并走 NLMS AEC 全双工消回声；
+        // 仅当用户手动勾选「播报时完全静音麦克风」时才启用硬静音全路。
         let routed_to_virtual_mic =
             is_meeting && target == "meeting_mic" && !tts.meeting_mic_output_device_id.trim().is_empty()
             || (is_meeting && target == "auto" && seg_ch == Some(AudioChannel::Mic) && !tts.meeting_mic_output_device_id.trim().is_empty());
-        let mute_capture = !routed_to_virtual_mic && tts.mute_mic_while_speaking;
-        (dev, mute_capture)
+        let mute_sys = !routed_to_virtual_mic;
+        let hard_mute = !routed_to_virtual_mic && tts.mute_mic_while_speaking;
+        (dev, mute_sys, hard_mute)
     };
 
     // 串行排队播报：避免连续多句自动播报互相掐断或提前解除静音
@@ -807,18 +819,26 @@ async fn play_cloned_segment_to_device(
         }
     }
 
-    if should_mute_mic {
+    if hard_mute_all {
         rt.mic_muted.store(true, Ordering::Relaxed);
-        // 提前 40ms 让采集线程排空缓冲并丢弃未成形片段
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    } else if mute_system_loopback {
+        rt.system_tts_muted.store(true, Ordering::Relaxed);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     }
+    let far_end_opt = if mute_system_loopback && !hard_mute_all {
+        Some(rt.aec_far_end.clone())
+    } else {
+        None
+    };
+
     let _ = app.emit(
         "tts:state",
         serde_json::json!({ "id": id, "state": "playing" }),
     );
     let cancel_for_play = cancel.clone();
     let res = tokio::task::spawn_blocking(move || {
-        audio::output::play_wav_to_device(&wav_bytes, &device_name, cancel_for_play)
+        audio::output::play_wav_to_device(&wav_bytes, &device_name, cancel_for_play, far_end_opt)
     })
     .await
     .map_err(|e| format!("播放线程异常：{}", e));
@@ -828,10 +848,13 @@ async fn play_cloned_segment_to_device(
         serde_json::json!({ "id": id, "state": "ready" }),
     );
 
-    if should_mute_mic {
-        // 留 450ms 声卡回环缓冲与房间残响消散窗口再恢复收音，彻底杜绝回声回传
+    if hard_mute_all {
         tokio::time::sleep(std::time::Duration::from_millis(450)).await;
         rt.mic_muted.store(false, Ordering::Relaxed);
+    } else if mute_system_loopback {
+        // 留 350ms 声卡回环缓冲消散窗口再恢复 System 内录；麦克风全程开启（AEC 自身带 400ms 尾音窗口）
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        rt.system_tts_muted.store(false, Ordering::Relaxed);
     }
     res?
 }
