@@ -356,14 +356,13 @@ private struct ConversationAudioBar: View {
                         .frame(minWidth: 42, alignment: .trailing)
                 }
 
-                HStack(spacing: 16) {
+                HStack(spacing: 20) {
                     Button {
                         player.cycleRate()
                     } label: {
                         Text(rateLabel)
-                            .font(.caption.weight(.semibold).monospacedDigit())
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
+                            .font(.subheadline.weight(.semibold).monospacedDigit())
+                            .frame(minWidth: 48, minHeight: 36)
                             .background(Color(.secondarySystemBackground), in: Capsule())
                     }
                     .buttonStyle(.plain)
@@ -375,8 +374,8 @@ private struct ConversationAudioBar: View {
                         player.skip(by: -10)
                     } label: {
                         Image(systemName: "gobackward.10")
-                            .font(.title3)
-                            .frame(width: 40, height: 36)
+                            .font(.system(size: 24, weight: .medium))
+                            .frame(width: 48, height: 48)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("快退 10 秒")
@@ -385,12 +384,16 @@ private struct ConversationAudioBar: View {
                         if !player.isPlaying { onBeforePlay() }
                         player.togglePlayPause()
                     } label: {
-                        Label(playButtonTitle, systemImage: playButtonIcon)
-                            .font(.subheadline.weight(.semibold))
-                            .padding(.horizontal, 20)
-                            .padding(.vertical, 9)
-                            .background(Color.accentColor, in: Capsule())
-                            .foregroundStyle(.white)
+                        HStack(spacing: 8) {
+                            Image(systemName: playButtonIcon)
+                                .font(.system(size: 18, weight: .bold))
+                            Text(playButtonTitle)
+                                .font(.headline)
+                        }
+                        .frame(minWidth: 128, minHeight: 48)
+                        .padding(.horizontal, 12)
+                        .background(Color.accentColor, in: Capsule())
+                        .foregroundStyle(.white)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(playButtonTitle)
@@ -399,8 +402,8 @@ private struct ConversationAudioBar: View {
                         player.skip(by: 10)
                     } label: {
                         Image(systemName: "goforward.10")
-                            .font(.title3)
-                            .frame(width: 40, height: 36)
+                            .font(.system(size: 24, weight: .medium))
+                            .frame(width: 48, height: 48)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("快进 10 秒")
@@ -408,12 +411,13 @@ private struct ConversationAudioBar: View {
                     Spacer()
 
                     // 右侧占位，让中间播放按钮组保持视觉居中
-                    Color.clear.frame(width: 44, height: 1)
+                    Color.clear.frame(width: 48, height: 1)
                 }
+                .padding(.top, 2)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
         .background(.ultraThinMaterial)
     }
 }
