@@ -260,6 +260,8 @@ struct SettingsView: View {
                             Text(session.langB.name).tag("B")
                             Text("不播放").tag("off")
                         }
+                    } else if session.speakOutput {
+                        Toggle("外放聆听时自动播报", isOn: $session.speakerAutoSpeak)
                     }
                     Toggle("显示声音图标", isOn: $session.showReadingIcon)
                     Toggle("声音克隆", isOn: $session.voiceClone)
