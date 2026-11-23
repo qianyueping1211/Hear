@@ -62,10 +62,16 @@ enum AudioRoute {
         defer { sessionLock.unlock() }
         let s = AVAudioSession.sharedInstance()
         if capturing {
-            // .defaultToSpeaker：没有耳机时走扬声器（不是听筒）。
-            // 插着耳机时系统还是走耳机（除非用 overrideOutputAudioPort(.speaker) 强制）。
-            var opts: AVAudioSession.CategoryOptions = [.defaultToSpeaker, .allowBluetoothA2DP]
-            if useHeadsetMic { opts.insert(.allowBluetooth) }
+            // 关键修复：耳机模式下绝不传 .defaultToSpeaker，且始终开启 .allowBluetooth + .allowBluetoothA2DP。
+            // 原因：开启「语音增强（VoiceProcessingIO）」时 iOS 不允许走 A2DP；
+            // 若未包含 .allowBluetooth 且带了 .defaultToSpeaker，iOS 会把蓝牙耳机输出强制踢回手机扬声器！
+            var opts: AVAudioSession.CategoryOptions = [.allowBluetoothA2DP]
+            if _lastOutput == .headphones {
+                opts.insert(.allowBluetooth)
+            } else {
+                opts.insert(.defaultToSpeaker)
+                if useHeadsetMic { opts.insert(.allowBluetooth) }
+            }
             // setCategory 会把"输出到哪"重置掉，只有真的改了类别才需要重新应用
             var categoryChanged = (s.category != .playAndRecord || s.categoryOptions != opts)
             if categoryChanged {
@@ -75,7 +81,7 @@ enum AudioRoute {
             // 换麦克风也会重置路由
             if applyInput() { categoryChanged = true }
             if categoryChanged { appliedOutput = nil }
-            apply(lastOutput)
+            apply(_lastOutput)
             return
         }
         if speaking {
@@ -215,6 +221,7 @@ enum AudioRoute {
     static func apply(_ output: AudioOutput) {
         sessionLock.lock()
         defer { sessionLock.unlock() }
+        let changedTarget = (_lastOutput != output)
         _lastOutput = output
         let s = AVAudioSession.sharedInstance()
         // overrideOutputAudioPort(.speaker) 仅在 .playAndRecord 类别下合法
@@ -222,7 +229,24 @@ enum AudioRoute {
             appliedOutput = nil
             return
         }
-        guard appliedOutput != output else { return }
+        // 收音期间切换扬声器/耳机时，同步更新 categoryOptions（耳机模式移除 .defaultToSpeaker 并启用 .allowBluetooth）
+        if captureRequested && changedTarget {
+            var wantOpts: AVAudioSession.CategoryOptions = [.allowBluetoothA2DP]
+            if output == .headphones {
+                wantOpts.insert(.allowBluetooth)
+            } else {
+                wantOpts.insert(.defaultToSpeaker)
+                if _useHeadsetMic { wantOpts.insert(.allowBluetooth) }
+            }
+            if s.categoryOptions != wantOpts {
+                try? s.setCategory(.playAndRecord, mode: .default, options: wantOpts)
+                appliedOutput = nil
+            }
+        }
+        // 耳机模式下若当前实际路由仍停在手机扬声器，即使 appliedOutput 相同也要强制重新切回 .none
+        let stuckOnSpeaker = (output == .headphones)
+            && s.currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+        guard appliedOutput != output || stuckOnSpeaker else { return }
         do {
             switch output {
             case .speaker:
