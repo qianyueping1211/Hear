@@ -11,6 +11,7 @@ final class SessionClonePipeline {
     private var pending: [UUID: (token: UUID, task: Work)] = [:]
     private var timedOut: Set<UUID> = []
     var onWorkChanged: (([UUID: UUID]) -> Void)?
+    var fixedReferenceProvider: (() -> (reference: Reference, preferOverLive: Bool)?)?
 
     func remember(_ id: UUID, samples: [Float], text: String, enabled: Bool) {
         let seconds = Double(samples.count) / 16_000
@@ -36,9 +37,9 @@ final class SessionClonePipeline {
     func reference(for item: TranslationItem, in items: [TranslationItem],
                    hasText: (String) -> Bool) -> Reference? {
         // 0. 若用户录制了「我的固定声纹样本」且开启优先复用，本地 ZipVoice 与云端 Qwen3-TTS 均直接使用该高质样本
-        let fixedStore = FixedVoiceSampleStore.shared
-        if fixedStore.preferOverLive, let fixed = fixedStore.loadReference() {
-            return fixed
+        let fixedEntry = fixedReferenceProvider?()
+        if let fixedEntry, fixedEntry.preferOverLive {
+            return fixedEntry.reference
         }
         if let own = references[item.id] {
             return (own.samples, hasText(own.text) ? own.text : item.sourceText)
@@ -56,8 +57,8 @@ final class SessionClonePipeline {
             }
         }
         // 3. 最终兜底：若用户已录制固定声纹样本，则始终可用，避免退回系统朗读
-        if let fixed = fixedStore.loadReference() {
-            return fixed
+        if let fixedEntry {
+            return fixedEntry.reference
         }
         return nil
     }

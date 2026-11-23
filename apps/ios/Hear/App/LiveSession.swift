@@ -641,6 +641,11 @@ final class LiveSession: ObservableObject {
         AudioRoute.useHeadsetMic = inputSource == "headset"
 
         clonePipeline.onWorkChanged = { [weak self] work in self?.cloneWorking = work }
+        clonePipeline.fixedReferenceProvider = {
+            let store = FixedVoiceSampleStore.shared
+            guard let ref = store.loadReference() else { return nil }
+            return (ref, store.preferOverLive)
+        }
         capture.onHealthChanged = { [weak self] health in
             self?.captureHealth = health
         }
