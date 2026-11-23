@@ -112,6 +112,11 @@ struct HistoryRow: View {
                 Text(meta.preview).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
             }
             HStack(spacing: 6) {
+                if ConversationStore.shared.hasAudioFile(meta.id) {
+                    Image(systemName: "waveform")
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityLabel("含完整录音")
+                }
                 if let dur = durationLabel {
                     Label(dur, systemImage: "clock")
                 }

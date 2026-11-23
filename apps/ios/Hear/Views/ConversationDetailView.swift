@@ -5,6 +5,7 @@ struct ConversationDetailView: View {
     let id: UUID
     @EnvironmentObject var session: LiveSession
     @ObservedObject private var store = ConversationStore.shared
+    @StateObject private var player = ConversationAudioPlayer()
 
     @State private var conv: Conversation?
     @State private var tab = 0
@@ -14,24 +15,57 @@ struct ConversationDetailView: View {
     @State private var confirmRegenerate = false
     @State private var copied = false
     @State private var editingSpeaker: TranslationItem?
+    @State private var editingSource: TranslationItem?
+    @State private var sourceDraft = ""
 
     private var template: SummaryTemplate { SummaryTemplate.find(conv?.activeTemplateID ?? SummaryTemplate.defaultID) }
     private var record: SummaryRecord? { conv?.summaries[template.id] }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            Picker("", selection: $tab) {
-                Text("对话").tag(0)
-                Text("总结").tag(1)
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal)
-            .padding(.vertical, 8)
+    /// 根据当前完整录音播放进度找到正在播放的那一条原文
+    private func activePlaybackID(in c: Conversation) -> UUID? {
+        guard player.hasAudio, player.isPlaying || player.currentTime > 0.05 else { return nil }
+        let t = player.currentTime
+        if let exact = c.items.first(where: { item in
+            guard let start = item.audioStartSec, let end = item.audioEndSec else { return false }
+            return t >= max(0, start - 0.1) && t <= end + 0.25
+        }) {
+            return exact.id
+        }
+        return nil
+    }
 
-            if let conv {
-                if tab == 0 { dialogTab(conv) } else { summaryTab(conv) }
-            } else {
-                ContentUnavailableView("对话不存在", systemImage: "questionmark.circle")
+    var body: some View {
+        ZStack {
+            VStack(spacing: 0) {
+                Picker("", selection: $tab) {
+                    Text("对话").tag(0)
+                    Text("总结").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 8)
+
+                if let conv {
+                    if tab == 0 { dialogTab(conv) } else { summaryTab(conv) }
+                } else {
+                    ContentUnavailableView("对话不存在", systemImage: "questionmark.circle")
+                }
+            }
+
+            if let item = editingSource {
+                SourceEditor(
+                    text: $sourceDraft,
+                    flag: item.source.flag,
+                    translation: item.displayedTranslation(using: session.chineseDisplayLanguage),
+                    targetFlag: item.displayedTranslationTarget.flag,
+                    onCancel: { editingSource = nil },
+                    onDone: {
+                        let targetID = item.id
+                        let text = sourceDraft
+                        editingSource = nil
+                        session.editSource(in: id, itemID: targetID, to: text)
+                    }
+                )
             }
         }
         .navigationTitle(conv?.title ?? "")
@@ -71,7 +105,13 @@ struct ConversationDetailView: View {
             }
             Button("取消", role: .cancel) {}
         }
-        .onAppear(perform: reload)
+        .onAppear {
+            reload()
+            player.load(conversationID: id)
+        }
+        .onDisappear {
+            player.stop()
+        }
         .onChange(of: store.revision) { _, _ in reload() }
     }
 
@@ -80,24 +120,62 @@ struct ConversationDetailView: View {
     // MARK: 对话
 
     private func dialogTab(_ c: Conversation) -> some View {
-        ScrollView {
-            LazyVStack(spacing: 12) {
-                if c.items.isEmpty {
-                    Text("这段对话没有内容").foregroundStyle(.secondary).padding(.top, 40)
+        let activeID = activePlaybackID(in: c)
+        return VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        if c.items.isEmpty {
+                            Text("这段对话没有内容").foregroundStyle(.secondary).padding(.top, 40)
+                        }
+                        ForEach(c.items) { item in
+                            BubbleView(
+                                item: item,
+                                leading: item.isLeading(left: c.langA, right: c.langB),
+                                displayLanguage: session.chineseDisplayLanguage,
+                                reading: session.readingID == item.id,
+                                audioHighlighted: activeID == item.id,
+                                playing: session.speakingID == item.id,
+                                preparing: session.cloneWorking[item.id] != nil,
+                                showIdleReadingIcon: session.showReadingIcon,
+                                useContextMenu: true,
+                                onEdit: {
+                                    editingSource = item
+                                    sourceDraft = item.sourceText
+                                },
+                                onSpeaker: item.speakerLabel == nil ? nil : { editingSpeaker = item },
+                                onTap: {
+                                    // 历史页点击框图：不自动播译文，有完整录音时直接定位并播放原文
+                                    if player.hasAudio, let start = item.audioStartSec {
+                                        session.stopReading()
+                                        player.seek(to: start, autoPlay: true)
+                                    }
+                                },
+                                onSpeak: {
+                                    // 长按菜单里的「播放译文」：暂停原文回放，改播译文
+                                    if player.isPlaying { player.pause() }
+                                    session.replay(item)
+                                }
+                            )
+                            .id(item.id)
+                        }
+                    }
+                    .padding()
                 }
-                ForEach(c.items) { item in
-                    BubbleView(item: item, leading: item.isLeading(left: c.langA, right: c.langB),
-                               displayLanguage: session.chineseDisplayLanguage,
-                               reading: session.readingID == item.id,
-                               playing: session.speakingID == item.id,
-                               preparing: session.cloneWorking[item.id] != nil,
-                               showIdleReadingIcon: session.showReadingIcon,
-                               onSpeaker: item.speakerLabel == nil ? nil : { editingSpeaker = item }) {
-                        session.replay(item)
+                .onChange(of: activeID) { _, newID in
+                    guard player.isPlaying, let newID else { return }
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        proxy.scrollTo(newID, anchor: .center)
                     }
                 }
             }
-            .padding()
+
+            if player.hasAudio {
+                Divider()
+                ConversationAudioBar(player: player) {
+                    session.stopReading()
+                }
+            }
         }
     }
 
@@ -208,5 +286,123 @@ struct ConversationDetailView: View {
         if let m = r.model { parts.append("模型 \(m)") }
         if r.edited { parts.append("已手动修改") }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// 历史对话底部的完整录音播放条：播放 / 暂停 / 继续 / 快退 / 快进 / 进度条 / 倍速
+private struct ConversationAudioBar: View {
+    @ObservedObject var player: ConversationAudioPlayer
+    var onBeforePlay: () -> Void
+
+    @State private var isDragging = false
+    @State private var dragTime: Double = 0
+
+    private var displayedTime: Double { isDragging ? dragTime : player.currentTime }
+
+    private var playButtonTitle: String {
+        if player.isPlaying { return "暂停" }
+        if player.isPausedMidway { return "继续" }
+        return "播放"
+    }
+
+    private var playButtonIcon: String {
+        player.isPlaying ? "pause.fill" : "play.fill"
+    }
+
+    private var rateLabel: String {
+        player.playbackRate == floor(player.playbackRate)
+            ? "\(Int(player.playbackRate))x"
+            : String(format: "%.2gx", player.playbackRate)
+    }
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Text(ConversationAudioPlayer.formatTime(displayedTime))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 42, alignment: .leading)
+
+                Slider(
+                    value: Binding(
+                        get: { displayedTime },
+                        set: { newVal in dragTime = newVal }
+                    ),
+                    in: 0...max(player.duration, 0.01),
+                    onEditingChanged: { editing in
+                        isDragging = editing
+                        if !editing {
+                            player.seek(to: dragTime)
+                        } else {
+                            dragTime = player.currentTime
+                        }
+                    }
+                )
+                .tint(Color.accentColor)
+
+                Text(ConversationAudioPlayer.formatTime(player.duration))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 42, alignment: .trailing)
+            }
+
+            HStack(spacing: 16) {
+                Button {
+                    player.cycleRate()
+                } label: {
+                    Text(rateLabel)
+                        .font(.caption.weight(.semibold).monospacedDigit())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color(.secondarySystemBackground), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("播放倍速 \(rateLabel)")
+
+                Spacer()
+
+                Button {
+                    player.skip(by: -10)
+                } label: {
+                    Image(systemName: "gobackward.10")
+                        .font(.title3)
+                        .frame(width: 40, height: 36)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("快退 10 秒")
+
+                Button {
+                    if !player.isPlaying { onBeforePlay() }
+                    player.togglePlayPause()
+                } label: {
+                    Label(playButtonTitle, systemImage: playButtonIcon)
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 9)
+                        .background(Color.accentColor, in: Capsule())
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(playButtonTitle)
+
+                Button {
+                    player.skip(by: 10)
+                } label: {
+                    Image(systemName: "goforward.10")
+                        .font(.title3)
+                        .frame(width: 40, height: 36)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("快进 10 秒")
+
+                Spacer()
+
+                // 右侧占位，让中间播放按钮组保持视觉居中
+                Color.clear.frame(width: 44, height: 1)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial)
     }
 }

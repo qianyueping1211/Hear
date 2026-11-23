@@ -390,6 +390,17 @@ final class LiveSession: ObservableObject {
             if isRunning, !applyingSyncedSettings { restartCapture() }
         }
     }
+    /// 是否保存完整录音：开启后将同一对话的声音录制到本地 WAV，供历史对话回放
+    @Published var saveFullRecording: Bool {
+        didSet {
+            guard saveFullRecording != oldValue else { return }
+            save("saveFullRecording", saveFullRecording)
+            fullRecorder.configure(enabled: saveFullRecording, conversationID: conversationID)
+            hearLog("保存完整录音：\(saveFullRecording ? "开" : "关")")
+        }
+    }
+    private let fullRecorder = ConversationAudioRecorder()
+    private var segStartFrames: [Int: Int64] = [:]
 
     /// 重开麦克风（改了输入相关的设置时用）
     private func restartCapture() {
@@ -597,6 +608,7 @@ final class LiveSession: ObservableObject {
         }
         LocalServerTrust.setStrictMode(strictOn)
         voiceProcessing = d.object(forKey: "voiceProcessing") as? Bool ?? true
+        saveFullRecording = d.object(forKey: "saveFullRecording") as? Bool ?? false
         inputSource = d.string(forKey: "inputSource") ?? "phone"
         // 上次用的模式一定要记住：不管存的是 Bool 还是 NSNumber 都能读回来
         if let v = d.object(forKey: "talkMode") as? Bool {
@@ -631,6 +643,9 @@ final class LiveSession: ObservableObject {
         clonePipeline.onWorkChanged = { [weak self] work in self?.cloneWorking = work }
         capture.onHealthChanged = { [weak self] health in
             self?.captureHealth = health
+        }
+        capture.onRecordingBlock = { [fullRecorder] block, muted in
+            fullRecorder.append(samples: block.samples, captureStartFrame: block.startFrame, muted: muted)
         }
         capture.segmenter.onEvent = { [weak self] e in
             DispatchQueue.main.async { self?.handle(e) }
@@ -1740,6 +1755,7 @@ final class LiveSession: ObservableObject {
         if outputMode == .speaker { stopReading() }
         if feedback { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
         activity = "正在打开麦克风…"
+        fullRecorder.configure(enabled: saveFullRecording, conversationID: conversationID)
         do {
             try await capture.start()
         } catch is CancellationError {
@@ -1939,6 +1955,7 @@ final class LiveSession: ObservableObject {
         talkLang = nil
         startToken = UUID()          // 正在等待的"开始收音"全部作废
         capture.stop()
+        fullRecorder.flush()
         capture.muted = false
         isRunning = false
         endLiveActivity()
@@ -1992,6 +2009,10 @@ final class LiveSession: ObservableObject {
         let tgt = src == langA ? langB : langA
         var item = TranslationItem(source: src, target: tgt, sourceText: text,
                                    sourceSide: src == langA ? .left : .right)
+        if let range = fullRecorder.timeRangeToCurrent(startFrame: currentSegStartFrame) {
+            item.audioStartSec = range.start
+            item.audioEndSec = range.end
+        }
         carryPreview(into: &item)
         items.append(item)
         stopFlushItemID = item.id      // 断句器最后一段声音会挂到这条上
@@ -2136,6 +2157,8 @@ final class LiveSession: ObservableObject {
 
     private func archiveConversation(summarize: Bool) {
         persist()
+        fullRecorder.close()
+        segStartFrames.removeAll()
         let oldID = conversationID
         // 有内容就算：原文已经认出来了、译文还在补，也值得总结
         let hadContent = items.contains { $0.done || Self.hasRealText($0.sourceText) }
@@ -2284,6 +2307,7 @@ final class LiveSession: ObservableObject {
             cancelMTPreview()
             currentSeg = id
             currentSegStartFrame = startFrame
+            segStartFrames[id] = startFrame
             previewTiming = PerformanceLog.isEnabled ? PreviewTiming(segment: id, start: .now) : nil
             partialSeg = id
             partial = "…"; partialTranslation = ""; partialTranslationTarget = nil; partialSource = forcedLang
@@ -2297,6 +2321,8 @@ final class LiveSession: ObservableObject {
                 await self?.previewLoop(generation)
             }
         case .ended(let id, let samples, let endFrame, let confirmedSpeech):
+            let segStart = segStartFrames.removeValue(forKey: id) ?? currentSegStartFrame
+            let audioRange = fullRecorder.timeRange(startFrame: segStart, endFrame: endFrame)
             let alreadyDone = id <= finishedSeg
             finishedSeg = max(finishedSeg, id)
             live?.markSegmentEnd(id, frame: endFrame)
@@ -2321,6 +2347,11 @@ final class LiveSession: ObservableObject {
                 if id == stopFlushSegID, let fid = stopFlushItemID {
                     stopFlushItemID = nil
                     if let idx = items.firstIndex(where: { $0.id == fid }) {
+                        if let audioRange, items[idx].audioStartSec == nil {
+                            items[idx].audioStartSec = audioRange.start
+                            items[idx].audioEndSec = audioRange.end
+                            persist()
+                        }
                         rememberReference(fid, samples: samples, text: items[idx].sourceText)
                         hearLog("暂停：这一段声音留给声音克隆用")
                         // 样本到手了就赶紧去生成（等到朗读时现做，要多等好几秒）
@@ -2340,6 +2371,10 @@ final class LiveSession: ObservableObject {
             var item = TranslationItem(source: src, target: tgt,
                                        sourceText: mine && !partial.isEmpty ? partial : "…",
                                        sourceSide: src == langA ? .left : .right)
+            if let audioRange {
+                item.audioStartSec = audioRange.start
+                item.audioEndSec = audioRange.end
+            }
             if mine { carryPreview(into: &item) }
             items.append(item)
             if mine { partial = ""; partialTranslation = ""; partialTranslationTarget = nil; partialSource = nil }
@@ -2373,6 +2408,7 @@ final class LiveSession: ObservableObject {
             }
             recognition.keepRecoveryBuffer()
         case .discarded(let id):
+            segStartFrames.removeValue(forKey: id)
             finishedSeg = max(finishedSeg, id)
             if partialSeg == id {
                 cancelMTPreview()
@@ -3439,6 +3475,46 @@ final class LiveSession: ObservableObject {
     func retryTranslation(_ id: UUID) {
         guard let item = items.first(where: { $0.id == id }), item.canRetryTranslation else { return }
         editSource(id, to: item.sourceText)
+    }
+
+    /// 修改任意历史对话里某条记录的原文，保存并重新翻译
+    func editSource(in targetConversationID: UUID, itemID: UUID, to newText: String) {
+        if targetConversationID == conversationID {
+            editSource(itemID, to: newText)
+            return
+        }
+        let text = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        if readingID == itemID { stopReading() }
+        guard let info = ConversationStore.shared.updateSourceText(
+            conversationID: targetConversationID, itemID: itemID, to: text
+        ) else { return }
+        itemVersions[itemID] = (itemVersions[itemID] ?? 0) + 1
+        let version = itemVersions[itemID] ?? 0
+        hearLogText("历史对话重新翻译原文：", String(text.prefix(40)))
+        Task {
+            do {
+                if translationEngine == "local" {
+                    while isLoadingPhase { try? await Task.sleep(nanoseconds: 200_000_000) }
+                    guard phase == .ready else { throw TranslatorError.notLoaded }
+                }
+                let result = try await translateFinal(text, from: info.source, to: info.target,
+                                                      previous: info.previous) { _ in }
+                guard itemVersions[itemID] == version else { return }
+                ConversationStore.shared.commitTranslation(
+                    conversationID: targetConversationID, itemID: itemID,
+                    expectedSource: text, translation: result, done: true
+                )
+            } catch {
+                guard itemVersions[itemID] == version else { return }
+                hearLog("历史对话重新翻译失败：\(error)", .error)
+                ConversationStore.shared.commitTranslation(
+                    conversationID: targetConversationID, itemID: itemID,
+                    expectedSource: text,
+                    translation: "（翻译失败：\(error.localizedDescription)）", done: true
+                )
+            }
+        }
     }
 
     func editSource(_ id: UUID, to newText: String) {

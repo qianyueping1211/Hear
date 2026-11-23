@@ -100,6 +100,9 @@ struct TranslationItem: Identifiable, Equatable, Codable {
     var speakerManuallySet: Bool? = nil
     var sourceSide: SourceSide? = nil
     var recognizedLanguage: String? = nil
+    /// 在该对话完整录音中的起止时间（秒），用于历史回放高亮与点击跳转
+    var audioStartSec: Double? = nil
+    var audioEndSec: Double? = nil
 
     var defaultSpeakerLanguage: String { recognizedLanguage ?? source.id }
 

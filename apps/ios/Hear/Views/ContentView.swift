@@ -454,14 +454,19 @@ struct BubbleView: View {
     let leading: Bool
     let displayLanguage: ChineseDisplayLanguage
     var reading: Bool = false
+    /// 历史完整录音回放时，当前正在播到这一句（高亮框图）
+    var audioHighlighted: Bool = false
     /// 真的在出声：喇叭显示成绿色的（只有正在播的时候才是绿的）
     var playing: Bool = false
     /// 声音（克隆原声）还在生成：喇叭显示成灰色，表示"马上就好"
     var preparing: Bool = false
     var showIdleReadingIcon: Bool = true
-    var onEdit: (() -> Void)? = nil      // 有值时：长按修改原文（对话页）；没有时：长按弹出复制菜单（历史页）
+    var useContextMenu: Bool = false
+    var onEdit: (() -> Void)? = nil      // 对话页直接长按修改原文；历史页配合 useContextMenu 放进弹出菜单
     var onRetry: (() -> Void)? = nil
     var onSpeaker: (() -> Void)? = nil
+    /// 自定义点击行为（历史页用于点气泡播放原文录音）；为 nil 时沿用点击朗读译文
+    var onTap: (() -> Void)? = nil
     var onSpeak: () -> Void
 
     private var speakerAvatarColor: Color {
@@ -565,44 +570,64 @@ struct BubbleView: View {
             }
             .multilineTextAlignment(leading ? .leading : .trailing)
             .padding(12)
-            .background(leading ? Color(.secondarySystemBackground) : Color.accentColor.opacity(0.15),
-                        in: RoundedRectangle(cornerRadius: 16))
+            .background(
+                audioHighlighted
+                    ? Color.accentColor.opacity(0.22)
+                    : (leading ? Color(.secondarySystemBackground) : Color.accentColor.opacity(0.15)),
+                in: RoundedRectangle(cornerRadius: 16)
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: 16)
-                    .stroke(reading ? Color.accentColor : Color.clear, lineWidth: 1.5)
+                    .stroke(
+                        audioHighlighted ? Color.accentColor : (reading ? Color.accentColor : Color.clear),
+                        lineWidth: audioHighlighted ? 2.2 : 1.5
+                    )
             )
             .contentShape(RoundedRectangle(cornerRadius: 16))
-            .onTapGesture { if item.canReadAloud { onSpeak() } }
-            .modifier(BubbleLongPress(item: item, displayLanguage: displayLanguage, onEdit: onEdit, onSpeak: onSpeak))
+            .onTapGesture {
+                if let onTap {
+                    onTap()
+                } else if item.canReadAloud {
+                    onSpeak()
+                }
+            }
+            .modifier(BubbleLongPress(item: item, displayLanguage: displayLanguage,
+                                      useContextMenu: useContextMenu, onEdit: onEdit, onSpeak: onSpeak))
             if leading { Spacer(minLength: 40) }
         }
     }
 }
 
-/// 气泡的长按：对话页是修改原文，历史页是复制菜单
+/// 气泡的长按：对话页是修改原文，历史页是四按钮弹出菜单（修改原文 / 复制原文 / 播放译文 / 复制译文）
 private struct BubbleLongPress: ViewModifier {
     let item: TranslationItem
     let displayLanguage: ChineseDisplayLanguage
+    let useContextMenu: Bool
     let onEdit: (() -> Void)?
     let onSpeak: () -> Void
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if let onEdit {
+        if !useContextMenu, let onEdit {
             content.onLongPressGesture(minimumDuration: 0.4) {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 onEdit()
             }
         } else {
             content.contextMenu {
-                Button { UIPasteboard.general.string = item.displayedTranslation(using: displayLanguage) } label: {
-                    Label("复制译文", systemImage: "doc.on.doc")
+                if let onEdit {
+                    Button(action: onEdit) {
+                        Label("修改原文", systemImage: "pencil")
+                    }
                 }
                 Button { UIPasteboard.general.string = item.displayedSource(using: displayLanguage) } label: {
                     Label("复制原文", systemImage: "doc.on.doc")
                 }
                 if item.canReadAloud {
-                    Button(action: onSpeak) { Label("朗读译文", systemImage: "speaker.wave.2") }
+                    Button(action: onSpeak) { Label("播放译文", systemImage: "speaker.wave.2") }
+                }
+                Button { UIPasteboard.general.string = item.displayedTranslation(using: displayLanguage) } label: {
+                    Label("复制译文", systemImage: "doc.on.doc")
                 }
             }
         }

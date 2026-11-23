@@ -28,6 +28,13 @@ final class AudioCapture {
         set { lock.lock(); _onSamples = newValue; lock.unlock() }
     }
 
+    /// 完整录音回调：收到每块 16kHz 采样时异步写入对话录音文件
+    private var _onRecordingBlock: ((AudioInputBlock, Bool) -> Void)?
+    var onRecordingBlock: ((AudioInputBlock, Bool) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onRecordingBlock }
+        set { lock.lock(); _onRecordingBlock = newValue; lock.unlock() }
+    }
+
     private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?          // 只在音频线程里读写
     private let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
@@ -148,6 +155,7 @@ final class AudioCapture {
         let audio = AudioInputBlock(samples: samples, startFrame: inputPosition)
         inputPosition = audio.endFrame
         let block = CaptureBlock(audio: audio, muted: _muted)
+        let recordingCallback = _onRecordingBlock
         var dropped = false
         if let feed = _onSamples {
             let result = speechFeed.append((block, feed), frames: samples.count)
@@ -157,6 +165,7 @@ final class AudioCapture {
         let result = segmentFeed.append(block, frames: samples.count)
         if result.dropped || dropped { lastOverflowAt = Date() }
         if result.schedule { queue.async { [weak self] in self?.drainSegmentFeed() } }
+        recordingCallback?(audio, block.muted)
     }
 
     private func drainSpeechFeed() {

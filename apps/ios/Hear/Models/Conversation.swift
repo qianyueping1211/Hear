@@ -40,8 +40,7 @@ final class ConversationStore: ObservableObject {
     }()
 
     private init() {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        dir = base.appendingPathComponent("Conversations", isDirectory: true)
+        dir = Self.conversationsDirectory
         indexURL = dir.appendingPathComponent("index.json")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -52,6 +51,24 @@ final class ConversationStore: ObservableObject {
             rebuildIndex()
         }
         recoverInterrupted()
+    }
+
+    nonisolated static var conversationsDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("Conversations", isDirectory: true)
+    }
+
+    nonisolated static func audioFileURL(for id: UUID) -> URL {
+        conversationsDirectory.appendingPathComponent("\(id.uuidString).wav")
+    }
+
+    func audioFileURL(_ id: UUID) -> URL { Self.audioFileURL(for: id) }
+
+    func hasAudioFile(_ id: UUID) -> Bool {
+        let url = audioFileURL(id)
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? NSNumber else { return false }
+        return size.intValue > 44
     }
 
     private func fileURL(_ id: UUID) -> URL { dir.appendingPathComponent("\(id.uuidString).json") }
@@ -89,6 +106,7 @@ final class ConversationStore: ObservableObject {
         UserDefaults.standard.set(gone, forKey: "deletedConversations")
         try? FileManager.default.removeItem(at: fileURL(id))
         try? FileManager.default.removeItem(at: syncBaseURL(id))
+        try? FileManager.default.removeItem(at: audioFileURL(id))
         metas.removeAll { $0.id == id }
         writeIndex()
         revision += 1
@@ -188,6 +206,7 @@ final class ConversationStore: ObservableObject {
         guard metas.contains(where: { $0.id == id }) else { return }
         try? FileManager.default.removeItem(at: fileURL(id))
         try? FileManager.default.removeItem(at: syncBaseURL(id))
+        try? FileManager.default.removeItem(at: audioFileURL(id))
         metas.removeAll { $0.id == id }
         writeIndex()
         revision += 1
