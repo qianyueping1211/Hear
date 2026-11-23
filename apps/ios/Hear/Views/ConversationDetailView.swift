@@ -356,68 +356,71 @@ private struct ConversationAudioBar: View {
                         .frame(minWidth: 42, alignment: .trailing)
                 }
 
-                HStack(spacing: 20) {
+                HStack(spacing: 0) {
                     Button {
                         player.cycleRate()
                     } label: {
                         Text(rateLabel)
                             .font(.subheadline.weight(.semibold).monospacedDigit())
-                            .frame(minWidth: 48, minHeight: 36)
+                            .frame(width: 42, height: 34)
                             .background(Color(.secondarySystemBackground), in: Capsule())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("播放倍速 \(rateLabel)")
 
-                    Spacer()
+                    Spacer(minLength: 6)
 
-                    Button {
-                        player.skip(by: -10)
-                    } label: {
-                        Image(systemName: "gobackward.10")
-                            .font(.system(size: 24, weight: .medium))
-                            .frame(width: 48, height: 48)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("快退 10 秒")
-
-                    Button {
-                        if !player.isPlaying { onBeforePlay() }
-                        player.togglePlayPause()
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: playButtonIcon)
-                                .font(.system(size: 18, weight: .bold))
-                            Text(playButtonTitle)
-                                .font(.headline)
+                    HStack(spacing: 10) {
+                        Button {
+                            player.skip(by: -10)
+                        } label: {
+                            Image(systemName: "gobackward.10")
+                                .font(.system(size: 22, weight: .medium))
+                                .frame(width: 42, height: 44)
                         }
-                        .frame(minWidth: 128, minHeight: 48)
-                        .padding(.horizontal, 12)
-                        .background(Color.accentColor, in: Capsule())
-                        .foregroundStyle(.white)
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("快退 10 秒")
+
+                        Button {
+                            if !player.isPlaying { onBeforePlay() }
+                            player.togglePlayPause()
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: playButtonIcon)
+                                    .font(.system(size: 17, weight: .bold))
+                                Text(playButtonTitle)
+                                    .font(.headline)
+                            }
+                            .frame(minWidth: 112, minHeight: 46)
+                            .padding(.horizontal, 8)
+                            .background(Color.accentColor, in: Capsule())
+                            .foregroundStyle(.white)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(playButtonTitle)
+
+                        Button {
+                            player.skip(by: 10)
+                        } label: {
+                            Image(systemName: "goforward.10")
+                                .font(.system(size: 22, weight: .medium))
+                                .frame(width: 42, height: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("快进 10 秒")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(playButtonTitle)
 
-                    Button {
-                        player.skip(by: 10)
-                    } label: {
-                        Image(systemName: "goforward.10")
-                            .font(.system(size: 24, weight: .medium))
-                            .frame(width: 48, height: 48)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("快进 10 秒")
+                    Spacer(minLength: 6)
 
-                    Spacer()
-
-                    // 右侧占位，让中间播放按钮组保持视觉居中
-                    Color.clear.frame(width: 48, height: 1)
+                    // 右侧占位与左侧倍速等宽，保证播放按钮组严格居中且绝不撑宽整页
+                    Color.clear.frame(width: 42, height: 1)
                 }
                 .padding(.top, 2)
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity)
         .background(.ultraThinMaterial)
     }
 }
