@@ -60,6 +60,7 @@ final class CloudSync: ObservableObject {
         // 在线模型的访问口令：重装 App 或换手机后不用再手动填。
         // 它会和其他设置一起写进 iCloud 云盘「听见」文件夹；口令泄露时到 Token 管理后台撤销即可。
         "cloudAccessToken",
+        "saveFullRecording",
     ]
     private static let settingKeys = legacySettingKeys + addedSettingKeys
 

@@ -3700,6 +3700,8 @@ final class LiveSession: ObservableObject {
         if eng != asrEngine { asrEngine = eng }
         let vp = d.object(forKey: "voiceProcessing") as? Bool ?? true
         if vp != voiceProcessing { voiceProcessing = vp }
+        let sfr = d.object(forKey: "saveFullRecording") as? Bool ?? false
+        if sfr != saveFullRecording { saveFullRecording = sfr }
         let isrc = d.string(forKey: "inputSource") ?? "phone"
         if isrc != inputSource { inputSource = isrc }
         let script = ChineseDisplayLanguage(rawValue: d.string(forKey: ChineseDisplayLanguage.preferenceKey) ?? "")
