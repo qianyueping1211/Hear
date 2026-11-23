@@ -1,4 +1,4 @@
-export type SessionMode = "idle" | "recording" | "playing" | "batch_processing";
+export type SessionMode = "idle" | "recording" | "paused" | "playing" | "batch_processing";
 
 export type AudioChannel = "system" | "mic" | "file";
 

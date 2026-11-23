@@ -271,10 +271,10 @@ mod win_wasapi {
         channels: usize,
         sample_rate: u32,
         processor: LaneProcessor,
+        rec_queue: std::collections::VecDeque<f32>,
         stat_frames: u64,
         stat_speech_frames: u64,
         stat_peak: f32,
-        record_to_wav: bool,
     }
 
     impl WasapiLane {
@@ -282,7 +282,6 @@ mod win_wasapi {
             enumerator: &IMMDeviceEnumerator,
             channel: AudioChannel,
             is_loopback: bool,
-            record_to_wav: bool,
         ) -> Result<Self, String> {
             let flow = if is_loopback { eRender } else { eCapture };
             let device = enumerator
@@ -385,16 +384,15 @@ mod win_wasapi {
                 channels: channels.max(1),
                 sample_rate: sample_rate.max(8_000),
                 processor: LaneProcessor::new(sample_rate, channels),
+                rec_queue: std::collections::VecDeque::with_capacity(VAD_SAMPLE_RATE as usize),
                 stat_frames: 0,
                 stat_speech_frames: 0,
                 stat_peak: 0.0,
-                record_to_wav,
             })
         }
 
         unsafe fn drain_packets(
             &mut self,
-            recorder: &mut Option<StreamingWavRecorder>,
             seg_tx: &tokio_mpsc::UnboundedSender<CapturedSegment>,
         ) -> f32 {
             let mut max_level = 0.0f32;
@@ -473,8 +471,8 @@ mod win_wasapi {
                 self.stat_frames += nf as u64;
 
                 let ch = self.channel;
-                let record_this = self.record_to_wav;
                 let mut speech_hits = 0u64;
+                let rec_q = &mut self.rec_queue;
                 self.processor.push_interleaved(&scratch, |frame, has_speech, level, ev| {
                     if has_speech {
                         speech_hits += 1;
@@ -482,11 +480,7 @@ mod win_wasapi {
                     if level > max_level {
                         max_level = level;
                     }
-                    if record_this {
-                        if let Some(ref mut rec) = recorder {
-                            let _ = rec.write_f32(frame);
-                        }
-                    }
+                    rec_q.extend(frame.iter().copied());
                     if let Some(event) = ev {
                         let _ = seg_tx.send(CapturedSegment { channel: ch, event });
                     }
@@ -494,6 +488,27 @@ mod win_wasapi {
                 self.stat_speech_frames += speech_hits;
             }
             max_level
+        }
+
+        unsafe fn discard_packets(&mut self) {
+            loop {
+                let pkt = match self.capture_client.GetNextPacketSize() {
+                    Ok(n) if n > 0 => n,
+                    _ => break,
+                };
+                let _ = pkt;
+                let mut data_ptr: *mut u8 = std::ptr::null_mut();
+                let mut num_frames: u32 = 0;
+                let mut buf_flags: u32 = 0;
+                if self
+                    .capture_client
+                    .GetBuffer(&mut data_ptr, &mut num_frames, &mut buf_flags, None, None)
+                    .is_err()
+                {
+                    break;
+                }
+                let _ = self.capture_client.ReleaseBuffer(num_frames);
+            }
         }
 
         unsafe fn stop_and_flush(
@@ -514,9 +529,31 @@ mod win_wasapi {
         }
     }
 
+    fn flush_lanes_into_recorder(lanes: &mut [WasapiLane], rec: &mut StreamingWavRecorder) {
+        if lanes.len() == 1 && !lanes[0].rec_queue.is_empty() {
+            let buf: Vec<f32> = lanes[0].rec_queue.drain(..).collect();
+            let _ = rec.write_f32(&buf);
+        } else if lanes.len() >= 2 {
+            let (first, rest) = lanes.split_at_mut(1);
+            let q0 = &mut first[0].rec_queue;
+            let q1 = &mut rest[0].rec_queue;
+            let rem = q0.len().max(q1.len());
+            if rem > 0 {
+                let mut mixed = Vec::with_capacity(rem);
+                for _ in 0..rem {
+                    let a = q0.pop_front().unwrap_or(0.0);
+                    let b = q1.pop_front().unwrap_or(0.0);
+                    mixed.push((a + b).clamp(-1.0, 1.0));
+                }
+                let _ = rec.write_f32(&mixed);
+            }
+        }
+    }
+
     pub fn run_capture_thread(
         capture_mode: AudioCaptureMode,
         stop_flag: Arc<AtomicBool>,
+        paused_flag: Arc<AtomicBool>,
         stop_rx: mpsc::Receiver<()>,
         ready_tx: mpsc::SyncSender<Result<(), String>>,
         seg_tx: tokio_mpsc::UnboundedSender<CapturedSegment>,
@@ -554,7 +591,7 @@ mod win_wasapi {
 
             let mut lanes: Vec<WasapiLane> = Vec::new();
             if want_system {
-                match WasapiLane::open(&enumerator, AudioChannel::System, true, true) {
+                match WasapiLane::open(&enumerator, AudioChannel::System, true) {
                     Ok(lane) => lanes.push(lane),
                     Err(e) => {
                         logger::error(&e);
@@ -567,7 +604,7 @@ mod win_wasapi {
                 }
             }
             if want_mic {
-                match WasapiLane::open(&enumerator, AudioChannel::Mic, false, !want_system) {
+                match WasapiLane::open(&enumerator, AudioChannel::Mic, false) {
                     Ok(lane) => lanes.push(lane),
                     Err(e) => {
                         for l in &mut lanes {
@@ -591,21 +628,126 @@ mod win_wasapi {
             let _ = ready_tx.send(Ok(()));
 
             let mut last_level_emit = Instant::now();
+            let mut last_live_tick = Instant::now();
             let mut last_stat_log = Instant::now();
             let started_at = Instant::now();
             let mut silence_warned = false;
+            let mut was_paused = false;
 
             while !stop_flag.load(Ordering::Relaxed) {
                 if stop_rx.try_recv().is_ok() {
                     break;
                 }
+
+                let is_paused = paused_flag.load(Ordering::Relaxed);
+                if is_paused {
+                    if !was_paused {
+                        was_paused = true;
+                        // 刚进入暂停：把当前未切完的句子和已录音频刷盘，允许暂停期间立即试听已录内容
+                        for lane in &mut lanes {
+                            if let Some(ev) = lane.processor.flush_final() {
+                                let _ = seg_tx.send(CapturedSegment {
+                                    channel: lane.channel,
+                                    event: ev,
+                                });
+                            }
+                        }
+                        if let Some(ref mut rec) = recorder {
+                            flush_lanes_into_recorder(&mut lanes, rec);
+                            let (path, duration_ms, peaks) = rec.snapshot();
+                            if duration_ms > 0 {
+                                let rt_pause = rt.clone();
+                                let app_pause = app.clone();
+                                let path_str = path.to_string_lossy().to_string();
+                                tauri::async_runtime::spawn(async move {
+                                    let pb = {
+                                        let mut snap = rt_pause.snapshot.lock().await;
+                                        snap.playback.has_audio = true;
+                                        snap.playback.audio_path = Some(path_str);
+                                        snap.playback.duration_ms = duration_ms;
+                                        snap.playback.peaks = peaks;
+                                        snap.playback.clone()
+                                    };
+                                    let _ = app_pause.emit("recording:ready", pb);
+                                });
+                            }
+                        }
+                        let _ = app.emit("audio:level", 0.0f32);
+                    }
+                    for lane in &mut lanes {
+                        lane.discard_packets();
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                } else if was_paused {
+                    was_paused = false;
+                }
+
                 let mut level = 0.0f32;
                 for lane in &mut lanes {
-                    let l = lane.drain_packets(&mut recorder, &seg_tx);
+                    let l = lane.drain_packets(&seg_tx);
                     if l > level {
                         level = l;
                     }
                 }
+
+                // 将单路或双路（系统声 + 麦克风）真实混合写入 WAV 录音文件，确保回放与波形永远有声
+                if let Some(ref mut rec) = recorder {
+                    if lanes.len() == 1 {
+                        if !lanes[0].rec_queue.is_empty() {
+                            let buf: Vec<f32> = lanes[0].rec_queue.drain(..).collect();
+                            let _ = rec.write_f32(&buf);
+                        }
+                    } else if lanes.len() >= 2 {
+                        let (first, rest) = lanes.split_at_mut(1);
+                        let q0 = &mut first[0].rec_queue;
+                        let q1 = &mut rest[0].rec_queue;
+                        let common = q0.len().min(q1.len());
+                        if common > 0 {
+                            let mut mixed = Vec::with_capacity(common);
+                            for _ in 0..common {
+                                let a = q0.pop_front().unwrap_or(0.0);
+                                let b = q1.pop_front().unwrap_or(0.0);
+                                mixed.push((a + b).clamp(-1.0, 1.0));
+                            }
+                            let _ = rec.write_f32(&mixed);
+                        }
+                        // 若其中一路暂停吐包（例如系统扬声器未播放任何声音），防止另一路积压超过 250ms
+                        let max_lead = (VAD_SAMPLE_RATE as usize) / 4;
+                        if q0.len() > max_lead {
+                            let extra = q0.len() - max_lead;
+                            let buf: Vec<f32> = q0.drain(..extra).collect();
+                            let _ = rec.write_f32(&buf);
+                        } else if q1.len() > max_lead {
+                            let extra = q1.len() - max_lead;
+                            let buf: Vec<f32> = q1.drain(..extra).collect();
+                            let _ = rec.write_f32(&buf);
+                        }
+                    }
+
+                    if last_live_tick.elapsed().as_millis() >= 300 {
+                        last_live_tick = Instant::now();
+                        let dur = rec.duration_ms();
+                        let tail_peaks: Vec<f32> = rec
+                            .peaks
+                            .iter()
+                            .rev()
+                            .take(180)
+                            .copied()
+                            .collect::<Vec<f32>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        let _ = app.emit(
+                            "recording:live_tick",
+                            serde_json::json!({
+                                "durationMs": dur,
+                                "peaks": tail_peaks
+                            }),
+                        );
+                    }
+                }
+
                 if last_level_emit.elapsed().as_millis() >= 66 {
                     last_level_emit = Instant::now();
                     let _ = app.emit("audio:level", level);
@@ -628,16 +770,21 @@ mod win_wasapi {
                         if !any_signal {
                             silence_warned = true;
                             let hint = if want_system && !want_mic {
-                                "已录音超过 7 秒但系统播放设备未检测到任何声音信号；若你在对着麦克风说话，请将左上角音频源切换为「默认麦克风」或「双路混合」"
+                                "当前电脑扬声器未检测到正在播放的声音（系统内录仅录电脑播放音视频）；如果你是在对着麦克风说话，请点击右侧切换到「默认麦克风」或「双路混合」"
                             } else {
-                                "已录音超过 7 秒但未检测到有效音频信号，请检查 Windows 默认音频设备是否静音或选错设备"
+                                "已录音超过 7 秒但未检测到有效声音信号，请检查 Windows 默认音频设备是否静音或选错设备"
                             };
                             logger::warn(hint);
-                            let _ = app.emit("session:error", hint);
+                            let _ = app.emit("session:notice", hint);
                         }
                     }
                 }
                 std::thread::sleep(Duration::from_millis(10));
+            }
+
+            // 停录前将残留的录音队列混合刷盘，避免丢掉最后 0.25s 录音
+            if let Some(ref mut rec) = recorder {
+                flush_lanes_into_recorder(&mut lanes, rec);
             }
 
             for lane in &mut lanes {
@@ -724,6 +871,7 @@ mod cpal_fallback {
     pub fn run_capture_thread(
         _capture_mode: AudioCaptureMode,
         stop_flag: Arc<AtomicBool>,
+        paused_flag: Arc<AtomicBool>,
         stop_rx: mpsc::Receiver<()>,
         ready_tx: mpsc::SyncSender<Result<(), String>>,
         seg_tx: tokio_mpsc::UnboundedSender<CapturedSegment>,
@@ -760,6 +908,7 @@ mod cpal_fallback {
         let app_cb = app.clone();
         let rec_cb = recorder.clone();
         let stop_cb = stop_flag.clone();
+        let pause_cb = paused_flag.clone();
         let mut last_level_emit = Instant::now();
 
         let stream = match build_cpal_stream(
@@ -767,7 +916,7 @@ mod cpal_fallback {
             &cfg,
             fmt,
             move |samples| {
-                if stop_cb.load(Ordering::Relaxed) {
+                if stop_cb.load(Ordering::Relaxed) || pause_cb.load(Ordering::Relaxed) {
                     return;
                 }
                 if let Ok(mut p) = proc_cb.lock() {
@@ -845,9 +994,10 @@ mod cpal_fallback {
     }
 }
 
-/// 正在运行的实时采集与翻译会话句柄（停止时优雅关闭音频流、落盘 WAV 并结束后台推理）
+/// 正在运行的实时采集与翻译会话句柄（支持暂停/继续/优雅结束）
 pub struct LiveCaptureHandle {
     stop_flag: Arc<AtomicBool>,
+    paused_flag: Arc<AtomicBool>,
     stop_tx: Option<mpsc::Sender<()>>,
     capture_thread: Option<JoinHandle<()>>,
     worker_task: tauri::async_runtime::JoinHandle<()>,
@@ -860,6 +1010,7 @@ impl LiveCaptureHandle {
         capture_mode: AudioCaptureMode,
     ) -> Result<Self, String> {
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let paused_flag = Arc::new(AtomicBool::new(false));
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), String>>(1);
         let (seg_tx, mut seg_rx) = tokio_mpsc::unbounded_channel::<CapturedSegment>();
@@ -867,6 +1018,7 @@ impl LiveCaptureHandle {
         let app_capture = app.clone();
         let rt_capture = rt.clone();
         let stop_flag_capture = stop_flag.clone();
+        let paused_flag_capture = paused_flag.clone();
 
         let capture_thread = std::thread::Builder::new()
             .name("hear-audio-capture".to_string())
@@ -875,6 +1027,7 @@ impl LiveCaptureHandle {
                 win_wasapi::run_capture_thread(
                     capture_mode,
                     stop_flag_capture,
+                    paused_flag_capture,
                     stop_rx,
                     ready_tx,
                     seg_tx,
@@ -885,6 +1038,7 @@ impl LiveCaptureHandle {
                 cpal_fallback::run_capture_thread(
                     capture_mode,
                     stop_flag_capture,
+                    paused_flag_capture,
                     stop_rx,
                     ready_tx,
                     seg_tx,
@@ -1186,10 +1340,19 @@ impl LiveCaptureHandle {
 
         Ok(Self {
             stop_flag,
+            paused_flag,
             stop_tx: Some(stop_tx),
             capture_thread: Some(capture_thread),
             worker_task,
         })
+    }
+
+    pub fn set_paused(&self, paused: bool) {
+        self.paused_flag.store(paused, Ordering::Relaxed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused_flag.load(Ordering::Relaxed)
     }
 
     pub fn stop(mut self) {

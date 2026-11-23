@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Pause, Play, RotateCcw, RotateCw, Volume2 } from "lucide-react";
+import {
+  Mic,
+  Pause,
+  Play,
+  RotateCcw,
+  RotateCw,
+  Square,
+  Volume2,
+} from "lucide-react";
 import { formatTimestamp } from "../../lib/export";
 import { useHearStore } from "../../stores/useHearStore";
 
@@ -7,10 +15,16 @@ const SPEEDS = [0.75, 1.0, 1.25, 1.5, 2.0];
 
 export function WaveformPlayer() {
   const {
+    mode,
+    audioLevel,
     captureMode,
     playback,
     seekNonce,
     seekTargetMs,
+    startRecording,
+    pauseRecording,
+    resumeRecording,
+    stopRecording,
     togglePlayback,
     setPlaybackPlaying,
     syncPlaybackPosition,
@@ -24,11 +38,11 @@ export function WaveformPlayer() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
-  // 录音文件就绪或切换时从 Rust 后端加载真实 WAV 字节并绑定到 HTMLAudioElement
+  // 录音文件就绪（暂停刷盘或结束录音）时从 Rust 后端加载真实 WAV 字节并绑定到 HTMLAudioElement
   useEffect(() => {
     let revoked = false;
     let objectUrl: string | null = null;
-    if (!playback.hasAudio || !playback.audioPath) {
+    if (!playback.hasAudio || !playback.audioPath || mode === "recording") {
       setAudioUrl(null);
       return;
     }
@@ -44,7 +58,13 @@ export function WaveformPlayer() {
       revoked = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [playback.hasAudio, playback.audioPath, readRecordingAudio]);
+  }, [
+    playback.hasAudio,
+    playback.audioPath,
+    playback.durationMs,
+    mode,
+    readRecordingAudio,
+  ]);
 
   // 响应显式跳转请求（点波形、点字幕句子、快退/快进）
   useEffect(() => {
@@ -88,6 +108,7 @@ export function WaveformPlayer() {
     return () => window.clearInterval(timer);
   }, [playback.isPlaying, audioUrl, syncPlaybackPosition]);
 
+  // 根据状态绘制不同主题的波形与进度条（录音中实时生长、暂停/回放态可点击定位）
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -102,38 +123,73 @@ export function WaveformPlayer() {
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, width, height);
 
-    const peaks = playback.peaks.length > 0 ? playback.peaks : new Array(80).fill(0.08);
-    const barCount = Math.min(peaks.length, Math.max(40, Math.floor(width / 4)));
+    const isRecording = mode === "recording";
+    const isPaused = mode === "paused";
+    const peaks =
+      playback.peaks.length > 0 ? playback.peaks : new Array(80).fill(0.08);
+    const barCount = Math.min(
+      Math.max(peaks.length, 48),
+      Math.max(48, Math.floor(width / 4))
+    );
     const barW = width / barCount;
-    const progress =
-      playback.durationMs > 0
-        ? Math.max(0, Math.min(1, playback.positionMs / playback.durationMs))
-        : 0;
+    const progress = isRecording
+      ? 1.0
+      : playback.durationMs > 0
+      ? Math.max(0, Math.min(1, playback.positionMs / playback.durationMs))
+      : 0;
 
     for (let i = 0; i < barCount; i++) {
       const srcIdx = Math.floor((i / barCount) * peaks.length);
-      const amp = Math.max(0.08, Math.min(1, peaks[srcIdx] ?? 0.08));
+      let amp = Math.max(0.08, Math.min(1, peaks[srcIdx] ?? 0.08));
+      // 录音中让最右侧几个柱子叠加当前实时电平跳动感
+      if (isRecording && i >= barCount - 3) {
+        amp = Math.max(amp, Math.min(1, audioLevel * 1.15 + 0.1));
+      }
       const barH = amp * (height - 6);
       const x = i * barW;
       const y = (height - barH) / 2;
       const ratio = i / barCount;
-      ctx.fillStyle =
-        ratio <= progress
-          ? "#60a5fa"
-          : "rgba(148, 163, 184, 0.28)";
+
+      if (isRecording) {
+        ctx.fillStyle =
+          i >= barCount - 4 ? "#fb7185" : "rgba(244, 63, 94, 0.72)";
+      } else if (isPaused) {
+        ctx.fillStyle =
+          ratio <= progress ? "#fbbf24" : "rgba(251, 191, 36, 0.30)";
+      } else {
+        ctx.fillStyle =
+          ratio <= progress ? "#60a5fa" : "rgba(148, 163, 184, 0.28)";
+      }
       ctx.fillRect(x + 0.5, y, Math.max(1.5, barW - 1.5), barH);
     }
 
-    // 播放指针
-    const px = progress * width;
-    ctx.fillStyle = "#f8fafc";
-    ctx.fillRect(px - 1, 0, 2, height);
-  }, [playback.peaks, playback.positionMs, playback.durationMs]);
+    // 指针（录音中在最右端脉冲，回放/暂停态在当前播放位置）
+    if (isRecording || playback.hasAudio) {
+      const px = Math.min(width - 2, Math.max(1, progress * width));
+      ctx.fillStyle = isRecording ? "#fda4af" : "#f8fafc";
+      ctx.fillRect(px - 1, 0, 2, height);
+    }
+  }, [
+    mode,
+    audioLevel,
+    playback.peaks,
+    playback.positionMs,
+    playback.durationMs,
+    playback.hasAudio,
+  ]);
+
+  const canSeek =
+    (mode === "idle" || mode === "paused") &&
+    playback.hasAudio &&
+    playback.durationMs > 0;
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!playback.hasAudio || playback.durationMs <= 0) return;
+    if (!canSeek) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const ratio = Math.max(
+      0,
+      Math.min(1, (e.clientX - rect.left) / rect.width)
+    );
     void seekPlayback(ratio * playback.durationMs, true);
   };
 
@@ -154,68 +210,179 @@ export function WaveformPlayer() {
         }}
         className="hidden"
       />
-      {/* 播放控制 */}
+
+      {/* 左侧主控区：按 4 种状态（未开始 / 正在录音 / 已暂停 / 已结束回放）差异化呈现 */}
       <div className="flex items-center gap-2 shrink-0">
-        <button
-          disabled={!playback.hasAudio}
-          onClick={() => void seekPlayback(Math.max(0, playback.positionMs - 5000), playback.isPlaying)}
-          title="快退 5 秒"
-          className="p-2 rounded-lg text-slate-300 hover:bg-white/10 disabled:opacity-35"
-        >
-          <RotateCcw className="w-4 h-4" />
-        </button>
-        <button
-          disabled={!playback.hasAudio}
-          onClick={() => void togglePlayback()}
-          title="播放 / 暂停完整录音"
-          className="w-10 h-10 rounded-full bg-brand-500 hover:bg-brand-600 text-white flex items-center justify-center disabled:opacity-35 shadow"
-        >
-          {playback.isPlaying ? (
-            <Pause className="w-4 h-4" />
-          ) : (
-            <Play className="w-4 h-4 ml-0.5" />
-          )}
-        </button>
-        <button
-          disabled={!playback.hasAudio}
-          onClick={() =>
-            void seekPlayback(
-              Math.min(playback.durationMs, playback.positionMs + 5000),
-              playback.isPlaying
-            )
-          }
-          title="快进 5 秒"
-          className="p-2 rounded-lg text-slate-300 hover:bg-white/10 disabled:opacity-35"
-        >
-          <RotateCw className="w-4 h-4" />
-        </button>
+        {mode === "recording" ? (
+          <>
+            <button
+              type="button"
+              onClick={() => void pauseRecording()}
+              title="暂停实时录音（保留已录音频与字幕，暂停期间可试听，随时可继续）"
+              className="px-3.5 py-2 rounded-full bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-semibold flex items-center gap-1.5 shadow transition"
+            >
+              <Pause className="w-3.5 h-3.5 fill-current" />
+              暂停
+            </button>
+            <button
+              type="button"
+              onClick={() => void stopRecording()}
+              title="结束本轮录音并生成完整可回放音频"
+              className="px-3.5 py-2 rounded-full bg-rose-500 hover:bg-rose-600 text-white text-xs font-semibold flex items-center gap-1.5 shadow transition"
+            >
+              <Square className="w-3.5 h-3.5 fill-current" />
+              结束
+            </button>
+          </>
+        ) : mode === "paused" ? (
+          <>
+            <button
+              type="button"
+              onClick={() => void resumeRecording()}
+              title="从暂停处无缝继续录音"
+              className="px-3.5 py-2 rounded-full bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold flex items-center gap-1.5 shadow transition"
+            >
+              <Mic className="w-3.5 h-3.5" />
+              继续录音
+            </button>
+            <button
+              type="button"
+              onClick={() => void stopRecording()}
+              title="结束本轮录音并进入完整回放模式"
+              className="px-3 py-2 rounded-full bg-rose-500/90 hover:bg-rose-600 text-white text-xs font-medium flex items-center gap-1.5 transition"
+            >
+              <Square className="w-3 h-3 fill-current" />
+              结束
+            </button>
+            {playback.hasAudio && (
+              <button
+                type="button"
+                onClick={() => void togglePlayback()}
+                title="试听目前已录片段"
+                className="w-9 h-9 rounded-full bg-surface-800 border border-white/15 hover:bg-surface-700 text-amber-300 flex items-center justify-center"
+              >
+                {playback.isPlaying ? (
+                  <Pause className="w-3.5 h-3.5" />
+                ) : (
+                  <Play className="w-3.5 h-3.5 ml-0.5" />
+                )}
+              </button>
+            )}
+          </>
+        ) : playback.hasAudio ? (
+          <>
+            <button
+              type="button"
+              onClick={() =>
+                void seekPlayback(
+                  Math.max(0, playback.positionMs - 5000),
+                  playback.isPlaying
+                )
+              }
+              title="快退 5 秒"
+              className="p-2 rounded-lg text-slate-300 hover:bg-white/10"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => void togglePlayback()}
+              title="播放 / 暂停完整录音"
+              className="w-10 h-10 rounded-full bg-brand-500 hover:bg-brand-600 text-white flex items-center justify-center shadow"
+            >
+              {playback.isPlaying ? (
+                <Pause className="w-4 h-4" />
+              ) : (
+                <Play className="w-4 h-4 ml-0.5" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                void seekPlayback(
+                  Math.min(playback.durationMs, playback.positionMs + 5000),
+                  playback.isPlaying
+                )
+              }
+              title="快进 5 秒"
+              className="p-2 rounded-lg text-slate-300 hover:bg-white/10"
+            >
+              <RotateCw className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => void startRecording(true)}
+              title="清空当前回放并开启新一轮实时录音"
+              className="ml-1 px-3 py-1.5 rounded-full bg-surface-800 border border-white/15 hover:bg-brand-500 hover:border-brand-400 text-xs text-slate-200 hover:text-white flex items-center gap-1.5 transition"
+            >
+              <Mic className="w-3.5 h-3.5 text-rose-400" />
+              新录音
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            disabled={mode === "batch_processing"}
+            onClick={() => void startRecording(false)}
+            className="px-4 py-2 rounded-full bg-brand-500 hover:bg-brand-600 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-2 shadow transition"
+          >
+            <Mic className="w-4 h-4" />
+            开始录音
+          </button>
+        )}
       </div>
 
-      {/* 时间 + 波形进度条 */}
+      {/* 中央：状态时间 + 波形进度条 */}
       <div className="flex-1 flex flex-col gap-1 min-w-0">
         <div className="flex items-center justify-between text-xs text-slate-400 font-mono">
-          <span>{formatTimestamp(playback.positionMs)}</span>
-          <span className="text-[11px] font-sans text-slate-500">
-            {playback.hasAudio
-              ? "点击波形或任意字幕段落即可精准跳转录音位置"
-              : "开始录音或拖入本地音视频后，可在此完整回听并双向联动"}
+          {mode === "recording" ? (
+            <span className="flex items-center gap-1.5 text-rose-400 font-semibold">
+              <span
+                className="w-2 h-2 rounded-full bg-rose-500 animate-ping"
+                style={{ opacity: 0.5 + Math.min(0.5, audioLevel) }}
+              />
+              正在录音 {formatTimestamp(playback.durationMs)}
+            </span>
+          ) : mode === "paused" ? (
+            <span className="text-amber-300 font-semibold">
+              已暂停 · {formatTimestamp(playback.positionMs)} /{" "}
+              {formatTimestamp(playback.durationMs)}
+            </span>
+          ) : (
+            <span>{formatTimestamp(playback.positionMs)}</span>
+          )}
+
+          <span className="text-[11px] font-sans text-slate-500 truncate px-2">
+            {mode === "recording"
+              ? "正在实时采集并识别翻译… 可随时点击左侧「暂停」或「结束」"
+              : mode === "paused"
+              ? "录音已暂停：点击波形或字幕可试听已录片段，点击「继续录音」无缝接着录"
+              : playback.hasAudio
+              ? "录音已结束：点击波形或任意字幕卡片即可精准跳转回听"
+              : "点击左侧「开始录音」启动实时翻译，或点击顶部「导入音视频」生成字幕"}
           </span>
+
           <span>{formatTimestamp(playback.durationMs)}</span>
         </div>
         <canvas
           ref={canvasRef}
           onClick={handleCanvasClick}
           className={`w-full h-9 rounded-md bg-surface-950/70 ${
-            playback.hasAudio ? "cursor-pointer" : "opacity-50"
+            canSeek
+              ? "cursor-pointer"
+              : mode === "recording"
+              ? "ring-1 ring-rose-500/30"
+              : "opacity-50"
           }`}
         />
       </div>
 
-      {/* 倍速 & 双轨音量 */}
+      {/* 右侧：倍速 & 音量控制 */}
       <div className="flex items-center gap-3 shrink-0">
         <button
-          disabled={!playback.hasAudio}
+          disabled={!canSeek}
           onClick={nextSpeed}
+          title="回放倍速"
           className="px-2.5 py-1 rounded-md bg-surface-800 border border-white/10 text-xs font-mono text-slate-200 hover:bg-surface-700 disabled:opacity-35"
         >
           {playback.speed.toFixed(2).replace(/\.00$/, ".0")}x
@@ -223,7 +390,7 @@ export function WaveformPlayer() {
 
         {captureMode === "dual_mix" ? (
           <div className="flex items-center gap-2 text-xs text-slate-400">
-            <label className="flex items-center gap-1" title="远端/系统声音轨音量">
+            <label className="flex items-center gap-1" title="回放音量">
               <span>对方</span>
               <input
                 type="range"
@@ -237,7 +404,7 @@ export function WaveformPlayer() {
                 className="w-16 accent-brand-500"
               />
             </label>
-            <label className="flex items-center gap-1" title="本机麦克风音轨音量">
+            <label className="flex items-center gap-1" title="麦克风音轨音量">
               <span>我</span>
               <input
                 type="range"

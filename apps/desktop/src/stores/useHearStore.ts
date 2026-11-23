@@ -124,6 +124,8 @@ interface HearStoreState extends AppSnapshot {
   audioSources: AudioSourceOption[];
   audioLevel: number;
   sessionError: string | null;
+  sessionNotice: string | null;
+  speakingSegmentId: string | null;
   seekNonce: number;
   seekTargetMs: number;
   searchQuery: string;
@@ -146,6 +148,7 @@ interface HearStoreState extends AppSnapshot {
 
   hydrate: () => Promise<void>;
   clearSessionError: () => void;
+  clearSessionNotice: () => void;
   setSearchQuery: (q: string) => void;
   setSummaryOpen: (open: boolean) => void;
   setSummaryTemplateId: (id: string) => void;
@@ -153,6 +156,10 @@ interface HearStoreState extends AppSnapshot {
 
   setLanguagePair: (src: string, dst: string, lockSrc: boolean) => Promise<void>;
   setCaptureMode: (mode: AudioCaptureMode, appPid?: number) => Promise<void>;
+  startRecording: (fresh?: boolean) => Promise<void>;
+  pauseRecording: () => Promise<void>;
+  resumeRecording: () => Promise<void>;
+  stopRecording: () => Promise<void>;
   toggleRecording: () => Promise<void>;
   clearRecording: () => Promise<void>;
 
@@ -186,17 +193,25 @@ interface HearStoreState extends AppSnapshot {
   setGlossary: (text: string) => void;
 
   editSegmentSource: (id: string, newSource: string) => Promise<void>;
+  editSegmentTranslation: (id: string, newTranslation: string) => Promise<void>;
+  editSegmentSpeaker: (
+    id: string,
+    speakerLabel: string,
+    applyToSameSpeaker: boolean
+  ) => Promise<void>;
+  speakSegment: (id: string, text: string, lang: string) => Promise<void>;
+  stopSpeakingSegment: () => void;
   generateSummary: () => Promise<void>;
   importMediaFile: () => Promise<void>;
 }
 
 export const useHearStore = create<HearStoreState>((set, get) => ({
-  appVersion: "0.1.8",
+  appVersion: "0.1.9",
   mode: "idle" as SessionMode,
   sourceLang: "en",
   targetLang: "zh",
   lockSourceLang: false,
-  captureMode: "system_loopback",
+  captureMode: "dual_mix",
   segments: [],
   livePartialSource: "",
   livePartialTranslation: "",
@@ -212,12 +227,14 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   updateInfo: undefined,
 
   audioSources: [
-    { id: "sys", label: "系统声音内录（自动排除听见自身）", kind: "system_loopback" },
-    { id: "mic", label: "默认麦克风", kind: "microphone" },
-    { id: "dual", label: "双路混合（系统声=对方 / 麦克风=我）", kind: "dual_mix" },
+    { id: "dual", label: "双路混合（电脑播放声 + 麦克风说话声）", kind: "dual_mix" },
+    { id: "mic", label: "默认麦克风（录人声说话）", kind: "microphone" },
+    { id: "sys", label: "系统声音内录（仅录电脑播放的声音）", kind: "system_loopback" },
   ],
   audioLevel: 0,
   sessionError: null,
+  sessionNotice: null,
+  speakingSegmentId: null,
   seekNonce: 0,
   seekTargetMs: 0,
   searchQuery: "",
@@ -309,8 +326,20 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       await listen<string>("session:error", (ev) => {
         set({ sessionError: ev.payload });
       });
+      await listen<string>("session:notice", (ev) => {
+        set({ sessionNotice: ev.payload });
+      });
       await listen<RecordingPlaybackState>("recording:ready", (ev) => {
         set({ playback: ev.payload });
+      });
+      await listen<{ durationMs: number; peaks: number[] }>("recording:live_tick", (ev) => {
+        set((state) => ({
+          playback: {
+            ...state.playback,
+            durationMs: ev.payload.durationMs,
+            peaks: ev.payload.peaks,
+          },
+        }));
       });
       await listen<string>("summary:delta", (ev) => {
         set({ summaryMarkdown: ev.payload, summaryOpen: true });
@@ -328,6 +357,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   },
 
   clearSessionError: () => set({ sessionError: null }),
+  clearSessionNotice: () => set({ sessionNotice: null }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),
   setSummaryOpen: (summaryOpen) => set({ summaryOpen }),
   setSummaryTemplateId: (summaryTemplateId) => set({ summaryTemplateId }),
@@ -340,14 +370,81 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   },
 
   setCaptureMode: async (captureMode, selectedAppPid) => {
-    set({ captureMode, selectedAppPid });
+    set({ captureMode, selectedAppPid, sessionNotice: null });
     await tauriInvoke("set_capture_mode", { captureMode, selectedAppPid });
   },
 
-  toggleRecording: async () => {
-    set({ sessionError: null });
+  startRecording: async (fresh = false) => {
+    set({ sessionError: null, sessionNotice: null });
+    if (fresh) {
+      await get().clearRecording();
+    }
     if (!isTauriRuntime()) {
-      const nextMode: SessionMode = get().mode === "recording" ? "idle" : "recording";
+      set({ mode: "recording" });
+      return;
+    }
+    try {
+      const mode = await tauriInvoke<SessionMode>("start_recording");
+      if (mode) set({ mode });
+    } catch (err) {
+      set({
+        mode: "idle",
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  pauseRecording: async () => {
+    if (!isTauriRuntime()) {
+      set({ mode: "paused" });
+      return;
+    }
+    try {
+      const mode = await tauriInvoke<SessionMode>("pause_recording");
+      if (mode) set({ mode });
+    } catch (err) {
+      set({
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  resumeRecording: async () => {
+    set({ sessionError: null, sessionNotice: null });
+    if (!isTauriRuntime()) {
+      set({ mode: "recording" });
+      return;
+    }
+    try {
+      const mode = await tauriInvoke<SessionMode>("resume_recording");
+      if (mode) set({ mode });
+    } catch (err) {
+      set({
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  stopRecording: async () => {
+    if (!isTauriRuntime()) {
+      set({ mode: "idle" });
+      return;
+    }
+    try {
+      const mode = await tauriInvoke<SessionMode>("stop_recording");
+      if (mode) set({ mode });
+    } catch (err) {
+      set({
+        mode: "idle",
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  toggleRecording: async () => {
+    set({ sessionError: null, sessionNotice: null });
+    if (!isTauriRuntime()) {
+      const nextMode: SessionMode = get().mode === "recording" ? "paused" : "recording";
       set({ mode: nextMode });
       return;
     }
@@ -371,6 +468,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       livePartialTranslation: "",
       summaryMarkdown: "",
       sessionError: null,
+      sessionNotice: null,
       playback: DEFAULT_PLAYBACK,
     });
     await tauriInvoke("clear_recording");
@@ -662,11 +760,119 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     set((s) => ({
       segments: s.segments.map((seg) =>
         seg.id === id
-          ? { ...seg, sourceText: newSource, status: "correcting", isEdited: true }
+          ? {
+              ...seg,
+              sourceText: newSource,
+              baselineTranslated: seg.baselineTranslated ?? seg.translatedText,
+              status: "correcting",
+              isEdited: true,
+            }
           : seg
       ),
     }));
-    await tauriInvoke("retranslate_segment", { id, newSource });
+    try {
+      await tauriInvoke("retranslate_segment", { id, newSource });
+    } catch (err) {
+      set({
+        sessionError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+
+  editSegmentTranslation: async (id, newTranslation) => {
+    set((s) => ({
+      segments: s.segments.map((seg) =>
+        seg.id === id
+          ? {
+              ...seg,
+              baselineTranslated: seg.baselineTranslated ?? seg.translatedText,
+              translatedText: newTranslation,
+              status: "final",
+              isEdited: true,
+            }
+          : seg
+      ),
+    }));
+    await tauriInvoke("update_segment_translation", { id, newTranslation });
+  },
+
+  editSegmentSpeaker: async (id, speakerLabel, applyToSameSpeaker) => {
+    const clean = speakerLabel.trim();
+    set((s) => {
+      const target = s.segments.find((seg) => seg.id === id);
+      if (!target) return {};
+      return {
+        segments: s.segments.map((seg) => {
+          const match =
+            seg.id === id ||
+            (applyToSameSpeaker &&
+              seg.channel === target.channel &&
+              seg.speakerLabel === target.speakerLabel);
+          return match ? { ...seg, speakerLabel: clean || undefined } : seg;
+        }),
+      };
+    });
+    await tauriInvoke("update_segment_speaker", {
+      id,
+      speakerLabel: clean,
+      applyToSameSpeaker,
+    });
+  },
+
+  speakSegment: async (id, text, lang) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (get().speakingSegmentId === id) {
+      get().stopSpeakingSegment();
+      return;
+    }
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    set({ speakingSegmentId: id });
+    const bcp47Map: Record<string, string> = {
+      zh: "zh-CN",
+      en: "en-US",
+      ja: "ja-JP",
+      ko: "ko-KR",
+      fr: "fr-FR",
+      de: "de-DE",
+      es: "es-ES",
+    };
+    const targetBcp = bcp47Map[lang] ?? "zh-CN";
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      const voices = window.speechSynthesis.getVoices();
+      const matched = voices.find((v) =>
+        v.lang.toLowerCase().startsWith(lang.toLowerCase())
+      );
+      if (voices.length > 0) {
+        const utter = new SpeechSynthesisUtterance(trimmed);
+        utter.lang = targetBcp;
+        if (matched) utter.voice = matched;
+        utter.onend = () => {
+          if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
+        };
+        utter.onerror = () => {
+          if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
+        };
+        window.speechSynthesis.speak(utter);
+        return;
+      }
+    }
+    try {
+      await tauriInvoke("speak_text_sapi", { text: trimmed });
+    } finally {
+      if (get().speakingSegmentId === id) {
+        set({ speakingSegmentId: null });
+      }
+    }
+  },
+
+  stopSpeakingSegment: () => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    set({ speakingSegmentId: null });
   },
 
   generateSummary: async () => {

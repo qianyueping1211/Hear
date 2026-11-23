@@ -68,6 +68,24 @@ impl StreamingWavRecorder {
         self.file.flush()
     }
 
+    pub fn snapshot(&mut self) -> (PathBuf, u64, Vec<f32>) {
+        let _ = self.flush_header();
+        let bytes_per_frame = (self.channels as u64) * 2;
+        let frames = (self.data_bytes as u64) / bytes_per_frame.max(1);
+        let duration_ms = (frames * 1000) / (self.sample_rate as u64).max(1);
+        let mut peaks = self.peaks.clone();
+        if self.peak_count > 0 {
+            peaks.push(self.peak_acc);
+        }
+        (self.path.clone(), duration_ms, peaks)
+    }
+
+    pub fn duration_ms(&self) -> u64 {
+        let bytes_per_frame = (self.channels as u64) * 2;
+        let frames = (self.data_bytes as u64) / bytes_per_frame.max(1);
+        (frames * 1000) / (self.sample_rate as u64).max(1)
+    }
+
     pub fn finalize(mut self) -> std::io::Result<(PathBuf, u64, Vec<f32>)> {
         if self.peak_count > 0 {
             self.peaks.push(self.peak_acc);

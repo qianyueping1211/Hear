@@ -7,6 +7,7 @@ import {
   Copy,
   Download,
   FileAudio,
+  Info,
   Lock,
   Mic,
   PanelRight,
@@ -19,6 +20,9 @@ import {
   Square,
   Trash2,
   Unlock,
+  UserCheck,
+  Volume2,
+  Wand2,
   X,
 } from "lucide-react";
 import {
@@ -51,8 +55,9 @@ export function MainApp() {
     lockSourceLang,
     captureMode,
     audioSources,
-    audioLevel,
     sessionError,
+    sessionNotice,
+    speakingSegmentId,
     segments,
     livePartialSource,
     livePartialTranslation,
@@ -71,27 +76,42 @@ export function MainApp() {
     summaryGenerating,
     hydrate,
     clearSessionError,
+    clearSessionNotice,
     setSearchQuery,
     setSummaryOpen,
     setSummaryTemplateId,
     setSettingsOpen,
     setLanguagePair,
     setCaptureMode,
-    toggleRecording,
     clearRecording,
     seekPlayback,
     toggleSubtitleVisible,
     testServiceConnection,
     editSegmentSource,
+    editSegmentTranslation,
+    editSegmentSpeaker,
+    speakSegment,
     generateSummary,
     importMediaFile,
   } = useHearStore();
 
   const [autoFollow, setAutoFollow] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState("");
+  const [editSourceDraft, setEditSourceDraft] = useState("");
+  const [editTransDraft, setEditTransDraft] = useState("");
+  const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
+  const [speakerDraft, setSpeakerDraft] = useState("");
+  const [speakerApplyAll, setSpeakerApplyAll] = useState(true);
   const listRef = useRef<HTMLDivElement | null>(null);
   const itemRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  const knownSpeakers = useMemo(() => {
+    const set = new Set<string>(["我", "对方"]);
+    for (const s of segments) {
+      if (s.speakerLabel?.trim()) set.add(s.speakerLabel.trim());
+    }
+    return Array.from(set);
+  }, [segments]);
 
   useEffect(() => {
     void hydrate();
@@ -291,34 +311,6 @@ export function MainApp() {
               {lockSourceLang ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
             </button>
           </div>
-        </div>
-
-        {/* 中央操作：开始/停止录音 + 导入音视频 */}
-        <div className="flex items-center gap-2 shrink-0">
-          <button
-            onClick={() => void toggleRecording()}
-            className={`px-4 py-1.5 rounded-full text-xs font-medium flex items-center gap-2 transition shadow ${
-              mode === "recording"
-                ? "bg-rose-500 hover:bg-rose-600 text-white"
-                : "bg-brand-500 hover:bg-brand-600 text-white"
-            }`}
-          >
-            {mode === "recording" ? (
-              <>
-                <Square className="w-3.5 h-3.5 fill-current" />
-                停止录音
-                <span
-                  className="w-2 h-2 rounded-full bg-white animate-pulse"
-                  style={{ opacity: 0.4 + Math.min(0.6, audioLevel) }}
-                />
-              </>
-            ) : (
-              <>
-                <Mic className="w-3.5 h-3.5" />
-                开始实时录音
-              </>
-            )}
-          </button>
 
           <button
             disabled={mode === "batch_processing"}
@@ -440,6 +432,43 @@ export function MainApp() {
             </div>
           </div>
 
+          {sessionNotice && (
+            <div className="mx-5 mt-3 rounded-xl bg-amber-500/15 border border-amber-400/40 px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs text-amber-100">
+              <div className="flex items-center gap-2 min-w-0">
+                <Info className="w-4 h-4 text-amber-300 shrink-0" />
+                <span className="leading-relaxed">{sessionNotice}</span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {captureMode !== "dual_mix" && (
+                  <button
+                    type="button"
+                    onClick={() => void setCaptureMode("dual_mix")}
+                    className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/40 text-amber-50"
+                  >
+                    切换为双路混合
+                  </button>
+                )}
+                {captureMode !== "microphone" && (
+                  <button
+                    type="button"
+                    onClick={() => void setCaptureMode("microphone")}
+                    className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/40 text-amber-50"
+                  >
+                    切换为默认麦克风
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={clearSessionNotice}
+                  title="关闭提示"
+                  className="p-1 rounded hover:bg-white/10 text-amber-200"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {sessionError && (
             <div className="mx-5 mt-3 rounded-xl bg-rose-500/15 border border-rose-400/40 px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs text-rose-200">
               <div className="flex items-center gap-2 min-w-0">
@@ -447,13 +476,18 @@ export function MainApp() {
                 <span className="break-all leading-relaxed">{sessionError}</span>
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => setSettingsOpen(true, "server")}
-                  className="px-2.5 py-1 rounded-md bg-rose-500/25 hover:bg-rose-500/40 text-rose-100"
-                >
-                  检查模型服务
-                </button>
+                {(sessionError.includes("服务") ||
+                  sessionError.includes("HTTP") ||
+                  sessionError.includes("连接") ||
+                  sessionError.includes("口令")) && (
+                  <button
+                    type="button"
+                    onClick={() => setSettingsOpen(true, "server")}
+                    className="px-2.5 py-1 rounded-md bg-rose-500/25 hover:bg-rose-500/40 text-rose-100"
+                  >
+                    检查模型服务
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={clearSessionError}
@@ -476,10 +510,10 @@ export function MainApp() {
             {filteredSegments.length === 0 && !livePartialSource ? (
               <div className="h-full flex flex-col items-center justify-center text-center text-slate-500 space-y-2">
                 <Mic className="w-10 h-10 text-slate-700" />
-                <div className="text-sm text-slate-300">完整录音模式已就绪</div>
+                <div className="text-sm text-slate-300">实时录音与翻译工作台就绪</div>
                 <p className="text-xs max-w-md leading-relaxed">
-                  点击顶部「开始实时录音」捕获系统声音/单个应用/麦克风，或直接导入本地音视频文件。
-                  每句原文与译文均绑定精确录音时间戳——点击任意一句即可跳转到对应录音位置回听。
+                  点击左下方「开始录音」支持随时暂停、继续、结束与回听，也可从顶部直接导入本地音视频文件。
+                  每句原文、译文、说话人均支持点击修改与译文语音朗读，点击任意卡片即可跳转到对应录音位置。
                 </p>
               </div>
             ) : (
@@ -487,6 +521,11 @@ export function MainApp() {
                 {filteredSegments.map((seg) => {
                   const isActive = seg.id === activeSegmentId;
                   const isEditing = editingId === seg.id;
+                  const isEditingSpeaker = editingSpeakerId === seg.id;
+                  const isSpeaking = speakingSegmentId === seg.id;
+                  const speakerText =
+                    seg.speakerLabel ?? (seg.channel === "mic" ? "我" : "对方");
+
                   return (
                     <div
                       key={seg.id}
@@ -494,16 +533,20 @@ export function MainApp() {
                         itemRefs.current[seg.id] = el;
                       }}
                       onClick={() => {
-                        if (!isEditing) void seekPlayback(seg.startMs, true);
+                        if (!isEditing && !isEditingSpeaker && playback.hasAudio) {
+                          void seekPlayback(seg.startMs, true);
+                        }
                       }}
-                      className={`group rounded-xl border p-3.5 transition cursor-pointer ${
+                      className={`group rounded-xl border p-3.5 transition ${
+                        playback.hasAudio ? "cursor-pointer" : ""
+                      } ${
                         isActive
                           ? "bg-brand-500/15 border-brand-400/50 shadow-sm"
                           : "bg-surface-900/75 border-white/5 hover:border-white/15 hover:bg-surface-800/70"
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2 mb-1.5 text-[11px]">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <span
                             className={`font-mono px-1.5 py-0.5 rounded ${
                               isActive
@@ -513,35 +556,102 @@ export function MainApp() {
                           >
                             {formatTimestamp(seg.startMs)} – {formatTimestamp(seg.endMs)}
                           </span>
-                          <span
-                            className={`px-1.5 py-0.5 rounded ${
+
+                          {/* 点击说话人标签可修改（对标 iOS SpeakerEditor） */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingSpeakerId(isEditingSpeaker ? null : seg.id);
+                              setSpeakerDraft(speakerText);
+                              setSpeakerApplyAll(true);
+                            }}
+                            title="点击修改说话人姓名"
+                            className={`px-2 py-0.5 rounded flex items-center gap-1 transition ${
                               seg.channel === "mic"
-                                ? "bg-emerald-500/15 text-emerald-300"
-                                : "bg-sky-500/15 text-sky-300"
+                                ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+                                : "bg-sky-500/15 text-sky-300 hover:bg-sky-500/25"
                             }`}
                           >
-                            {seg.speakerLabel ?? (seg.channel === "mic" ? "我" : "对方")}
-                          </span>
+                            <UserCheck className="w-3 h-3" />
+                            <span>{speakerText}</span>
+                          </button>
+
+                          {seg.isEdited && (
+                            <span
+                              title={
+                                seg.baselineTranslated
+                                  ? `原译文：${seg.baselineTranslated}`
+                                  : "已手动校对修改"
+                              }
+                              className="px-1.5 py-0.5 rounded bg-brand-500/15 text-brand-300 flex items-center gap-1"
+                            >
+                              <Wand2 className="w-3 h-3" />
+                              已校对
+                            </span>
+                          )}
+
                           {seg.status === "correcting" && (
-                            <span className="text-amber-300">校对/重译中…</span>
+                            <span className="text-amber-300 animate-pulse">
+                              正在重新翻译…
+                            </span>
                           )}
                         </div>
 
+                        {/* 常驻操作栏：朗读译文 + 修改原文/译文 + 复制（对标 iOS 直观可见） */}
                         <div
-                          className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition"
+                          className="flex items-center gap-1"
                           onClick={(e) => e.stopPropagation()}
                         >
                           <button
+                            type="button"
+                            onClick={() =>
+                              void speakSegment(
+                                seg.id,
+                                seg.translatedText || seg.sourceText,
+                                seg.targetLang
+                              )
+                            }
+                            title={isSpeaking ? "停止朗读译文" : "朗读本句译文"}
+                            className={`px-2 py-1 rounded flex items-center gap-1 transition ${
+                              isSpeaking
+                                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/40"
+                                : "hover:bg-white/10 text-slate-300 hover:text-white"
+                            }`}
+                          >
+                            {isSpeaking ? (
+                              <>
+                                <Square className="w-3 h-3 fill-current" />
+                                <span>朗读中</span>
+                              </>
+                            ) : (
+                              <>
+                                <Volume2 className="w-3.5 h-3.5" />
+                                <span>朗读</span>
+                              </>
+                            )}
+                          </button>
+
+                          <button
+                            type="button"
                             onClick={() => {
-                              setEditingId(seg.id);
-                              setEditDraft(seg.sourceText);
+                              setEditingId(isEditing ? null : seg.id);
+                              setEditSourceDraft(seg.sourceText);
+                              setEditTransDraft(seg.translatedText);
                             }}
-                            title="修改原文并重新翻译"
-                            className="p-1 rounded hover:bg-white/10 text-slate-400 hover:text-white"
+                            title="修改原文重译，或直接修改译文"
+                            className={`px-2 py-1 rounded flex items-center gap-1 transition ${
+                              isEditing
+                                ? "bg-brand-500/25 text-brand-300"
+                                : "hover:bg-white/10 text-slate-300 hover:text-white"
+                            }`}
                           >
                             <Pencil className="w-3.5 h-3.5" />
+                            <span>修改</span>
                           </button>
+
                           <button
+                            type="button"
                             onClick={() =>
                               void navigator.clipboard?.writeText(
                                 `${seg.sourceText}\n${seg.translatedText}`
@@ -555,41 +665,157 @@ export function MainApp() {
                         </div>
                       </div>
 
-                      {isEditing ? (
+                      {/* 说话人修改面板 */}
+                      {isEditingSpeaker && (
                         <div
-                          className="flex items-center gap-2 mb-2"
+                          className="mb-2.5 rounded-lg bg-surface-950/90 border border-sky-400/40 p-2.5 space-y-2 text-xs"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          <input
-                            value={editDraft}
-                            onChange={(e) => setEditDraft(e.target.value)}
-                            className="flex-1 rounded bg-surface-950 border border-brand-500 px-2.5 py-1 text-xs text-white"
-                          />
-                          <button
-                            onClick={() => {
-                              void editSegmentSource(seg.id, editDraft.trim());
-                              setEditingId(null);
-                            }}
-                            className="px-2 py-1 rounded bg-brand-500 text-white text-xs flex items-center gap-1"
-                          >
-                            <Check className="w-3 h-3" /> 重译
-                          </button>
-                          <button
-                            onClick={() => setEditingId(null)}
-                            className="px-2 py-1 rounded bg-surface-800 text-slate-300 text-xs"
-                          >
-                            取消
-                          </button>
-                        </div>
-                      ) : (
-                        <div className="text-xs text-slate-300 leading-relaxed">
-                          {seg.sourceText}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-slate-400">说话人姓名：</span>
+                            <input
+                              value={speakerDraft}
+                              onChange={(e) => setSpeakerDraft(e.target.value)}
+                              placeholder="例如：张总 / Alice / 我"
+                              className="rounded bg-surface-900 border border-white/15 px-2.5 py-1 text-xs text-white focus:outline-none focus:border-brand-500"
+                            />
+                            {knownSpeakers.map((sp) => (
+                              <button
+                                key={sp}
+                                type="button"
+                                onClick={() => setSpeakerDraft(sp)}
+                                className={`px-2 py-0.5 rounded text-[11px] border ${
+                                  speakerDraft === sp
+                                    ? "bg-brand-500/25 border-brand-400 text-brand-200"
+                                    : "bg-surface-900 border-white/10 text-slate-300 hover:text-white"
+                                }`}
+                              >
+                                {sp}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={speakerApplyAll}
+                                onChange={(e) => setSpeakerApplyAll(e.target.checked)}
+                                className="w-3.5 h-3.5 accent-brand-500"
+                              />
+                              同步修改当前对话中「{speakerText}」的所有句子
+                            </label>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void editSegmentSpeaker(
+                                    seg.id,
+                                    speakerDraft,
+                                    speakerApplyAll
+                                  );
+                                  setEditingSpeakerId(null);
+                                }}
+                                className="px-2.5 py-1 rounded bg-brand-500 hover:bg-brand-600 text-white text-xs flex items-center gap-1"
+                              >
+                                <Check className="w-3 h-3" /> 保存说话人
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingSpeakerId(null)}
+                                className="px-2 py-1 rounded bg-surface-800 text-slate-300 text-xs"
+                              >
+                                取消
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       )}
 
-                      <div className="text-sm font-medium text-white mt-1 leading-relaxed">
-                        {seg.translatedText}
-                      </div>
+                      {/* 原文 + 译文双框编辑面板（对标 iOS：可改原文重译，也可直接改译文） */}
+                      {isEditing ? (
+                        <div
+                          className="mt-2 rounded-lg bg-surface-950/90 border border-brand-500/50 p-3 space-y-2.5"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div className="space-y-1">
+                            <label className="text-[11px] text-slate-400">
+                              修改识别原文（点「保存原文并重译」将保留旧译文对照并自动重新翻译）
+                            </label>
+                            <input
+                              value={editSourceDraft}
+                              onChange={(e) => setEditSourceDraft(e.target.value)}
+                              className="w-full rounded bg-surface-900 border border-white/15 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-brand-500"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[11px] text-slate-400">
+                              或直接修改译文（无需等待模型，立即保存人工校对译文）
+                            </label>
+                            <input
+                              value={editTransDraft}
+                              onChange={(e) => setEditTransDraft(e.target.value)}
+                              className="w-full rounded bg-surface-900 border border-white/15 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+                            />
+                          </div>
+                          <div className="flex items-center justify-end gap-2 pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (editSourceDraft.trim()) {
+                                  void editSegmentSource(seg.id, editSourceDraft.trim());
+                                }
+                                setEditingId(null);
+                              }}
+                              className="px-3 py-1.5 rounded bg-brand-500 hover:bg-brand-600 text-white text-xs font-medium flex items-center gap-1"
+                            >
+                              <RefreshCw className="w-3 h-3" /> 保存原文并重译
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (
+                                  editSourceDraft.trim() &&
+                                  editSourceDraft.trim() !== seg.sourceText
+                                ) {
+                                  void editSegmentSource(seg.id, editSourceDraft.trim());
+                                }
+                                if (editTransDraft.trim()) {
+                                  void editSegmentTranslation(
+                                    seg.id,
+                                    editTransDraft.trim()
+                                  );
+                                }
+                                setEditingId(null);
+                              }}
+                              className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium flex items-center gap-1"
+                            >
+                              <Check className="w-3 h-3" /> 直接保存译文
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setEditingId(null)}
+                              className="px-2.5 py-1.5 rounded bg-surface-800 text-slate-300 text-xs"
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="text-xs text-slate-300 leading-relaxed">
+                            {seg.sourceText}
+                          </div>
+                          <div className="text-sm font-medium text-white mt-1 leading-relaxed">
+                            {seg.translatedText}
+                          </div>
+                          {seg.baselineTranslated &&
+                            seg.baselineTranslated !== seg.translatedText && (
+                              <div className="text-[11px] text-slate-500 mt-1">
+                                校对前原译：{seg.baselineTranslated}
+                              </div>
+                            )}
+                        </>
+                      )}
                     </div>
                   );
                 })}

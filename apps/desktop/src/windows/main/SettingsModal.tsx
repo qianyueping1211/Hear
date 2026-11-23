@@ -1041,18 +1041,45 @@ export function SettingsModal() {
                     <Save className="w-3.5 h-3.5" />
                     {savedHint === "system" ? "已保存" : "保存设置"}
                   </button>
-                  <button
-                    disabled={checkingUpdate}
-                    onClick={() => void handleCheckUpdate()}
-                    className="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-xs text-white flex items-center gap-1.5 disabled:opacity-50"
-                  >
-                    {checkingUpdate ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <RefreshCw className="w-3.5 h-3.5" />
-                    )}
-                    {checkingUpdate ? "正在检查更新…" : "立即检查更新"}
-                  </button>
+                  {updateInfo?.hasUpdate && updateInfo.assetApiUrl ? (
+                    <>
+                      <button
+                        disabled={downloadingUpdate}
+                        onClick={() => void downloadAndInstallUpdate()}
+                        className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs text-white font-medium flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        {downloadingUpdate ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Download className="w-3.5 h-3.5" />
+                        )}
+                        {downloadingUpdate ? "正在下载更新…" : "下载并更新"}
+                      </button>
+                      <button
+                        disabled={checkingUpdate || downloadingUpdate}
+                        onClick={() => void handleCheckUpdate()}
+                        title="重新检查更新"
+                        className="p-1.5 rounded-lg bg-surface-950 border border-white/10 hover:bg-white/5 text-slate-400 hover:text-white disabled:opacity-50"
+                      >
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 ${checkingUpdate ? "animate-spin" : ""}`}
+                        />
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      disabled={checkingUpdate}
+                      onClick={() => void handleCheckUpdate()}
+                      className="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-xs text-white flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      {checkingUpdate ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      )}
+                      {checkingUpdate ? "正在检查更新…" : "立即检查更新"}
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1140,22 +1167,6 @@ export function SettingsModal() {
                       )}
 
                       <div className="flex items-center gap-2 pt-1">
-                        {updateInfo.hasUpdate && updateInfo.assetApiUrl && (
-                          <button
-                            disabled={downloadingUpdate}
-                            onClick={() => void downloadAndInstallUpdate()}
-                            className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50"
-                          >
-                            {downloadingUpdate ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <Download className="w-3.5 h-3.5" />
-                            )}
-                            {downloadingUpdate
-                              ? "正在下载安装程序…"
-                              : `下载并更新（${updateInfo.assetName ?? "安装包"}）`}
-                          </button>
-                        )}
                         {updateInfo.releaseUrl && (
                           <button
                             onClick={() => void openGithubUrl(updateInfo.releaseUrl!)}

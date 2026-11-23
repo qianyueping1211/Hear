@@ -90,19 +90,18 @@ async fn set_capture_mode(
     Ok(())
 }
 
-async fn toggle_recording_impl(
+async fn start_recording_impl(
     app: &AppHandle,
     rt: &Arc<AppRuntime>,
 ) -> Result<SessionMode, String> {
     let mut cap_guard = rt.capture.lock().await;
-
-    // 已在录音：优雅停止采集流、冲刷尾句并落盘录音文件
-    if let Some(handle) = cap_guard.take() {
-        let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
+    if let Some(ref handle) = *cap_guard {
+        handle.set_paused(false);
         let mut snap = rt.snapshot.lock().await;
-        snap.mode = SessionMode::Idle;
-        let _ = app.emit("session:mode", SessionMode::Idle);
-        return Ok(SessionMode::Idle);
+        snap.mode = SessionMode::Recording;
+        snap.playback.is_playing = false;
+        let _ = app.emit("session:mode", SessionMode::Recording);
+        return Ok(SessionMode::Recording);
     }
 
     // 启动前校验路由对应的语音识别与文本翻译服务地址是否已配置
@@ -145,9 +144,83 @@ async fn toggle_recording_impl(
     {
         let mut snap = rt.snapshot.lock().await;
         snap.mode = SessionMode::Recording;
+        snap.playback = Default::default();
     }
     let _ = app.emit("session:mode", SessionMode::Recording);
     Ok(SessionMode::Recording)
+}
+
+async fn pause_recording_impl(
+    app: &AppHandle,
+    rt: &Arc<AppRuntime>,
+) -> Result<SessionMode, String> {
+    let cap_guard = rt.capture.lock().await;
+    if let Some(ref handle) = *cap_guard {
+        handle.set_paused(true);
+        let mut snap = rt.snapshot.lock().await;
+        snap.mode = SessionMode::Paused;
+        let _ = app.emit("session:mode", SessionMode::Paused);
+        return Ok(SessionMode::Paused);
+    }
+    Ok(SessionMode::Idle)
+}
+
+async fn stop_recording_impl(
+    app: &AppHandle,
+    rt: &Arc<AppRuntime>,
+) -> Result<SessionMode, String> {
+    let mut cap_guard = rt.capture.lock().await;
+    if let Some(handle) = cap_guard.take() {
+        let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
+    }
+    let mut snap = rt.snapshot.lock().await;
+    snap.mode = SessionMode::Idle;
+    let _ = app.emit("session:mode", SessionMode::Idle);
+    Ok(SessionMode::Idle)
+}
+
+async fn toggle_recording_impl(
+    app: &AppHandle,
+    rt: &Arc<AppRuntime>,
+) -> Result<SessionMode, String> {
+    let current_mode = rt.snapshot.lock().await.mode;
+    match current_mode {
+        SessionMode::Recording => pause_recording_impl(app, rt).await,
+        SessionMode::Paused => start_recording_impl(app, rt).await,
+        _ => start_recording_impl(app, rt).await,
+    }
+}
+
+#[tauri::command]
+async fn start_recording(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<SessionMode, String> {
+    start_recording_impl(&app, rt.inner()).await
+}
+
+#[tauri::command]
+async fn pause_recording(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<SessionMode, String> {
+    pause_recording_impl(&app, rt.inner()).await
+}
+
+#[tauri::command]
+async fn resume_recording(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<SessionMode, String> {
+    start_recording_impl(&app, rt.inner()).await
+}
+
+#[tauri::command]
+async fn stop_recording(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<SessionMode, String> {
+    stop_recording_impl(&app, rt.inner()).await
 }
 
 #[tauri::command]
@@ -512,8 +585,8 @@ async fn retranslate_segment(
     id: String,
     new_source: String,
 ) -> Result<(), String> {
-    let (base_url, token, source_lang, target_lang, glossary) = {
-        let snap = rt.snapshot.lock().await;
+    let (base_url, token, source_lang, target_lang, glossary, existing_seg) = {
+        let mut snap = rt.snapshot.lock().await;
         let (addr, tok) = match snap.service_config.mt_source {
             EngineSource::Local => (
                 snap.service_config.local_service_address.clone(),
@@ -524,16 +597,28 @@ async fn retranslate_segment(
                 snap.service_config.cloud_access_token.clone(),
             ),
         };
-        let seg_langs = snap
-            .segments
-            .iter()
-            .find(|s| s.id == id)
-            .map(|s| (s.source_lang.clone(), s.target_lang.clone()))
-            .unwrap_or_else(|| (snap.source_lang.clone(), snap.target_lang.clone()));
-        (addr, tok, seg_langs.0, seg_langs.1, snap.glossary.clone())
+        let mut seg_snapshot = None;
+        let mut seg_langs = (snap.source_lang.clone(), snap.target_lang.clone());
+        if let Some(seg) = snap.segments.iter_mut().find(|s| s.id == id) {
+            if seg.baseline_translated.is_none() && !seg.translated_text.trim().is_empty() {
+                seg.baseline_translated = Some(seg.translated_text.clone());
+            }
+            seg.source_text = new_source.clone();
+            seg.status = "correcting".into();
+            seg.is_edited = Some(true);
+            seg_langs = (seg.source_lang.clone(), seg.target_lang.clone());
+            seg_snapshot = Some(seg.clone());
+        }
+        (addr, tok, seg_langs.0, seg_langs.1, snap.glossary.clone(), seg_snapshot)
     };
 
+    if let Some(ref seg) = existing_seg {
+        let _ = app.emit("segment:upsert", seg);
+    }
+
     let prompt = audio::build_translation_prompt(&new_source, &source_lang, &target_lang, &glossary);
+    let app_stream = app.clone();
+    let mut seg_cb = existing_seg.clone();
     let translated_raw = rt
         .cloud
         .translate_stream(
@@ -545,7 +630,15 @@ async fn retranslate_segment(
             } else {
                 Some(&token)
             },
-            |_| {},
+            |partial_raw| {
+                let cleaned = audio::clean_translation_output(partial_raw);
+                if !cleaned.is_empty() {
+                    if let Some(ref mut s) = seg_cb {
+                        s.translated_text = cleaned;
+                        let _ = app_stream.emit("segment:upsert", &*s);
+                    }
+                }
+            },
         )
         .await?;
     let translated = audio::clean_translation_output(&translated_raw);
@@ -563,6 +656,97 @@ async fn retranslate_segment(
     }
     if let Some(seg) = updated {
         let _ = app.emit("segment:upsert", seg);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_segment_translation(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    id: String,
+    new_translation: String,
+) -> Result<(), String> {
+    let trimmed = new_translation.trim().to_string();
+    let mut updated = None;
+    {
+        let mut snap = rt.snapshot.lock().await;
+        if let Some(seg) = snap.segments.iter_mut().find(|s| s.id == id) {
+            if seg.baseline_translated.is_none() && !seg.translated_text.trim().is_empty() {
+                seg.baseline_translated = Some(seg.translated_text.clone());
+            }
+            seg.translated_text = trimmed;
+            seg.status = "final".into();
+            seg.is_edited = Some(true);
+            updated = Some(seg.clone());
+        }
+    }
+    if let Some(seg) = updated {
+        let _ = app.emit("segment:upsert", seg);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_segment_speaker(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    id: String,
+    speaker_label: String,
+    apply_to_same_speaker: bool,
+) -> Result<(), String> {
+    let clean = speaker_label.trim().to_string();
+    let next_label = if clean.is_empty() { None } else { Some(clean) };
+    let mut changed: Vec<SubtitleSegment> = Vec::new();
+    {
+        let mut snap = rt.snapshot.lock().await;
+        let target_info = snap
+            .segments
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| (s.speaker_label.clone(), s.channel));
+
+        if let Some((old_label, old_channel)) = target_info {
+            for seg in &mut snap.segments {
+                let is_target = seg.id == id
+                    || (apply_to_same_speaker
+                        && seg.channel == old_channel
+                        && seg.speaker_label == old_label);
+                if is_target {
+                    seg.speaker_label = next_label.clone();
+                    changed.push(seg.clone());
+                }
+            }
+        }
+    }
+    for seg in changed {
+        let _ = app.emit("segment:upsert", seg);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn speak_text_sapi(text: String) -> Result<(), String> {
+    let trimmed = text.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        tokio::task::spawn_blocking(move || {
+            use std::os::windows::process::CommandExt;
+            let mut cmd = std::process::Command::new("powershell");
+            cmd.args([
+                "-NoProfile",
+                "-Command",
+                "Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak($env:HEAR_SPEAK_TEXT)",
+            ])
+            .env("HEAR_SPEAK_TEXT", trimmed)
+            .creation_flags(0x0800_0000);
+            let _ = cmd.status();
+        })
+        .await
+        .map_err(|e| format!("系统朗读任务异常：{}", e))?;
     }
     Ok(())
 }
@@ -1229,6 +1413,10 @@ pub fn run() {
             list_audio_sources,
             set_language_pair,
             set_capture_mode,
+            start_recording,
+            pause_recording,
+            resume_recording,
+            stop_recording,
             toggle_recording,
             read_recording_audio,
             clear_recording,
@@ -1252,6 +1440,9 @@ pub fn run() {
             set_tts_settings,
             set_glossary,
             retranslate_segment,
+            update_segment_translation,
+            update_segment_speaker,
+            speak_text_sapi,
             generate_summary,
             import_media_file,
         ])

@@ -26,34 +26,34 @@ pub mod fallback {
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub use fallback as os;
 
-/// 列出当前桌面端可用的基础音频源（Sprint 2 将接入实时发声应用枚举）
+/// 列出当前桌面端可用的基础音频源
 pub fn default_audio_sources() -> Vec<AudioSourceOption> {
     vec![
         AudioSourceOption {
+            id: "dual_mix".into(),
+            label: "双路混合（电脑播放声 + 麦克风说话声）".into(),
+            kind: AudioCaptureMode::DualMix,
+            process_id: None,
+            process_name: None,
+        },
+        AudioSourceOption {
+            id: "microphone".into(),
+            label: "默认麦克风（录人声说话）".into(),
+            kind: AudioCaptureMode::Microphone,
+            process_id: None,
+            process_name: None,
+        },
+        AudioSourceOption {
             id: "system_loopback".into(),
-            label: "系统声音内录（自动排除听见自身）".into(),
+            label: "系统声音内录（仅录电脑播放的声音）".into(),
             kind: AudioCaptureMode::SystemLoopback,
             process_id: None,
             process_name: None,
         },
         AudioSourceOption {
             id: "app_loopback".into(),
-            label: "单应用进程内录（选择浏览器/会议软件）".into(),
+            label: "单应用进程内录（暂同系统内录）".into(),
             kind: AudioCaptureMode::AppLoopback,
-            process_id: None,
-            process_name: None,
-        },
-        AudioSourceOption {
-            id: "microphone".into(),
-            label: "默认麦克风".into(),
-            kind: AudioCaptureMode::Microphone,
-            process_id: None,
-            process_name: None,
-        },
-        AudioSourceOption {
-            id: "dual_mix".into(),
-            label: "双路混合（系统声=对方 / 麦克风=我）".into(),
-            kind: AudioCaptureMode::DualMix,
             process_id: None,
             process_name: None,
         },

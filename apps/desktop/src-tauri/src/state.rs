@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum SessionMode {
     Idle,
     Recording,
+    Paused,
     Playing,
     BatchProcessing,
 }
@@ -329,7 +330,7 @@ impl Default for AppSnapshot {
             source_lang: "en".to_string(),
             target_lang: "zh".to_string(),
             lock_source_lang: false,
-            capture_mode: AudioCaptureMode::SystemLoopback,
+            capture_mode: AudioCaptureMode::DualMix,
             selected_app_pid: None,
             selected_mic_id: None,
             segments: Vec::new(),
