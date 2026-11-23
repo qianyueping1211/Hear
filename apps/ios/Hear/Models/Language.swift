@@ -75,6 +75,8 @@ struct SpeakerDetails: Codable, Equatable {
     var gender: Gender? = nil
     var commonLanguage: String? = nil
     var accent: Accent? = nil
+    /// 多人说话时标记该说话人使用用户录制的「我的固定声纹样本」（本地 + 云端通用）
+    var useFixedVoiceSample: Bool? = nil
 }
 
 /// 一条翻译记录
@@ -221,6 +223,16 @@ extension Array where Element == TranslationItem {
                 self[index].speakerManuallySet = true
             }
             let savedDetails = details == SpeakerDetails() ? nil : details
+            if savedDetails?.useFixedVoiceSample == true {
+                // 同一对话中只允许一位说话人绑定「我的固定声纹」，避免多人误用同一声音
+                for i in indices where self[i].speakerID != id {
+                    if self[i].speakerDetails?.useFixedVoiceSample == true {
+                        var other = self[i].speakerDetails ?? SpeakerDetails()
+                        other.useFixedVoiceSample = nil
+                        self[i].speakerDetails = other == SpeakerDetails() ? nil : other
+                    }
+                }
+            }
             for i in indices where self[i].speakerID == id {
                 self[i].speakerName = name
                 self[i].speakerDetails = savedDetails

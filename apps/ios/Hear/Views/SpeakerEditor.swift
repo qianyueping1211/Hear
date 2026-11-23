@@ -9,7 +9,10 @@ struct SpeakerEditor: View {
     @State private var gender: SpeakerDetails.Gender?
     @State private var commonLanguage = ""
     @State private var accent: SpeakerDetails.Accent?
+    @State private var useFixedVoiceSample = false
     @State private var createsNewSpeaker = false
+    @State private var voiceSampleStore = FixedVoiceSampleStore.shared
+    @State private var showVoiceSampleRecorder = false
 
     var body: some View {
         NavigationStack {
@@ -33,6 +36,27 @@ struct SpeakerEditor: View {
                             Text(option.title).tag(Optional(option))
                         }
                     }
+                }
+                Section {
+                    Toggle("使用我的固定声纹", isOn: $useFixedVoiceSample)
+                        .disabled(!voiceSampleStore.hasSample)
+                    Button {
+                        showVoiceSampleRecorder = true
+                    } label: {
+                        LabeledContent(voiceSampleStore.hasSample ? "重新录制我的固定声纹" : "去录制我的固定声纹") {
+                            if voiceSampleStore.hasSample {
+                                Text(String(format: "已录制 %.1f 秒", voiceSampleStore.durationSeconds))
+                                    .foregroundStyle(.green)
+                            } else {
+                                Text("3~10 秒")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("声纹克隆")
+                } footer: {
+                    Text("多人对话时，开启后仅该说话人使用你录制的固定声纹（本地与云端通用），其他说话人仍保留各自原声。")
                 }
                 Section("这句话是谁说的") {
                     ForEach(labels.keys.sorted(), id: \.self) { id in
@@ -68,7 +92,8 @@ struct SpeakerEditor: View {
                     Button("保存") {
                         let details = SpeakerDetails(gender: gender,
                                                      commonLanguage: commonLanguage.isEmpty ? nil : commonLanguage,
-                                                     accent: accent)
+                                                     accent: accent,
+                                                     useFixedVoiceSample: useFixedVoiceSample ? true : nil)
                         save(.saveProfile(name: name, details: details, newSpeaker: createsNewSpeaker))
                     }
                 }
@@ -78,6 +103,10 @@ struct SpeakerEditor: View {
                 gender = item.speakerDetails?.gender
                 commonLanguage = item.speakerDetails?.commonLanguage ?? item.defaultSpeakerLanguage
                 accent = item.speakerDetails?.accent
+                useFixedVoiceSample = item.speakerDetails?.useFixedVoiceSample == true
+            }
+            .sheet(isPresented: $showVoiceSampleRecorder) {
+                VoiceSampleRecorderSheet()
             }
         }
     }

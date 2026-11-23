@@ -36,9 +36,17 @@ final class SessionClonePipeline {
 
     func reference(for item: TranslationItem, in items: [TranslationItem],
                    hasText: (String) -> Bool) -> Reference? {
-        // 0. 若用户录制了「我的固定声纹样本」且开启优先复用，本地 ZipVoice 与云端 Qwen3-TTS 均直接使用该高质样本
         let fixedEntry = fixedReferenceProvider?()
-        if let fixedEntry, fixedEntry.preferOverLive {
+        let itemUsesFixed = item.speakerDetails?.useFixedVoiceSample == true
+        let anySpeakerBoundToFixed = items.contains { $0.speakerDetails?.useFixedVoiceSample == true }
+        let distinctSpeakerCount = Set(items.compactMap(\.speakerID)).count
+
+        // 0. 若该说话人显式开启了「使用我的固定声纹」，直接使用用户录制的固定声纹（本地 ZipVoice + 云端 Qwen3-TTS 通用）
+        if itemUsesFixed, let fixedEntry {
+            return fixedEntry.reference
+        }
+        // 单人对话且未单独指定说话人时，遵循设置里的「克隆时优先使用固定声纹」
+        if !anySpeakerBoundToFixed, distinctSpeakerCount <= 1, let fixedEntry, fixedEntry.preferOverLive {
             return fixedEntry.reference
         }
         if let own = references[item.id] {
@@ -51,13 +59,14 @@ final class SessionClonePipeline {
                     if let ref = references[earlier.id], hasText(ref.text) { return ref }
                 }
             }
-            // 2. 未开启说话人区分或同说话人无前文样本时，兜底复用同语种最近一句的参考音（短词如 OK/谢谢 也能克隆）
+            // 2. 兜底复用同语种最近一句的参考音（多人对话且已指定固定声纹说话人时，避开固定声纹说话人以免串音）
             for earlier in items[..<index].reversed() where earlier.source == item.source {
+                if anySpeakerBoundToFixed && earlier.speakerDetails?.useFixedVoiceSample == true { continue }
                 if let ref = references[earlier.id], hasText(ref.text) { return ref }
             }
         }
-        // 3. 最终兜底：若用户已录制固定声纹样本，则始终可用，避免退回系统朗读
-        if let fixedEntry {
+        // 3. 最终兜底：仅在未把固定声纹绑定给其他说话人时，用固定声纹兜底避免退回系统朗读
+        if !anySpeakerBoundToFixed, let fixedEntry {
             return fixedEntry.reference
         }
         return nil
