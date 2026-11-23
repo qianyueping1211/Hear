@@ -473,6 +473,25 @@ def whisper_status():
     return "未加载"
 
 
+def asr_status_text():
+    """语音识别模块对外展示状态（综合 SenseVoice 与 faster-whisper）。"""
+    ws = whisper_status()
+    sv = sensevoice_available()
+    wh_status = _whisper_state.get("status", "未加载")
+    if ASR_SCHEME == "sensevoice":
+        return "就绪（SenseVoice）" if sv else "SenseVoice 模型未就绪"
+    if ASR_SCHEME == "sensevoice+whisper":
+        if sv and wh_status == "就绪":
+            return "就绪（SenseVoice + Whisper %s）" % ASR_MODEL
+        if sv:
+            if wh_status == "加载中":
+                return "就绪（SenseVoice；Whisper 加载中）"
+            if wh_status == "失败":
+                return "就绪（SenseVoice；Whisper 不可用）"
+            return "就绪（SenseVoice；Whisper %s）" % ws
+    return ws
+
+
 def self_check():
     """后台自己连一下，通不通立刻就知道（不能挡住服务接收请求）"""
     time.sleep(2)
@@ -900,7 +919,7 @@ a{color:#007aff;text-decoration:none}
         if ASR_URL:
             out["asr"] = "外部服务" if backend_alive(ASR_URL) else "外部服务连不上"
         else:
-            out["asr"] = whisper_status()
+            out["asr"] = asr_status_text()
             out["asr_scheme"] = ASR_SCHEME
         mt_state = backend_state(MT_URL)
         out["mt"] = mt_state

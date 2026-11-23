@@ -1,4 +1,4 @@
-# 听见 App 的云端模型服务 —— Windows 上直接跑（能用上 Intel 核显和 NPU）
+﻿# 听见 App 的云端模型服务 —— Windows 上直接跑（能用上 Intel 核显和 NPU）
 #
 # 在哪里运行：仓库的根目录（就是有 README.md、server 文件夹的那一层）。
 #   cd <仓库路径>
@@ -629,6 +629,8 @@ function Get-GpuDevice($exe) {
 
 # ---------------------------------------------------------------- Python（识别模型）
 function Find-Python {
+    $bundled = Join-Path $ServerDir "runtime\python.exe"
+    if (Test-Path -LiteralPath $bundled) { return $bundled }
     $venv = Join-Path $ServerDir ".venv\Scripts\python.exe"
     if (Test-Path $venv) { return $venv }
     foreach ($cand in @("python", "python3", "py")) {
@@ -787,28 +789,34 @@ if ($want.Count -gt 0) {
 }
 if (-not (Find-Exe "llama-server.exe" "")) { Die "没找到 llama-server.exe" }
 
-Say "Python：$py"
+$bundledPy = Join-Path $ServerDir "runtime\python.exe"
+if (Test-Path -LiteralPath $bundledPy) {
+    $venvPy = $bundledPy
+    Say "使用安装包内置 Python 运行时（已预装 faster-whisper / sherpa-onnx / cryptography）"
+} else {
+    Say "Python：$py"
 
-# venv 是一个"文件夹"，不是 python.exe 的路径（之前写错，venv 建到了 python.exe 上，
-# 结果 python.exe 根本不存在）
-$venvDir = Join-Path $ServerDir ".venv"
-$venvPy  = Join-Path $venvDir "Scripts\python.exe"
-if (-not (Test-Path $venvPy)) {
-    Say "建虚拟环境并装 faster-whisper（识别模型用）"
-    if (Test-Path $venvDir) { Remove-Item -Recurse -Force $venvDir -ErrorAction SilentlyContinue }
-    & $py -m venv $venvDir
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPy)) {
-        Say "建虚拟环境失败，退回用系统 Python（可能要管理员权限）"
-        $venvPy = $py
+    # venv 是一个"文件夹"，不是 python.exe 的路径（之前写错，venv 建到了 python.exe 上，
+    # 结果 python.exe 根本不存在）
+    $venvDir = Join-Path $ServerDir ".venv"
+    $venvPy  = Join-Path $venvDir "Scripts\python.exe"
+    if (-not (Test-Path $venvPy)) {
+        Say "建虚拟环境并装 faster-whisper（识别模型用）"
+        if (Test-Path $venvDir) { Remove-Item -Recurse -Force $venvDir -ErrorAction SilentlyContinue }
+        & $py -m venv $venvDir
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPy)) {
+            Say "建虚拟环境失败，退回用系统 Python（可能要管理员权限）"
+            $venvPy = $py
+        }
     }
-}
-if (-not (Test-Path $venvPy)) { Die "找不到可用的 Python" }
-& $venvPy -m pip install --upgrade pip --quiet
-if ($LASTEXITCODE -ne 0) { Say "pip 升级失败，先用现有的 pip 继续" }
-& $venvPy -m pip install -r (Join-Path $ServerDir "requirements.txt") --quiet
-if ($LASTEXITCODE -ne 0) {
-    Say "faster-whisper 没装上，语音识别会不可用（翻译和克隆不受影响）"
-    Step "手动装：& `"$venvPy`" -m pip install -r requirements.txt"
+    if (-not (Test-Path $venvPy)) { Die "找不到可用的 Python" }
+    & $venvPy -m pip install --upgrade pip --quiet
+    if ($LASTEXITCODE -ne 0) { Say "pip 升级失败，先用现有的 pip 继续" }
+    & $venvPy -m pip install -r (Join-Path $ServerDir "requirements.txt") --quiet
+    if ($LASTEXITCODE -ne 0) {
+        Say "faster-whisper 没装上，语音识别会不可用（翻译和克隆不受影响）"
+        Step "手动装：& `"$venvPy`" -m pip install -r requirements.txt"
+    }
 }
 
 # ---------------------------------------------------------------- 云端服务（先起）

@@ -15,8 +15,8 @@ use state::{
 };
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tokio::sync::Mutex;
 
 pub struct AppRuntime {
@@ -416,6 +416,24 @@ async fn import_media_file() -> Result<(), String> {
     Ok(())
 }
 
+fn show_main_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    if let Some(cfg) = app.config().app.windows.iter().find(|w| w.label == "main") {
+        if let Ok(builder) = tauri::WebviewWindowBuilder::from_config(app, cfg) {
+            if let Ok(w) = builder.build() {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }
+    }
+}
+
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show_main = MenuItem::with_id(app, "show_main", "打开听见主工作台", true, None::<&str>)?;
     let toggle_sub = MenuItem::with_id(app, "toggle_sub", "显示 / 隐藏悬浮字幕", true, None::<&str>)?;
@@ -428,16 +446,14 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("听见 Hear — 桌面实时翻译与悬浮字幕")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show_main" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
-                }
+                show_main_window(app);
             }
             "toggle_sub" => {
                 if let Some(w) = app.get_webview_window("subtitle") {
                     if w.is_visible().unwrap_or(false) {
                         let _ = w.hide();
                     } else {
+                        let _ = w.unminimize();
                         let _ = w.show();
                     }
                 }
@@ -452,17 +468,19 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             _ => {}
         })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            }
+            | TrayIconEvent::DoubleClick {
                 button: MouseButton::Left,
                 ..
-            } = event
-            {
-                if let Some(w) = tray.app_handle().get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.set_focus();
-                }
+            } => {
+                show_main_window(tray.app_handle());
             }
+            _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
@@ -482,6 +500,15 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(runtime)
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" || window.label() == "subtitle" {
+                    // 点击关闭按钮时隐藏到系统托盘，避免窗口被销毁后无法从托盘重新打开
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(move |app| {
             let loaded = load_config(app.handle());
             let initial_style = loaded.subtitle_style.clone();

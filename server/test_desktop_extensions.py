@@ -288,11 +288,38 @@ def test_local_secret_and_per_device_preview_and_sse():
         hear_cloud.LOCAL_SECRET = old_secret
 
 
+def test_asr_status_text_reporting():
+    print("== 5. /health ASR status combines SenseVoice and Whisper cleanly ==")
+    old_scheme = hear_cloud.ASR_SCHEME
+    old_state = dict(hear_cloud._whisper_state)
+    old_sv_fn = hear_cloud.sensevoice_available
+    try:
+        hear_cloud.ASR_SCHEME = "sensevoice+whisper"
+        hear_cloud.sensevoice_available = lambda: True
+        hear_cloud._whisper_state.update({"status": "就绪", "detail": ""})
+        txt = hear_cloud.asr_status_text()
+        check("both ready reports SenseVoice + Whisper", txt.startswith("就绪") and "SenseVoice" in txt and "Whisper" in txt, txt)
+
+        hear_cloud._whisper_state.update({"status": "失败", "detail": "missing faster_whisper"})
+        txt2 = hear_cloud.asr_status_text()
+        check("SenseVoice ready + Whisper failed still reports SenseVoice ready", txt2.startswith("就绪") and "SenseVoice" in txt2, txt2)
+
+        hear_cloud.sensevoice_available = lambda: False
+        txt3 = hear_cloud.asr_status_text()
+        check("neither ready surfaces real Whisper failure detail", "missing faster_whisper" in txt3, txt3)
+    finally:
+        hear_cloud.ASR_SCHEME = old_scheme
+        hear_cloud._whisper_state.clear()
+        hear_cloud._whisper_state.update(old_state)
+        hear_cloud.sensevoice_available = old_sv_fn
+
+
 def main():
     test_decode_wav_16_and_32()
     test_auth_http_exception_survival()
     test_login_throttle_and_negative_content_length()
     test_local_secret_and_per_device_preview_and_sse()
+    test_asr_status_text_reporting()
     print("\npassed %d, failed %d" % (passed, failed))
     return 1 if failed else 0
 

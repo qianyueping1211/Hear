@@ -103,6 +103,8 @@ function Resolve-AuthMode {
 }
 
 function Find-LauncherPython {
+    $bundled = Join-Path $serverDir 'runtime\python.exe'
+    if (Test-Path -LiteralPath $bundled) { return @($bundled) }
     $venv = Join-Path $serverDir '.venv\Scripts\python.exe'
     if (Test-Path -LiteralPath $venv) { return @($venv) }
     foreach ($candidate in @('python', 'python3')) {
