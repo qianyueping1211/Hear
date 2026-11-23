@@ -29,7 +29,7 @@ final class ConversationStore: ObservableObject {
     private let encoder: JSONEncoder = {
         let e = JSONEncoder()
         e.dateEncodingStrategy = .iso8601
-        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        e.outputFormatting = [.sortedKeys]
         return e
     }()
     private let decoder: JSONDecoder = {

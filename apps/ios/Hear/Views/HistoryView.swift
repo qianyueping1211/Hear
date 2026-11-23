@@ -2,20 +2,41 @@ import SwiftUI
 
 /// 历史对话列表：查看、重命名、删除
 struct HistoryView: View {
+    @EnvironmentObject var session: LiveSession
     @ObservedObject private var store = ConversationStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var renaming: ConversationMeta?
     @State private var newTitle = ""
     @State private var deleting: ConversationMeta?
+    @State private var query = ""
+
+    private var filteredMetas: [ConversationMeta] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return store.metas }
+        return store.metas.filter {
+            $0.title.localizedCaseInsensitiveContains(q)
+                || $0.preview.localizedCaseInsensitiveContains(q)
+                || $0.langs.localizedCaseInsensitiveContains(q)
+        }
+    }
 
     var body: some View {
         NavigationStack {
             List {
-                if store.metas.isEmpty {
-                    ContentUnavailableView("还没有历史对话", systemImage: "clock",
-                                           description: Text("实时翻译的内容会自动保存在这里。"))
+                if filteredMetas.isEmpty {
+                    ContentUnavailableView(
+                        query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ? "还没有历史对话"
+                            : "没有匹配的对话",
+                        systemImage: query.isEmpty ? "clock" : "magnifyingglass",
+                        description: Text(
+                            query.isEmpty
+                                ? "实时翻译的内容会自动保存在这里。"
+                                : "试试换一个关键词搜索标题或内容摘要。"
+                        )
+                    )
                 }
-                ForEach(store.metas) { m in
+                ForEach(filteredMetas) { m in
                     NavigationLink {
                         ConversationDetailView(id: m.id)
                     } label: {
@@ -32,6 +53,7 @@ struct HistoryView: View {
                     }
                 }
             }
+            .searchable(text: $query, prompt: "搜索标题或摘要")
             .navigationTitle("历史")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -49,7 +71,13 @@ struct HistoryView: View {
                                 isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
                                 titleVisibility: .visible,
                                 presenting: deleting) { m in
-                Button("删除「\(m.title)」", role: .destructive) { store.delete(m.id) }
+                Button("删除「\(m.title)」", role: .destructive) {
+                    let deletingActive = (m.id == session.conversationID)
+                    store.delete(m.id)
+                    if deletingActive {
+                        session.clearPage()
+                    }
+                }
                 Button("取消", role: .cancel) {}
             } message: { _ in
                 Text("对话内容和所有总结都会被删除，无法恢复。")

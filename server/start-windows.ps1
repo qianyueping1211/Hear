@@ -810,12 +810,27 @@ if (Test-Path -LiteralPath $bundledPy) {
         }
     }
     if (-not (Test-Path $venvPy)) { Die "找不到可用的 Python" }
-    & $venvPy -m pip install --upgrade pip --quiet
-    if ($LASTEXITCODE -ne 0) { Say "pip 升级失败，先用现有的 pip 继续" }
-    & $venvPy -m pip install -r (Join-Path $ServerDir "requirements.txt") --quiet
-    if ($LASTEXITCODE -ne 0) {
-        Say "faster-whisper 没装上，语音识别会不可用（翻译和克隆不受影响）"
-        Step "手动装：& `"$venvPy`" -m pip install -r requirements.txt"
+    $reqFile = Join-Path $ServerDir "requirements.txt"
+    $reqStamp = Join-Path $venvDir ".requirements.sha256"
+    $reqHash = ""
+    if (Test-Path -LiteralPath $reqFile) {
+        try { $reqHash = (Get-FileHash -LiteralPath $reqFile -Algorithm SHA256).Hash } catch { $reqHash = "" }
+    }
+    $savedHash = if (Test-Path -LiteralPath $reqStamp) {
+        (Get-Content -LiteralPath $reqStamp -Raw -ErrorAction SilentlyContinue).Trim()
+    } else { "" }
+    if ($reqHash -and $savedHash -eq $reqHash) {
+        Step "Python 依赖未变化，跳过 pip 安装（离线也能秒起）"
+    } else {
+        & $venvPy -m pip install --upgrade pip --quiet
+        if ($LASTEXITCODE -ne 0) { Say "pip 升级失败，先用现有的 pip 继续" }
+        & $venvPy -m pip install -r $reqFile --quiet
+        if ($LASTEXITCODE -ne 0) {
+            Say "faster-whisper 没装上，语音识别会不可用（翻译和克隆不受影响）"
+            Step "手动装：& `"$venvPy`" -m pip install -r requirements.txt"
+        } elseif ($reqHash -and (Test-Path -LiteralPath $venvDir)) {
+            Set-Content -LiteralPath $reqStamp -Value $reqHash -Encoding ASCII -ErrorAction SilentlyContinue
+        }
     }
 }
 

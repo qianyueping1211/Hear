@@ -26,6 +26,9 @@ $secretDir = Join-Path $dataDir 'secrets'
 $gatewayId = if ($env:HEAR_GATEWAY_ID) { $env:HEAR_GATEWAY_ID.Trim() } else { 'hear-home' }
 $credFile = Join-Path $secretDir "$gatewayId.cred"
 $port = if ($env:HEAR_TOKEN_SERVICE_PORT) { $env:HEAR_TOKEN_SERVICE_PORT.Trim() } else { '8443' }
+if ($port -notmatch '^\d+$' -or [int]$port -lt 1 -or [int]$port -gt 65535) {
+    throw "HEAR_TOKEN_SERVICE_PORT 必须是 1~65535 的纯数字端口（当前值：$port）"
+}
 $adminUrl = "http://127.0.0.1:$port/admin/"
 $taskName = 'Hear Token Admin'
 
@@ -33,6 +36,8 @@ function Say($text) { Write-Host $text -ForegroundColor Cyan }
 function Note($text) { Write-Host "  $text" -ForegroundColor DarkGray }
 
 function Find-Python {
+    $bundled = Join-Path $serverDir 'runtime\python.exe'
+    if (Test-Path -LiteralPath $bundled) { return @($bundled) }
     $venv = Join-Path $serverDir '.venv\Scripts\python.exe'
     if (Test-Path -LiteralPath $venv) { return @($venv) }
     foreach ($candidate in @('python', 'python3')) {
@@ -62,10 +67,20 @@ function Test-ServiceRunning {
     } catch { return $false }
 }
 
+function Protect-PrivateDir($path) {
+    New-Item -ItemType Directory -Path $path -Force | Out-Null
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $grant = if ($sid) { "*$($sid):(OI)(CI)F" } else { "$($env:USERNAME):(OI)(CI)F" }
+    & icacls.exe $path /inheritance:r /grant:r $grant | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Note "提示：设置目录访问权限未成功（$path），请确认当前用户拥有所有权"
+    }
+}
+
 function Protect-SecretDir {
-    New-Item -ItemType Directory -Path $secretDir -Force | Out-Null
-    # 只让当前 Windows 用户访问凭据目录
-    & icacls.exe $secretDir /inheritance:r /grant:r "$($env:USERNAME):(OI)(CI)F" | Out-Null
+    Protect-PrivateDir $secretDir
+    Protect-PrivateDir (Join-Path $dataDir 'token-data')
+    Protect-PrivateDir (Join-Path $dataDir 'backups')
 }
 
 function Initialize-Admin {

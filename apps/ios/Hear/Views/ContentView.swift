@@ -79,10 +79,14 @@ struct ContentView: View {
                 if let id = editingID, let item = session.items.first(where: { $0.id == id }) {
                     SourceEditor(text: $draft, flag: item.source.flag,
                                  translation: item.displayedTranslation(using: session.chineseDisplayLanguage),
-                                 targetFlag: item.displayedTranslationTarget.flag) {
-                        if draft != originalDraft { session.editSource(id, to: draft) }
-                        editingID = nil
-                    }
+                                 targetFlag: item.displayedTranslationTarget.flag,
+                                 onCancel: {
+                                     editingID = nil
+                                 },
+                                 onDone: {
+                                     if draft != originalDraft { session.editSource(id, to: draft) }
+                                     editingID = nil
+                                 })
                 }
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
@@ -605,12 +609,13 @@ private struct BubbleLongPress: ViewModifier {
     }
 }
 
-/// 修改原文的编辑框：点编辑框以外的地方就保存，并重新翻译
+/// 修改原文的编辑框：提供显式取消与保存重译按钮，适配小屏键盘与无障碍焦点
 struct SourceEditor: View {
     @Binding var text: String
     let flag: String
     var translation: String = ""          // 当前译文，只看不改
     var targetFlag: String = ""
+    let onCancel: () -> Void
     let onDone: () -> Void
     @FocusState private var focused: Bool
 
@@ -619,38 +624,66 @@ struct SourceEditor: View {
             Color.black.opacity(0.45)
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
-                .onTapGesture { onDone() }
-            VStack(alignment: .leading, spacing: 10) {
-                Text("\(flag) 修改原文").font(.headline)
-                TextField("原文", text: $text, axis: .vertical)
-                    .lineLimit(2...8)
-                    .focused($focused)
-                    .padding(10)
-                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
-                // 最新译文：方便对照，不能修改
-                if !translation.isEmpty {
-                    Text("\(targetFlag) 最新译文").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
-                    Text(translation)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                .onTapGesture { onCancel() }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("\(flag) 修改原文").font(.headline)
+                        Spacer()
+                        Button("取消", action: onCancel)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    TextField("原文", text: $text, axis: .vertical)
+                        .lineLimit(2...8)
+                        .focused($focused)
                         .padding(10)
-                        .background(Color(.secondarySystemBackground).opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
-                        .textSelection(.enabled)
-                        .contextMenu {
-                            Button {
-                                UIPasteboard.general.string = translation
-                            } label: {
-                                Label("复制译文", systemImage: "doc.on.doc")
+                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                    // 最新译文：方便对照，不能修改
+                    if !translation.isEmpty {
+                        Text("\(targetFlag) 最新译文").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                        Text(translation)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .background(Color(.secondarySystemBackground).opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+                            .textSelection(.enabled)
+                            .contextMenu {
+                                Button {
+                                    UIPasteboard.general.string = translation
+                                } label: {
+                                    Label("复制译文", systemImage: "doc.on.doc")
+                                }
                             }
+                    }
+                    HStack(spacing: 12) {
+                        Button(action: onCancel) {
+                            Text("取消")
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
                         }
+                        .foregroundStyle(.primary)
+                        Button(action: onDone) {
+                            Text("保存并重译")
+                                .fontWeight(.semibold)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                        .foregroundStyle(.white)
+                    }
+                    .padding(.top, 4)
                 }
-                Text("点空白处保存，并重新翻译").font(.footnote).foregroundStyle(.secondary)
+                .padding(16)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+                .padding(.horizontal, 16)
+                .padding(.top, 56)
+                .padding(.bottom, 24)
             }
-            .padding(16)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
-            .padding(.horizontal, 16)
-            .padding(.top, 110)
+            .scrollBounceBehavior(.basedOnSize)
         }
+        .accessibilityAddTraits(.isModal)
         .onAppear { focused = true }
     }
 }

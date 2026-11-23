@@ -240,8 +240,20 @@ enum LLMClient {
     private static func url(_ base: String, _ path: String) throws -> URL {
         var b = base.trimmingCharacters(in: .whitespacesAndNewlines)
         while b.hasSuffix("/") { b.removeLast() }
+        // 兼容用户在 Anthropic 等地址末尾多填了 /v1（避免拼出 /v1/v1/messages）
+        if path.hasPrefix("/v1/"), b.lowercased().hasSuffix("/v1") {
+            b.removeLast(3)
+            while b.hasSuffix("/") { b.removeLast() }
+        }
         guard let u = URL(string: b + path) else { throw LLMError.badURL }
         return u
+    }
+
+    /// 推理系模型（o1/o3/o4/gpt-5 等）不接受自定义 temperature 参数，传了会返回 HTTP 400
+    private static func isReasoningModel(_ model: String) -> Bool {
+        let lower = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let base = lower.split(separator: "/").last.map(String.init) ?? lower
+        return base.hasPrefix("o1") || base.hasPrefix("o3") || base.hasPrefix("o4") || base.hasPrefix("gpt-5")
     }
 
     /// 发请求用的会话：跨主机的重定向由 LLMRedirectGuard 拦下来
@@ -345,17 +357,18 @@ enum LLMClient {
 
     /// 获取模型列表
     static func listModels(_ p: LLMProvider, key: String) async throws -> [String] {
-        try checkCredentials(p, key: key)
+        let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        try checkCredentials(p, key: cleanKey)
         var req: URLRequest
         switch p.kind {
         case .openai:
             req = URLRequest(url: try url(p.baseURL, "/models"))
             // 没有 Key 就别发认证头（局域网的自建服务不需要 Key，
             // 发一个空的头出去反而怪）
-            if !key.isEmpty { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
+            if !cleanKey.isEmpty { req.setValue("Bearer \(cleanKey)", forHTTPHeaderField: "Authorization") }
         case .anthropic:
             req = URLRequest(url: try url(p.baseURL, "/v1/models?limit=100"))
-            if !key.isEmpty { req.setValue(key, forHTTPHeaderField: "x-api-key") }
+            if !cleanKey.isEmpty { req.setValue(cleanKey, forHTTPHeaderField: "x-api-key") }
             req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         }
         req.timeoutInterval = 30
@@ -367,23 +380,33 @@ enum LLMClient {
     /// 发送一次对话，返回文字结果
     static func complete(_ p: LLMProvider, key: String, model: String,
                          system: String, user: String) async throws -> String {
-        try checkCredentials(p, key: key)
+        let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        try checkCredentials(p, key: cleanKey)
         var req: URLRequest
         let body: [String: Any]
         switch p.kind {
         case .openai:
             req = URLRequest(url: try url(p.baseURL, "/chat/completions"))
-            if !key.isEmpty { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
-            body = ["model": model,
-                    "temperature": 0.3,
-                    "messages": [["role": "system", "content": system],
-                                 ["role": "user", "content": user]]]
+            if !cleanKey.isEmpty { req.setValue("Bearer \(cleanKey)", forHTTPHeaderField: "Authorization") }
+            var payload: [String: Any] = [
+                "model": model,
+                "messages": [["role": "system", "content": system],
+                             ["role": "user", "content": user]]
+            ]
+            if !isReasoningModel(model) {
+                payload["temperature"] = 0.3
+            }
+            body = payload
         case .anthropic:
             req = URLRequest(url: try url(p.baseURL, "/v1/messages"))
-            if !key.isEmpty { req.setValue(key, forHTTPHeaderField: "x-api-key") }
+            if !cleanKey.isEmpty { req.setValue(cleanKey, forHTTPHeaderField: "x-api-key") }
             req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            let lowerModel = model.lowercased()
+            let maxTokens = (lowerModel.contains("claude-3-opus")
+                || lowerModel.contains("claude-3-sonnet")
+                || lowerModel.contains("claude-3-haiku")) ? 4096 : 8192
             body = ["model": model,
-                    "max_tokens": 8000,
+                    "max_tokens": maxTokens,
                     "system": system,
                     "messages": [["role": "user", "content": user]]]
         }
@@ -397,7 +420,14 @@ enum LLMClient {
         switch p.kind {
         case .openai:
             let choice = (json["choices"] as? [[String: Any]])?.first
-            text = (choice?["message"] as? [String: Any])?["content"] as? String
+            let msg = choice?["message"] as? [String: Any]
+            if let str = msg?["content"] as? String {
+                text = str
+            } else if let parts = msg?["content"] as? [[String: Any]] {
+                text = parts.compactMap { $0["text"] as? String }.joined()
+            } else {
+                text = nil
+            }
         case .anthropic:
             text = (json["content"] as? [[String: Any]])?
                 .compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }

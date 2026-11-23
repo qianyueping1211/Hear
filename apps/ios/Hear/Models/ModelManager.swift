@@ -193,10 +193,21 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
     private var moveError: Error?
     /// 上次失败时系统给的续传数据（断点续传用）
     private var resumeData: Data?
+    private var resumeFileURL: URL?
     /// 已经重试了几次
     private var retryCount = 0
     private let maxRetries = 8
     private var sourceURL: URL!
+
+    private static let transientURLErrorCodes: Set<Int> = [
+        NSURLErrorTimedOut,               // -1001
+        NSURLErrorCannotFindHost,         // -1003
+        NSURLErrorCannotConnectToHost,    // -1004
+        NSURLErrorNetworkConnectionLost,  // -1005
+        NSURLErrorDNSLookupFailed,        // -1006
+        NSURLErrorNotConnectedToInternet, // -1009
+        NSURLErrorDataNotAllowed,         // -1020
+    ]
 
     private static func resumeFile(for url: URL) -> URL {
         let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -211,9 +222,10 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
         self.progress = progress
         sourceURL = url
         let savedResume = Self.resumeFile(for: url)
+        resumeFileURL = savedResume
         resumeData = try? Data(contentsOf: savedResume)
         retryCount = 0
-        // 网络中断（-1005）、超时（-1001）这类错误会自动重试，能续传就从断点继续
+        // 网络中断（-1005）、超时（-1001）、无网（-1009）这类瞬断错误会自动重试，能续传就从断点继续
         var lastError: Error?
         var retriedWithoutSavedData = false
         while retryCount <= maxRetries {
@@ -228,7 +240,7 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
                 lastError = error
                 // 这个错误重试也没用（比如 404、没权限）
                 let code = (error as NSError).code
-                if code == -1005 || code == -1001 || code == -1003 || code == NSURLErrorNetworkConnectionLost {
+                if Self.transientURLErrorCodes.contains(code) {
                     retryCount += 1
                     if retryCount > maxRetries { break }
                     // 退避等待：网络抖一下的话过几秒就好了
@@ -319,10 +331,13 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let e = error ?? moveError {
-            // 拿到系统的续传数据（网络中断时会给），下次从断点继续
+            // 拿到系统的续传数据（网络中断时会给），立刻落盘防止重试耗尽或切后台丢失进度
             let ns = e as NSError
             if let rd = ns.userInfo[NSURLSessionDownloadTaskResumeData] as? Data, rd.count > 0 {
                 resumeData = rd
+                if let file = resumeFileURL {
+                    try? rd.write(to: file, options: .atomic)
+                }
             }
             continuation?.resume(throwing: e)
         } else {
