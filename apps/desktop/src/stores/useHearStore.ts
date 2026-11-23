@@ -12,6 +12,8 @@ import type {
   SubtitleStyle,
   SummaryTemplateOption,
   TtsOutputSettings,
+  UpdateCheckResult,
+  UpdateConfig,
 } from "../types/hear";
 
 const isTauriRuntime = () =>
@@ -103,6 +105,12 @@ const DEFAULT_PLAYBACK: RecordingPlaybackState = {
   peaks: [],
 };
 
+const DEFAULT_UPDATE_CONFIG: UpdateConfig = {
+  repo: "qianyueping1211/Hear",
+  githubToken: "",
+  autoCheckOnStartup: true,
+};
+
 interface HearStoreState extends AppSnapshot {
   audioSources: AudioSourceOption[];
   audioLevel: number;
@@ -112,9 +120,13 @@ interface HearStoreState extends AppSnapshot {
   summaryMarkdown: string;
   summaryGenerating: boolean;
   settingsOpen: boolean;
-  activeSettingsTab: "server" | "subtitle" | "audio" | "general";
+  activeSettingsTab: "server" | "subtitle" | "audio" | "general" | "system";
   testingLocal: boolean;
   testingCloud: boolean;
+  checkingUpdate: boolean;
+  downloadingUpdate: boolean;
+  updateDownloadProgress: { downloaded: number; total: number } | null;
+  updateDownloadError: string | null;
 
   hydrate: () => Promise<void>;
   setSearchQuery: (q: string) => void;
@@ -140,6 +152,10 @@ interface HearStoreState extends AppSnapshot {
     overrideAddress?: string,
     overrideToken?: string
   ) => Promise<ServiceProbeResult | null>;
+  saveUpdateConfig: (patch: Partial<UpdateConfig>) => Promise<UpdateConfig>;
+  checkForUpdates: (override?: UpdateConfig) => Promise<UpdateCheckResult | null>;
+  downloadAndInstallUpdate: () => Promise<void>;
+  openGithubUrl: (url: string) => Promise<void>;
   updateTtsSettings: (patch: Partial<TtsOutputSettings>) => void;
   setGlossary: (text: string) => void;
 
@@ -149,6 +165,7 @@ interface HearStoreState extends AppSnapshot {
 }
 
 export const useHearStore = create<HearStoreState>((set, get) => ({
+  appVersion: "0.1.3",
   mode: "idle" as SessionMode,
   sourceLang: "en",
   targetLang: "zh",
@@ -164,6 +181,8 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   ttsSettings: DEFAULT_TTS,
   playback: DEFAULT_PLAYBACK,
   glossary: "",
+  updateConfig: DEFAULT_UPDATE_CONFIG,
+  updateInfo: undefined,
 
   audioSources: [
     { id: "sys", label: "系统声音内录（自动排除听见自身）", kind: "system_loopback" },
@@ -180,6 +199,10 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   activeSettingsTab: "server",
   testingLocal: false,
   testingCloud: false,
+  checkingUpdate: false,
+  downloadingUpdate: false,
+  updateDownloadProgress: null,
+  updateDownloadError: null,
 
   hydrate: async () => {
     const snap = await tauriInvoke<AppSnapshot>("get_snapshot");
@@ -230,6 +253,12 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       });
       await listen<SubtitleStyle>("subtitle:style", (ev) => {
         set({ subtitleStyle: ev.payload });
+      });
+      await listen<UpdateCheckResult>("update:info", (ev) => {
+        set({ updateInfo: ev.payload });
+      });
+      await listen<{ downloaded: number; total: number }>("update:progress", (ev) => {
+        set({ updateDownloadProgress: ev.payload });
       });
       await listen<number>("audio:level", (ev) => {
         set({ audioLevel: ev.payload });
@@ -343,6 +372,54 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     } finally {
       if (target === "local") set({ testingLocal: false });
       else set({ testingCloud: false });
+    }
+  },
+
+  saveUpdateConfig: async (patch) => {
+    const merged: UpdateConfig = { ...get().updateConfig, ...patch };
+    set({ updateConfig: merged });
+    const saved = await tauriInvoke<UpdateConfig>("save_update_config", {
+      config: merged,
+    });
+    return saved ?? merged;
+  },
+
+  checkForUpdates: async (override) => {
+    set({ checkingUpdate: true, updateDownloadError: null });
+    try {
+      const res = await tauriInvoke<UpdateCheckResult>("check_for_updates", {
+        overrideConfig: override ?? null,
+      });
+      if (res) set({ updateInfo: res });
+      return res;
+    } finally {
+      set({ checkingUpdate: false });
+    }
+  },
+
+  downloadAndInstallUpdate: async () => {
+    set({
+      downloadingUpdate: true,
+      updateDownloadError: null,
+      updateDownloadProgress: { downloaded: 0, total: get().updateInfo?.assetSize ?? 0 },
+    });
+    try {
+      await tauriInvoke<string>("download_and_install_update");
+    } catch (err) {
+      set({
+        updateDownloadError:
+          err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      set({ downloadingUpdate: false });
+    }
+  },
+
+  openGithubUrl: async (url) => {
+    if (isTauriRuntime()) {
+      await tauriInvoke("open_github_url", { url });
+    } else {
+      window.open(url, "_blank", "noopener,noreferrer");
     }
   },
 

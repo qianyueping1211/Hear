@@ -1,13 +1,17 @@
 pub mod cloud;
+pub mod config_store;
 pub mod platform;
 pub mod recorder;
 pub mod state;
+pub mod updater;
 pub mod vad;
 
 use cloud::HearCloudClient;
+use config_store::{load_config, save_config, PersistedConfig};
 use state::{
     AppSnapshot, AudioCaptureMode, AudioSourceOption, EngineSource, ServiceConfig,
-    ServiceProbeResult, SessionMode, SubtitleStyle, TtsOutputSettings,
+    ServiceProbeResult, SessionMode, SubtitleStyle, TtsOutputSettings, UpdateCheckResult,
+    UpdateConfig,
 };
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
@@ -26,6 +30,20 @@ impl AppRuntime {
             snapshot: Mutex::new(AppSnapshot::default()),
             cloud: HearCloudClient::new(),
         }
+    }
+
+    pub async fn persist(&self, app: &AppHandle) {
+        let cfg = {
+            let snap = self.snapshot.lock().await;
+            PersistedConfig {
+                service_config: snap.service_config.clone(),
+                subtitle_style: snap.subtitle_style.clone(),
+                tts_settings: snap.tts_settings.clone(),
+                glossary: snap.glossary.clone(),
+                update_config: snap.update_config.clone(),
+            }
+        };
+        save_config(app, &cfg);
     }
 }
 
@@ -176,6 +194,7 @@ async fn set_subtitle_style(
         let mut snap = rt.snapshot.lock().await;
         snap.subtitle_style = style.clone();
     }
+    rt.persist(&app).await;
     let _ = app.emit("subtitle:style", style);
     Ok(())
 }
@@ -183,11 +202,15 @@ async fn set_subtitle_style(
 /// 仅保存服务连接配置，不拉起或干预任何服务端进程
 #[tauri::command]
 async fn save_service_config(
+    app: AppHandle,
     rt: State<'_, Arc<AppRuntime>>,
     config: ServiceConfig,
 ) -> Result<ServiceConfig, String> {
-    let mut snap = rt.snapshot.lock().await;
-    snap.service_config = config.clone();
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.service_config = config.clone();
+    }
+    rt.persist(&app).await;
     Ok(config)
 }
 
@@ -218,17 +241,107 @@ async fn test_service_connection(
 }
 
 #[tauri::command]
+async fn save_update_config(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    config: UpdateConfig,
+) -> Result<UpdateConfig, String> {
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.update_config = config.clone();
+    }
+    rt.persist(&app).await;
+    Ok(config)
+}
+
+#[tauri::command]
+async fn check_for_updates(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    override_config: Option<UpdateConfig>,
+) -> Result<UpdateCheckResult, String> {
+    let cfg = match override_config {
+        Some(c) => {
+            {
+                let mut snap = rt.snapshot.lock().await;
+                snap.update_config = c.clone();
+            }
+            rt.persist(&app).await;
+            c
+        }
+        None => rt.snapshot.lock().await.update_config.clone(),
+    };
+    let res = updater::check_for_updates(&cfg).await;
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.update_info = Some(res.clone());
+    }
+    let _ = app.emit("update:info", &res);
+    Ok(res)
+}
+
+#[tauri::command]
+async fn download_and_install_update(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+) -> Result<String, String> {
+    let (token, asset_url, asset_name) = {
+        let snap = rt.snapshot.lock().await;
+        let info = snap
+            .update_info
+            .as_ref()
+            .ok_or_else(|| "请先检查更新获取新版本信息".to_string())?;
+        let url = info
+            .asset_api_url
+            .clone()
+            .ok_or_else(|| "当前新版本未找到 .exe 安装包附件".to_string())?;
+        let name = info
+            .asset_name
+            .clone()
+            .unwrap_or_else(|| "Hear-Win-Update.exe".to_string());
+        (snap.update_config.github_token.clone(), url, name)
+    };
+
+    let app_clone = app.clone();
+    let mut last_emit = std::time::Instant::now();
+    let path = updater::download_and_launch_installer(&asset_url, &asset_name, &token, |done, total| {
+        if last_emit.elapsed().as_millis() >= 120 || (total > 0 && done >= total) {
+            last_emit = std::time::Instant::now();
+            let _ = app_clone.emit(
+                "update:progress",
+                serde_json::json!({ "downloaded": done, "total": total }),
+            );
+        }
+    })
+    .await?;
+
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn open_github_url(url: String) -> Result<(), String> {
+    updater::open_github_url(&url)
+}
+
+#[tauri::command]
 async fn set_tts_settings(
+    app: AppHandle,
     rt: State<'_, Arc<AppRuntime>>,
     settings: TtsOutputSettings,
 ) -> Result<(), String> {
     rt.snapshot.lock().await.tts_settings = settings;
+    rt.persist(&app).await;
     Ok(())
 }
 
 #[tauri::command]
-async fn set_glossary(rt: State<'_, Arc<AppRuntime>>, glossary: String) -> Result<(), String> {
+async fn set_glossary(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    glossary: String,
+) -> Result<(), String> {
     rt.snapshot.lock().await.glossary = glossary;
+    rt.persist(&app).await;
     Ok(())
 }
 
@@ -292,7 +405,6 @@ async fn generate_summary(
     _rt: State<'_, Arc<AppRuntime>>,
     template_id: String,
 ) -> Result<String, String> {
-    // Sprint 4 接入完整流式 LLMClient（OpenAI / Anthropic / 本地模型）
     Ok(format!(
         "### 一键总结预览（模板：{}）\n\n- [00:00] 当前为预览版框架输出，后续将接入完整流式 LLM 纪要生成与时间戳锚点。",
         template_id
@@ -301,7 +413,6 @@ async fn generate_summary(
 
 #[tauri::command]
 async fn import_media_file() -> Result<(), String> {
-    // Sprint 4 接入文件选择对话框 + 音频提取 + 离线批量转译管线
     Ok(())
 }
 
@@ -364,17 +475,54 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 pub fn run() {
     tracing_subscriber::fmt::init();
     let runtime = Arc::new(AppRuntime::new());
+    let runtime_setup = runtime.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(runtime)
-        .setup(|app| {
+        .setup(move |app| {
+            let loaded = load_config(app.handle());
+            let initial_style = loaded.subtitle_style.clone();
+            let auto_check = loaded.update_config.auto_check_on_startup;
+            let update_cfg = loaded.update_config.clone();
+
+            {
+                let mut snap = runtime_setup.snapshot.blocking_lock();
+                snap.service_config = loaded.service_config;
+                snap.subtitle_style = loaded.subtitle_style;
+                snap.tts_settings = loaded.tts_settings;
+                snap.glossary = loaded.glossary;
+                snap.update_config = loaded.update_config;
+            }
+
             setup_tray(app.handle())?;
             if let Some(sub) = app.get_webview_window("subtitle") {
-                let _ = platform::apply_overlay_traits(&sub, false, true);
+                if !initial_style.visible {
+                    let _ = sub.hide();
+                }
+                let _ = platform::apply_overlay_traits(
+                    &sub,
+                    initial_style.click_through,
+                    initial_style.exclude_from_capture,
+                );
             }
+
+            // 启动时后台自动检测 Windows 新版本（静默不阻塞启动）
+            if auto_check {
+                let handle = app.handle().clone();
+                let rt_bg = runtime_setup.clone();
+                tauri::async_runtime::spawn(async move {
+                    let res = updater::check_for_updates(&update_cfg).await;
+                    {
+                        let mut snap = rt_bg.snapshot.lock().await;
+                        snap.update_info = Some(res.clone());
+                    }
+                    let _ = handle.emit("update:info", &res);
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -391,6 +539,10 @@ pub fn run() {
             set_subtitle_style,
             save_service_config,
             test_service_connection,
+            save_update_config,
+            check_for_updates,
+            download_and_install_update,
+            open_github_url,
             set_tts_settings,
             set_glossary,
             retranslate_segment,

@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import {
   AlertCircle,
+  ArrowUpCircle,
   CheckCircle2,
   Cloud,
+  Download,
+  ExternalLink,
   Laptop,
   Loader2,
   Palette,
@@ -127,6 +130,7 @@ function StatusPanel({ status }: { status: ServiceProbeResult }) {
 
 export function SettingsModal() {
   const {
+    appVersion,
     settingsOpen,
     activeSettingsTab,
     setSettingsOpen,
@@ -138,8 +142,18 @@ export function SettingsModal() {
     subtitleStyle,
     ttsSettings,
     glossary,
+    updateConfig,
+    updateInfo,
+    checkingUpdate,
+    downloadingUpdate,
+    updateDownloadProgress,
+    updateDownloadError,
     saveServiceConfig,
     testServiceConnection,
+    saveUpdateConfig,
+    checkForUpdates,
+    downloadAndInstallUpdate,
+    openGithubUrl,
     updateSubtitleStyle,
     updateTtsSettings,
     setGlossary,
@@ -150,7 +164,10 @@ export function SettingsModal() {
   const [localToken, setLocalToken] = useState(serviceConfig.localAccessToken);
   const [cloudAddress, setCloudAddress] = useState(serviceConfig.cloudServiceAddress);
   const [cloudToken, setCloudToken] = useState(serviceConfig.cloudAccessToken);
-  const [savedHint, setSavedHint] = useState<"local" | "cloud" | null>(null);
+  const [ghRepo, setGhRepo] = useState(updateConfig.repo);
+  const [ghToken, setGhToken] = useState(updateConfig.githubToken);
+  const [autoCheck, setAutoCheck] = useState(updateConfig.autoCheckOnStartup);
+  const [savedHint, setSavedHint] = useState<"local" | "cloud" | "system" | null>(null);
 
   useEffect(() => {
     if (settingsOpen) {
@@ -158,18 +175,41 @@ export function SettingsModal() {
       setLocalToken(serviceConfig.localAccessToken);
       setCloudAddress(serviceConfig.cloudServiceAddress);
       setCloudToken(serviceConfig.cloudAccessToken);
+      setGhRepo(updateConfig.repo);
+      setGhToken(updateConfig.githubToken);
+      setAutoCheck(updateConfig.autoCheckOnStartup);
       setSavedHint(null);
     }
-  }, [settingsOpen, serviceConfig]);
+  }, [settingsOpen, serviceConfig, updateConfig]);
 
   if (!settingsOpen) return null;
 
   const tabs: { id: typeof activeSettingsTab; label: string; icon: React.ReactNode }[] = [
-    { id: "server", label: "模型服务与连接", icon: <Server className="w-4 h-4" /> },
-    { id: "subtitle", label: "悬浮字幕样式", icon: <Sliders className="w-4 h-4" /> },
-    { id: "audio", label: "朗读与原音压低", icon: <Volume2 className="w-4 h-4" /> },
-    { id: "general", label: "快捷键与术语表", icon: <Shield className="w-4 h-4" /> },
+    { id: "server", label: "模型服务", icon: <Server className="w-4 h-4" /> },
+    { id: "subtitle", label: "悬浮字幕", icon: <Sliders className="w-4 h-4" /> },
+    { id: "audio", label: "朗读与音频", icon: <Volume2 className="w-4 h-4" /> },
+    { id: "general", label: "快捷键与术语", icon: <Shield className="w-4 h-4" /> },
+    { id: "system", label: "系统与更新", icon: <ArrowUpCircle className="w-4 h-4" /> },
   ];
+
+  const handleSaveSystem = async () => {
+    await saveUpdateConfig({
+      repo: ghRepo.trim() || "qianyueping1211/Hear",
+      githubToken: ghToken.trim(),
+      autoCheckOnStartup: autoCheck,
+    });
+    setSavedHint("system");
+    setTimeout(() => setSavedHint((h) => (h === "system" ? null : h)), 2000);
+  };
+
+  const handleCheckUpdate = async () => {
+    const cfg = {
+      repo: ghRepo.trim() || "qianyueping1211/Hear",
+      githubToken: ghToken.trim(),
+      autoCheckOnStartup: autoCheck,
+    };
+    await checkForUpdates(cfg);
+  };
 
   const handleSaveLocal = async () => {
     await saveServiceConfig({
@@ -635,6 +675,224 @@ export function SettingsModal() {
                   className="w-full rounded-lg bg-surface-950 border border-white/10 p-3 text-xs font-mono text-slate-100"
                 />
               </div>
+            </div>
+          )}
+
+          {activeSettingsTab === "system" && (
+            <div className="space-y-4">
+              {/* 当前版本与 GitHub 仓库快捷入口 */}
+              <div className="rounded-xl bg-surface-800/70 border border-white/10 p-4 flex items-center justify-between gap-4">
+                <div>
+                  <div className="font-semibold text-white">
+                    听见 Windows 客户端{" "}
+                    <span className="ml-1.5 px-2 py-0.5 rounded-full bg-brand-500/20 text-brand-400 font-mono text-xs">
+                      v{appVersion}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">
+                    版本检测仅追踪 Windows 发布标签（win-v*），支持启动自动检测与手动一键更新。
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() =>
+                      void openGithubUrl(
+                        `https://github.com/${(ghRepo.trim() || "qianyueping1211/Hear").replace(/^https?:\/\/github\.com\//, "")}`
+                      )
+                    }
+                    className="px-3 py-1.5 rounded-lg bg-surface-950 border border-white/10 hover:bg-white/5 text-xs text-slate-200 flex items-center gap-1.5"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" /> GitHub 仓库
+                  </button>
+                  <button
+                    onClick={() =>
+                      void openGithubUrl(
+                        `https://github.com/${(ghRepo.trim() || "qianyueping1211/Hear").replace(/^https?:\/\/github\.com\//, "")}/releases`
+                      )
+                    }
+                    className="px-3 py-1.5 rounded-lg bg-surface-950 border border-white/10 hover:bg-white/5 text-xs text-slate-200 flex items-center gap-1.5"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" /> 全部发布页
+                  </button>
+                </div>
+              </div>
+
+              {/* GitHub Token 与自动检测设置 */}
+              <div className="rounded-xl bg-surface-800/70 border border-white/10 p-4 space-y-3">
+                <div className="font-semibold text-white">更新源与 GitHub Token</div>
+
+                <div className="space-y-2">
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">GitHub 仓库（owner/repo）</label>
+                    <input
+                      type="text"
+                      value={ghRepo}
+                      onChange={(e) => setGhRepo(e.target.value)}
+                      placeholder="qianyueping1211/Hear"
+                      className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-brand-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-400 block mb-1">
+                      GitHub Token（可选：私有仓库必填，公开仓库可避免 API 限频；持久化保存在本机）
+                    </label>
+                    <input
+                      type="password"
+                      value={ghToken}
+                      onChange={(e) => setGhToken(e.target.value)}
+                      placeholder="github_pat_... 或 ghp_..."
+                      className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-xs font-mono text-slate-100 focus:outline-none focus:border-brand-500"
+                    />
+                  </div>
+                </div>
+
+                <label className="flex items-center justify-between pt-1">
+                  <span className="text-xs text-slate-200">每次打开软件自动检查新版本</span>
+                  <input
+                    type="checkbox"
+                    checked={autoCheck}
+                    onChange={(e) => setAutoCheck(e.target.checked)}
+                    className="w-4 h-4 accent-brand-500"
+                  />
+                </label>
+
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={() => void handleSaveSystem()}
+                    className="px-3 py-1.5 rounded-lg bg-surface-950 border border-white/10 hover:bg-white/5 text-xs text-slate-200 flex items-center gap-1.5"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    {savedHint === "system" ? "已保存" : "保存设置"}
+                  </button>
+                  <button
+                    disabled={checkingUpdate}
+                    onClick={() => void handleCheckUpdate()}
+                    className="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-xs text-white flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    {checkingUpdate ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
+                    {checkingUpdate ? "正在检查更新…" : "立即检查更新"}
+                  </button>
+                </div>
+              </div>
+
+              {/* 新版本详情与一键更新卡片 */}
+              {updateInfo && (
+                <div className="rounded-xl bg-surface-950/90 border border-white/10 p-4 space-y-3 text-xs">
+                  {updateInfo.error ? (
+                    <div className="flex items-center gap-2 text-rose-300">
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <span>{updateInfo.error}</span>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          {updateInfo.hasUpdate ? (
+                            <>
+                              <ArrowUpCircle className="w-4 h-4 text-emerald-400" />
+                              <span className="font-semibold text-emerald-300">
+                                发现新版本：{updateInfo.releaseTitle || `v${updateInfo.latestVersion}`}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                              <span className="font-semibold text-slate-200">
+                                当前已是最新版本（最新：v{updateInfo.latestVersion}）
+                              </span>
+                            </>
+                          )}
+                        </div>
+                        {updateInfo.publishedAt && (
+                          <span className="text-slate-500 font-mono">
+                            {updateInfo.publishedAt.slice(0, 10)}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* 新版本介绍 */}
+                      {updateInfo.releaseNotes && (
+                        <div className="rounded-lg bg-surface-900 border border-white/5 p-3 max-h-44 overflow-y-auto whitespace-pre-wrap text-slate-300 leading-relaxed select-text">
+                          {updateInfo.releaseNotes}
+                        </div>
+                      )}
+
+                      {/* 下载进度条 */}
+                      {downloadingUpdate && updateDownloadProgress && (
+                        <div className="space-y-1">
+                          <div className="flex justify-between text-[11px] text-sky-300 font-mono">
+                            <span>正在下载 {updateInfo.assetName}…</span>
+                            <span>
+                              {(updateDownloadProgress.downloaded / 1048576).toFixed(1)} MB
+                              {updateDownloadProgress.total > 0
+                                ? ` / ${(updateDownloadProgress.total / 1048576).toFixed(1)} MB (${Math.round(
+                                    (updateDownloadProgress.downloaded /
+                                      updateDownloadProgress.total) *
+                                      100
+                                  )}%)`
+                                : ""}
+                            </span>
+                          </div>
+                          <div className="h-2 rounded-full bg-surface-800 overflow-hidden">
+                            <div
+                              className="h-full bg-brand-500 transition-all"
+                              style={{
+                                width:
+                                  updateDownloadProgress.total > 0
+                                    ? `${Math.min(
+                                        100,
+                                        Math.round(
+                                          (updateDownloadProgress.downloaded /
+                                            updateDownloadProgress.total) *
+                                            100
+                                        )
+                                      )}%`
+                                    : "35%",
+                              }}
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      {updateDownloadError && (
+                        <div className="text-rose-300">{updateDownloadError}</div>
+                      )}
+
+                      <div className="flex items-center gap-2 pt-1">
+                        {updateInfo.hasUpdate && updateInfo.assetApiUrl && (
+                          <button
+                            disabled={downloadingUpdate}
+                            onClick={() => void downloadAndInstallUpdate()}
+                            className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium flex items-center gap-1.5 disabled:opacity-50"
+                          >
+                            {downloadingUpdate ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Download className="w-3.5 h-3.5" />
+                            )}
+                            {downloadingUpdate
+                              ? "正在下载安装程序…"
+                              : `下载并更新（${updateInfo.assetName ?? "安装包"}）`}
+                          </button>
+                        )}
+                        {updateInfo.releaseUrl && (
+                          <button
+                            onClick={() => void openGithubUrl(updateInfo.releaseUrl!)}
+                            className="px-3 py-1.5 rounded-lg bg-surface-800 border border-white/10 hover:bg-surface-700 text-slate-200 flex items-center gap-1.5"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            在 GitHub 查看此版本详情
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

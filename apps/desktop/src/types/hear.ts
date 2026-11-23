@@ -105,7 +105,31 @@ export interface SummaryTemplateOption {
   description: string;
 }
 
+export interface UpdateConfig {
+  repo: string;
+  githubToken: string;
+  autoCheckOnStartup: boolean;
+}
+
+export interface UpdateCheckResult {
+  currentVersion: string;
+  latestVersion?: string;
+  hasUpdate: boolean;
+  tagName?: string;
+  releaseTitle?: string;
+  releaseNotes: string;
+  publishedAt?: string;
+  releaseUrl?: string;
+  repoUrl: string;
+  assetName?: string;
+  assetApiUrl?: string;
+  assetBrowserUrl?: string;
+  assetSize?: number;
+  error?: string;
+}
+
 export interface AppSnapshot {
+  appVersion: string;
   mode: SessionMode;
   sourceLang: string;
   targetLang: string;
@@ -123,4 +147,6 @@ export interface AppSnapshot {
   ttsSettings: TtsOutputSettings;
   playback: RecordingPlaybackState;
   glossary: string;
+  updateConfig: UpdateConfig;
+  updateInfo?: UpdateCheckResult;
 }

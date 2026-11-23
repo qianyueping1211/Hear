@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownCircle,
+  ArrowUpCircle,
   Check,
   Copy,
   Download,
@@ -58,6 +59,7 @@ export function MainApp() {
     cloudStatus,
     testingLocal,
     testingCloud,
+    updateInfo,
     playback,
     searchQuery,
     summaryOpen,
@@ -324,8 +326,19 @@ export function MainApp() {
           </button>
         </div>
 
-        {/* 右侧：服务状态胶囊（可点刷新）+ 悬浮字幕 + 总结 + 设置 */}
+        {/* 右侧：新版本提醒 + 服务状态胶囊 + 悬浮字幕 + 总结 + 设置 */}
         <div className="flex items-center gap-1.5 shrink-0">
+          {updateInfo?.hasUpdate && (
+            <button
+              onClick={() => setSettingsOpen(true, "system")}
+              title={`发现新版本 v${updateInfo.latestVersion}，点击查看更新说明并一键更新`}
+              className="px-2.5 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30 text-xs flex items-center gap-1.5"
+            >
+              <ArrowUpCircle className="w-3.5 h-3.5" />
+              <span>新版本 v{updateInfo.latestVersion}</span>
+            </button>
+          )}
+
           <div
             onClick={() => setSettingsOpen(true, "server")}
             title={serviceBadge.tooltip}

@@ -70,7 +70,7 @@ pub struct AudioSourceOption {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct SubtitleStyle {
     pub visible: bool,
     pub click_through: bool,
@@ -107,7 +107,7 @@ impl Default for SubtitleStyle {
 
 /// 客户端服务连接配置（服务端由服务端独立启动管理，客户端仅保存地址/口令与路由选择）
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct ServiceConfig {
     pub local_service_address: String,
     pub local_access_token: String,
@@ -175,7 +175,7 @@ impl Default for ServiceProbeResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct TtsOutputSettings {
     pub enabled: bool,
     pub use_voice_clone: bool,
@@ -227,8 +227,67 @@ impl Default for RecordingPlaybackState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UpdateConfig {
+    pub repo: String,
+    pub github_token: String,
+    pub auto_check_on_startup: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            repo: "qianyueping1211/Hear".to_string(),
+            github_token: String::new(),
+            auto_check_on_startup: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResult {
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub has_update: bool,
+    pub tag_name: Option<String>,
+    pub release_title: Option<String>,
+    pub release_notes: String,
+    pub published_at: Option<String>,
+    pub release_url: Option<String>,
+    pub repo_url: String,
+    pub asset_name: Option<String>,
+    pub asset_api_url: Option<String>,
+    pub asset_browser_url: Option<String>,
+    pub asset_size: Option<u64>,
+    pub error: Option<String>,
+}
+
+impl Default for UpdateCheckResult {
+    fn default() -> Self {
+        Self {
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            latest_version: None,
+            has_update: false,
+            tag_name: None,
+            release_title: None,
+            release_notes: String::new(),
+            published_at: None,
+            release_url: None,
+            repo_url: "https://github.com/qianyueping1211/Hear".to_string(),
+            asset_name: None,
+            asset_api_url: None,
+            asset_browser_url: None,
+            asset_size: None,
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
+    pub app_version: String,
     pub mode: SessionMode,
     pub source_lang: String,
     pub target_lang: String,
@@ -246,11 +305,14 @@ pub struct AppSnapshot {
     pub tts_settings: TtsOutputSettings,
     pub playback: RecordingPlaybackState,
     pub glossary: String,
+    pub update_config: UpdateConfig,
+    pub update_info: Option<UpdateCheckResult>,
 }
 
 impl Default for AppSnapshot {
     fn default() -> Self {
         Self {
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
             mode: SessionMode::Idle,
             source_lang: "en".to_string(),
             target_lang: "zh".to_string(),
@@ -268,6 +330,8 @@ impl Default for AppSnapshot {
             tts_settings: TtsOutputSettings::default(),
             playback: RecordingPlaybackState::default(),
             glossary: String::new(),
+            update_config: UpdateConfig::default(),
+            update_info: None,
         }
     }
 }
