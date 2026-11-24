@@ -1641,7 +1641,7 @@ export function MainApp() {
                         title="手动编辑总结并保存到历史"
                         className="px-2 py-1 rounded bg-surface-950 border border-white/10 hover:bg-white/10 text-[11px] text-slate-300 hover:text-white flex items-center gap-1"
                       >
-                        <Edit3 className="w-3 h-3" />
+                        <Pencil className="w-3 h-3" />
                         编辑
                       </button>
                     )}
