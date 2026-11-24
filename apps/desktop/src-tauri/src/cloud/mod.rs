@@ -46,9 +46,55 @@ pub fn normalize_service_url(raw: &str) -> Result<String, String> {
     Ok(with_scheme.trim_end_matches('/').to_string())
 }
 
+/// 判断目标 URL 是否为本机、局域网（RFC1918 / Link-Local / .local）或 CGNAT（100.64.0.0/10，如 Tailscale）：
+/// - 仅对本机/内网自签证书放宽 TLS 校验；
+/// - 所有公网域名（如 Cloudflare 代理域名）强制执行严格系统证书校验，防止中间人窃取访问口令。
+pub fn is_local_or_lan_url(raw_url: &str) -> bool {
+    let trimmed = raw_url.trim();
+    let after_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let authority = after_scheme.split('/').next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    }
+    .trim()
+    .to_ascii_lowercase();
+
+    if host.is_empty() {
+        return false;
+    }
+    if host == "localhost" || host.ends_with(".local") || host.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                let [a, b, _, _] = v4.octets();
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || (a == 100 && (64..=127).contains(&b))
+            }
+            std::net::IpAddr::V6(v6) => {
+                let seg0 = v6.segments()[0];
+                v6.is_loopback()
+                    || (seg0 & 0xfe00) == 0xfc00
+                    || (seg0 & 0xffc0) == 0xfe80
+            }
+        };
+    }
+    false
+}
+
 /// 跨平台 Hear 模型服务客户端（只做 HTTP/HTTPS 调用与只读探测，绝不管理任何服务端进程）
 pub struct HearCloudClient {
-    http: Client,
+    http_strict: Client,
+    http_local: Client,
     device_id: String,
     /// 参考声纹上传 ID 缓存：(base_url, wav_fnv64) -> (ref_id, uploaded_at)
     /// 复用固定声纹时跳过每次 200KB 重复上传与往返握手，并让服务端命中 speaker reference 缓存
@@ -66,22 +112,38 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 
 impl HearCloudClient {
     pub fn new() -> Self {
-        let http = Client::builder()
+        let ua = concat!(
+            "HearDesktop/",
+            env!("CARGO_PKG_VERSION"),
+            " (Windows NT 10.0; Win64; x64)"
+        );
+        let http_strict = Client::builder()
             .no_proxy()
-            .user_agent(concat!(
-                "HearDesktop/",
-                env!("CARGO_PKG_VERSION"),
-                " (Windows NT 10.0; Win64; x64)"
-            ))
+            .user_agent(ua)
             .connect_timeout(Duration::from_secs(5))
-            // 兼容局域网/本机自签证书；后续可叠加 #hear-root=... 严格指纹固定校验
+            .build()
+            .expect("failed to build strict reqwest client");
+        let http_local = Client::builder()
+            .no_proxy()
+            .user_agent(ua)
+            .connect_timeout(Duration::from_secs(5))
+            // 仅限局域网/本机自签证书使用
             .danger_accept_invalid_certs(true)
             .build()
-            .expect("failed to build reqwest client");
+            .expect("failed to build local reqwest client");
         Self {
-            http,
+            http_strict,
+            http_local,
             device_id: format!("desktop-{}", &uuid::Uuid::new_v4().to_string()[..8]),
             ref_id_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn client_for_url(&self, url: &str) -> &Client {
+        if is_local_or_lan_url(url) {
+            &self.http_local
+        } else {
+            &self.http_strict
         }
     }
 
@@ -113,7 +175,7 @@ impl HearCloudClient {
         let started = Instant::now();
         let health_url = format!("{}/health", base_url);
         let resp = match self
-            .apply_headers(self.http.get(&health_url), Some(token))
+            .apply_headers(self.client_for_url(&health_url).get(&health_url), Some(token))
             .timeout(Duration::from_secs(6))
             .send()
             .await
@@ -174,7 +236,7 @@ impl HearCloudClient {
             } else {
                 let check_url = format!("{}/v1/auth/check", base_url);
                 match self
-                    .apply_headers(self.http.get(&check_url), Some(token))
+                    .apply_headers(self.client_for_url(&check_url).get(&check_url), Some(token))
                     .timeout(Duration::from_secs(5))
                     .send()
                     .await
@@ -298,7 +360,7 @@ impl HearCloudClient {
         let base_url = normalize_service_url(raw_address)?;
         let url = format!("{}/v1/asr", base_url);
         let mut req = self
-            .http
+            .client_for_url(&url)
             .post(&url)
             .header("Content-Type", "audio/wav")
             .header("X-Languages", languages)
@@ -414,7 +476,7 @@ impl HearCloudClient {
                 if !wav.is_empty() {
                     let ref_url = format!("{}/v1/clone/reference", base_url);
                     let req = self.apply_headers(
-                        self.http
+                        self.client_for_url(&ref_url)
                             .post(&ref_url)
                             .header("Content-Type", "audio/wav")
                             .body(wav.clone()),
@@ -479,7 +541,7 @@ impl HearCloudClient {
         let mut reuploaded_ref = false;
         for attempt in 1..=max_attempts {
             let req = self.apply_headers(
-                self.http
+                self.client_for_url(&clone_url)
                     .post(&clone_url)
                     .header("X-Hear-Audio", "wav")
                     .json(&payload),
@@ -521,7 +583,7 @@ impl HearCloudClient {
                     if !wav.is_empty() {
                         let ref_url = format!("{}/v1/clone/reference", base_url);
                         let req = self.apply_headers(
-                            self.http
+                            self.client_for_url(&ref_url)
                                 .post(&ref_url)
                                 .header("Content-Type", "audio/wav")
                                 .body(wav.clone()),
@@ -585,7 +647,7 @@ impl HearCloudClient {
             "max_tokens": if preview { 256 } else { 512 },
         });
         let mut req = self
-            .http
+            .client_for_url(&url)
             .post(&url)
             .header("Accept", "text/event-stream, application/json")
             .json(&body);
@@ -665,5 +727,22 @@ impl HearCloudClient {
             }
         }
         Ok(full)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_local_or_lan_url_distinguishes_public_and_lan() {
+        assert!(is_local_or_lan_url("https://127.0.0.1:8000/health"));
+        assert!(is_local_or_lan_url("https://localhost:8000/v1/asr"));
+        assert!(is_local_or_lan_url("https://192.168.1.88:8000/v1/mt"));
+        assert!(is_local_or_lan_url("https://10.0.0.12:8000/v1/clone"));
+        assert!(is_local_or_lan_url("https://100.88.12.34:8000/health"));
+        assert!(is_local_or_lan_url("https://mac-studio.local:8000/health"));
+        assert!(!is_local_or_lan_url("https://hear.yueping1211.asia/v1/asr"));
+        assert!(!is_local_or_lan_url("https://api.example.com:8443/health"));
     }
 }

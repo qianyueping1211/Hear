@@ -5,6 +5,7 @@
 # 用法：
 #   ./start-macos.sh                   正常启动（首次自动安装依赖与下载模型）
 #   ./start-macos.sh --reconfigure     重新选择翻译/克隆/识别模型档位
+#   ./start-macos.sh token-admin       初始化并启动本机口令管理后台（127.0.0.1:8443）
 #   ./start-macos.sh install-launchd   安装为 macOS 开机自启后台服务
 #   ./start-macos.sh uninstall-launchd 卸载开机自启后台服务
 set -euo pipefail
@@ -82,6 +83,80 @@ if [ "${1:-}" = "uninstall-launchd" ]; then
   rm -f "$PLIST_PATH"
   ok "已卸载 macOS 后台自启服务：$PLIST_LABEL"
   exit 0
+fi
+
+# ---------------------------------------------------------------- Python 环境辅助（供 token-admin 与主服务共用）
+ensure_mac_python() {
+  local py_bin=""
+  for p in /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
+    if command -v "$p" >/dev/null 2>&1; then
+      py_bin="$(command -v "$p")"
+      break
+    fi
+  done
+  if [ -z "$py_bin" ]; then
+    err "未找到 python3，请先运行：brew install python@3.12"
+    exit 1
+  fi
+  if [ ! -x "$SERVER_DIR/.venv/bin/python" ]; then
+    say "初始化 Python 虚拟环境并安装识别/加密依赖（首次约 1~2 分钟）…"
+    "$py_bin" -m venv "$SERVER_DIR/.venv"
+    "$SERVER_DIR/.venv/bin/pip" install --upgrade pip -q || true
+    "$SERVER_DIR/.venv/bin/pip" install -r "$SERVER_DIR/requirements.txt"
+  fi
+  PY="$SERVER_DIR/.venv/bin/python"
+}
+
+APP_SUPPORT_DIR="$HOME/Library/Application Support/Hear"
+TOKEN_DATA_DIR="$APP_SUPPORT_DIR/token-data"
+TOKEN_DB="$TOKEN_DATA_DIR/hear-tokens.db"
+SECRET_DIR="$APP_SUPPORT_DIR/secrets"
+BACKUP_DIR="$APP_SUPPORT_DIR/backups"
+GATEWAY_ID="${HEAR_GATEWAY_ID:-hear-home}"
+CRED_FILE="$SECRET_DIR/${GATEWAY_ID}.cred"
+TOKEN_PORT="${HEAR_TOKEN_SERVICE_PORT:-8443}"
+
+if [ "${1:-}" = "token-admin" ]; then
+  ensure_mac_python
+  ADMIN_URL="http://127.0.0.1:${TOKEN_PORT}/admin/"
+  if curl -sf "http://127.0.0.1:${TOKEN_PORT}/healthz" >/dev/null 2>&1; then
+    ok "口令管理后台已在运行：$ADMIN_URL"
+    open "$ADMIN_URL" 2>/dev/null || true
+    exit 0
+  fi
+  mkdir -p "$TOKEN_DATA_DIR" "$SECRET_DIR" "$BACKUP_DIR"
+  chmod 700 "$TOKEN_DATA_DIR" "$SECRET_DIR" "$BACKUP_DIR"
+  FIRST_RUN=0
+  [ ! -f "$TOKEN_DB" ] && FIRST_RUN=1
+  "$PY" "$SERVER_DIR/hear_token_service.py" --db "$TOKEN_DB" init
+  if [ "$FIRST_RUN" = "1" ]; then
+    echo
+    say "首次使用：请创建口令管理后台的管理员账号（用户名固定为 admin，密码至少 12 位，输入时不显示）"
+    CREATED=0
+    for _ in 1 2 3; do
+      if "$PY" "$SERVER_DIR/hear_token_service.py" --db "$TOKEN_DB" create-admin --username admin; then
+        CREATED=1
+        break
+      fi
+      warn "创建失败，请重试…"
+    done
+    if [ "$CREATED" != "1" ]; then
+      rm -f "${TOKEN_DB}"*
+      err "管理员账号未创建成功，请重新运行。"
+      exit 1
+    fi
+  fi
+  if [ ! -f "$CRED_FILE" ]; then
+    say "登记本机网关 $GATEWAY_ID 并生成网关凭据…"
+    if ! "$PY" "$SERVER_DIR/hear_token_service.py" --db "$TOKEN_DB" create-gateway --id "$GATEWAY_ID" --name "Mac本机网关" --credential-out "$CRED_FILE"; then
+      "$PY" "$SERVER_DIR/hear_token_service.py" --db "$TOKEN_DB" rotate-gateway-credential --id "$GATEWAY_ID" --credential-out "$CRED_FILE"
+    fi
+    chmod 600 "$CRED_FILE" 2>/dev/null || true
+    ok "网关凭据已保存：$CRED_FILE（下次启动听见服务端将自动进入托管鉴权模式）"
+  fi
+  ok "口令管理后台地址：$ADMIN_URL（仅本机可访问）"
+  (sleep 2 && open "$ADMIN_URL" 2>/dev/null || true) &
+  exec "$PY" "$SERVER_DIR/hear_token_service.py" --db "$TOKEN_DB" serve --host 127.0.0.1 --port "$TOKEN_PORT"
 fi
 
 NON_INTERACTIVE="${HEAR_NON_INTERACTIVE:-0}"
@@ -269,14 +344,21 @@ if [ "${HEAR_SENSEVOICE:-1}" != "0" ]; then
   fetch_hf "$SV_REPO" "tokens.txt" "$SV_DIR/tokens.txt"
 fi
 
-# 说话人区分模型（约 28 MB）
+# 说话人区分模型（约 28 MB，下载后校验 SHA256 与 Windows 端保持一致）
 SPK_FILE="$MODEL_DIR/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+SPK_SHA256="e6af4d4c444f3dab01d991bb9b7d5af98eb979e329f6c8880a19d5553561ed25"
 if [ ! -f "$SPK_FILE" ]; then
   say "下载说话人区分模型（约 28 MB）…"
   SPK_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
   if curl -fL --retry 3 -o "$SPK_FILE.part" "$SPK_URL"; then
-    mv "$SPK_FILE.part" "$SPK_FILE"
-    ok "说话人区分模型就绪"
+    ACTUAL_SHA="$(shasum -a 256 "$SPK_FILE.part" | awk '{print $1}')"
+    if [ "$ACTUAL_SHA" = "$SPK_SHA256" ]; then
+      mv "$SPK_FILE.part" "$SPK_FILE"
+      ok "说话人区分模型就绪（SHA256 校验通过）"
+    else
+      rm -f "$SPK_FILE.part"
+      warn "说话人模型 SHA256 校验不匹配（期望 $SPK_SHA256，实际 $ACTUAL_SHA），已丢弃（不影响核心翻译与克隆）"
+    fi
   else
     rm -f "$SPK_FILE.part"
     warn "说话人模型下载失败（不影响核心翻译与克隆）"
@@ -284,25 +366,7 @@ if [ ! -f "$SPK_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------- Python 虚拟环境
-PYTHON_BIN=""
-for p in /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
-  if command -v "$p" >/dev/null 2>&1; then
-    PYTHON_BIN="$(command -v "$p")"
-    break
-  fi
-done
-if [ -z "$PYTHON_BIN" ]; then
-  err "未找到 python3，请先运行：brew install python@3.12"
-  exit 1
-fi
-
-if [ ! -x "$SERVER_DIR/.venv/bin/python" ]; then
-  say "初始化 Python 虚拟环境并安装识别/加密依赖（首次约 1~2 分钟）…"
-  "$PYTHON_BIN" -m venv "$SERVER_DIR/.venv"
-  "$SERVER_DIR/.venv/bin/pip" install --upgrade pip -q || true
-  "$SERVER_DIR/.venv/bin/pip" install -r "$SERVER_DIR/requirements.txt"
-fi
-PY="$SERVER_DIR/.venv/bin/python"
+ensure_mac_python
 
 # 生成自签 HTTPS 证书（如果不存在；hear_cloud.py 默认路径为 certs/cert.pem）
 CERT_FILE="${HEAR_TLS_CERT:-$SERVER_DIR/certs/cert.pem}"
@@ -312,6 +376,7 @@ if [ -f "$SERVER_DIR/make_cert.py" ] && [ ! -f "$CERT_FILE" ]; then
 fi
 
 # ---------------------------------------------------------------- 启动 Metal GPU 模型服务
+PID_FILE="$LOG_DIR/hear.pids"
 PIDS=()
 cleanup() {
   echo
@@ -320,6 +385,7 @@ cleanup() {
     kill "$pid" 2>/dev/null || true
   done
   wait 2>/dev/null || true
+  rm -f "$PID_FILE"
   ok "已全部停止"
 }
 trap cleanup EXIT INT TERM
@@ -336,32 +402,93 @@ wait_health() {
   warn "$name 超过 2 分钟仍未就绪，请查看日志：$LOG_DIR"
 }
 
-# 释放可能残留的旧端口进程
+# 安全清理上一次由本脚本启动的残留听见进程（绝不误杀占用端口的其他软件）
+if [ -f "$PID_FILE" ]; then
+  while IFS= read -r old_pid; do
+    [ -z "$old_pid" ] && continue
+    if kill -0 "$old_pid" 2>/dev/null; then
+      cmd_line="$(ps -p "$old_pid" -o command= 2>/dev/null || true)"
+      if printf '%s' "$cmd_line" | grep -Eq 'llama-server|hear_cloud\.py|hear_token_service\.py'; then
+        warn "清理上一次听见残留进程 ($old_pid)…"
+        kill "$old_pid" 2>/dev/null || true
+      fi
+    fi
+  done < "$PID_FILE"
+  rm -f "$PID_FILE"
+  sleep 0.5
+fi
+
+# 检查关键端口是否被其他非听见程序占用
 for p in "$MT_PORT" "$CLONE_PORT" "$PORT"; do
-  old_pid="$(lsof -ti tcp:"$p" 2>/dev/null || true)"
-  if [ -n "$old_pid" ]; then
-    warn "端口 $p 已被旧进程 ($old_pid) 占用，尝试结束…"
-    kill "$old_pid" 2>/dev/null || true
-    sleep 0.5
+  occ_pids="$(lsof -ti tcp:"$p" -sTCP:LISTEN 2>/dev/null || true)"
+  if [ -n "$occ_pids" ]; then
+    while IFS= read -r pid; do
+      [ -z "$pid" ] && continue
+      cmd_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+      if printf '%s' "$cmd_line" | grep -Eq 'llama-server|hear_cloud\.py'; then
+        warn "端口 $p 上检测到旧版听见进程 ($pid)，正在结束…"
+        kill "$pid" 2>/dev/null || true
+        sleep 0.4
+      else
+        err "端口 $p 已被其他程序占用（PID=$pid：$cmd_line），请先关闭占用程序或通过 HEAR_PORT/HEAR_MT_PORT/HEAR_CLONE_PORT 更换端口。"
+        exit 1
+      fi
+    done <<< "$occ_pids"
   fi
 done
 
-say "启动文本翻译模型（Hy-MT2-$MT_TIER · Metal GPU 全层卸载 · 端口 $MT_PORT）"
+# 仅在 127.0.0.1 监听模型端口，防止局域网绕过 8000 端口口令鉴权直连 llama-server
+MODEL_HOST="127.0.0.1"
+if [ "${HEAR_OPEN_MODEL_PORTS:-0}" = "1" ]; then
+  MODEL_HOST="0.0.0.0"
+  warn "已开启 HEAR_OPEN_MODEL_PORTS=1，模型端口将对局域网开放"
+fi
+
+say "启动文本翻译模型（Hy-MT2-$MT_TIER · Metal GPU 全层卸载 · ${MODEL_HOST}:${MT_PORT}）"
 "$LLAMA_SERVER" \
   -m "$MODEL_DIR/$MT_FILE" \
-  --host 0.0.0.0 --port "$MT_PORT" \
+  --host "$MODEL_HOST" --port "$MT_PORT" \
   -ngl 99 -fa on -c "$CTX" -t "$THREADS" --no-warmup \
   > "$LOG_DIR/mt.log" 2>&1 &
-PIDS+=($!)
+MT_PID=$!
+PIDS+=("$MT_PID")
+echo "$MT_PID" >> "$PID_FILE"
 
-say "启动声音克隆模型（Qwen3-TTS-$CLONE_TIER · Metal GPU 全层卸载 · 端口 $CLONE_PORT）"
+say "启动声音克隆模型（Qwen3-TTS-$CLONE_TIER · Metal GPU 全层卸载 · ${MODEL_HOST}:${CLONE_PORT}）"
 "$LLAMA_SERVER" \
   -m "$MODEL_DIR/$CLONE_FILE" \
   --mmproj "$MODEL_DIR/$CLONE_MMPROJ" \
-  --host 0.0.0.0 --port "$CLONE_PORT" \
+  --host "$MODEL_HOST" --port "$CLONE_PORT" \
   -ngl 99 -fa on -c "$CTX" -t "$THREADS" --no-warmup \
   > "$LOG_DIR/clone.log" 2>&1 &
-PIDS+=($!)
+CLONE_PID=$!
+PIDS+=("$CLONE_PID")
+echo "$CLONE_PID" >> "$PID_FILE"
+
+# 鉴权模式解析（与 Windows 端一致：已有网关凭据则自动进入托管模式并拉起管理服务，否则默认启用单口令鉴权）
+AUTH_DESC="单口令模式（certs/access-token.txt）"
+if [ "${HEAR_AUTH_MODE:-}" != "legacy" ] && [ -f "$CRED_FILE" ]; then
+  if ! curl -sf "http://127.0.0.1:${TOKEN_PORT}/healthz" >/dev/null 2>&1; then
+    say "检测到网关凭据，正在后台启动本机口令管理服务（127.0.0.1:${TOKEN_PORT}）…"
+    "$PY" "$SERVER_DIR/hear_token_service.py" --db "$TOKEN_DB" serve --host 127.0.0.1 --port "$TOKEN_PORT" \
+      > "$LOG_DIR/token-service.log" 2>&1 &
+    TOK_PID=$!
+    PIDS+=("$TOK_PID")
+    echo "$TOK_PID" >> "$PID_FILE"
+    for _ in $(seq 1 20); do
+      curl -sf "http://127.0.0.1:${TOKEN_PORT}/healthz" >/dev/null 2>&1 && break
+      sleep 0.3
+    done
+  fi
+  export HEAR_AUTH_MODE="managed"
+  export HEAR_AUTH_API_URL="${HEAR_AUTH_API_URL:-http://127.0.0.1:${TOKEN_PORT}}"
+  export HEAR_GATEWAY_ID="$GATEWAY_ID"
+  export HEAR_GATEWAY_CREDENTIAL_FILE="$CRED_FILE"
+  export HEAR_REQUIRE_TOKEN="0"
+  AUTH_DESC="多用户托管模式（管理后台：http://127.0.0.1:${TOKEN_PORT}/admin/）"
+else
+  export HEAR_REQUIRE_TOKEN="${HEAR_REQUIRE_TOKEN:-1}"
+fi
 
 wait_health "http://127.0.0.1:$MT_PORT" "翻译模型 (Hy-MT2)"
 wait_health "http://127.0.0.1:$CLONE_PORT" "声音克隆模型 (Qwen3-TTS)"
@@ -375,15 +502,17 @@ echo "=================================================================="
 ok "听见 (Hear) Mac Studio 服务端已就绪！（Apple Metal GPU 加速）"
 echo "  局域网地址： ${SCHEME}://${LAN_IP}:${PORT}"
 echo "  本机自检：   ${SCHEME}://127.0.0.1:${PORT}/health"
-echo "  口令管理：   双击「启动口令管理后台.command」开启（默认端口 8090）"
+echo "  鉴权模式：   ${AUTH_DESC}"
+echo "  口令管理：   双击「启动口令管理后台.command」开启（http://127.0.0.1:${TOKEN_PORT}/admin/）"
 echo "  模型日志：   $LOG_DIR/"
-echo "  提示：iPhone / Windows 客户端填入上方局域网地址即可极速连接。"
+echo "  提示：iPhone / Windows 客户端填入上方局域网地址与访问口令即可极速连接。"
 echo "=================================================================="
 echo
 
 export HEAR_PORT="$PORT"
 export HEAR_MT_URL="http://127.0.0.1:$MT_PORT"
 export HEAR_CLONE_URL="http://127.0.0.1:$CLONE_PORT"
+export HEAR_MT_TIER="$MT_TIER"
 export HEAR_ASR_MODEL="$ASR_MODEL"
 export HEAR_ASR_SCHEME="${HEAR_ASR_SCHEME:-sensevoice+whisper}"
 export HEAR_SENSEVOICE="${HEAR_SENSEVOICE:-1}"

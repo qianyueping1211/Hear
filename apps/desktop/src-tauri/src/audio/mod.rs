@@ -410,12 +410,43 @@ pub fn clean_translation_output(raw: &str) -> String {
     s.trim().to_string()
 }
 
-/// 将任意采样率/声道数的实时输入下混为单声道并线性重采样到 16 kHz，再按 512 采样帧喂入 VAD 与断句器
+/// 构造 15 阶 Hamming 窗 Sinc 低通抗混叠 FIR 核（用于 48kHz/44.1kHz 降采样到 16kHz 前滤除 8kHz 以上高频，避免混叠进人声频段）
+fn build_antialias_fir(src_rate: u32, dst_rate: u32) -> Vec<f32> {
+    if src_rate <= dst_rate {
+        return Vec::new();
+    }
+    const TAPS: usize = 15;
+    let half = (TAPS - 1) / 2;
+    let fc = (dst_rate as f64 * 0.44) / src_rate as f64;
+    let mut kernel = Vec::with_capacity(TAPS);
+    let mut sum = 0.0f64;
+    for i in 0..TAPS {
+        let m = i as f64 - half as f64;
+        let sinc = if m.abs() < 1e-9 {
+            2.0 * fc
+        } else {
+            let x = std::f64::consts::PI * m;
+            (2.0 * fc * x).sin() / x
+        };
+        let window = 0.54 - 0.46 * (2.0 * std::f64::consts::PI * i as f64 / (TAPS - 1) as f64).cos();
+        let coeff = sinc * window;
+        kernel.push(coeff);
+        sum += coeff;
+    }
+    kernel
+        .into_iter()
+        .map(|c| (c / sum.max(1e-12)) as f32)
+        .collect()
+}
+
+/// 将任意采样率/声道数的实时输入下混为单声道并经低通抗混叠滤波后重采样到 16 kHz，再按 512 采样帧喂入 VAD 与断句器
 struct LaneProcessor {
     src_rate: u32,
     channels: usize,
     pos: f64,
     prev_sample: Option<f32>,
+    fir_kernel: Vec<f32>,
+    fir_tail: Vec<f32>,
     frame_buf: Vec<f32>,
     segmenter: Segmenter,
     noise_floor: f32,
@@ -426,11 +457,16 @@ struct LaneProcessor {
 
 impl LaneProcessor {
     fn new(src_rate: u32, channels: usize) -> Self {
+        let clamped_rate = src_rate.max(8_000);
+        let fir_kernel = build_antialias_fir(clamped_rate, VAD_SAMPLE_RATE);
+        let tail_len = fir_kernel.len().saturating_sub(1);
         Self {
-            src_rate: src_rate.max(8_000),
+            src_rate: clamped_rate,
             channels: channels.max(1),
             pos: 0.0,
             prev_sample: None,
+            fir_kernel,
+            fir_tail: vec![0.0; tail_len],
             frame_buf: Vec::with_capacity(VAD_WINDOW_SAMPLES * 2),
             segmenter: Segmenter::new(520, 12),
             noise_floor: 0.0015,
@@ -511,18 +547,38 @@ impl LaneProcessor {
             }
         }
 
-        // 线性重采样到 16 kHz
+        // 抗混叠低通滤波 + 重采样到 16 kHz
         if self.src_rate == VAD_SAMPLE_RATE {
             self.frame_buf.extend_from_slice(&mono);
         } else {
+            let filtered = if !self.fir_kernel.is_empty() {
+                let taps = self.fir_kernel.len();
+                let tail_len = taps - 1;
+                let mut padded = Vec::with_capacity(tail_len + mono.len());
+                padded.extend_from_slice(&self.fir_tail);
+                padded.extend_from_slice(&mono);
+                let mut out = Vec::with_capacity(mono.len());
+                for i in 0..mono.len() {
+                    let mut acc = 0.0f32;
+                    for k in 0..taps {
+                        acc += padded[i + k] * self.fir_kernel[k];
+                    }
+                    out.push(acc);
+                }
+                let start = padded.len() - tail_len;
+                self.fir_tail.copy_from_slice(&padded[start..]);
+                out
+            } else {
+                mono
+            };
             let step = self.src_rate as f64 / VAD_SAMPLE_RATE as f64;
-            let mut input = Vec::with_capacity(mono.len() + 1);
+            let mut input = Vec::with_capacity(filtered.len() + 1);
             if let Some(prev) = self.prev_sample {
                 input.push(prev);
             } else {
-                input.push(mono[0]);
+                input.push(filtered[0]);
             }
-            input.extend_from_slice(&mono);
+            input.extend_from_slice(&filtered);
             let max_idx = (input.len() - 1) as f64;
             while self.pos < max_idx {
                 let idx = self.pos.floor() as usize;
@@ -532,11 +588,11 @@ impl LaneProcessor {
                 self.frame_buf.push(a + (b - a) * frac);
                 self.pos += step;
             }
-            self.pos -= mono.len() as f64;
+            self.pos -= filtered.len() as f64;
             if self.pos < 0.0 {
                 self.pos = 0.0;
             }
-            self.prev_sample = mono.last().copied();
+            self.prev_sample = filtered.last().copied();
         }
 
         // 按严格 512 采样帧做自适应能量 VAD + 断句（若麦克风启用全双工 AEC 且扬声器正在播报，先实时抵消回声）
@@ -2520,5 +2576,28 @@ mod tests {
             "我不知道你到底是怎么想的",
             "Let me see how the results are now."
         ));
+    }
+
+    #[test]
+    fn antialias_downsample_48k_to_16k_attenuates_10khz_sine() {
+        let mut proc = LaneProcessor::new(48_000, 1);
+        let n = 48_000 / 2; // 0.5s of 10 kHz sine wave
+        let sine: Vec<f32> = (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * 10_000.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let mut out_samples = Vec::new();
+        proc.push_interleaved(&sine, |frame, _, _, _| {
+            out_samples.extend_from_slice(frame);
+        });
+        // Skip first 64 samples of filter startup transient
+        let steady = &out_samples[64..];
+        let rms = (steady.iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>()
+            / steady.len().max(1) as f64)
+            .sqrt();
+        assert!(
+            rms < 0.08,
+            "10 kHz sine should be heavily attenuated after 48k->16k anti-alias FIR, got rms={:.4}",
+            rms
+        );
     }
 }

@@ -1205,6 +1205,7 @@ actor CloudClient {
                         "top_k": 20,
                         "top_p": 0.6,
                         "temperature": 0.7,
+                        "repeat_penalty": 1.05,
                     ]
                     let obj = try await json("/v1/chat/completions", address: addr, method: "POST",
                                              body: try JSONSerialization.data(withJSONObject: body), timeout: timeLimit,

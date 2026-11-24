@@ -314,12 +314,41 @@ def test_asr_status_text_reporting():
         hear_cloud.sensevoice_available = old_sv_fn
 
 
+def test_hy_mt2_sampling_params():
+    print("== 6. Hy-MT2 sampling params match 1.8B/7B vs 30B official presets ==")
+    saved = {k: os.environ.get(k) for k in ("HEAR_MT_TIER", "HEAR_TOP_K", "HEAR_TOP_P", "HEAR_TEMPERATURE", "HEAR_REPEAT_PENALTY")}
+    try:
+        for k in saved:
+            os.environ.pop(k, None)
+        os.environ["HEAR_MT_TIER"] = "7b"
+        p7 = hear_cloud.resolve_mt_sampling_params()
+        check("7B preset uses top_k=20, top_p=0.6, temp=0.7, repeat_penalty=1.05",
+              p7 == {"top_k": 20, "top_p": 0.6, "temperature": 0.7, "repeat_penalty": 1.05}, p7)
+
+        os.environ["HEAR_MT_TIER"] = "30b"
+        p30 = hear_cloud.resolve_mt_sampling_params()
+        check("30B preset uses top_k=-1, top_p=1.0, temp=0.7, repeat_penalty=1.0",
+              p30 == {"top_k": -1, "top_p": 1.0, "temperature": 0.7, "repeat_penalty": 1.0}, p30)
+
+        os.environ["HEAR_REPEAT_PENALTY"] = "1.12"
+        p_ovr = hear_cloud.resolve_mt_sampling_params()
+        check("explicit env override takes precedence over tier preset",
+              p_ovr["repeat_penalty"] == 1.12 and p_ovr["top_k"] == -1, p_ovr)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main():
     test_decode_wav_16_and_32()
     test_auth_http_exception_survival()
     test_login_throttle_and_negative_content_length()
     test_local_secret_and_per_device_preview_and_sse()
     test_asr_status_text_reporting()
+    test_hy_mt2_sampling_params()
     print("\npassed %d, failed %d" % (passed, failed))
     return 1 if failed else 0
 

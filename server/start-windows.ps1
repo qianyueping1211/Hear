@@ -841,6 +841,19 @@ $env:HEAR_PORT = $Port
 $env:HEAR_MT_URL = "http://127.0.0.1:$MtPort"
 $env:HEAR_CLONE_URL = "http://127.0.0.1:$ClonePort"
 $env:HEAR_ASR_MODEL = $AsrModel
+# 自动探测 NVIDIA CUDA 供 faster-whisper 加速（不可用时安全回退 CPU int8）
+if (-not $env:HEAR_ASR_DEVICE) {
+    if (Get-Command "nvidia-smi" -ErrorAction SilentlyContinue) {
+        try {
+            & $venvPy -c "import ctranslate2, sys; sys.exit(0 if ctranslate2.get_cuda_device_count() > 0 else 1)" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $env:HEAR_ASR_DEVICE = "cuda"
+                if (-not $env:HEAR_ASR_COMPUTE) { $env:HEAR_ASR_COMPUTE = "float16" }
+                Step "检测到可用 NVIDIA CUDA，Whisper 识别已启用 GPU 加速（float16）"
+            }
+        } catch {}
+    }
+}
 $cloudScript = Join-Path $ServerDir "hear_cloud.py"
 # 正式服务启动前再清一次：临时服务是 venv 之前的 Python，
 # 正式服务必须由 venv Python 接管 8000。三个端口都检查，
@@ -1115,6 +1128,19 @@ $env:HEAR_PORT = $Port
 $env:HEAR_MT_URL = "http://127.0.0.1:$MtPort"
 $env:HEAR_CLONE_URL = "http://127.0.0.1:$ClonePort"
 $env:HEAR_ASR_MODEL = $AsrModel
+# 自动探测 NVIDIA CUDA 供 faster-whisper 加速（不可用时安全回退 CPU int8）
+if (-not $env:HEAR_ASR_DEVICE) {
+    if (Get-Command "nvidia-smi" -ErrorAction SilentlyContinue) {
+        try {
+            & $venvPy -c "import ctranslate2, sys; sys.exit(0 if ctranslate2.get_cuda_device_count() > 0 else 1)" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                $env:HEAR_ASR_DEVICE = "cuda"
+                if (-not $env:HEAR_ASR_COMPUTE) { $env:HEAR_ASR_COMPUTE = "float16" }
+                Step "检测到可用 NVIDIA CUDA，Whisper 识别已启用 GPU 加速（float16）"
+            }
+        } catch {}
+    }
+}
 
 Show-LanInfo $Port
 Write-Host ""

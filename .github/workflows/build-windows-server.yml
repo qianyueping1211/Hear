@@ -107,6 +107,8 @@ jobs:
             $src = Join-Path "server" $f
             if (Test-Path $src) { Copy-Item $src $srvOut -Force }
           }
+          # 写入发布版标记文件，避免整合包每次启动自动被 main 分支源码覆盖
+          [IO.File]::WriteAllText((Join-Path $srvOut ".hear-release"), "win-server-v$ver`n", [Text.Encoding]::UTF8)
 
           # 4. 隔离环境自检
           $bundledPy = Join-Path $runtimeDir "python.exe"
@@ -125,18 +127,22 @@ jobs:
           if ($rc1 -ne 0) { exit $rc1 }
           if ($rc2 -ne 0) { exit $rc2 }
 
-          # 5. 打包为 Hear-Win-Server-<VER>-x64.zip
+          # 5. 打包为 Hear-Win-Server-<VER>-x64.zip 并生成 .sha256 校验文件
           $zipPath = Join-Path $PWD "dist-windows-server\$asset"
           if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
           7z a -tzip -mx=5 "$zipPath" "$stage" | Out-Null
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Get-Item $zipPath | Format-List Name, Length
+          $sha = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText("$zipPath.sha256", "$sha  $asset`n", [Text.Encoding]::ASCII)
+          Get-Item $zipPath, "$zipPath.sha256" | Format-List Name, Length
 
       - name: Upload Windows Server artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.version.outputs.asset }}
-          path: dist-windows-server/${{ steps.version.outputs.asset }}
+          path: |
+            dist-windows-server/${{ steps.version.outputs.asset }}
+            dist-windows-server/${{ steps.version.outputs.asset }}.sha256
           retention-days: 30
 
       - name: Publish GitHub Release (听见 Windows 服务端)
@@ -146,6 +152,7 @@ jobs:
           $tag = "${{ steps.version.outputs.tag }}"
           $ver = "${{ steps.version.outputs.ver }}"
           $asset = "dist-windows-server/${{ steps.version.outputs.asset }}"
+          $shaAsset = "$asset.sha256"
           $notes = @"
           听见 (Hear) Windows x64 服务端独立整合包 v${ver}：
           - 内置便携 Python 3.12 与全套语音识别/加密依赖（faster-whisper / sherpa-onnx / av / numpy / cryptography），免安装 Python
@@ -154,7 +161,7 @@ jobs:
           "@
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $asset --clobber
+            gh release upload $tag $asset $shaAsset --clobber
           } else {
-            gh release create $tag $asset --title "听见 Win-Server v${ver}" --notes $notes
+            gh release create $tag $asset $shaAsset --title "听见 Win-Server v${ver}" --notes $notes
           }

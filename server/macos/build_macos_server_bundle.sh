@@ -73,11 +73,7 @@ chmod +x "$STAGE/卸载开机自启.command"
 cat > "$STAGE/启动口令管理后台.command" <<'EOF'
 #!/usr/bin/env bash
 cd "$(dirname "$0")/server"
-PY="./.venv/bin/python"
-if [ ! -x "$PY" ]; then
-  PY="$(command -v python3 || true)"
-fi
-exec "$PY" ./hear_token_service.py "$@"
+exec /bin/bash ./start-macos.sh token-admin
 EOF
 chmod +x "$STAGE/启动口令管理后台.command"
 

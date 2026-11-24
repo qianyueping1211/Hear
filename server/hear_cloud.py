@@ -89,10 +89,52 @@ SPEAKER = SpeakerDetector(os.environ.get("HEAR_SPEAKER_MODEL", "") or
 MAX_BODY = int(os.environ.get("HEAR_MAX_BODY", str(64 * 1024 * 1024)))
 ASR_DEVICE = os.environ.get("HEAR_ASR_DEVICE", "cpu")
 ASR_COMPUTE = os.environ.get("HEAR_ASR_COMPUTE", "int8")
-# 和 App 本地翻译用的采样参数保持一致（Hy-MT2 官方推荐）
+# 和 App 本地翻译用的采样参数保持一致（Hy-MT2 官方推荐）：
+# - Hy-MT2-1.8B / 7B：temperature=0.7, top_p=0.6, top_k=20, repeat_penalty=1.05
+# - Hy-MT2-30B-A3B：  temperature=0.7, top_p=1.0, top_k=-1, repeat_penalty=1.0
 TOP_K = int(os.environ.get("HEAR_TOP_K", "20"))
 TOP_P = float(os.environ.get("HEAR_TOP_P", "0.6"))
 TEMPERATURE = float(os.environ.get("HEAR_TEMPERATURE", "0.7"))
+REPEAT_PENALTY = float(os.environ.get("HEAR_REPEAT_PENALTY", "1.05"))
+_MT_MODEL_HINT_CACHE = {"url": "", "model": "", "checked_at": 0.0}
+
+
+def _detect_mt_model_hint():
+    tier = os.environ.get("HEAR_MT_TIER", "").strip().lower()
+    if tier:
+        return tier
+    now = time.time()
+    if _MT_MODEL_HINT_CACHE["url"] == MT_URL and (now - _MT_MODEL_HINT_CACHE["checked_at"]) < 120:
+        return _MT_MODEL_HINT_CACHE["model"]
+    hint = ""
+    try:
+        props = http_json(MT_URL + "/props", timeout=1.5)
+        if isinstance(props, dict):
+            hint = str(props.get("model_path") or props.get("model_alias") or "").lower()
+    except Exception:
+        hint = ""
+    _MT_MODEL_HINT_CACHE.update({"url": MT_URL, "model": hint, "checked_at": now})
+    return hint
+
+
+def resolve_mt_sampling_params():
+    """按 Hy-MT2 模型规格选择官方推荐采样参数，环境变量显式指定时优先生效。"""
+    hint = _detect_mt_model_hint()
+    is_30b = "30b" in hint
+    default_top_k = -1 if is_30b else TOP_K
+    default_top_p = 1.0 if is_30b else TOP_P
+    default_temp = 0.7 if is_30b else TEMPERATURE
+    default_rep = 1.0 if is_30b else REPEAT_PENALTY
+    top_k = int(os.environ["HEAR_TOP_K"]) if "HEAR_TOP_K" in os.environ else default_top_k
+    top_p = float(os.environ["HEAR_TOP_P"]) if "HEAR_TOP_P" in os.environ else default_top_p
+    temp = float(os.environ["HEAR_TEMPERATURE"]) if "HEAR_TEMPERATURE" in os.environ else default_temp
+    rep = float(os.environ["HEAR_REPEAT_PENALTY"]) if "HEAR_REPEAT_PENALTY" in os.environ else default_rep
+    return {
+        "top_k": top_k,
+        "top_p": top_p,
+        "temperature": temp,
+        "repeat_penalty": rep,
+    }
 
 _whisper = None
 _whisper_lock = threading.Lock()
@@ -623,9 +665,15 @@ def run_with_timeout(fn, seconds):
 
 
 def deferred_whisper(samples, rate, language, fallback):
+    def _run():
+        # 后台精修阶段（X-ASR-Stage: correct）使用 beam_size=5 提升准确率；
+        # 兼容外部测试桩按旧 4 参数签名 monkeypatch whisper_transcribe 的场景
+        try:
+            return whisper_transcribe(samples, rate, language, fallback, beam_size=5)
+        except TypeError:
+            return whisper_transcribe(samples, rate, language, fallback)
     try:
-        return run_with_timeout(
-            lambda: whisper_transcribe(samples, rate, language, fallback), CORRECT_TIMEOUT)
+        return run_with_timeout(_run, CORRECT_TIMEOUT)
     except TimeoutError:
         return "", fallback
 
@@ -684,7 +732,7 @@ def recognize(samples, rate, language, fallback, scheme=None, preview=False,
     return whisper_transcribe(samples, rate, language, fallback)
 
 
-def whisper_transcribe(samples, rate, language, fallback):
+def whisper_transcribe(samples, rate, language, fallback, beam_size=1):
     """只用 faster-whisper 识别"""
     model = get_whisper()
     # 必须给 numpy 的 float32 数组：
@@ -695,7 +743,7 @@ def whisper_transcribe(samples, rate, language, fallback):
     # faster-whisper 的 segments 是惰性迭代器；锁必须覆盖迭代全过程。
     with _whisper_inference_lock:
         segments, info = model.transcribe(
-            audio, language=language, beam_size=1, vad_filter=True,
+            audio, language=language, beam_size=beam_size, vad_filter=True,
             vad_parameters={"min_speech_duration_ms": 100, "min_silence_duration_ms": 300},
             condition_on_previous_text=False,
         )
@@ -1208,13 +1256,15 @@ a{color:#007aff;text-decoration:none}
             self._error("max_tokens 必须是整数", 400)
             return
         max_tokens = max(1, min(max_tokens, 256 if preview else 2048))
+        sampling = resolve_mt_sampling_params()
         payload = {
             "messages": [{"role": "user", "content": prompt}],
             "stream": want_stream,
             "max_tokens": max_tokens,
-            "top_k": TOP_K,
-            "top_p": TOP_P,
-            "temperature": TEMPERATURE,
+            "top_k": sampling["top_k"],
+            "top_p": sampling["top_p"],
+            "temperature": sampling["temperature"],
+            "repeat_penalty": sampling["repeat_penalty"],
         }
         if want_stream:
             try:

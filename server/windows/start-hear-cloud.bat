@@ -21,9 +21,11 @@ $files = @('start-windows.ps1', 'hear_cloud.py', 'hear_http.py', 'hear_speaker.p
            'hear_token_admin.html', 'hear_token_admin.js', 'hear_token_admin.css', 'test_token_auth.py')
 $parentDir = Split-Path -Parent $here
 $inWindowsSubdir = Test-Path -LiteralPath (Join-Path $parentDir 'start-windows.ps1')
-$inCheckout = Test-Path -LiteralPath (Join-Path $here 'server\start-windows.ps1')
+$inCheckout = $inWindowsSubdir -or (Test-Path -LiteralPath (Join-Path $here 'server\start-windows.ps1'))
 $root = if ($inWindowsSubdir) { Split-Path -Parent $parentDir } elseif ($inCheckout) { $here } else { Join-Path $here 'Hear' }
 $serverDir = if ($inWindowsSubdir) { $parentDir } else { Join-Path $root 'server' }
+$releaseMarker = Join-Path $serverDir '.hear-release'
+$isPackagedRelease = Test-Path -LiteralPath $releaseMarker
 
 function Test-ServerFiles($directory) {
     foreach ($name in $files) {
@@ -155,9 +157,9 @@ function Update-ServerFiles {
     try {
         $ref = if ($env:HEAR_SERVER_REF) { $env:HEAR_SERVER_REF.Trim() } else { 'main' }
         if ($ref -eq 'main') { $snapshot = 'refs/heads/main' }
-        elseif ($ref -match '^v[0-9]+\.[0-9]+\.[0-9]+$') { $snapshot = "refs/tags/$ref" }
+        elseif ($ref -match '^(?:win-server-)?v[0-9]+\.[0-9]+\.[0-9]+$') { $snapshot = "refs/tags/$ref" }
         elseif ($ref -match '^[0-9a-f]{40}$') { $snapshot = $ref }
-        else { throw 'HEAR_SERVER_REF must be main, a release tag such as v0.4.73, or a full commit SHA.' }
+        else { throw 'HEAR_SERVER_REF must be main, a release tag such as win-server-v1.0.1 / v0.4.73, or a full commit SHA.' }
         $url = "https://codeload.github.com/qianyueping1211/Hear/zip/$snapshot"
         Write-Host 'Downloading the Hear server source snapshot...'
         Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive -TimeoutSec 45
@@ -233,7 +235,7 @@ try {
         & $python[0] @pythonArgs
         exit $LASTEXITCODE
     }
-    if (-not $inCheckout) {
+    if (-not $inCheckout -and (-not $isPackagedRelease -or [bool]$env:HEAR_SERVER_REF)) {
         try { Update-ServerFiles }
         catch {
             if (-not (Test-ServerFiles $serverDir)) { throw }
