@@ -61,7 +61,7 @@ struct CloneAudio: Sendable {
             levels.append(Float(sqrt(max(0, power / n - mean * mean))))
         }
 
-        let threshold = max(0.0005, (levels.max() ?? 0) * 0.035)
+        let threshold = max(0.001, (levels.max() ?? 0) * 0.05)
         var previous: Int?
         var first: Int?
         var last = 0
@@ -74,8 +74,8 @@ struct CloneAudio: Sendable {
             previous = index
         }
         guard let first else { return nil }
-        let start = max(0, (first - 8) * window)
-        let end = min(samples.count, (last + 11) * window)
+        let start = max(0, (first - 5) * window)
+        let end = min(samples.count, (last + 9) * window)
         let trailing = samples.count - end
         guard start > 0 || trailing > 0 else { return (self, 0, 0) }
 

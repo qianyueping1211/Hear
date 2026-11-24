@@ -64,11 +64,14 @@ final class FixedVoiceSampleStore {
                           userInfo: [NSLocalizedDescriptionKey: "参考朗读文本不能为空"])
         }
         let data = try Data(contentsOf: tempURL)
-        let samples = Self.decodePCM16Mono(from: data)
+        let rawSamples = Self.decodePCM16Mono(from: data)
+        // 自动裁掉按下录制到开口前、以及读完到停止之间的前后空白音，避免模型把开头静音/气口学进去导致朗读开头无声
+        let samples = CloneAudio(samples: rawSamples, sampleRate: 16_000)
+            .trimmingEdgeSilence()?.audio.samples ?? rawSamples
         let seconds = Double(samples.count) / 16_000.0
-        guard seconds >= 2.9 else {
+        guard seconds >= 2.2 else {
             throw NSError(domain: "FixedVoiceSampleStore", code: 2,
-                          userInfo: [NSLocalizedDescriptionKey: "录制时长不足 3 秒，请重新录制 3~10 秒"])
+                          userInfo: [NSLocalizedDescriptionKey: "有效人声时长不足，请在安静环境下清晰朗读 3~10 秒"])
         }
         let clipped = seconds > 10.0 ? Array(samples.prefix(160_000)) : samples
         let canonicalWav = Self.encodeWav16kMono(samples: clipped)
@@ -91,7 +94,9 @@ final class FixedVoiceSampleStore {
               !referenceText.isEmpty else {
             return nil
         }
-        let samples = Self.decodePCM16Mono(from: data)
+        let rawSamples = Self.decodePCM16Mono(from: data)
+        let samples = CloneAudio(samples: rawSamples, sampleRate: 16_000)
+            .trimmingEdgeSilence()?.audio.samples ?? rawSamples
         guard samples.count >= 16_000 * 2 else { return nil }
         return (samples, referenceText)
     }

@@ -207,6 +207,87 @@ fn resample_linear_to_interleaved(
     out
 }
 
+/// 裁掉克隆音频开头与结尾的空白/轻气口并做人声响度归一化（对标 iOS CloneAudio.trimmingEdgeSilence + playbackGain）
+/// 若整段音频近似静音，返回 None 以便上层立即降级系统语音，避免显示「播放中」却无声。
+fn trim_edge_silence_and_normalize(samples: &[f32], sample_rate: u32) -> Option<Vec<f32>> {
+    if samples.is_empty() || sample_rate < 8_000 {
+        return None;
+    }
+    let window = (sample_rate as usize / 100).max(1); // 10ms 窗口
+    let mut levels = Vec::with_capacity((samples.len() + window - 1) / window);
+    let mut max_level = 0.0f32;
+    let mut peak = 0.0f32;
+    for chunk in samples.chunks(window) {
+        let n = chunk.len() as f64;
+        let mut sum = 0.0f64;
+        let mut power = 0.0f64;
+        for &s in chunk {
+            let v = if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 };
+            peak = peak.max(v.abs());
+            let d = v as f64;
+            sum += d;
+            power += d * d;
+        }
+        let mean = sum / n;
+        let rms = (power / n - mean * mean).max(0.0).sqrt() as f32;
+        max_level = max_level.max(rms);
+        levels.push(rms);
+    }
+    if max_level < 0.001 || peak < 0.002 {
+        return None;
+    }
+    let threshold = (max_level * 0.05).max(0.001);
+    let mut previous: Option<usize> = None;
+    let mut first: Option<usize> = None;
+    let mut last = 0usize;
+    for (idx, &lv) in levels.iter().enumerate() {
+        if lv >= threshold {
+            if let Some(prev) = previous {
+                if idx.saturating_sub(prev) <= 2 {
+                    if first.is_none() {
+                        first = Some(prev);
+                    }
+                    last = idx;
+                }
+            }
+            previous = Some(idx);
+        }
+    }
+    let first_idx = first?;
+    let start = first_idx.saturating_sub(5) * window;
+    let end = ((last + 9) * window).min(samples.len());
+    if end <= start {
+        return None;
+    }
+    let mut clipped: Vec<f32> = samples[start..end].to_vec();
+    // 响度归一化：把偏小的克隆声音温和抬升至 ~0.10 RMS（峰值不超过 0.88）
+    let active_energy: f64 = clipped.iter().map(|&s| (s as f64) * (s as f64)).sum();
+    let rms = (active_energy / clipped.len().max(1) as f64).sqrt() as f32;
+    let gain = if rms > 1e-4 {
+        (0.10 / rms).clamp(1.0, 6.0).min(0.88 / peak.max(1e-4))
+    } else {
+        1.0
+    };
+    if (gain - 1.0).abs() > 0.02 {
+        for s in &mut clipped {
+            *s = (*s * gain).clamp(-1.0, 1.0);
+        }
+    }
+    // 首尾 5ms 淡入淡出防爆音
+    let fade = (window / 2).min(clipped.len() / 2);
+    for i in 0..fade {
+        let g = i as f32 / fade.max(1) as f32;
+        if start > 0 {
+            clipped[i] *= g;
+        }
+        if end < samples.len() {
+            let tail_i = clipped.len() - 1 - i;
+            clipped[tail_i] *= g;
+        }
+    }
+    Some(clipped)
+}
+
 /// 将 WAV 字节定向播放到指定的输出设备（支持物理耳机/扬声器或 VB-Cable 等虚拟麦克风）
 /// 若传入 `far_end`，则在播放期间按真实播放进度同步推送 16kHz 远端参考样本供麦克风 AEC 实时消除回声。
 pub fn play_wav_to_device(
@@ -215,7 +296,9 @@ pub fn play_wav_to_device(
     cancel: Arc<AtomicBool>,
     far_end: Option<Arc<crate::audio::aec::FarEndReference>>,
 ) -> Result<(), String> {
-    let (mono, src_rate) = decode_wav_mono_f32(wav_bytes)?;
+    let (raw_mono, src_rate) = decode_wav_mono_f32(wav_bytes)?;
+    let mono = trim_edge_silence_and_normalize(&raw_mono, src_rate)
+        .ok_or_else(|| "克隆音频为空或近似静音，将自动降级系统朗读".to_string())?;
     if mono.is_empty() {
         return Ok(());
     }

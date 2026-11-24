@@ -45,8 +45,8 @@ pub struct AppRuntime {
     pub system_tts_muted: Arc<AtomicBool>,
     /// 实时声学回声消除（NLMS AEC）远端参考缓冲：接收本机 TTS 播放的 16kHz 音频用于麦克风实时消回声
     pub aec_far_end: Arc<audio::aec::FarEndReference>,
-    /// 最近一次播报的译文文本与时间戳，供文本级回声过滤器兜底拦截扬声器复录
-    pub last_spoken_tts: Mutex<Option<(String, std::time::Instant)>>,
+    /// 最近播报的 4 句译文文本与时间戳队列，供文本级回声过滤器在 10 秒窗口内拦截任意一句扬声器复录
+    pub last_spoken_tts: Mutex<std::collections::VecDeque<(String, std::time::Instant)>>,
     /// 串行播放闸门：保证多句连续自动播报按顺序逐句播放且不互相提前解除静音
     pub tts_play_gate: Mutex<()>,
     /// 手动点播代次：每次用户点击小喇叭立即自增并掐断旧播报，确保绝不串播其他句子
@@ -75,13 +75,25 @@ impl AppRuntime {
             mic_muted: Arc::new(AtomicBool::new(false)),
             system_tts_muted: Arc::new(AtomicBool::new(false)),
             aec_far_end: Arc::new(audio::aec::FarEndReference::new()),
-            last_spoken_tts: Mutex::new(None),
+            last_spoken_tts: Mutex::new(std::collections::VecDeque::with_capacity(6)),
             tts_play_gate: Mutex::new(()),
             tts_manual_epoch: Arc::new(AtomicU64::new(0)),
             session_epoch: Arc::new(AtomicU64::new(0)),
             auto_spoken_ids: Mutex::new(std::collections::HashSet::new()),
             tts_cancel: Mutex::new(None),
             import_cancel: AtomicBool::new(false),
+        }
+    }
+
+    pub async fn record_spoken_tts(&self, text: &str) {
+        let t = text.trim();
+        if t.is_empty() {
+            return;
+        }
+        let mut q = self.last_spoken_tts.lock().await;
+        q.push_back((t.to_string(), std::time::Instant::now()));
+        while q.len() > 4 {
+            q.pop_front();
         }
     }
 
@@ -953,10 +965,7 @@ async fn set_system_tts_muted(
 ) -> Result<(), String> {
     rt.system_tts_muted.store(muted, Ordering::Relaxed);
     if let Some(txt) = spoken_text {
-        let t = txt.trim().to_string();
-        if !t.is_empty() {
-            *rt.last_spoken_tts.lock().await = Some((t, std::time::Instant::now()));
-        }
+        rt.record_spoken_tts(&txt).await;
     }
     Ok(())
 }
@@ -1129,15 +1138,15 @@ async fn play_cloned_segment_to_device(
         "tts:state",
         serde_json::json!({ "id": id, "state": "playing" }),
     );
-    *rt.last_spoken_tts.lock().await = Some((trimmed.clone(), std::time::Instant::now()));
+    rt.record_spoken_tts(&trimmed).await;
     let cancel_for_play = cancel.clone();
     let res = tokio::task::spawn_blocking(move || {
         audio::output::play_wav_to_device(&wav_bytes, &device_name, cancel_for_play, far_end_opt)
     })
     .await
     .map_err(|e| format!("播放线程异常：{}", e));
-    // 播报结束时刷新时间戳，确保播完后 6 秒残响/ASR 延迟窗口内都能识别并过滤回声
-    *rt.last_spoken_tts.lock().await = Some((trimmed.clone(), std::time::Instant::now()));
+    // 播报结束时再次刷新时间戳，确保播完后 10 秒残响/ASR 延迟窗口内都能识别并过滤回声
+    rt.record_spoken_tts(&trimmed).await;
 
     let _ = app.emit(
         "tts:state",

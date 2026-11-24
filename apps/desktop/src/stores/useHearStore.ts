@@ -1382,7 +1382,8 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       es: "es-ES",
     };
     const targetBcp = bcp47Map[lang] ?? "zh-CN";
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+    // Windows Tauri 桌面端优先使用原生 SAPI（speak_text_sapi），规避 Edge WebView2 speechSynthesis 偶发静默无声且不触发 onend 导致卡在「播放中」的问题
+    if (!isTauriRuntime() && typeof window !== "undefined" && "speechSynthesis" in window) {
       const voices = window.speechSynthesis.getVoices();
       const matched = voices.find((v) =>
         v.lang.toLowerCase().startsWith(lang.toLowerCase())

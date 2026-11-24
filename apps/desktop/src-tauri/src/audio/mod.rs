@@ -432,7 +432,7 @@ impl LaneProcessor {
             pos: 0.0,
             prev_sample: None,
             frame_buf: Vec::with_capacity(VAD_WINDOW_SAMPLES * 2),
-            segmenter: Segmenter::new(640, 15),
+            segmenter: Segmenter::new(520, 12),
             noise_floor: 0.0015,
             hangover: 0,
             onset_count: 0,
@@ -1805,7 +1805,18 @@ impl LiveCaptureHandle {
             let mut last_preview_at: Option<Instant> = None;
             let mut voice_clusterer = VoiceprintClusterer::new();
 
-            while let Some(item) = seg_rx.recv().await {
+            while let Some(mut item) = seg_rx.recv().await {
+                // 合并/丢弃积压的旧 Partial 预览事件：若队列里已有更新的 Partial 或已到来的 Final，直接跳到最新事件，
+                // 避免 Final 终稿翻译被旧预览请求堵在队列后面导致延迟比 iOS 慢数秒！
+                if matches!(item.event, SegmentEvent::Partial { .. }) {
+                    while let Ok(next) = seg_rx.try_recv() {
+                        let is_final = matches!(next.event, SegmentEvent::Final { .. });
+                        item = next;
+                        if is_final {
+                            break;
+                        }
+                    }
+                }
                 let (
                     asr_url,
                     asr_tok,
@@ -1868,7 +1879,7 @@ impl LiveCaptureHandle {
                 match item.event {
                     SegmentEvent::Partial { samples, .. } => {
                         let throttled = last_preview_at
-                            .map(|t| t.elapsed().as_millis() < 900)
+                            .map(|t| t.elapsed().as_millis() < 450)
                             .unwrap_or(false);
                         if throttled || samples.len() < (VAD_SAMPLE_RATE as usize / 2) {
                             continue;
@@ -1889,6 +1900,17 @@ impl LiveCaptureHandle {
                         {
                             let clean_src = text.trim().to_string();
                             if has_real_speech_text(&clean_src) {
+                                // 预览阶段同样拦截 10 秒内扬声器刚播报的译文回声，避免实时预览框闪出回声复录
+                                let is_partial_echo = {
+                                    let guard = rt.last_spoken_tts.lock().await;
+                                    guard.iter().any(|(spoken_text, spoken_at)| {
+                                        spoken_at.elapsed().as_secs() <= 10
+                                            && is_likely_tts_echo(&clean_src, spoken_text)
+                                    })
+                                };
+                                if is_partial_echo {
+                                    continue;
+                                }
                                 // 1. 检查原文是否与上一轮预览完全一致：若中文/原文未变且已有译文，直接跳过重复翻译，绝不反复重写！
                                 let (same_src, has_existing_tr, keep_tr) = {
                                     let mut snap = rt.snapshot.lock().await;
@@ -2028,16 +2050,14 @@ impl LiveCaptureHandle {
                             continue;
                         }
 
-                        // 文本级回声防御：若正在播报或 6 秒内刚播报过高度重合的译文，直接丢弃，杜绝自动朗读被再次收音翻译
+                        // 文本级回声防御：若正在播报或 10 秒内刚播报过高度重合的译文（最近 4 句队列），直接丢弃，杜绝自动朗读被再次收音翻译
                         {
                             let is_echo = {
                                 let guard = rt.last_spoken_tts.lock().await;
-                                if let Some((ref spoken_text, spoken_at)) = *guard {
-                                    spoken_at.elapsed().as_secs() <= 6
+                                guard.iter().any(|(spoken_text, spoken_at)| {
+                                    spoken_at.elapsed().as_secs() <= 10
                                         && is_likely_tts_echo(&source_text, spoken_text)
-                                } else {
-                                    false
-                                }
+                                })
                             };
                             if is_echo {
                                 logger::info(format!(
