@@ -366,7 +366,7 @@ export function MainApp() {
   ]);
 
   const exportBaseFilename = () => {
-    const meta = conversations.find((c) => c.id === activeConversationId);
+    const meta = (conversations ?? []).find((c) => c.id === activeConversationId);
     const raw = (meta?.title || "听见会议记录")
       .replace(/[\\/:*?"<>|]/g, "_")
       .trim()
