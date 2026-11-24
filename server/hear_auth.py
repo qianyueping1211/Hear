@@ -3,6 +3,8 @@
 
 网关启动时从 Token 管理服务拉取本实例的完整 Token 清单，之后每 30 秒整体替换一次。
 推理请求只在内存里比对 SHA-256 摘要和时间，不访问数据库，也不调用管理服务。
+每个 Token 的限流（每分钟请求数、同时请求数）也只在内存里执行；识别时长额度按
+「管理服务上已记录的用量 + 本网关还没上报的用量」判断，用量每 30 秒批量上报一次。
 
 环境变量：
     HEAR_AUTH_MODE                 managed（托管）/ legacy（旧的单口令）/ off
@@ -13,6 +15,9 @@
 """
 import datetime
 import hashlib
+import collections
+import math
+import secrets
 import http.client
 import ipaddress
 import json
@@ -31,6 +36,10 @@ RETRY_INTERVAL = 5.0
 MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+USAGE_BUCKET_US = 15 * 60 * 1000000
+USAGE_KEEP_US = 40 * 86400 * 1000000
+MAX_USAGE_BATCH = 300
+LIMIT_KEYS = ("rate_per_minute", "max_concurrent", "daily_audio_minutes", "monthly_audio_minutes")
 
 MESSAGES = {
     "TOKEN_REQUIRED": "请填写访问口令",
@@ -40,6 +49,9 @@ MESSAGES = {
     "TOKEN_REVOKED": "访问口令已被撤销，请联系管理员",
     "AUTH_SERVICE_UNAVAILABLE": "已连到服务，口令管理暂不可用",
     "HTTPS_REQUIRED": "请求未使用 HTTPS，已拒绝",
+    "RATE_LIMITED": "请求太频繁，请稍后再试",
+    "CONCURRENCY_LIMITED": "同时进行的请求太多，请稍后再试",
+    "QUOTA_EXCEEDED": "识别时长额度已用完",
 }
 
 
@@ -87,7 +99,7 @@ def token_digest(token):
 # ------------------------------------------------------------------ 结果
 
 class AuthResult:
-    __slots__ = ("ok", "http_status", "code", "message", "details")
+    __slots__ = ("ok", "http_status", "code", "message", "details", "subject", "limits")
 
     def __init__(self, ok, http_status=200, code=None, message=None, details=None):
         self.ok = ok
@@ -95,6 +107,9 @@ class AuthResult:
         self.code = code
         self.message = message
         self.details = details or {}
+        # 托管模式下通过校验的 Token：token_id 和它的限流额度（不返回给客户端）
+        self.subject = None
+        self.limits = {}
 
     @classmethod
     def allow(cls, details=None):
@@ -172,9 +187,188 @@ def parse_snapshot(raw, gateway_id):
             raise SnapshotError("Token 时间不合法") from error
         if expires <= starts:
             raise SnapshotError("Token 结束时间早于开始时间")
+        limits = item.get("limits") or {}
+        if not isinstance(limits, dict):
+            raise SnapshotError("Token 限额格式不对")
+        clean = {}
+        for key in LIMIT_KEYS:
+            value = limits.get(key)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise SnapshotError("Token 限额数值不合法")
+            clean[key] = value
         entries[digest] = {"token_id": token_id, "user_id": user_id, "starts_at": starts,
-                           "expires_at": expires, "revoked_at": revoked}
+                           "expires_at": expires, "revoked_at": revoked, "limits": clean}
     return revision, entries
+
+
+# ------------------------------------------------------------------ 用量、限流与额度
+
+def _local_window(now):
+    """管理服务还没告诉我们日、月边界时，先按网关本机时区估一个（下次上报成功后以管理服务为准）。"""
+    local = datetime.datetime.fromtimestamp(now / 1000000.0)
+    start = lambda y, m, d: int(time.mktime((y, m, d, 0, 0, 0, 0, 0, -1)) * 1000000)
+    following = datetime.date(local.year, local.month, local.day) + datetime.timedelta(days=1)
+    year, month = (local.year + 1, 1) if local.month == 12 else (local.year, local.month + 1)
+    return {"day_start": start(local.year, local.month, local.day),
+            "day_end": start(following.year, following.month, following.day),
+            "month_start": start(local.year, local.month, 1), "month_end": start(year, month, 1)}
+
+
+class UsageMeter:
+    """每个 Token 的并发数、最近 60 秒请求数，以及还没上报给管理服务的用量。全部在内存里。"""
+
+    def __init__(self, monotonic=time.monotonic, wall=time.time):
+        self._monotonic = monotonic
+        self._wall = wall
+        self._lock = threading.Lock()
+        self._recent = {}        # token_id -> deque(单调时钟秒)
+        self._active = {}        # token_id -> 正在进行的请求数
+        self._pending = {}       # token_id -> {bucket_us: [requests, asr_ms, mt, clone]}
+        self._last_used = {}     # token_id -> 最近一次成功使用（微秒）
+        self._inflight = None    # 正在上报、还没确认的一批：(batch_id, items, 原始数据)
+        self._base = {}          # token_id -> (day_asr_ms, month_asr_ms)，来自管理服务
+        self._window = None      # 管理服务给的日、月边界
+
+    def _window_now(self, now):
+        window = self._window
+        if window is None or now >= window["day_end"] or now < window["day_start"]:
+            return _local_window(now), False
+        return window, True
+
+    def _used(self, token_id, now):
+        """(今日已用毫秒, 本月已用毫秒, 窗口)：管理服务记录的 + 本网关未确认的。"""
+        window, from_service = self._window_now(now)
+        base_day, base_month = self._base.get(token_id, (0, 0)) if from_service else (0, 0)
+        if not from_service and self._window is not None and now < self._window["month_end"]:
+            base_month = self._base.get(token_id, (0, 0))[1]   # 只跨了天、没跨月：月用量还有效
+        day = month = 0
+        sources = [self._pending.get(token_id, {})]
+        if self._inflight is not None:
+            sources.append(self._inflight[2].get(token_id, {}))
+        for buckets in sources:
+            for bucket, values in buckets.items():
+                if window["month_start"] <= bucket < window["month_end"]:
+                    month += values[1]
+                    if window["day_start"] <= bucket < window["day_end"]:
+                        day += values[1]
+        return base_day + day, base_month + month, window
+
+    def admit(self, token_id, limits):
+        """放行返回 None；超限返回拒绝结果（429）。放行后必须调用 release。"""
+        now_mono = self._monotonic()
+        now = now_us(self._wall)
+        with self._lock:
+            active = self._active.get(token_id, 0)
+            limit = limits.get("max_concurrent")
+            if limit and active >= limit:
+                return AuthResult.deny("CONCURRENCY_LIMITED", 429,
+                                       {"limit": limit, "retry_after_seconds": 1})
+            recent = self._recent.setdefault(token_id, collections.deque())
+            while recent and now_mono - recent[0] >= 60:
+                recent.popleft()
+            limit = limits.get("rate_per_minute")
+            if limit and len(recent) >= limit:
+                wait = max(1, int(math.ceil(60 - (now_mono - recent[0]))))
+                return AuthResult.deny("RATE_LIMITED", 429, {"limit": limit, "retry_after_seconds": wait})
+            daily, monthly = limits.get("daily_audio_minutes"), limits.get("monthly_audio_minutes")
+            if daily or monthly:
+                day_ms, month_ms, window = self._used(token_id, now)
+                for quota, limit, used, resets in (("daily", daily, day_ms, window["day_end"]),
+                                                   ("monthly", monthly, month_ms, window["month_end"])):
+                    if limit and used >= limit * 60000:
+                        message = "今日识别时长已用完" if quota == "daily" else "本月识别时长已用完"
+                        return AuthResult.deny("QUOTA_EXCEEDED", 429, {
+                            "quota": quota, "limit_minutes": limit,
+                            "used_minutes": round(used / 60000.0, 1), "resets_at": format_time(resets),
+                            "retry_after_seconds": max(1, int((resets - now) / 1000000))}, message=message)
+            recent.append(now_mono)
+            self._active[token_id] = active + 1
+        return None
+
+    def release(self, token_id, success, asr_ms=0, translation=False, clone=False):
+        now = now_us(self._wall)
+        with self._lock:
+            active = self._active.get(token_id, 0) - 1
+            if active > 0:
+                self._active[token_id] = active
+            else:
+                self._active.pop(token_id, None)
+            if not success:
+                return
+            bucket = now - now % USAGE_BUCKET_US
+            values = self._pending.setdefault(token_id, {}).setdefault(bucket, [0, 0, 0, 0])
+            values[0] += 1
+            values[1] += max(0, int(asr_ms))
+            values[2] += 1 if translation else 0
+            values[3] += 1 if clone else 0
+            self._last_used[token_id] = max(now, self._last_used.get(token_id, 0))
+
+    def status(self, token_id, limits):
+        """给 /v1/auth/check 用：限额和已用量（不占用请求次数）。"""
+        out = {"limits": dict(limits)}
+        if limits.get("daily_audio_minutes") or limits.get("monthly_audio_minutes"):
+            with self._lock:
+                day_ms, month_ms, window = self._used(token_id, now_us(self._wall))
+            out["usage"] = {"today_audio_minutes": round(day_ms / 60000.0, 1),
+                            "month_audio_minutes": round(month_ms / 60000.0, 1),
+                            "day_resets_at": format_time(window["day_end"]),
+                            "month_resets_at": format_time(window["month_end"])}
+        return out
+
+    def take_batch(self):
+        """取一批待上报的用量。上一批没确认就原样重发（同一个 batch_id，管理服务只记一次）。"""
+        with self._lock:
+            if self._inflight is not None:
+                return self._inflight[0], self._inflight[1]
+            now = now_us(self._wall)
+            taken, items = {}, []
+            for token_id in list(self._pending):
+                buckets = self._pending[token_id]
+                for bucket in sorted(buckets):
+                    if bucket < now - USAGE_KEEP_US:
+                        del buckets[bucket]          # 太旧了，管理服务也不收
+                        continue
+                    if len(items) >= MAX_USAGE_BATCH:
+                        break
+                    values = buckets.pop(bucket)
+                    taken.setdefault(token_id, {})[bucket] = values
+                    items.append({"token_id": token_id, "bucket_start": format_time(bucket),
+                                  "requests": values[0], "asr_ms": values[1], "mt_requests": values[2],
+                                  "clone_requests": values[3]})
+                if not buckets:
+                    del self._pending[token_id]
+                if len(items) >= MAX_USAGE_BATCH:
+                    break
+            for item in items:
+                last = self._last_used.get(item["token_id"])
+                if last is not None:
+                    item["last_used_at"] = format_time(last)
+            batch_id = "b_" + secrets.token_hex(12)
+            self._inflight = (batch_id, items, taken)
+            return batch_id, items
+
+    def confirm(self, batch_id, response):
+        """管理服务已收下这一批：换上它算好的已用量。"""
+        window = {key: parse_time(response["window"][key])
+                  for key in ("day_start", "day_end", "month_start", "month_end")}
+        base = {}
+        for total in response.get("totals") or []:
+            day, month = total.get("day_asr_ms"), total.get("month_asr_ms")
+            if (isinstance(total.get("token_id"), str) and isinstance(day, int) and isinstance(month, int)
+                    and not isinstance(day, bool) and not isinstance(month, bool)):
+                base[total["token_id"]] = (max(0, day), max(0, month))
+        with self._lock:
+            if self._inflight is None or self._inflight[0] != batch_id:
+                return
+            self._inflight = None
+            self._window = window
+            self._base = base
+
+    def has_pending(self):
+        with self._lock:
+            return bool(self._pending) or self._inflight is not None
 
 
 # ------------------------------------------------------------------ 网关端校验器
@@ -213,6 +407,7 @@ class ManagedAuthenticator:
             raise AuthConfigError("网关凭据为空")
         base = api_url.strip().rstrip("/")
         self.snapshot_url = "%s/internal/v1/gateways/%s/token-snapshot" % (base, quote(gateway_id, safe=""))
+        self.usage_url = "%s/internal/v1/gateways/%s/usage" % (base, quote(gateway_id, safe=""))
         self.gateway_id = gateway_id
         self._credential = credential
         self.timeout = timeout
@@ -237,6 +432,10 @@ class ManagedAuthenticator:
         self._last_error = "尚未同步"
         self._failing = False
         self.sync_attempts = 0
+        self.meter = UsageMeter(monotonic=monotonic, wall=wall)
+        self._usage_supported = True
+        self._usage_failing = False
+        self.usage_reports = 0
         self._stop = threading.Event()
         self._thread = None
 
@@ -313,6 +512,68 @@ class ManagedAuthenticator:
             self._log("鉴权清单同步失败：%s（超过 %d 秒没同步成功会拒绝推理）" % (reason, int(self.max_staleness)))
         self._failing = True
 
+    def _needs_report(self):
+        if self.meter.has_pending():
+            return True
+        with self._lock:
+            entries = self._entries or {}
+            # 有额度限制的 Token：哪怕本网关没用，也要定期取回别的网关用掉的量
+            return any(entry["limits"].get("daily_audio_minutes") or entry["limits"].get("monthly_audio_minutes")
+                       for entry in entries.values())
+
+    def report_usage(self):
+        """把用量批量交给管理服务，并取回有额度 Token 的已用量。不影响口令校验。"""
+        if not self._usage_supported or not self._needs_report():
+            return True
+        batch_id, items = self.meter.take_batch()
+        body = json.dumps({"batch_id": batch_id, "items": items}).encode("utf-8")
+        request = urllib.request.Request(self.usage_url, data=body, method="POST")
+        request.add_header("Authorization", "Bearer " + self._credential)
+        request.add_header("Content-Type", "application/json")
+        request.add_header("Accept", "application/json")
+        try:
+            try:
+                with self._opener.open(request, timeout=self.timeout) as response:
+                    raw = response.read(MAX_SNAPSHOT_BYTES + 1)
+            except urllib.error.HTTPError as error:
+                try:
+                    error.read(4096)
+                finally:
+                    error.close()
+                if error.code in (404, 405):
+                    # 旧版管理服务没有用量接口：只在本网关内存里限流和计额度
+                    self._usage_supported = False
+                    self._log("管理服务不支持用量上报（HTTP %d），识别时长额度只按本网关计算" % error.code)
+                    return False
+                raise SnapshotError("用量上报返回 HTTP %d" % error.code)
+            self.meter.confirm(batch_id, json.loads(raw.decode("utf-8")))
+            self.usage_reports += 1
+            if self._usage_failing:
+                self._log("用量上报已恢复")
+            self._usage_failing = False
+            return True
+        except (SnapshotError, urllib.error.URLError, OSError, ValueError, KeyError, TypeError,
+                ssl.SSLError, http.client.HTTPException) as error:
+            if not self._usage_failing:
+                self._log("用量上报失败：%s（用量先留在本网关，稍后重发）" % (getattr(error, "reason", None) or error))
+            self._usage_failing = True
+            return False
+
+    def admit(self, result):
+        """口令已通过：再检查这个 Token 的限流和额度。放行返回 None。"""
+        if result.subject is None:
+            return None
+        return self.meter.admit(result.subject, result.limits)
+
+    def release(self, result, success, **usage):
+        if result.subject is not None:
+            self.meter.release(result.subject, success, **usage)
+
+    def usage_status(self, result):
+        if result.subject is None:
+            return {}
+        return self.meter.status(result.subject, result.limits)
+
     def start(self):
         if self._thread is not None:
             return
@@ -330,6 +591,10 @@ class ManagedAuthenticator:
                 # 单次异常不能让鉴权清单同步线程永久退出。
                 self._mark_failure("%s: %s" % (type(error).__name__, error))
                 ok = False
+            try:
+                self.report_usage()
+            except Exception as error:  # 用量上报出错不能影响清单同步
+                self._log("用量上报异常：%s: %s" % (type(error).__name__, error))
             self._stop.wait(self.refresh_interval if ok else min(self.retry_interval, self.refresh_interval))
 
     # -- 查询 --
@@ -365,7 +630,10 @@ class ManagedAuthenticator:
         status = info["status"]
         if status == "active":
             info["active"] = True
-            return AuthResult.allow(info)
+            result = AuthResult.allow(info)
+            result.subject = entry["token_id"]
+            result.limits = entry.get("limits") or {}
+            return result
         info["active"] = False
         code = {"scheduled": "TOKEN_NOT_STARTED", "expired": "TOKEN_EXPIRED",
                 "revoked": "TOKEN_REVOKED"}[status]
