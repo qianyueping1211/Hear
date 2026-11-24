@@ -9,10 +9,10 @@ on:
     paths-ignore:
       - .github/workflows/build-ipa.yml
       - .github/workflows/build-windows.yml
+      - .github/workflows/build-windows-server.yml
+      - .github/workflows/build-macos-server.yml
       - .github/workflows/rename-releases.yml
       - .github/workflows/server-contract.yml
-      - start-hear-cloud.bat
-      - start-hear-token-admin.bat
       - 'desktop/**'
       - 'apps/desktop/**'
       - scripts/prepare_desktop_icons.py

@@ -14,9 +14,11 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $env:PYTHONUTF8 = '1'
 $here = Split-Path -Parent $env:HEAR_LAUNCHER_FILE
 $mode = $env:HEAR_LAUNCHER_MODE
+$parentDir = Split-Path -Parent $here
+$inWindowsSubdir = Test-Path -LiteralPath (Join-Path $parentDir 'start-windows.ps1')
 $inCheckout = Test-Path -LiteralPath (Join-Path $here 'server\start-windows.ps1')
-$root = if ($inCheckout) { $here } else { Join-Path $here 'Hear' }
-$serverDir = Join-Path $root 'server'
+$root = if ($inWindowsSubdir) { Split-Path -Parent $parentDir } elseif ($inCheckout) { $here } else { Join-Path $here 'Hear' }
+$serverDir = if ($inWindowsSubdir) { $parentDir } else { Join-Path $root 'server' }
 $service = Join-Path $serverDir 'hear_token_service.py'
 
 # 数据和凭据放在当前 Windows 用户自己的目录里：更新服务文件时不会被覆盖

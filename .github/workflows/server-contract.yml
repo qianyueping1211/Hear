@@ -9,15 +9,11 @@ on:
     paths:
       - 'server/**'
       - 'tests/audio/**'
-      - 'start-hear-cloud.bat'
-      - 'start-hear-token-admin.bat'
       - '.github/workflows/server-contract.yml'
   pull_request:
     paths:
       - 'server/**'
       - 'tests/audio/**'
-      - 'start-hear-cloud.bat'
-      - 'start-hear-token-admin.bat'
       - '.github/workflows/server-contract.yml'
 
 permissions:
@@ -67,17 +63,17 @@ jobs:
           [void][System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
           if ($errors.Count) { throw ($errors -join [Environment]::NewLine) }
           # 两个 BAT 里嵌入的 PowerShell 也要能解析
-          foreach ($bat in @('start-hear-cloud.bat', 'start-hear-token-admin.bat')) {
+          foreach ($bat in @('server/windows/start-hear-cloud.bat', 'server/windows/start-hear-token-admin.bat')) {
             $text = [IO.File]::ReadAllText((Resolve-Path $bat), [Text.Encoding]::UTF8)
             $embedded = $text.Substring($text.LastIndexOf(':__HEAR_POWERSHELL__') + 20)
             [void][System.Management.Automation.Language.Parser]::ParseInput($embedded, [ref]$tokens, [ref]$errors)
             if ($errors.Count) { throw ("$bat`n" + ($errors -join [Environment]::NewLine)) }
           }
-          cmd /d /c "start-hear-cloud.bat --check"
+          cmd /d /c "server\windows\start-hear-cloud.bat --check"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /d /c "start-hear-cloud.bat --help"
+          cmd /d /c "server\windows\start-hear-cloud.bat --help"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmd /d /c "start-hear-token-admin.bat --help"
+          cmd /d /c "server\windows\start-hear-token-admin.bat --help"
           exit $LASTEXITCODE
 
   contract:

@@ -84,6 +84,6 @@ jobs:
             gh release upload "$TAG" "$ASSET" --clobber
           else
             gh release create "$TAG" "$ASSET" \
-              --title "听见 Mac Studio 服务端 v${VER} (Apple Silicon Metal)" \
+              --title "听见 Apple-Server v${VER}" \
               --notes "$NOTES"
           fi

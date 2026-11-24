@@ -19,9 +19,11 @@ $files = @('start-windows.ps1', 'hear_cloud.py', 'hear_http.py', 'hear_speaker.p
            'requirements.txt', 'test_api.py', 'test_contract.py',
            'hear_auth.py', 'hear_check_token.py', 'hear_token_store.py', 'hear_token_service.py',
            'hear_token_admin.html', 'hear_token_admin.js', 'hear_token_admin.css', 'test_token_auth.py')
+$parentDir = Split-Path -Parent $here
+$inWindowsSubdir = Test-Path -LiteralPath (Join-Path $parentDir 'start-windows.ps1')
 $inCheckout = Test-Path -LiteralPath (Join-Path $here 'server\start-windows.ps1')
-$root = if ($inCheckout) { $here } else { Join-Path $here 'Hear' }
-$serverDir = Join-Path $root 'server'
+$root = if ($inWindowsSubdir) { Split-Path -Parent $parentDir } elseif ($inCheckout) { $here } else { Join-Path $here 'Hear' }
+$serverDir = if ($inWindowsSubdir) { $parentDir } else { Join-Path $root 'server' }
 
 function Test-ServerFiles($directory) {
     foreach ($name in $files) {

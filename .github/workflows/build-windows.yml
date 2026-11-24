@@ -13,7 +13,7 @@ on:
       - 'server/hear_speaker.py'
       - 'server/requirements.txt'
       - 'server/start-windows.ps1'
-      - 'start-hear-cloud.bat'
+      - 'server/windows/**'
       - '.github/workflows/build-windows.yml'
   pull_request:
     paths:
@@ -233,8 +233,9 @@ jobs:
           python -m pip install --prefer-binary --target "$sitePackages" -r server/requirements.txt
 
           # 3. 拷贝服务端脚本与启动入口
-          foreach ($rootFile in @("start-hear-cloud.bat", "start-hear-token-admin.bat")) {
-            if (Test-Path $rootFile) { Copy-Item $rootFile $stage -Force }
+          foreach ($bat in @("start-hear-cloud.bat", "start-hear-token-admin.bat")) {
+            $batSrc = Join-Path "server\windows" $bat
+            if (Test-Path $batSrc) { Copy-Item $batSrc $stage -Force }
           }
           if (Test-Path "docs/windows-deploy.md") {
             Copy-Item "docs/windows-deploy.md" (Join-Path $stage "使用说明.md") -Force
