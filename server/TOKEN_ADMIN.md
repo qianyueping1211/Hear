@@ -11,10 +11,10 @@
 | `hear_token_service.py` | 管理服务：浏览器后台 `/admin/`、管理 API `/admin/api/v1`、网关清单 `/internal/v1`，以及命令行工具 |
 | `hear_token_store.py` | SQLite 存储、迁移和业务规则。签发、改期、撤销、停用和删除都与网关修订号在同一事务内提交 |
 | `hear_token_admin.html/.js/.css` | 管理后台页面。使用严格 CSP，不含内联脚本，用户数据一律按纯文本写入页面 |
-| `hear_auth.py` | 网关端：拉取清单、在内存中校验，每 30 秒刷新一次；超过 60 秒未同步成功则返回 503 |
+| `hear_auth.py` | 网关端：拉取清单、在内存中校验，每 30 秒刷新一次；超过 60 秒未同步成功则返回 503。每个 Token 的限流和额度也在这里执行，并批量上报用量 |
 | `hear_http.py` / `hear_cloud.py` | 推理接口接入同一套鉴权，新增 `/v1/auth/check`，`/health` 增加 `auth_mode` 和 `auth_ready` |
 | `hear_check_token.py` | `start-hear-cloud.bat --check-token` 背后的检查程序 |
-| `test_token_auth.py` | 端到端自测，覆盖 116 项，CI 中运行 |
+| `test_token_auth.py` | 端到端自测，覆盖 166 项，CI 中运行 |
 
 ## 2. 地址与权限
 
@@ -22,7 +22,7 @@
 | --- | --- | --- | --- | --- |
 | 管理后台 | `https://<管理服务>:8443/admin/` | 管理员用户名和密码（会话 Cookie） | 浏览器管理 | — |
 | 管理 API | `https://<管理服务>:8443/admin/api/v1` | 会话 Cookie；写操作另需 `X-CSRF-Token` 且同源 | `admin` 角色可读写，`viewer` 角色只读 | 网关凭据和用户 Token 都会得到 401 |
-| 网关清单 | `https://<管理服务>:8443/internal/v1/gateways/{gateway_id}/token-snapshot` | `Authorization: Bearer hear_gw_...` | 只能读取本网关的清单 | 读取其他网关的清单返回 403；用户 Token 返回 401；不能操作用户 |
+| 网关清单 / 用量上报 | `https://<管理服务>:8443/internal/v1/gateways/{gateway_id}/token-snapshot`、`.../usage` | `Authorization: Bearer hear_gw_...` | 只能读取本网关的清单、上报本网关 Token 的用量 | 访问其他网关的数据返回 403；用户 Token 返回 401；不能操作用户 |
 | 网关健康 | `https://hear.yueping1211.asia/health`，或内网 `https://<Windows IP>:8000/health` | 无 | 查看连通、模型和口令服务状态 | — |
 | 口令检查 | 同上，路径为 `/v1/auth/check` | `X-Hear-Token: hear_ut_...` | 检查这串口令在该网关上的状态 | 不调用模型 |
 | 推理接口 | 同上，路径为 `/v1/asr` 等 | `X-Hear-Token` | App 现有的协议不变 | 明文 HTTP 返回 403（显式开启的本机 Cloudflare 回源除外） |
@@ -52,6 +52,15 @@
 | `--disable-managed` / `--enable-managed` | 临时切回旧的单口令 / 恢复 Token 管理 |
 
 数据库在 `%LOCALAPPDATA%\Hear\token-data\hear-tokens.db`，更新服务文件时不会被覆盖。
+
+### Mac 服务端
+
+Mac 整合包也带有同一套管理服务，用法和 Windows 一样：
+
+1. 双击「启动口令管理后台.command」（或运行 `./start-macos.sh token-admin`）。第一次运行时，它会让你设置 `admin` 的密码、登记本机网关 `hear-home`，然后打开 **http://127.0.0.1:8443/admin/**。
+2. 以后照常启动「听见服务端」。发现 `~/Library/Application Support/Hear/secrets/` 里已有网关凭据时，它会自动进入 Token 管理模式，并在后台启动管理服务。
+
+数据库在 `~/Library/Application Support/Hear/token-data/hear-tokens.db`。限流、额度和用量统计在 Mac 上同样生效。
 
 下面第 3、4 节讲的是手动部署，适合管理服务放在另一台机器上的情况。
 
@@ -177,6 +186,30 @@ python hear_token_service.py backup --out D:\Backup\hear-tokens-20270115.db
 
 备份文件里有 Token 摘要、管理员密码哈希和网关凭据摘要，请按敏感数据保管。
 
+## 7a. 限流、额度与用量统计
+
+每个 Token 可以单独设置下面 4 项，留空表示不限制。签发时填，或者之后在后台点「修改」调整：
+
+| 项目 | 含义 | 超出时 |
+| --- | --- | --- |
+| 每分钟请求数 | 最近 60 秒内的推理请求数，包括预览请求 | 429 `RATE_LIMITED` |
+| 同时进行的请求数 | 同一时刻还没结束的请求数 | 429 `CONCURRENCY_LIMITED` |
+| 每日识别时长（分钟） | 当天首次识别的语音总长 | 429 `QUOTA_EXCEEDED`（`quota=daily`） |
+| 每月识别时长（分钟） | 当月首次识别的语音总长 | 429 `QUOTA_EXCEEDED`（`quota=monthly`） |
+
+- **在哪里执行。** 限流和额度都在网关内存里判断，鉴权路径仍然不访问数据库，也不调用管理服务。429 错误体里带 `retry_after_seconds`，额度超出时还带 `resets_at`（什么时候重置）。
+- **建议值。** 实时翻译时，每句话会有多次识别和翻译预览请求。每分钟请求数建议不低于 300，同时请求数不低于 4，否则正常使用也可能被拦。
+- **识别时长怎么算。** 只算首次识别的音频长度，从 WAV 头读出，预览（`X-ASR-Preview: 1`）和后台精修（`X-ASR-Stage: correct`）不重复计算。只统计成功（2xx）的请求。
+- **日和月怎么划分。** 按管理服务所在电脑的时区。
+- **用量怎么回到管理服务。** 网关每轮同步清单后，把用量按 15 分钟一格批量上报（`POST /internal/v1/gateways/{id}/usage`），同时取回有额度 Token 的已用量：
+  - 每批都有 `batch_id`。上报失败时网关原样重发，管理服务对同一批只记一次。
+  - 管理服务暂时连不上时，用量先留在网关内存里，额度按「上次取回的已用量 + 本网关还没上报的量」判断。
+- **多个网关共用一个 Token 时**，额度判断大约有 30 秒延迟，可能略超一点。
+- **旧版管理服务**没有用量接口。网关会自动停止上报，只按本网关的用量判断额度。
+- **在哪里看用量。** 后台 Token 列表里直接显示今日用量和最近使用时间。点「用量」可以看今日、本月、累计，以及最近 30 天每天的明细（`GET /admin/api/v1/tokens/{id}/usage?days=30`）。
+- **App 端怎么看额度。** `/v1/auth/check` 会返回这个 Token 的 `limits`。设置了识别时长额度时，还会返回今日和本月已用分钟数。这个检查不占请求次数。
+- **保存多久。** 用量明细保留 400 天。上报批次号保留 2 天，用来去重。
+
 ## 8. 日志与安全要点
 
 - 用户 Token 原文只在签发成功的 201 响应里出现一次。数据库、审计、清单、列表和日志里只有 SHA-256 摘要、末 6 位和元数据。网关凭据在库里也只存摘要。
@@ -198,10 +231,11 @@ python hear_token_service.py backup --out D:\Backup\hear-tokens-20270115.db
 | 网关离线、口令到期、模型加载中 | `--check-token` 分别返回退出码 2、5，并单独显示模型就绪状态；错误口令返回 3，仅凭 `/health` 成功不能判为有效 |
 | 同一 Token 连续请求 | 后台「网关」页和 `list-gateways` 显示清单请求计数。“80 checks/inferences cause only the scheduled snapshot requests” |
 | 公网与内网 | 两边是同一套规则。空口令、错误口令和明文 HTTP 推理都会被拒绝，见对应的 401 和 403 测试项 |
+| 限流、额度与用量 | “the gateway enforces rate_per_minute with 429 RATE_LIMITED”“the gateway enforces daily_audio_minutes with 429 QUOTA_EXCEEDED”“usage is reported back to the token service”“a repeated batch_id is counted once” |
 | 凭据隔离 | “a user token cannot read the snapshot”“another gateway's credential cannot read this snapshot”“the gateway credential cannot use the admin API”“…logs never contain raw tokens” |
 
 ## 10. 已知限制
 
-- 网关不回写 Token 的最近使用时间。规范把这一项列为可选，且要求鉴权路径不写数据库，所以这一版没有做。
+- 最近使用时间和用量来自网关的批量上报，最多晚 30 秒左右，鉴权路径本身仍然不写数据库。
 - 用 `HEAR_SERVER_REF` 指定的早于本版的发行版标签，缺少上面列出的新文件，启动器会提示快照不完整。请使用 `main`，或包含本功能的版本。
-- App 的「测试连接」按钮仍然只请求 `/health`。想让它直接显示到期原因，需要另外做一次 App 改动，接入 `/v1/auth/check`。
+- 限流和额度按网关分别计数：同一个 Token 同时连多个网关时，每分钟请求数和并发数是每个网关各自的上限。
