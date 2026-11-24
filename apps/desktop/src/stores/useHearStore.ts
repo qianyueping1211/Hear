@@ -192,6 +192,7 @@ interface HearStoreState extends AppSnapshot {
   updateDownloadProgress: { downloaded: number; total: number } | null;
   updateDownloadError: string | null;
   importProgress: { current: number; total: number; active: boolean } | null;
+  hydrated: boolean;
 
   hydrate: () => Promise<void>;
   clearSessionError: () => void;
@@ -272,7 +273,7 @@ interface HearStoreState extends AppSnapshot {
 }
 
 export const useHearStore = create<HearStoreState>((set, get) => ({
-  appVersion: "0.1.12",
+  appVersion: "0.1.28",
   activeConversationId: "",
   conversations: [],
   mode: "idle" as SessionMode,
@@ -330,11 +331,18 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   updateDownloadProgress: null,
   updateDownloadError: null,
   importProgress: null,
+  hydrated: false,
 
   hydrate: async () => {
     const snap = await tauriInvoke<AppSnapshot>("get_snapshot");
     if (snap) {
-      set({ ...snap, ttsSettings: { ...DEFAULT_TTS, ...snap.ttsSettings } });
+      set({
+        ...snap,
+        ttsSettings: { ...DEFAULT_TTS, ...snap.ttsSettings },
+        hydrated: true,
+      });
+    } else {
+      set({ hydrated: true });
     }
     const sources = await tauriInvoke<AudioSourceOption[]>("list_audio_sources");
     if (sources && sources.length > 0) {

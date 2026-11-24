@@ -146,6 +146,7 @@ function StatusPanel({ status }: { status: ServiceProbeResult }) {
 export function SettingsModal() {
   const {
     appVersion,
+    hydrated,
     settingsOpen,
     activeSettingsTab,
     setSettingsOpen,
@@ -207,9 +208,9 @@ export function SettingsModal() {
   const [voiceRecorderOpen, setVoiceRecorderOpen] = useState(false);
   const [previewingVoiceSample, setPreviewingVoiceSample] = useState(false);
 
-  // 仅在弹窗打开瞬间同步一次草稿并做只读状态探测，避免保存单项配置时把其它草稿或「已保存」提示冲掉
+  // 仅在弹窗打开瞬间（或刚完成首屏 hydrate 时）同步草稿并做只读状态探测，避免刚启动点开设置读到空默认值
   useEffect(() => {
-    if (!settingsOpen) return;
+    if (!settingsOpen || !hydrated) return;
     const snap = useHearStore.getState();
     setLocalAddress(snap.serviceConfig.localServiceAddress);
     setLocalToken(snap.serviceConfig.localAccessToken);
@@ -235,7 +236,7 @@ export function SettingsModal() {
     if (!cloudTested && snap.serviceConfig.cloudServiceAddress.trim()) {
       void testServiceConnection("cloud");
     }
-  }, [settingsOpen, refreshLocalServerInstallStatus, testServiceConnection]);
+  }, [settingsOpen, hydrated, refreshLocalServerInstallStatus, testServiceConnection]);
 
   if (!settingsOpen) return null;
 
@@ -258,9 +259,10 @@ export function SettingsModal() {
   };
 
   const handleCheckUpdate = async () => {
+    const storedTok = useHearStore.getState().updateConfig.githubToken.trim();
     const cfg = {
       repo: ghRepo.trim() || "qianyueping1211/Hear",
-      githubToken: ghToken.trim(),
+      githubToken: ghToken.trim() || storedTok,
       autoCheckOnStartup: autoCheck,
     };
     await checkForUpdates(cfg);
