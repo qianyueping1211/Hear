@@ -74,3 +74,9 @@ dialog::backdrop { background: rgba(17,24,39,.45); }
 .toast.bad { background: var(--danger); }
 body.readonly .write { display: none; }
 @media (max-width: 760px) { .bar { gap: 10px; padding: 0 12px; } main { padding: 0 12px; } table.list { font-size: 12.5px; } }
+fieldset.limits { border: 1px solid var(--line); border-radius: 8px; margin: 12px 0 0; padding: 4px 12px 8px; }
+fieldset.limits legend { color: var(--muted); font-size: 13px; padding: 0 4px; }
+#dlg-usage { width: min(640px, 94vw); }
+#dlg-usage .table-scroll { max-height: 50vh; overflow: auto; }
+.row-actions { white-space: nowrap; }
+.row-actions button { margin-left: 4px; }

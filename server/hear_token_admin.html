@@ -81,7 +81,7 @@
     </div>
     <div class="table-scroll">
       <table class="list">
-        <thead><tr><th>标签</th><th>后缀</th><th>网关</th><th>状态</th><th>生效</th><th>计划结束</th><th>实际失效</th><th></th></tr></thead>
+        <thead><tr><th>标签</th><th>后缀</th><th>网关</th><th>状态</th><th>有效期</th><th>限额</th><th>今日用量</th><th>最近使用</th><th></th></tr></thead>
         <tbody id="token-rows"></tbody>
       </table>
       <button id="token-more" class="ghost more" hidden>加载更多</button>
@@ -143,9 +143,30 @@
     <label>开始时间（含）<input name="starts_at" type="datetime-local" step="1" required></label>
     <label>结束时间（不含，必填）<input name="expires_at" type="datetime-local" step="1" required></label>
     <p class="hint" id="tz-hint"></p>
+    <fieldset class="limits">
+      <legend>限流与额度（留空表示不限制）</legend>
+      <label>每分钟请求数<input name="rate_per_minute" type="number" min="1" max="100000" step="1" placeholder="不限制"></label>
+      <label>同时进行的请求数<input name="max_concurrent" type="number" min="1" max="256" step="1" placeholder="不限制"></label>
+      <label>每日识别时长（分钟）<input name="daily_audio_minutes" type="number" min="1" max="1440" step="1" placeholder="不限制"></label>
+      <label>每月识别时长（分钟）<input name="monthly_audio_minutes" type="number" min="1" max="44640" step="1" placeholder="不限制"></label>
+      <p class="hint">实时翻译时每句话会有多次预览请求，每分钟请求数建议不低于 300、同时请求数不低于 4。识别时长只算首次识别的语音长度；额度超出时网关返回 429，日、月按管理服务所在电脑的时区划分。</p>
+    </fieldset>
     <p class="error" id="token-form-error"></p>
     <div class="actions"><button value="cancel" formnovalidate class="ghost">取消</button><button value="ok" class="primary">确定</button></div>
   </form>
+</dialog>
+
+<dialog id="dlg-usage">
+  <h2 id="usage-title">用量</h2>
+  <dl class="meta" id="usage-summary"></dl>
+  <div class="table-scroll">
+    <table class="list">
+      <thead><tr><th>日期</th><th>请求</th><th>识别（分钟）</th><th>翻译</th><th>克隆</th></tr></thead>
+      <tbody id="usage-rows"></tbody>
+    </table>
+  </div>
+  <p class="hint">网关每 30 秒左右上报一次用量，最新的请求可能要稍等才出现。</p>
+  <div class="actions"><button id="usage-close" class="primary">关闭</button></div>
 </dialog>
 
 <dialog id="dlg-secret">

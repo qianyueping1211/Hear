@@ -42,6 +42,35 @@
     if (Number.isNaN(d.getTime())) throw new Error("时间格式不对");
     return d.toISOString();
   }
+  // 限流与额度
+  const LIMIT_FIELDS = ["rate_per_minute", "max_concurrent", "daily_audio_minutes", "monthly_audio_minutes"];
+  function limitsText(limits) {
+    if (!limits) return "不限";
+    const parts = [];
+    if (limits.rate_per_minute) parts.push(`${limits.rate_per_minute} 次/分`);
+    if (limits.max_concurrent) parts.push(`并发 ${limits.max_concurrent}`);
+    if (limits.daily_audio_minutes) parts.push(`每日 ${limits.daily_audio_minutes} 分钟`);
+    if (limits.monthly_audio_minutes) parts.push(`每月 ${limits.monthly_audio_minutes} 分钟`);
+    return parts.length ? parts.join("，") : "不限";
+  }
+  const minutes = (seconds) => (seconds / 60).toFixed(seconds >= 600 ? 0 : 1);
+  function usageText(day, limits) {
+    if (!day) return "—";
+    let text = `${day.requests} 次 · 识别 ${minutes(day.audio_seconds)} 分钟`;
+    if (limits && limits.daily_audio_minutes) text += ` / ${limits.daily_audio_minutes}`;
+    return text;
+  }
+  function readLimits(form) {
+    const out = {};
+    for (const field of LIMIT_FIELDS) {
+      const raw = form[field].value.trim();
+      if (raw === "") { out[field] = null; continue; }
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value < 1) throw new Error("限流与额度需要填正整数，留空表示不限制");
+      out[field] = value;
+    }
+    return out;
+  }
   let toastTimer = null;
   function toast(message, bad) {
     const node = $("toast");
@@ -203,22 +232,27 @@
       if (!more) body.replaceChildren();
       for (const token of page.items) {
         const editable = token.status === "active" || token.status === "scheduled";
-        const actions = el("td", { class: "write" });
+        const actions = el("span", { class: "write" });
+        const cell = el("td", { class: "row-actions" }, el("button", { onclick: () => showUsage(token) }, "用量"));
         if (editable) {
-          actions.append(el("button", { onclick: () => editToken(token) }, "修改"), " ",
+          actions.append(el("button", { onclick: () => editToken(token) }, "修改"),
             el("button", { class: "danger", onclick: () => revokeToken(token) }, "撤销"));
+          cell.append(actions);
         }
         body.append(el("tr", { title: token.token_id },
           el("td", {}, token.label, el("div", { class: "hint mono" }, token.token_id)),
           el("td", { class: "mono" }, "…" + token.token_suffix),
           el("td", { class: "mono" }, token.gateway_id),
-          el("td", {}, pill(token.status), token.revocation_reason ? el("div", { class: "hint" }, token.revocation_reason) : null),
-          el("td", {}, fmt(token.starts_at)),
-          el("td", {}, fmt(token.expires_at)),
-          el("td", {}, fmt(token.invalidated_at)),
-          actions));
+          el("td", {}, pill(token.status),
+            token.revocation_reason ? el("div", { class: "hint" }, token.revocation_reason) : null,
+            token.invalidated_at ? el("div", { class: "hint" }, "失效于 " + fmt(token.invalidated_at)) : null),
+          el("td", { class: "hint" }, "从 " + fmt(token.starts_at), el("br"), "到 " + fmt(token.expires_at)),
+          el("td", { class: "hint" }, limitsText(token.limits)),
+          el("td", {}, usageText(token.usage && token.usage.today, token.limits)),
+          el("td", {}, fmt(token.usage && token.usage.last_used_at)),
+          cell));
       }
-      if (!body.children.length) body.append(el("tr", {}, el("td", { colspan: 8, class: "empty" }, "没有 Token")));
+      if (!body.children.length) body.append(el("tr", {}, el("td", { colspan: 9, class: "empty" }, "没有 Token")));
       state.cursors.tokens = page.next_cursor;
       $("token-more").hidden = !page.next_cursor;
     } catch (error) {
@@ -297,6 +331,7 @@
     const now = new Date();
     form.starts_at.value = toLocalInput(now.toISOString());
     form.expires_at.value = toLocalInput(new Date(now.getTime() + 30 * 86400000).toISOString());
+    for (const field of LIMIT_FIELDS) form[field].value = "";
     $("token-form-error").textContent = "";
     tzHint();
     $("dlg-token").showModal();
@@ -314,6 +349,10 @@
     form.starts_at.value = startVal;
     form.expires_at.value = expVal;
     state.tokenInitialTimes = { starts_at: startVal, expires_at: expVal };
+    for (const field of LIMIT_FIELDS) {
+      const value = token.limits ? token.limits[field] : null;
+      form[field].value = value === null || value === undefined ? "" : String(value);
+    }
     $("token-form-error").textContent = "";
     tzHint();
     $("dlg-token").showModal();
@@ -332,13 +371,22 @@
         if (!state.tokenInitialTimes || form.expires_at.value !== state.tokenInitialTimes.expires_at) {
           body.expires_at = fromLocalInput(form.expires_at.value);
         }
+        // 限流与额度也只提交改动过的项
+        const limits = readLimits(form);
+        const current = state.editingToken.limits || {};
+        let limitsChanged = false;
+        for (const field of LIMIT_FIELDS) {
+          if ((current[field] ?? null) !== limits[field]) { body[field] = limits[field]; limitsChanged = true; }
+        }
         await api("PATCH", "/tokens/" + encodeURIComponent(state.editingToken.token_id), body);
         $("dlg-token").close();
-        toast(body.starts_at || body.expires_at ? "已修改，网关下一轮同步（约 30 秒）后生效" : "已保存备注");
+        toast(body.starts_at || body.expires_at || limitsChanged ? "已修改，网关下一轮同步（约 30 秒）后生效" : "已保存备注");
       } else {
         body.starts_at = fromLocalInput(form.starts_at.value);
         body.expires_at = fromLocalInput(form.expires_at.value);
         body.gateway_id = form.gateway_id.value;
+        const limits = readLimits(form);
+        for (const field of LIMIT_FIELDS) if (limits[field] !== null) body[field] = limits[field];
         const issued = await api("POST", `/users/${encodeURIComponent(state.user.user_id)}/tokens`, body);
         $("dlg-token").close();
         showSecret("Token 已签发：" + issued.label, issued.token,
@@ -366,6 +414,26 @@
       loadTokens(false);
     } catch (error) { toast(error.message, true); }
   });
+
+  // 用量：今日 / 本月 / 累计，以及最近 30 天每天的明细
+  async function showUsage(token) {
+    try {
+      const data = await api("GET", `/tokens/${encodeURIComponent(token.token_id)}/usage?days=30`);
+      $("usage-title").textContent = `用量：${token.label}（…${token.token_suffix}）`;
+      const line = (u) => `${u.requests} 次请求 · 识别 ${minutes(u.audio_seconds)} 分钟 · 翻译 ${u.translations} 次 · 克隆 ${u.clones} 次`;
+      $("usage-summary").replaceChildren(
+        el("dt", {}, "限额"), el("dd", {}, limitsText(data.limits)),
+        el("dt", {}, "今日"), el("dd", {}, line(data.today)),
+        el("dt", {}, "本月"), el("dd", {}, line(data.month)),
+        el("dt", {}, "累计"), el("dd", {}, line(data.total)),
+        el("dt", {}, "最近使用"), el("dd", {}, fmt(data.last_used_at)));
+      $("usage-rows").replaceChildren(...data.daily.slice().reverse().map((d) => el("tr", {},
+        el("td", { class: "mono" }, d.date), el("td", {}, String(d.requests)),
+        el("td", {}, minutes(d.audio_seconds)), el("td", {}, String(d.translations)), el("td", {}, String(d.clones)))));
+      $("dlg-usage").showModal();
+    } catch (error) { toast(error.message, true); }
+  }
+  $("usage-close").addEventListener("click", () => $("dlg-usage").close());
 
   // 一次性展示原文：关闭时从页面清掉
   function showSecret(title, secret, warning) {
