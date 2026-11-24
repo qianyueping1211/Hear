@@ -2282,8 +2282,9 @@ final class LiveSession: ObservableObject {
         clonePipeline.allowRetry(item.id)
         stopReading()
         readIndex = i
-        // 扬声器模式 + 正在聆听：不出声，只记住从这句开始，停止实时翻译后再读
-        if outputMode == .speaker && isRunning {
+        // 扬声器模式 + 正在聆听 + 未开启硬件语音增强（AEC）时：不出声，只记住从这句开始，停止实时翻译后再读；
+        // 开启了语音增强（VoiceProcessingIO 硬件回声消除）时可直接全双工朗读，不阻塞实时识别！
+        if outputMode == .speaker && isRunning && !voiceProcessing {
             activity = "停止实时翻译后从这句开始朗读"
             return
         }
@@ -3413,23 +3414,28 @@ final class LiveSession: ObservableObject {
         }
 
         AudioRoute.apply(outputMode)
-        // 聆听中用扬声器读（只有点句子时才会）：暂停麦克风，避免把喇叭声音再识别一遍
-        let mute = outputMode == .speaker && isRunning
-        // 声音克隆：等提前生成好的克隆声音，没有就用系统声音。
-        // 云端要等电脑那边算完（自己也要几秒），多给点时间：
-        // 宁可多等一会儿用原声，也不要等不及就退回系统声音。
+        // 仅在扬声器外放且关闭了「语音增强（VoiceProcessingIO 硬件回声消除）」时才静音麦克风；
+        // 默认开启语音增强时由苹果硬件 AEC 自动消回声，麦克风保持开启，边播译文边说话也能实时解析！
+        let mute = outputMode == .speaker && isRunning && !voiceProcessing
+        // 声音克隆：优先直接命中已完成的按句缓存（即使后续切换本地/云端、打开历史或服务暂时离线，也 0ms 秒播，绝不再提示「克隆服务不可用」）
         let cloneWait: Double = 60
         var cloned: CloneAudio?
         // 发了请求但没拿到声音 = 服务不可用；连请求都没发 = 这句没有声音样本
         var cloneAsked = false
         if voiceClone {
-            // ?? 的右边不能带 await（自动闭包里不支持异步），所以分开写
-            var task = clonePipeline.existing(item.id)
-            if task == nil { task = prepareClone(item.id) }
-            if let t = task {
-                cloneAsked = true
-                cloned = await waitClone(t, seconds: cloneWait)
-                if Task.isCancelled || inBackground { return }
+            let itemKey = itemCloneCacheKey(id: item.id, lang: item.target.id, text: text)
+            if let cached = await CloneCache.shared.get(itemKey) {
+                hearLog("声音克隆：命中已克隆句缓存，直接播放")
+                cloned = cached
+            } else {
+                // ?? 的右边不能带 await（自动闭包里不支持异步），所以分开写
+                var task = clonePipeline.existing(item.id)
+                if task == nil { task = prepareClone(item.id) }
+                if let t = task {
+                    cloneAsked = true
+                    cloned = await waitClone(t, seconds: cloneWait)
+                    if Task.isCancelled || inBackground { return }
+                }
             }
         }
         hearLog("朗读：\(item.target.displayName)，\(outputMode == .speaker ? "扬声器" : (pan < 0 ? "左耳" : (pan > 0 ? "右耳" : "双耳")))，\(cloned != nil ? "克隆原声" : "系统声音")")
@@ -4162,6 +4168,10 @@ final class LiveSession: ObservableObject {
     /// 换个人说话就会命中上一个人的缓存——听着像别人的声音。
     ///
     /// v4 = 键里加上了参考音频的指纹
+    private func itemCloneCacheKey(id: UUID, lang: String, text: String) -> String {
+        "item|\(id.uuidString)|\(lang)|\(text)"
+    }
+
     private func cloneCacheKey(lang: String, text: String, ref: [Float]) -> String {
         // 指纹：隔几个采样取一个，算个 FNV-1a（不用整个音频算，太慢）
         var fp: UInt64 = 1469598103934665603
@@ -4196,6 +4206,7 @@ final class LiveSession: ObservableObject {
         if !usingCloudClone, (!ZipVoiceModel.supports(lang) || !ZipVoiceModel.supports(item.source.id)) { return nil }
         let backend = usingCloudClone ? "cloud" : "zipvoice"
         let key = backend + "-" + cloneCacheKey(lang: lang, text: text + "\n" + refText, ref: ref.samples)
+        let itemKey = itemCloneCacheKey(id: id, lang: lang, text: text)
         let cloner = self.cloner
         let cloud = self.cloud
         let useCloud = usingCloudClone
@@ -4204,8 +4215,13 @@ final class LiveSession: ObservableObject {
                 do {
                     try Task.checkCancellation()
                     // 之前生成过一样的，直接拿来放，不用再等模型算一遍
-                    if let cached = await CloneCache.shared.get(key) {
+                    var cached = await CloneCache.shared.get(itemKey)
+                    if cached == nil {
+                        cached = await CloneCache.shared.get(key)
+                    }
+                    if let cached {
                         hearLog("声音克隆：命中缓存，直接播放")
+                        _ = await CloneCache.shared.put(itemKey, cached)
                         return cached
                     }
                     if useCloud {
@@ -4235,6 +4251,7 @@ final class LiveSession: ObservableObject {
                             return nil
                         }
                         hearLogNow("声音克隆（云端）：结束，生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
+                        _ = await CloneCache.shared.put(itemKey, out)
                         return await CloneCache.shared.put(key, out)
                     }
                     guard await cloner.isLoaded else { return nil }
@@ -4243,6 +4260,7 @@ final class LiveSession: ObservableObject {
                                                           reference: ref.samples, referenceText: refText)
                     hearLogNow("声音克隆（本地）：结束，生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
                     // 存进缓存，下次同一句话直接播放
+                    _ = await CloneCache.shared.put(itemKey, out)
                     return await CloneCache.shared.put(key, out)
                 } catch {
                     guard !Task.isCancelled else { return nil }

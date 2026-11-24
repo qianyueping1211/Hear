@@ -9,10 +9,12 @@ struct LogView: View {
     @State private var copiedHint = ""
 
     private var shown: [LogEntry] {
-        log.entries.filter {
-            (filter == nil || $0.level == filter)
-                && (keyword.isEmpty || $0.message.localizedCaseInsensitiveContains(keyword))
-        }
+        Array(
+            log.entries.filter {
+                (filter == nil || $0.level == filter)
+                    && (keyword.isEmpty || $0.message.localizedCaseInsensitiveContains(keyword))
+            }.reversed()
+        )
     }
 
     private func count(_ l: LogLevel) -> Int { log.entries.filter { $0.level == l }.count }
@@ -46,11 +48,11 @@ struct LogView: View {
                     }
                 }
                 .onAppear {
-                    if let id = shown.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+                    if let id = shown.first?.id { proxy.scrollTo(id, anchor: .top) }
                 }
                 .onChange(of: log.entries.last?.id) { _, _ in
-                    guard follow, let id = shown.last?.id else { return }
-                    withAnimation { proxy.scrollTo(id, anchor: .bottom) }
+                    guard follow, let id = shown.first?.id else { return }
+                    withAnimation { proxy.scrollTo(id, anchor: .top) }
                 }
             }
 
