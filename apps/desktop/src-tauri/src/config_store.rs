@@ -234,9 +234,15 @@ pub fn save_config(app: &AppHandle, cfg: &PersistedConfig) {
     if let Some(path) = config_file_path(app) {
         write_json_atomic(&path, &json);
     }
-    // 同步一份到独立用户配置镜像目录，避免 NSIS 卸载/覆盖安装误清默认目录导致地址与 Token 丢失
+    // 同步一份到独立用户配置镜像目录，避免 NSIS 卸载/覆盖安装误清默认目录导致地址与 Token 丢失；
+    // 若镜像中已保存有效凭据而本次写入的凭据为空，拒绝用空配置覆盖镜像，防止偶发异常反写把备份也一并清空。
     if let Some(mirror) = resilient_mirror_path(app) {
-        write_json_atomic(&mirror, &json);
+        let existing_has_creds = load_from_path(&mirror)
+            .map(|m| has_meaningful_credentials(&m))
+            .unwrap_or(false);
+        if has_meaningful_credentials(cfg) || !existing_has_creds {
+            write_json_atomic(&mirror, &json);
+        }
     }
 }
 

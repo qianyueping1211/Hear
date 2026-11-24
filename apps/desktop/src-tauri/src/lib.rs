@@ -59,6 +59,9 @@ pub struct AppRuntime {
     pub tts_cancel: Mutex<Option<Arc<AtomicBool>>>,
     /// 当前正在运行的 Windows 原生 SAPI 朗读子进程 PID（便于 stop_device_tts 或切句时立即打断）
     pub sapi_pid: Arc<AtomicU32>,
+    /// 启动配置与历史记录加载完成屏障：防止前端首屏 get_snapshot 抢在 setup() 完成前读到空默认值并反写覆盖 config.json
+    pub setup_done: AtomicBool,
+    pub setup_notify: tokio::sync::Notify,
     pub import_cancel: AtomicBool,
 }
 
@@ -84,6 +87,8 @@ impl AppRuntime {
             auto_spoken_ids: Mutex::new(std::collections::HashSet::new()),
             tts_cancel: Mutex::new(None),
             sapi_pid: Arc::new(AtomicU32::new(0)),
+            setup_done: AtomicBool::new(false),
+            setup_notify: tokio::sync::Notify::new(),
             import_cancel: AtomicBool::new(false),
         }
     }
@@ -269,6 +274,10 @@ impl AppRuntime {
 
 #[tauri::command]
 async fn get_snapshot(rt: State<'_, Arc<AppRuntime>>) -> Result<AppSnapshot, String> {
+    // 等待 setup() 完成 load_config 与历史加载，杜绝前端首屏抢跑读到空默认值
+    while !rt.setup_done.load(Ordering::Acquire) {
+        rt.setup_notify.notified().await;
+    }
     Ok(rt.snapshot.lock().await.clone())
 }
 
@@ -2448,7 +2457,16 @@ pub fn run() {
                 }
                 snap.local_server_install = install_status;
                 snap.conversations = initial_conversations;
+                logger::info(format!(
+                    "[config] 启动加载完成: has_cloud={} asr={:?} mt={:?} clone={:?}",
+                    !snap.service_config.cloud_service_address.trim().is_empty(),
+                    snap.service_config.asr_source,
+                    snap.service_config.mt_source,
+                    snap.service_config.clone_source
+                ));
             }
+            runtime_setup.setup_done.store(true, Ordering::Release);
+            runtime_setup.setup_notify.notify_waiters();
 
             setup_tray(app.handle())?;
             if let Some(sub) = app.get_webview_window("subtitle") {

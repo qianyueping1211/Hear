@@ -846,6 +846,9 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   },
 
   saveServiceConfig: async (patch) => {
+    if (!get().hydrated) {
+      await get().hydrate();
+    }
     const merged: ServiceConfig = { ...get().serviceConfig, ...patch };
     set({ serviceConfig: merged });
     const saved = await tauriInvoke<ServiceConfig>("save_service_config", {
