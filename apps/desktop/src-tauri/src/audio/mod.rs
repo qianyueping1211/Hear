@@ -579,10 +579,15 @@ mod win_wasapi {
 
     struct WasapiLane {
         channel: AudioChannel,
+        is_loopback: bool,
         audio_client: Option<IAudioClient>,
         capture_client: Option<IAudioCaptureClient>,
         cpal_stream: Option<cpal::Stream>,
         cpal_buf: Option<Arc<std::sync::Mutex<Vec<f32>>>>,
+        cpal_broken: Option<Arc<AtomicBool>>,
+        needs_reopen: bool,
+        reopen_after: Option<Instant>,
+        last_packet_at: Instant,
         encoding: SampleEncoding,
         channels: usize,
         sample_rate: u32,
@@ -700,10 +705,15 @@ mod win_wasapi {
 
             Ok(Self {
                 channel,
+                is_loopback,
                 audio_client: Some(audio_client),
                 capture_client: Some(capture_client),
                 cpal_stream: None,
                 cpal_buf: None,
+                cpal_broken: None,
+                needs_reopen: false,
+                reopen_after: None,
+                last_packet_at: Instant::now(),
                 encoding,
                 channels: channels.max(1),
                 sample_rate: sample_rate.max(8_000),
@@ -735,7 +745,12 @@ mod win_wasapi {
             let buf: Arc<std::sync::Mutex<Vec<f32>>> =
                 Arc::new(std::sync::Mutex::new(Vec::with_capacity(8192)));
             let buf_cb = buf.clone();
-            let err_fn = |err| logger::warn(format!("[cpal-mic] stream error: {}", err));
+            let broken = Arc::new(AtomicBool::new(false));
+            let broken_cb = broken.clone();
+            let err_fn = move |err| {
+                logger::warn(format!("[cpal-mic] stream error (trigger reopen): {}", err));
+                broken_cb.store(true, Ordering::Relaxed);
+            };
 
             let stream = match cfg.sample_format() {
                 SampleFormat::F32 => device.build_input_stream(
@@ -791,10 +806,15 @@ mod win_wasapi {
 
             Ok(Self {
                 channel: AudioChannel::Mic,
+                is_loopback: false,
                 audio_client: None,
                 capture_client: None,
                 cpal_stream: Some(stream),
                 cpal_buf: Some(buf),
+                cpal_broken: Some(broken),
+                needs_reopen: false,
+                reopen_after: None,
+                last_packet_at: Instant::now(),
                 encoding: SampleEncoding::F32,
                 channels: channels.max(1),
                 sample_rate: sample_rate.max(8_000),
@@ -806,6 +826,45 @@ mod win_wasapi {
             })
         }
 
+        /// 耳机插拔或设备失效时热重连采集流，保留 rec_queue 与时间戳连贯，无需重启录音
+        unsafe fn reopen_in_place(
+            &mut self,
+            enumerator: &IMMDeviceEnumerator,
+            chosen_mic: &str,
+        ) -> Result<(), String> {
+            self.cpal_stream = None;
+            if let Some(ref ac) = self.audio_client {
+                let _ = ac.Stop();
+            }
+            self.audio_client = None;
+            self.capture_client = None;
+
+            let fresh = if self.channel == AudioChannel::Mic && !chosen_mic.is_empty() && chosen_mic != "default" {
+                Self::open_cpal_mic(chosen_mic)
+                    .or_else(|_| Self::open(enumerator, AudioChannel::Mic, false))?
+            } else {
+                Self::open(enumerator, self.channel, self.is_loopback)?
+            };
+
+            let had_aec = self.processor.aec.is_some();
+            self.audio_client = fresh.audio_client;
+            self.capture_client = fresh.capture_client;
+            self.cpal_stream = fresh.cpal_stream;
+            self.cpal_buf = fresh.cpal_buf;
+            self.cpal_broken = fresh.cpal_broken;
+            self.encoding = fresh.encoding;
+            self.channels = fresh.channels;
+            self.sample_rate = fresh.sample_rate;
+            self.processor = fresh.processor;
+            if had_aec {
+                self.processor.enable_aec();
+            }
+            self.needs_reopen = false;
+            self.reopen_after = None;
+            self.last_packet_at = Instant::now();
+            Ok(())
+        }
+
         unsafe fn drain_packets(
             &mut self,
             seg_tx: &tokio_mpsc::UnboundedSender<CapturedSegment>,
@@ -815,12 +874,24 @@ mod win_wasapi {
             let mut scratch: Vec<f32> = Vec::new();
 
             if let Some(ref cpal_buf) = self.cpal_buf {
+                if self
+                    .cpal_broken
+                    .as_ref()
+                    .map(|b| b.load(Ordering::Relaxed))
+                    .unwrap_or(false)
+                {
+                    self.cpal_stream = None;
+                    self.needs_reopen = true;
+                    self.reopen_after = Some(Instant::now() + Duration::from_millis(250));
+                    return 0.0;
+                }
                 if let Ok(mut g) = cpal_buf.lock() {
                     if !g.is_empty() {
                         std::mem::swap(&mut scratch, &mut *g);
                     }
                 }
                 if !scratch.is_empty() {
+                    self.last_packet_at = Instant::now();
                     let nf = scratch.len() / self.channels.max(1);
                     for &s in &scratch {
                         let a = s.abs();
@@ -849,30 +920,62 @@ mod win_wasapi {
                         },
                     );
                     self.stat_speech_frames += speech_hits;
+                } else if self.last_packet_at.elapsed().as_millis() > 1800 {
+                    // 麦克风超过 1.8 秒未吐包（常见于耳机中途拔出/断开），自动触发热重连
+                    logger::warn("[cpal-mic] 超过 1.8 秒无数据包，自动热重连当前可用麦克风");
+                    self.cpal_stream = None;
+                    self.needs_reopen = true;
+                    self.reopen_after = Some(Instant::now() + Duration::from_millis(250));
                 }
                 return max_level;
             }
 
             let Some(ref capture_client) = self.capture_client else {
+                self.needs_reopen = true;
                 return 0.0;
             };
 
+            let mut got_any_packet = false;
             loop {
                 let pkt = match capture_client.GetNextPacketSize() {
                     Ok(n) if n > 0 => n,
-                    _ => break,
+                    Ok(_) => break,
+                    Err(e) => {
+                        logger::warn(format!(
+                            "[wasapi] channel={:?} 设备失效/断开 ({:?})，触发热重连",
+                            self.channel, e
+                        ));
+                        self.audio_client = None;
+                        self.capture_client = None;
+                        self.needs_reopen = true;
+                        self.reopen_after = Some(Instant::now() + Duration::from_millis(250));
+                        break;
+                    }
                 };
                 let _ = pkt;
 
                 let mut data_ptr: *mut u8 = std::ptr::null_mut();
                 let mut num_frames: u32 = 0;
                 let mut buf_flags: u32 = 0;
-                if capture_client
-                    .GetBuffer(&mut data_ptr, &mut num_frames, &mut buf_flags, None, None)
-                    .is_err()
-                {
+                if let Err(e) = capture_client.GetBuffer(
+                    &mut data_ptr,
+                    &mut num_frames,
+                    &mut buf_flags,
+                    None,
+                    None,
+                ) {
+                    logger::warn(format!(
+                        "[wasapi] channel={:?} GetBuffer 失败 ({:?})，触发热重连",
+                        self.channel, e
+                    ));
+                    self.audio_client = None;
+                    self.capture_client = None;
+                    self.needs_reopen = true;
+                    self.reopen_after = Some(Instant::now() + Duration::from_millis(250));
                     break;
                 }
+                got_any_packet = true;
+                self.last_packet_at = Instant::now();
 
                 let nf = num_frames as usize;
                 let sample_count = nf * self.channels;
@@ -947,6 +1050,17 @@ mod win_wasapi {
                     }
                 });
                 self.stat_speech_frames += speech_hits;
+            }
+            if !got_any_packet
+                && !self.is_loopback
+                && !self.needs_reopen
+                && self.last_packet_at.elapsed().as_millis() > 1800
+            {
+                logger::warn("[wasapi] Mic 超过 1.8 秒无数据包（疑似耳机拔出），自动触发热重连");
+                self.audio_client = None;
+                self.capture_client = None;
+                self.needs_reopen = true;
+                self.reopen_after = Some(Instant::now() + Duration::from_millis(250));
             }
             max_level
         }
@@ -1182,6 +1296,9 @@ mod win_wasapi {
                     continue;
                 } else if was_paused {
                     was_paused = false;
+                    for lane in &mut lanes {
+                        lane.last_packet_at = Instant::now();
+                    }
                 }
 
                 let mut level = 0.0f32;
@@ -1197,6 +1314,43 @@ mod win_wasapi {
                 }
                 let sys_tts_muted = rt.system_tts_muted.load(Ordering::Relaxed);
                 for lane in &mut lanes {
+                    // 耳机拔插/设备失效时自动热重连，确保录音声纹与时间持续推进不卡死
+                    if lane.needs_reopen {
+                        let ready = lane
+                            .reopen_after
+                            .map(|t| Instant::now() >= t)
+                            .unwrap_or(true);
+                        if ready {
+                            let chosen_mic = rt
+                                .snapshot
+                                .blocking_lock()
+                                .tts_settings
+                                .input_device_id
+                                .trim()
+                                .to_string();
+                            match lane.reopen_in_place(&enumerator, &chosen_mic) {
+                                Ok(()) => {
+                                    logger::info(format!(
+                                        "[audio] 热重连成功: channel={:?} sr={} ch={}",
+                                        lane.channel, lane.sample_rate, lane.channels
+                                    ));
+                                    let _ = app.emit(
+                                        "session:notice",
+                                        "检测到音频设备变化（耳机插拔），已自动重新连接并继续录制",
+                                    );
+                                }
+                                Err(e) => {
+                                    logger::warn(format!(
+                                        "[audio] 热重连 {:?} 暂未就绪，400ms 后重试：{}",
+                                        lane.channel, e
+                                    ));
+                                    lane.reopen_after =
+                                        Some(Instant::now() + Duration::from_millis(400));
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     // 全双工模式：本地扬声器播报译文时只屏蔽 System（防止 WASAPI 内录回传听见自己的声音），
                     // 麦克风保持全程开启并通过 NLMS AEC 实时抵消扬声器回声，实现边播边说不漏录！
                     if lane.channel == AudioChannel::System && sys_tts_muted {

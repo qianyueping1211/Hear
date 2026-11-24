@@ -18,7 +18,7 @@ use state::{
     SubtitleSegment, SubtitleStyle, TtsOutputSettings, UpdateCheckResult, UpdateConfig,
 };
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -32,6 +32,8 @@ pub struct AppRuntime {
     pub capture: Mutex<Option<audio::LiveCaptureHandle>>,
     pub summary_markdown: Mutex<String>,
     pub segment_wavs: Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    /// 已克隆译文 WAV 缓存（segment_id -> (translated_text, wav_bytes)）：小喇叭就绪后点击 0ms 秒播，绝不再重复请求克隆
+    pub cloned_tts_cache: Mutex<std::collections::HashMap<String, (String, Vec<u8>)>>,
     /// 声音克隆单并发闸门：防止多句预克隆或用户点击并发打到服务端触发 503 SERVICE_BUSY
     pub clone_gate: Mutex<()>,
     /// 强制静音全路采集（仅在用户手动勾选「播报时完全静音麦克风」时启用）
@@ -42,6 +44,10 @@ pub struct AppRuntime {
     pub aec_far_end: Arc<audio::aec::FarEndReference>,
     /// 串行播放闸门：保证多句连续自动播报按顺序逐句播放且不互相提前解除静音
     pub tts_play_gate: Mutex<()>,
+    /// 手动点播代次：每次用户点击小喇叭立即自增并掐断旧播报，确保绝不串播其他句子
+    pub tts_manual_epoch: Arc<AtomicU64>,
+    /// 录音会话代次：停录/清空/切换历史时自增，彻底杜绝上一场滞后的自动克隆突然在新录音里出声
+    pub session_epoch: Arc<AtomicU64>,
     /// 进程级自动播报去重集合：防止主窗口与悬浮字幕窗或重复事件对同一句触发两次自动播报
     pub auto_spoken_ids: Mutex<std::collections::HashSet<String>>,
     /// 当前正在通过指定输出设备（如虚拟麦克风）播放的 TTS 取消标记
@@ -57,11 +63,14 @@ impl AppRuntime {
             capture: Mutex::new(None),
             summary_markdown: Mutex::new(String::new()),
             segment_wavs: Mutex::new(std::collections::HashMap::new()),
+            cloned_tts_cache: Mutex::new(std::collections::HashMap::new()),
             clone_gate: Mutex::new(()),
             mic_muted: Arc::new(AtomicBool::new(false)),
             system_tts_muted: Arc::new(AtomicBool::new(false)),
             aec_far_end: Arc::new(audio::aec::FarEndReference::new()),
             tts_play_gate: Mutex::new(()),
+            tts_manual_epoch: Arc::new(AtomicU64::new(0)),
+            session_epoch: Arc::new(AtomicU64::new(0)),
             auto_spoken_ids: Mutex::new(std::collections::HashSet::new()),
             tts_cancel: Mutex::new(None),
             import_cancel: AtomicBool::new(false),
@@ -331,6 +340,15 @@ async fn stop_recording_impl(
     app: &AppHandle,
     rt: &Arc<AppRuntime>,
 ) -> Result<SessionMode, String> {
+    // 停录立即推进会话代次并取消在途自动播报，防止滞后克隆在停录后或下一场录音中突然发声
+    rt.session_epoch.fetch_add(1, Ordering::SeqCst);
+    if let Some(flag) = rt.tts_cancel.lock().await.take() {
+        flag.store(true, Ordering::Relaxed);
+    }
+    rt.mic_muted.store(false, Ordering::Relaxed);
+    rt.system_tts_muted.store(false, Ordering::Relaxed);
+    rt.aec_far_end.clear();
+
     let mut cap_guard = rt.capture.lock().await;
     if let Some(handle) = cap_guard.take() {
         let _ = tokio::task::spawn_blocking(move || handle.stop()).await;
@@ -432,8 +450,13 @@ async fn clear_recording(
     rt: State<'_, Arc<AppRuntime>>,
 ) -> Result<(), String> {
     rt.save_history(&app).await;
+    rt.session_epoch.fetch_add(1, Ordering::SeqCst);
+    if let Some(flag) = rt.tts_cancel.lock().await.take() {
+        flag.store(true, Ordering::Relaxed);
+    }
     *rt.summary_markdown.lock().await = String::new();
     rt.segment_wavs.lock().await.clear();
+    rt.cloned_tts_cache.lock().await.clear();
     rt.auto_spoken_ids.lock().await.clear();
     let mut snap = rt.snapshot.lock().await;
     snap.active_conversation_id = format!("conv-{}", uuid::Uuid::new_v4());
@@ -468,7 +491,12 @@ async fn load_conversation(
         }
     }
     rt.save_history(&app).await;
+    rt.session_epoch.fetch_add(1, Ordering::SeqCst);
+    if let Some(flag) = rt.tts_cancel.lock().await.take() {
+        flag.store(true, Ordering::Relaxed);
+    }
     rt.segment_wavs.lock().await.clear();
+    rt.cloned_tts_cache.lock().await.clear();
     rt.auto_spoken_ids.lock().await.clear();
 
     let conv = history_store::load_conversation(&app, &id)?;
@@ -540,6 +568,15 @@ async fn synthesize_cloned_segment_wav(
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
         return Err("朗读文本为空".to_string());
+    }
+    // 优先命中 Rust 侧克隆 WAV 缓存：已预克隆好的句子 0ms 直接返回，不占 clone_gate 也不重复请求模型
+    {
+        let cache = rt.cloned_tts_cache.lock().await;
+        if let Some((cached_text, cached_wav)) = cache.get(id) {
+            if cached_text == &trimmed && cached_wav.len() > 44 {
+                return Ok(cached_wav.clone());
+            }
+        }
     }
     let (primary_url, primary_tok, fallback_url, fallback_tok, audio_path_opt, seg_info, same_ch_candidates) = {
         let snap = rt.snapshot.lock().await;
@@ -675,7 +712,7 @@ async fn synthesize_cloned_segment_wav(
     // 串行排队调用服务端克隆，避免多句并发导致服务端返回 503 SERVICE_BUSY
     let _clone_guard = rt.clone_gate.lock().await;
 
-    match rt
+    let synthesized = match rt
         .cloud
         .clone_voice(
             primary_target,
@@ -700,12 +737,25 @@ async fn synthesize_cloned_segment_wav(
                     .clone_voice(&fallback_url, &trimmed, lang, ref_wav, &ref_text, f_tok_opt)
                     .await
                 {
-                    return Ok(wav_bytes);
+                    Ok(wav_bytes)
+                } else {
+                    Err(first_err)
                 }
+            } else {
+                Err(first_err)
             }
-            Err(first_err)
+        }
+    };
+    if let Ok(ref wav_bytes) = synthesized {
+        if wav_bytes.len() > 44 {
+            let mut cache = rt.cloned_tts_cache.lock().await;
+            if cache.len() >= 64 {
+                cache.clear();
+            }
+            cache.insert(id.to_string(), (trimmed.clone(), wav_bytes.clone()));
         }
     }
+    synthesized
 }
 
 #[tauri::command]
@@ -745,6 +795,7 @@ async fn set_mic_muted(rt: State<'_, Arc<AppRuntime>>, muted: bool) -> Result<()
 
 #[tauri::command]
 async fn stop_device_tts(rt: State<'_, Arc<AppRuntime>>) -> Result<(), String> {
+    rt.tts_manual_epoch.fetch_add(1, Ordering::SeqCst);
     if let Some(flag) = rt.tts_cancel.lock().await.take() {
         flag.store(true, Ordering::Relaxed);
     }
@@ -768,28 +819,60 @@ async fn play_cloned_segment_to_device(
     if !rt.snapshot.lock().await.tts_settings.use_voice_clone {
         return Err("声音克隆已关闭".to_string());
     }
-    if is_auto == Some(true) {
-        let mut spoken = rt.auto_spoken_ids.lock().await;
-        if !spoken.insert(id.clone()) {
-            return Ok(());
+    let is_auto_flag = is_auto == Some(true);
+    let start_session_epoch = rt.session_epoch.load(Ordering::SeqCst);
+    let my_manual_epoch = if is_auto_flag {
+        {
+            let mut spoken = rt.auto_spoken_ids.lock().await;
+            if !spoken.insert(id.clone()) {
+                return Ok(());
+            }
         }
-    }
-    let _ = app.emit(
-        "tts:state",
-        serde_json::json!({ "id": id, "state": "cloning" }),
-    );
-    let wav_bytes = match synthesize_cloned_segment_wav(&app, rt.inner(), &id, &text, &lang).await {
-        Ok(b) => b,
-        Err(e) => {
-            let _ = app.emit(
-                "tts:state",
-                serde_json::json!({ "id": id, "state": "ready" }),
-            );
-            return Err(e);
+        rt.tts_manual_epoch.load(Ordering::SeqCst)
+    } else {
+        // 用户手动点击某句小喇叭：立即推进手动代次并立刻掐断当前正在播放的其他句子，确保点哪句播哪句！
+        let next_ep = rt.tts_manual_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(prev) = rt.tts_cancel.lock().await.take() {
+            prev.store(true, Ordering::Relaxed);
+        }
+        next_ep
+    };
+
+    // 先查缓存：已克隆好（小喇叭就绪）时跳过 "cloning" 状态，直接 0ms 播放
+    let trimmed = text.trim().to_string();
+    let cached_wav = {
+        let cache = rt.cloned_tts_cache.lock().await;
+        cache
+            .get(&id)
+            .filter(|(t, w)| t == &trimmed && w.len() > 44)
+            .map(|(_, w)| w.clone())
+    };
+    let wav_bytes = if let Some(b) = cached_wav {
+        b
+    } else {
+        let _ = app.emit(
+            "tts:state",
+            serde_json::json!({ "id": id, "state": "cloning" }),
+        );
+        match synthesize_cloned_segment_wav(&app, rt.inner(), &id, &text, &lang).await {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = app.emit(
+                    "tts:state",
+                    serde_json::json!({ "id": id, "state": "ready" }),
+                );
+                return Err(e);
+            }
         }
     };
-    // 克隆耗时期间若用户已关闭「声音克隆」，立即中止播放，绝不放出克隆音
-    if !rt.snapshot.lock().await.tts_settings.use_voice_clone {
+
+    // 克隆耗时期间若已关闭声音克隆、或会话已停录/切换、或用户点击了其他句子，立即中止，绝不串播！
+    if !rt.snapshot.lock().await.tts_settings.use_voice_clone
+        || rt.tts_manual_epoch.load(Ordering::SeqCst) != my_manual_epoch
+        || (is_auto_flag
+            && (rt.session_epoch.load(Ordering::SeqCst) != start_session_epoch
+                || rt.snapshot.lock().await.mode != SessionMode::Recording))
+    {
         let _ = app.emit(
             "tts:state",
             serde_json::json!({ "id": id, "state": "ready" }),
@@ -818,9 +901,6 @@ async fn play_cloned_segment_to_device(
                 }
             }
         };
-        // 会议模式发到独立虚拟麦时不静音采集也不走扬声器 AEC；
-        // 发往本机扬声器/耳机时：默认仅静音 System 内录通道（防 WASAPI Loopback 自回环），麦克风保持开启并走 NLMS AEC 全双工消回声；
-        // 仅当用户手动勾选「播报时完全静音麦克风」时才启用硬静音全路。
         let routed_to_virtual_mic =
             is_meeting && target == "meeting_mic" && !tts.meeting_mic_output_device_id.trim().is_empty()
             || (is_meeting && target == "auto" && seg_ch == Some(AudioChannel::Mic) && !tts.meeting_mic_output_device_id.trim().is_empty());
@@ -829,8 +909,20 @@ async fn play_cloned_segment_to_device(
         (dev, mute_sys, hard_mute)
     };
 
-    // 串行排队播报：避免连续多句自动播报互相掐断或提前解除静音
+    // 串行排队播报：拿到播报闸门后再做一次代次校验，防止排在后面的旧句子覆盖刚点的句子或上一场残留自动播报突然发声
     let _play_guard = rt.tts_play_gate.lock().await;
+    if !rt.snapshot.lock().await.tts_settings.use_voice_clone
+        || rt.tts_manual_epoch.load(Ordering::SeqCst) != my_manual_epoch
+        || (is_auto_flag
+            && (rt.session_epoch.load(Ordering::SeqCst) != start_session_epoch
+                || rt.snapshot.lock().await.mode != SessionMode::Recording))
+    {
+        let _ = app.emit(
+            "tts:state",
+            serde_json::json!({ "id": id, "state": "ready" }),
+        );
+        return Ok(());
+    }
 
     let cancel = Arc::new(AtomicBool::new(false));
     {

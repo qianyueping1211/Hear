@@ -1246,8 +1246,14 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         get().mode === "recording";
 
       if (needsDeviceRoute) {
-        // 先标记克隆中，等后端 tts:state=playing 事件真正开始发声时再点亮绿色播放喇叭
-        set({ speakingSegmentId: null, preparingCloneSegmentId: id });
+        // 若该句已经克隆完成（小喇叭就绪），不再显示「克隆中…」，后端将 0ms 命中缓存直接播放
+        const alreadyReady =
+          get().cloneStates[id] === "ready" ||
+          cloneWavCache.get(id)?.text === trimmed;
+        set({
+          speakingSegmentId: alreadyReady ? id : null,
+          preparingCloneSegmentId: alreadyReady ? null : id,
+        });
         try {
           const target =
             tts.routingMode === "meeting" && seg?.channel === "mic"
