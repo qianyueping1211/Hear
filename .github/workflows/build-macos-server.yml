@@ -1,0 +1,96 @@
+name: Build macOS Apple Silicon Server Bundle (.zip)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'server/MAC_VERSION'
+      - 'server/start-macos.sh'
+      - 'server/macos/**'
+      - 'server/hear_cloud.py'
+      - 'server/hear_http.py'
+      - 'server/hear_auth.py'
+      - 'server/hear_speaker.py'
+      - 'server/requirements.txt'
+      - '.github/workflows/build-macos-server.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-macos-server-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos-server:
+    name: Build macOS arm64 Metal Server (.zip)
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LLAMA_TAG: b12491
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: version
+        run: |
+          VER="$(tr -d '[:space:]' < server/MAC_VERSION)"
+          TAG="mac-server-v$VER"
+          ASSET="Hear-Mac-Server-$VER-arm64.zip"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          echo "macOS Server 版本：$VER ($TAG -> $ASSET)"
+
+      - name: Cache llama.cpp Apple Silicon Metal build
+        id: cache-llama
+        uses: actions/cache@v4
+        with:
+          path: llama.cpp/build/bin
+          key: llama-macos-arm64-metal-${{ env.LLAMA_TAG }}
+
+      - name: Build llama-server with Apple Metal GPU
+        if: steps.cache-llama.outputs.cache-hit != 'true'
+        run: |
+          brew install cmake || true
+          git clone --depth 1 --branch "$LLAMA_TAG" https://github.com/ggml-org/llama.cpp llama.cpp
+          cmake -S llama.cpp -B llama.cpp/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_CURL=OFF
+          cmake --build llama.cpp/build --config Release -j "$(sysctl -n hw.ncpu)" --target llama-server
+          ls -lh llama.cpp/build/bin/llama-server
+
+      - name: Package macOS Apple Silicon Server bundle
+        run: |
+          chmod +x server/start-macos.sh server/macos/build_macos_server_bundle.sh
+          bash server/macos/build_macos_server_bundle.sh "$PWD/llama.cpp/build/bin" "$PWD/dist-macos-server"
+
+      - name: Upload macOS Server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.asset }}
+          path: dist-macos-server/${{ steps.version.outputs.asset }}
+          retention-days: 30
+
+      - name: Publish GitHub Release (听见 Mac Studio 服务端)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VER="${{ steps.version.outputs.ver }}"
+          ASSET="dist-macos-server/${{ steps.version.outputs.asset }}"
+          NOTES="听见 (Hear) macOS Apple Silicon (M1/M2/M3/M4 Max) 服务端整合包 v${VER}：
+          - 内置预编译 Apple Metal GPU 加速 llama-server（-ngl 99 全层卸载，无需手动装 Xcode/cmake）
+          - 针对 Mac Studio M4 Max 64GB 统一内存自动推荐旗舰组合（Hy-MT2-30B-A3B + Qwen3-TTS-1.7B + SenseVoice + Whisper large-v3-turbo）
+          - 包含双击「听见服务端.app」与一键开机自启（launchd）脚本，解压即用"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ASSET" --clobber
+          else
+            gh release create "$TAG" "$ASSET" \
+              --title "听见 Mac Studio 服务端 v${VER} (Apple Silicon Metal)" \
+              --notes "$NOTES"
+          fi
