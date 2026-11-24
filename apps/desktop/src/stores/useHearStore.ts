@@ -1182,11 +1182,13 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   },
 
   playSegmentOriginal: async (id) => {
+    // 仅在结束录音后或查看历史会话（idle 状态）允许播放原文原音，实时录音期间绝不外放原音导致回环重录
+    if (get().mode !== "idle") return;
     const seg = get().segments.find((s) => s.id === id);
     if (!seg) return;
     get().stopSpeakingSegment();
-    // 若已结束录音或处于历史会话且整轨音频就绪，直接定位到底部播放器对应位置播放原文原音
-    if (get().mode === "idle" && get().playback.hasAudio) {
+    // 若整轨音频就绪，直接定位到底部播放器对应位置播放原文原音
+    if (get().playback.hasAudio) {
       await get().seekPlayback(seg.startMs, true);
       return;
     }

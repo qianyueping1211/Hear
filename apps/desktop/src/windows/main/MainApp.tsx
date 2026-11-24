@@ -1188,7 +1188,8 @@ export function MainApp() {
                         itemRefs.current[seg.id] = el;
                       }}
                       onClick={() => {
-                        if (isEditing || isEditingSpeaker) return;
+                        // 实时翻译/录音期间禁止单击气泡播放原文（防误触及原音回环录入）；仅在结束录音后或历史记录中允许单击播放原文
+                        if (isRecordingMode || isEditing || isEditingSpeaker) return;
                         if (clickTimerRef.current !== null) {
                           window.clearTimeout(clickTimerRef.current);
                         }
