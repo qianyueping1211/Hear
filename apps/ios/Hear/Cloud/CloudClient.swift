@@ -1079,6 +1079,34 @@ actor CloudClient {
         try await transcribe(samples: samples, candidates: candidates, fallback: fallback, preview: false)
     }
 
+    /// 从用户术语表提取左值原词并做 UTF-8 百分号编码，随 X-ASR-Hotwords 传给服务端 Whisper 精修
+    private func encodedGlossaryHotwords() -> String? {
+        guard let raw = UserDefaults.standard.string(forKey: "glossary"), !raw.isEmpty else {
+            return nil
+        }
+        var seen = Set<String>()
+        var terms: [String] = []
+        var totalChars = 0
+        for line in raw.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+            let term: String
+            if let eq = trimmed.firstIndex(where: { $0 == "=" || $0 == "＝" || $0 == ":" }) {
+                term = String(trimmed[..<eq]).trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                term = trimmed
+            }
+            guard !term.isEmpty else { continue }
+            let key = term.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            if terms.count >= 32 || totalChars + term.count > 400 { break }
+            totalChars += term.count + 2
+            terms.append(term)
+        }
+        guard !terms.isEmpty else { return nil }
+        return terms.joined(separator: ", ").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
+    }
+
     func correctTranscription(samples: [Float], language: String, address: String) async throws -> String {
         try Task.checkCancellation()
         guard candidateAddresses(asrAddress).contains(address) else { throw CloudError.notConfigured }
@@ -1089,6 +1117,9 @@ actor CloudClient {
         request.setValue(language, forHTTPHeaderField: "X-Fallback-Language")
         request.setValue("sensevoice+whisper", forHTTPHeaderField: "X-ASR-Scheme")
         request.setValue("correct", forHTTPHeaderField: "X-ASR-Stage")
+        if let hw = encodedGlossaryHotwords() {
+            request.setValue(hw, forHTTPHeaderField: "X-ASR-Hotwords")
+        }
         let (data, response) = try await sendWithRetry(request, path: "/v1/asr", retries: 1)
         try Task.checkCancellation()
         let code = response?.statusCode ?? 0
@@ -1127,7 +1158,12 @@ actor CloudClient {
                 req.setValue(asrScheme, forHTTPHeaderField: "X-ASR-Scheme")
                 // 预览只要快，不要修正
                 if preview { req.setValue("1", forHTTPHeaderField: "X-ASR-Preview") }
-                else { req.setValue("first", forHTTPHeaderField: "X-ASR-Stage") }
+                else {
+                    req.setValue("first", forHTTPHeaderField: "X-ASR-Stage")
+                    if let hw = encodedGlossaryHotwords() {
+                        req.setValue(hw, forHTTPHeaderField: "X-ASR-Hotwords")
+                    }
+                }
                 let (data, resp) = try await sendWithRetry(req, path: "/v1/asr", retries: preview ? 1 : 3,
                                                          inferenceDeadline: deadline,
                                                          retryConnection: !preview && index == addresses.count - 1)

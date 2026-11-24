@@ -342,6 +342,15 @@ def test_hy_mt2_sampling_params():
                 os.environ[k] = v
 
 
+def test_asr_hotwords_parsing():
+    print("== 7. X-ASR-Hotwords parsing decodes UTF-8, deduplicates, and caps length ==")
+    raw = urllib.parse.quote("Antigravity, 听见, antigravity, Hy-MT2，Qwen3-TTS")
+    parsed = hear_cloud.parse_asr_hotwords(raw)
+    check("UTF-8 percent-encoded hotwords decoded and deduplicated",
+          parsed == "Antigravity, 听见, Hy-MT2, Qwen3-TTS", parsed)
+    check("empty hotwords returns None", hear_cloud.parse_asr_hotwords("  , ; ") is None)
+
+
 def main():
     test_decode_wav_16_and_32()
     test_auth_http_exception_survival()
@@ -349,6 +358,7 @@ def main():
     test_local_secret_and_per_device_preview_and_sse()
     test_asr_status_text_reporting()
     test_hy_mt2_sampling_params()
+    test_asr_hotwords_parsing()
     print("\npassed %d, failed %d" % (passed, failed))
     return 1 if failed else 0
 

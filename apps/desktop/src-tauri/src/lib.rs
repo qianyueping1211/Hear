@@ -1686,6 +1686,7 @@ async fn set_glossary(
     rt: State<'_, Arc<AppRuntime>>,
     glossary: String,
 ) -> Result<(), String> {
+    rt.cloud.set_asr_hotwords_from_glossary(&glossary);
     rt.snapshot.lock().await.glossary = glossary;
     rt.persist(&app).await;
     Ok(())
@@ -2486,6 +2487,9 @@ pub fn run() {
                 snap.service_config = loaded.service_config;
                 snap.subtitle_style = loaded.subtitle_style;
                 snap.tts_settings = loaded.tts_settings;
+                runtime_setup
+                    .cloud
+                    .set_asr_hotwords_from_glossary(&loaded.glossary);
                 snap.glossary = loaded.glossary;
                 snap.llm_config = loaded.llm_config;
                 snap.update_config = loaded.update_config;

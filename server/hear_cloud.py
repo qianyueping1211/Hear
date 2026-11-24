@@ -664,14 +664,44 @@ def run_with_timeout(fn, seconds):
     return result.result(timeout=max(0, seconds))
 
 
-def deferred_whisper(samples, rate, language, fallback):
+def parse_asr_hotwords(raw):
+    """解析客户端通过 X-ASR-Hotwords 传入的术语表热词（支持 URL 编码的 UTF-8 中文/英文专有名词）。"""
+    if not raw:
+        return None
+    import re
+    try:
+        decoded = urllib.parse.unquote(str(raw))
+    except Exception:
+        decoded = str(raw)
+    seen = set()
+    terms = []
+    total_len = 0
+    for part in re.split(r"[,;\n|，；]+", decoded):
+        term = part.strip()
+        if not term:
+            continue
+        key = term.lower()
+        if key in seen:
+            continue
+        if len(terms) >= 32 or total_len + len(term) > 512:
+            break
+        seen.add(key)
+        terms.append(term)
+        total_len += len(term) + 2
+    return ", ".join(terms) if terms else None
+
+
+def deferred_whisper(samples, rate, language, fallback, hotwords=None):
     def _run():
-        # 后台精修阶段（X-ASR-Stage: correct）使用 beam_size=5 提升准确率；
+        # 后台精修阶段（X-ASR-Stage: correct）使用 beam_size=5 + 术语表热词提升准确率；
         # 兼容外部测试桩按旧 4 参数签名 monkeypatch whisper_transcribe 的场景
         try:
-            return whisper_transcribe(samples, rate, language, fallback, beam_size=5)
+            return whisper_transcribe(samples, rate, language, fallback, beam_size=5, hotwords=hotwords)
         except TypeError:
-            return whisper_transcribe(samples, rate, language, fallback)
+            try:
+                return whisper_transcribe(samples, rate, language, fallback, beam_size=5)
+            except TypeError:
+                return whisper_transcribe(samples, rate, language, fallback)
     try:
         return run_with_timeout(_run, CORRECT_TIMEOUT)
     except TimeoutError:
@@ -679,7 +709,7 @@ def deferred_whisper(samples, rate, language, fallback):
 
 
 def recognize(samples, rate, language, fallback, scheme=None, preview=False,
-              log_content=False):
+              log_content=False, hotwords=None):
     """按方案选识别：
        whisper              只用 Whisper
        sensevoice           只用 SenseVoice
@@ -707,8 +737,13 @@ def recognize(samples, rate, language, fallback, scheme=None, preview=False,
         # 再用 Whisper 修正（准）
         # 修正失败也要保住已经有的结果：慢引擎出错不能把整句话弄丢
         try:
+            def _run_whisper():
+                try:
+                    return whisper_transcribe(samples, rate, language, fallback, hotwords=hotwords)
+                except TypeError:
+                    return whisper_transcribe(samples, rate, language, fallback)
             slow_text, slow_lang = run_with_timeout(
-                lambda: whisper_transcribe(samples, rate, language, fallback),
+                _run_whisper,
                 CORRECT_TIMEOUT)
         except TimeoutError:
             # 修正太慢：先用快结果，别把这一句拖死
@@ -729,10 +764,13 @@ def recognize(samples, rate, language, fallback, scheme=None, preview=False,
         return (fast_text, fast_lang or slow_lang or fallback)
 
     # 默认：只用 Whisper
-    return whisper_transcribe(samples, rate, language, fallback)
+    try:
+        return whisper_transcribe(samples, rate, language, fallback, hotwords=hotwords)
+    except TypeError:
+        return whisper_transcribe(samples, rate, language, fallback)
 
 
-def whisper_transcribe(samples, rate, language, fallback, beam_size=1):
+def whisper_transcribe(samples, rate, language, fallback, beam_size=1, hotwords=None):
     """只用 faster-whisper 识别"""
     model = get_whisper()
     # 必须给 numpy 的 float32 数组：
@@ -740,13 +778,22 @@ def whisper_transcribe(samples, rate, language, fallback, beam_size=1):
     # 给普通 list 它会当成文件去 av.open()，老版本 av 会直接报
     # "open() got an unexpected keyword argument 'metadata_errors'"。
     audio = to_float32(samples, rate)
+    kwargs = {
+        "language": language,
+        "beam_size": beam_size,
+        "vad_filter": True,
+        "vad_parameters": {"min_speech_duration_ms": 100, "min_silence_duration_ms": 300},
+        "condition_on_previous_text": False,
+    }
+    if hotwords:
+        kwargs["hotwords"] = hotwords
     # faster-whisper 的 segments 是惰性迭代器；锁必须覆盖迭代全过程。
     with _whisper_inference_lock:
-        segments, info = model.transcribe(
-            audio, language=language, beam_size=beam_size, vad_filter=True,
-            vad_parameters={"min_speech_duration_ms": 100, "min_silence_duration_ms": 300},
-            condition_on_previous_text=False,
-        )
+        try:
+            segments, info = model.transcribe(audio, **kwargs)
+        except TypeError:
+            kwargs.pop("hotwords", None)
+            segments, info = model.transcribe(audio, **kwargs)
         text = "".join(s.text for s in segments).strip()
         return (text, info.language or fallback)
 
@@ -1108,16 +1155,17 @@ a{color:#007aff;text-decoration:none}
             # 预览只要快：组合方案下只用 SenseVoice，不跑 Whisper 修正
             preview = (self.headers.get("X-ASR-Preview") or "").strip() == "1"
             stage = self.headers.get("X-ASR-Stage", "")
+            hotwords = parse_asr_hotwords(self.headers.get("X-ASR-Hotwords", ""))
             if not preview and scheme == "sensevoice+whisper" and stage == "correct":
-                text, lang = deferred_whisper(samples, rate, language, fallback)
+                text, lang = deferred_whisper(samples, rate, language, fallback, hotwords=hotwords)
             elif not preview and scheme == "sensevoice+whisper" and stage == "first":
                 lang, text = sensevoice_transcribe(samples, rate)
                 can_correct = bool(text)
                 if not text:
-                    text, lang = deferred_whisper(samples, rate, language, fallback)
+                    text, lang = deferred_whisper(samples, rate, language, fallback, hotwords=hotwords)
             else:
                 text, lang = recognize(samples, rate, language, fallback, scheme, preview,
-                                       log_content=log_content)
+                                       log_content=log_content, hotwords=hotwords)
         log_text("识别（%s）%.1fs：" % (scheme, time.time() - t0), text[:40],
                  enabled=log_content)
         self._send_json({"lang": lang or fallback, "text": text, "can_correct": can_correct,

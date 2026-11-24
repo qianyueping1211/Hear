@@ -99,6 +99,60 @@ pub struct HearCloudClient {
     /// 参考声纹上传 ID 缓存：(base_url, wav_fnv64) -> (ref_id, uploaded_at)
     /// 复用固定声纹时跳过每次 200KB 重复上传与往返握手，并让服务端命中 speaker reference 缓存
     ref_id_cache: std::sync::Mutex<std::collections::HashMap<(String, u64), (String, Instant)>>,
+    /// 术语表提取并经百分号编码的 ASR 热词头（X-ASR-Hotwords），供服务端 Whisper 精修提高专有名词识别率
+    asr_hotwords_header: std::sync::Mutex<Option<String>>,
+}
+
+fn percent_encode_utf8(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() * 2);
+    for &b in input.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b',' | b' ') {
+            if b == b' ' {
+                out.push_str("%20");
+            } else {
+                out.push(b as char);
+            }
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+pub fn extract_glossary_hotwords_header(glossary: &str) -> Option<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut terms = Vec::new();
+    let mut total_chars = 0usize;
+    for line in glossary.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let term = trimmed
+            .split_once('=')
+            .or_else(|| trimmed.split_once('＝'))
+            .or_else(|| trimmed.split_once(':'))
+            .map(|(k, _)| k.trim())
+            .unwrap_or(trimmed);
+        if term.is_empty() {
+            continue;
+        }
+        let key = term.to_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        let c = term.chars().count();
+        if terms.len() >= 32 || total_chars + c > 400 {
+            break;
+        }
+        total_chars += c + 2;
+        terms.push(term.to_string());
+    }
+    if terms.is_empty() {
+        None
+    } else {
+        Some(percent_encode_utf8(&terms.join(", ")))
+    }
 }
 
 fn fnv1a_64(bytes: &[u8]) -> u64 {
@@ -136,6 +190,13 @@ impl HearCloudClient {
             http_local,
             device_id: format!("desktop-{}", &uuid::Uuid::new_v4().to_string()[..8]),
             ref_id_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            asr_hotwords_header: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub fn set_asr_hotwords_from_glossary(&self, glossary: &str) {
+        if let Ok(mut guard) = self.asr_hotwords_header.lock() {
+            *guard = extract_glossary_hotwords_header(glossary);
         }
     }
 
@@ -371,6 +432,13 @@ impl HearCloudClient {
         }
         if let Some(st) = stage {
             req = req.header("X-ASR-Stage", st);
+        }
+        if !preview {
+            if let Ok(guard) = self.asr_hotwords_header.lock() {
+                if let Some(ref hw) = *guard {
+                    req = req.header("X-ASR-Hotwords", hw.as_str());
+                }
+            }
         }
         req = self.apply_headers(req, token);
 
