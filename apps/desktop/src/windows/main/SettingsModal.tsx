@@ -172,6 +172,7 @@ export function SettingsModal() {
     glossary,
     llmConfig,
     saveLlmConfig,
+    fetchLlmModels,
     updateConfig,
     updateInfo,
     checkingUpdate,
@@ -210,6 +211,9 @@ export function SettingsModal() {
   const [llmApiKey, setLlmApiKey] = useState(llmConfig.apiKey);
   const [llmModel, setLlmModel] = useState(llmConfig.model);
   const [showLlmKey, setShowLlmKey] = useState(false);
+  const [llmModels, setLlmModels] = useState<string[]>([]);
+  const [fetchingLlmModels, setFetchingLlmModels] = useState(false);
+  const [llmFetchError, setLlmFetchError] = useState<string | null>(null);
   const [savedHint, setSavedHint] = useState<"local" | "cloud" | "llm" | "system" | null>(null);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const [removeModelsOnUninstall, setRemoveModelsOnUninstall] = useState(false);
@@ -312,6 +316,24 @@ export function SettingsModal() {
     });
     setSavedHint("llm");
     setTimeout(() => setSavedHint((h) => (h === "llm" ? null : h)), 2000);
+  };
+
+  const handleFetchLlmModels = async () => {
+    setFetchingLlmModels(true);
+    setLlmFetchError(null);
+    try {
+      const list = await fetchLlmModels(llmProvider, llmBaseUrl.trim(), llmApiKey.trim());
+      setLlmModels(list);
+      if (list.length > 0 && !list.includes(llmModel.trim())) {
+        setLlmModel(list[0]);
+      } else if (list.length === 0) {
+        setLlmFetchError("接口返回为空，可手动输入模型名称");
+      }
+    } catch (err) {
+      setLlmFetchError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFetchingLlmModels(false);
+    }
   };
 
   const handleSaveCloud = async () => {
@@ -735,25 +757,54 @@ export function SettingsModal() {
 
                 <div className="flex flex-wrap gap-1.5 text-[11px]">
                   {[
+                    { label: "MiniMax", provider: "openai", baseUrl: "https://api.minimaxi.com/v1", model: "MiniMax-M1" },
                     { label: "DeepSeek", provider: "openai", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" },
                     { label: "通义千问", provider: "openai", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus" },
+                    { label: "Kimi", provider: "openai", baseUrl: "https://api.moonshot.cn/v1", model: "moonshot-v1-8k" },
                     { label: "OpenAI", provider: "openai", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini" },
                     { label: "Anthropic", provider: "anthropic", baseUrl: "https://api.anthropic.com", model: "claude-3-5-sonnet-latest" },
-                  ].map((preset) => (
-                    <button
-                      key={preset.label}
-                      type="button"
-                      onClick={() => {
-                        setLlmEnabled(true);
-                        setLlmProvider(preset.provider);
-                        setLlmBaseUrl(preset.baseUrl);
-                        setLlmModel(preset.model);
-                      }}
-                      className="px-2 py-1 rounded-md bg-white/5 hover:bg-white/10 border border-white/10 text-slate-300 hover:text-white"
-                    >
-                      预设：{preset.label}
-                    </button>
-                  ))}
+                    { label: "OpenRouter", provider: "openai", baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini" },
+                    { label: "自定义", provider: llmProvider, baseUrl: "", model: "" },
+                  ].map((preset) => {
+                    const isCustom = preset.label === "自定义";
+                    const isActive = isCustom
+                      ? ![
+                          "https://api.minimaxi.com/v1",
+                          "https://api.deepseek.com/v1",
+                          "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                          "https://api.moonshot.cn/v1",
+                          "https://api.openai.com/v1",
+                          "https://api.anthropic.com",
+                          "https://openrouter.ai/api/v1",
+                        ].includes(llmBaseUrl.trim())
+                      : llmBaseUrl.trim() === preset.baseUrl;
+                    return (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        onClick={() => {
+                          setLlmEnabled(true);
+                          setLlmFetchError(null);
+                          setLlmModels([]);
+                          if (!isCustom) {
+                            setLlmProvider(preset.provider);
+                            setLlmBaseUrl(preset.baseUrl);
+                            setLlmModel(preset.model);
+                          } else {
+                            setLlmBaseUrl("");
+                            setLlmModel("");
+                          }
+                        }}
+                        className={`px-2.5 py-1 rounded-md border transition ${
+                          isActive
+                            ? "bg-brand-500/20 border-brand-400/50 text-brand-300"
+                            : "bg-white/5 hover:bg-white/10 border-white/10 text-slate-300 hover:text-white"
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
@@ -764,38 +815,28 @@ export function SettingsModal() {
                       onChange={(e) => setLlmProvider(e.target.value)}
                       className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-slate-100"
                     >
-                      <option value="openai">OpenAI 兼容（DeepSeek / 通义 / GPT / Ollama）</option>
+                      <option value="openai">OpenAI 兼容（MiniMax / DeepSeek / 通义 / Kimi / GPT）</option>
                       <option value="anthropic">Anthropic (/v1/messages)</option>
                     </select>
                   </label>
                   <label className="space-y-1">
-                    <span className="text-slate-400">模型名称</span>
-                    <input
-                      type="text"
-                      value={llmModel}
-                      onChange={(e) => setLlmModel(e.target.value)}
-                      placeholder="例如 deepseek-chat / qwen-plus / gpt-4o-mini"
-                      className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-slate-100"
-                    />
-                  </label>
-                  <label className="space-y-1 sm:col-span-2">
                     <span className="text-slate-400">API Base URL</span>
                     <input
                       type="text"
                       value={llmBaseUrl}
                       onChange={(e) => setLlmBaseUrl(e.target.value)}
-                      placeholder="https://api.deepseek.com/v1"
+                      placeholder="https://api.minimaxi.com/v1"
                       className="w-full rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-slate-100"
                     />
                   </label>
                   <label className="space-y-1 sm:col-span-2">
-                    <span className="text-slate-400">API Key（仅存本机配置文件）</span>
+                    <span className="text-slate-400">API Key / Token（仅存本机配置文件）</span>
                     <div className="flex gap-2">
                       <input
                         type={showLlmKey ? "text" : "password"}
                         value={llmApiKey}
                         onChange={(e) => setLlmApiKey(e.target.value)}
-                        placeholder="sk-..."
+                        placeholder="填好 Token 后点击右侧「拉取模型」"
                         className="flex-1 rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-slate-100"
                       />
                       <button
@@ -805,8 +846,54 @@ export function SettingsModal() {
                       >
                         {showLlmKey ? "隐藏" : "显示"}
                       </button>
+                      <button
+                        type="button"
+                        disabled={fetchingLlmModels || !llmBaseUrl.trim()}
+                        onClick={() => void handleFetchLlmModels()}
+                        className="px-3 rounded-lg bg-white/10 hover:bg-white/15 border border-white/10 text-slate-100 inline-flex items-center gap-1.5 disabled:opacity-50"
+                      >
+                        {fetchingLlmModels ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        )}
+                        <span>{fetchingLlmModels ? "拉取中…" : "拉取模型"}</span>
+                      </button>
                     </div>
                   </label>
+                  <div className="space-y-1 sm:col-span-2">
+                    <span className="text-slate-400">
+                      选择或填写模型名称{llmModels.length > 0 ? `（已拉取 ${llmModels.length} 个模型）` : ""}
+                    </span>
+                    <div className="flex gap-2">
+                      {llmModels.length > 0 && (
+                        <select
+                          value={llmModels.includes(llmModel) ? llmModel : ""}
+                          onChange={(e) => {
+                            if (e.target.value) setLlmModel(e.target.value);
+                          }}
+                          className="w-1/2 rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-slate-100"
+                        >
+                          <option value="">从已拉取模型选择…</option>
+                          {llmModels.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      <input
+                        type="text"
+                        value={llmModel}
+                        onChange={(e) => setLlmModel(e.target.value)}
+                        placeholder="选择已拉取模型，或手动输入模型名（如 MiniMax-M1 / deepseek-chat）"
+                        className="flex-1 rounded-lg bg-surface-950 border border-white/10 px-3 py-2 text-slate-100"
+                      />
+                    </div>
+                    {llmFetchError && (
+                      <div className="text-[11px] text-amber-400 pt-0.5">{llmFetchError}</div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-end gap-2">

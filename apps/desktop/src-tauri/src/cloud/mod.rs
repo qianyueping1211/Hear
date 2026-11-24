@@ -957,6 +957,82 @@ impl HearCloudClient {
         }
         Ok(full)
     }
+
+    /// 拉取外部大模型 API 可用模型列表（兼容 OpenAI /models 与 Anthropic /v1/models）
+    pub async fn fetch_llm_models(
+        &self,
+        provider: &str,
+        raw_base_url: &str,
+        api_key: &str,
+    ) -> Result<Vec<String>, String> {
+        let base = normalize_service_url(raw_base_url)?;
+        let key = api_key.trim();
+        let is_anthropic = provider.eq_ignore_ascii_case("anthropic");
+        let url = if is_anthropic {
+            if base.ends_with("/v1") {
+                format!("{}/models?limit=100", base)
+            } else {
+                format!("{}/v1/models?limit=100", base)
+            }
+        } else if base.ends_with("/models") {
+            base
+        } else {
+            format!("{}/models", base)
+        };
+
+        let mut req = self.client_for_url(&url).get(&url);
+        if is_anthropic {
+            req = req.header("anthropic-version", "2023-06-01");
+            if !key.is_empty() {
+                req = req.header("x-api-key", key);
+            }
+        } else if !key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let resp = req
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|e| format!("拉取模型列表失败：{}", e))?;
+        if !resp.status().is_success() {
+            let code = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("拉取模型返回 HTTP {}：{}", code, body.chars().take(160).collect::<String>()));
+        }
+
+        let val: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("解析模型列表失败：{}", e))?;
+
+        let mut models: Vec<String> = Vec::new();
+        if let Some(arr) = val.get("data").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                    let t = id.trim();
+                    if !t.is_empty() && !models.iter().any(|m| m == t) {
+                        models.push(t.to_string());
+                    }
+                }
+            }
+        } else if let Some(arr) = val.get("models").and_then(|v| v.as_array()) {
+            for item in arr {
+                let id = item
+                    .get("id")
+                    .or_else(|| item.get("name"))
+                    .and_then(|v| v.as_str());
+                if let Some(id) = id {
+                    let t = id.trim();
+                    if !t.is_empty() && !models.iter().any(|m| m == t) {
+                        models.push(t.to_string());
+                    }
+                }
+            }
+        }
+        models.sort();
+        Ok(models)
+    }
 }
 
 #[cfg(test)]

@@ -252,6 +252,7 @@ interface HearStoreState extends AppSnapshot {
   saveUpdateConfig: (patch: Partial<UpdateConfig>) => Promise<UpdateConfig>;
   llmConfig: LlmApiConfig;
   saveLlmConfig: (patch: Partial<LlmApiConfig>) => Promise<LlmApiConfig>;
+  fetchLlmModels: (provider: string, baseUrl: string, apiKey: string) => Promise<string[]>;
   checkForUpdates: (override?: UpdateConfig) => Promise<UpdateCheckResult | null>;
   downloadAndInstallUpdate: () => Promise<void>;
   openGithubUrl: (url: string) => Promise<void>;
@@ -1036,6 +1037,15 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       config: merged,
     });
     return saved ?? merged;
+  },
+
+  fetchLlmModels: async (provider, baseUrl, apiKey) => {
+    const res = await tauriInvoke<string[]>("fetch_llm_models", {
+      provider,
+      baseUrl,
+      apiKey,
+    });
+    return res ?? [];
   },
 
   saveUpdateConfig: async (patch) => {

@@ -1497,6 +1497,18 @@ async fn save_llm_config(
 }
 
 #[tauri::command]
+async fn fetch_llm_models(
+    rt: State<'_, Arc<AppRuntime>>,
+    provider: String,
+    base_url: String,
+    api_key: String,
+) -> Result<Vec<String>, String> {
+    rt.cloud
+        .fetch_llm_models(&provider, &base_url, &api_key)
+        .await
+}
+
+#[tauri::command]
 async fn save_update_config(
     app: AppHandle,
     rt: State<'_, Arc<AppRuntime>>,
@@ -2730,6 +2742,7 @@ pub fn run() {
             save_service_config,
             test_service_connection,
             save_llm_config,
+            fetch_llm_models,
             save_update_config,
             check_for_updates,
             download_and_install_update,
