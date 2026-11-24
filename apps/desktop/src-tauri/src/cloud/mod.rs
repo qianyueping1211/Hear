@@ -728,6 +728,167 @@ impl HearCloudClient {
         }
         Ok(full)
     }
+
+    /// 调用外部大模型 API（OpenAI 兼容或 Anthropic）流式生成会议纪要 / 自动标题
+    pub async fn llm_chat_stream<F>(
+        &self,
+        provider: &str,
+        raw_base_url: &str,
+        api_key: &str,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+        mut on_delta: F,
+    ) -> Result<String, String>
+    where
+        F: FnMut(&str),
+    {
+        let base = normalize_service_url(raw_base_url)?;
+        let model_name = model.trim();
+        if model_name.is_empty() {
+            return Err("请先在设置中填写大模型名称（例如 deepseek-chat / gpt-4o-mini）".to_string());
+        }
+        let key = api_key.trim();
+
+        if provider.eq_ignore_ascii_case("anthropic") {
+            let url = if base.ends_with("/v1/messages") {
+                base
+            } else if base.ends_with("/v1") {
+                format!("{}/messages", base)
+            } else {
+                format!("{}/v1/messages", base)
+            };
+            let body = serde_json::json!({
+                "model": model_name,
+                "max_tokens": 4096,
+                "temperature": 0.3,
+                "system": system_prompt,
+                "messages": [{ "role": "user", "content": user_prompt }],
+            });
+            let mut req = self
+                .client_for_url(&url)
+                .post(&url)
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .json(&body);
+            if !key.is_empty() {
+                req = req.header("x-api-key", key);
+            }
+            let resp = req
+                .timeout(Duration::from_secs(120))
+                .send()
+                .await
+                .map_err(|e| format!("大模型请求失败：{}", e))?;
+            if !resp.status().is_success() {
+                let code = resp.status().as_u16();
+                let txt = resp.text().await.unwrap_or_default();
+                return Err(format!("Anthropic API 返回 HTTP {}：{}", code, txt));
+            }
+            let val: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("解析 Anthropic 响应失败：{}", e))?;
+            let text = val
+                .get("content")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default();
+            if !text.is_empty() {
+                on_delta(&text);
+            }
+            return Ok(text);
+        }
+
+        // 默认 OpenAI 兼容接口（支持 OpenAI / DeepSeek / 通义千问 / Kimi / OpenRouter / Ollama）
+        let url = if base.ends_with("/chat/completions") {
+            base
+        } else {
+            format!("{}/chat/completions", base)
+        };
+        let body = serde_json::json!({
+            "model": model_name,
+            "temperature": 0.3,
+            "stream": true,
+            "messages": [
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": user_prompt }
+            ],
+        });
+        let mut req = self
+            .client_for_url(&url)
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream, application/json")
+            .json(&body);
+        if !key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+        let resp = req
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+            .map_err(|e| format!("大模型请求失败：{}", e))?;
+        if !resp.status().is_success() {
+            let code = resp.status().as_u16();
+            let txt = resp.text().await.unwrap_or_default();
+            return Err(format!("大模型 API 返回 HTTP {}：{}", code, txt));
+        }
+
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !content_type.contains("text/event-stream") {
+            let val: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| format!("解析大模型响应失败：{}", e))?;
+            let text = val
+                .pointer("/choices/0/message/content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !text.is_empty() {
+                on_delta(&text);
+            }
+            return Ok(text);
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut raw_buf: Vec<u8> = Vec::new();
+        let mut full = String::new();
+        while let Some(chunk) = stream.next().await {
+            let bytes = chunk.map_err(|e| format!("读取大模型流式响应中断：{}", e))?;
+            raw_buf.extend_from_slice(&bytes);
+            while let Some(pos) = raw_buf.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = raw_buf.drain(..=pos).collect();
+                let line = String::from_utf8_lossy(&line_bytes).trim().to_string();
+                if let Some(payload) = line.strip_prefix("data:") {
+                    let trimmed = payload.trim();
+                    if trimmed == "[DONE]" {
+                        return Ok(full);
+                    }
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        if let Some(delta) = val
+                            .pointer("/choices/0/delta/content")
+                            .and_then(|v| v.as_str())
+                        {
+                            full.push_str(delta);
+                            on_delta(&full);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(full)
+    }
 }
 
 #[cfg(test)]

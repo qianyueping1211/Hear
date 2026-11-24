@@ -120,6 +120,14 @@ export interface SummaryTemplateOption {
   description: string;
 }
 
+export interface LlmApiConfig {
+  enabled: boolean;
+  provider: "openai" | "anthropic" | string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
 export interface UpdateConfig {
   repo: string;
   githubToken: string;
@@ -202,6 +210,7 @@ export interface AppSnapshot {
   ttsSettings: TtsOutputSettings;
   playback: RecordingPlaybackState;
   glossary: string;
+  llmConfig?: LlmApiConfig;
   updateConfig: UpdateConfig;
   updateInfo?: UpdateCheckResult;
 }

@@ -1339,6 +1339,16 @@ export function MainApp() {
 
                           <button
                             type="button"
+                            onClick={() => void editSegmentSource(seg.id, seg.sourceText)}
+                            title="按当前语种与术语表重新翻译本句"
+                            className="px-2 py-1 rounded flex items-center gap-1 transition hover:bg-white/10 text-slate-300 hover:text-white"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span>重译</span>
+                          </button>
+
+                          <button
+                            type="button"
                             onClick={() => {
                               setEditingId(isEditing ? null : seg.id);
                               setEditSourceDraft(seg.sourceText);

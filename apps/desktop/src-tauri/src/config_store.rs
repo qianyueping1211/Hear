@@ -1,4 +1,6 @@
-use crate::state::{AudioCaptureMode, ServiceConfig, SubtitleStyle, TtsOutputSettings, UpdateConfig};
+use crate::state::{
+    AudioCaptureMode, LlmApiConfig, ServiceConfig, SubtitleStyle, TtsOutputSettings, UpdateConfig,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
@@ -14,6 +16,8 @@ pub struct PersistedConfig {
     pub tts_settings: TtsOutputSettings,
     #[serde(default)]
     pub glossary: String,
+    #[serde(default)]
+    pub llm_config: LlmApiConfig,
     #[serde(default)]
     pub update_config: UpdateConfig,
     #[serde(default)]
@@ -50,6 +54,7 @@ fn has_meaningful_credentials(cfg: &PersistedConfig) -> bool {
         || !cfg.service_config.local_access_token.trim().is_empty()
         || !cfg.service_config.cloud_access_token.trim().is_empty()
         || !cfg.update_config.github_token.trim().is_empty()
+        || !cfg.llm_config.api_key.trim().is_empty()
         || !cfg.glossary.trim().is_empty()
 }
 
@@ -96,6 +101,12 @@ pub(crate) fn parse_config_resilient(raw: &str) -> Result<PersistedConfig, Strin
 
     if let Some(g) = obj.get("glossary").and_then(|v| v.as_str()) {
         cfg.glossary = g.to_string();
+    }
+
+    if let Some(llm_val) = obj.get("llmConfig") {
+        if let Ok(llm) = serde_json::from_value::<LlmApiConfig>(llm_val.clone()) {
+            cfg.llm_config = llm;
+        }
     }
 
     if let Some(uc_val) = obj.get("updateConfig") {

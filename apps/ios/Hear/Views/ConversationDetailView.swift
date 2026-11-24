@@ -71,6 +71,25 @@ struct ConversationDetailView: View {
         .navigationTitle(conv?.title ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if let conv, !conv.items.isEmpty {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        ShareLink(item: exportMarkdown(for: conv)) {
+                            Label("分享双语记录 (Markdown)", systemImage: "doc.richtext")
+                        }
+                        ShareLink(item: exportSrt(for: conv)) {
+                            Label("分享字幕文本 (SRT)", systemImage: "captions.bubble")
+                        }
+                        if let content = record?.content, !content.isEmpty {
+                            ShareLink(item: content) {
+                                Label("分享当前总结", systemImage: "text.document")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                }
+            }
             if tab == 1, record?.status == SummaryRecord.Status.done {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -116,6 +135,69 @@ struct ConversationDetailView: View {
     }
 
     private func reload() { conv = store.load(id) }
+
+    /// 导出双语记录为 Markdown 文本，便于通过系统分享发送至微信、备忘录或文件
+    private func exportMarkdown(for c: Conversation) -> String {
+        let lang = session.chineseDisplayLanguage
+        var lines: [String] = []
+        let title = c.title.isEmpty ? "听见对话记录" : c.title
+        lines.append("# \(title)")
+        lines.append("")
+        for item in c.items {
+            let src = item.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let tr = item.displayedTranslation(using: lang).trimmingCharacters(in: .whitespacesAndNewlines)
+            if src.isEmpty && tr.isEmpty { continue }
+            let ts = item.audioStartSec.map { formatMmSs($0) } ?? ""
+            let spk = item.speakerLabel ?? ""
+            var headerParts: [String] = []
+            if !ts.isEmpty { headerParts.append("[\(ts)]") }
+            if !spk.isEmpty { headerParts.append("**\(spk)**") }
+            let prefix = headerParts.isEmpty ? "" : headerParts.joined(separator: " ") + " "
+            if !src.isEmpty {
+                lines.append("- \(prefix)\(src)")
+            }
+            if !tr.isEmpty && tr != src {
+                lines.append("  > \(tr)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// 导出双语记录为标准 SRT 字幕文本
+    private func exportSrt(for c: Conversation) -> String {
+        let lang = session.chineseDisplayLanguage
+        var blocks: [String] = []
+        var idx = 1
+        var fallbackSec: Double = 0
+        for item in c.items {
+            let src = item.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let tr = item.displayedTranslation(using: lang).trimmingCharacters(in: .whitespacesAndNewlines)
+            if src.isEmpty && tr.isEmpty { continue }
+            let start = item.audioStartSec ?? fallbackSec
+            let end = max(start + 0.8, item.audioEndSec ?? (start + 3.0))
+            fallbackSec = end
+            var textLines: [String] = []
+            if !src.isEmpty { textLines.append(src) }
+            if !tr.isEmpty && tr != src { textLines.append(tr) }
+            blocks.append("\(idx)\n\(formatSrtTime(start)) --> \(formatSrtTime(end))\n\(textLines.joined(separator: "\n"))")
+            idx += 1
+        }
+        return blocks.joined(separator: "\n\n")
+    }
+
+    private func formatMmSs(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded(.down)))
+        return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    private func formatSrtTime(_ seconds: Double) -> String {
+        let ms = max(0, Int((seconds * 1000.0).rounded()))
+        let h = ms / 3_600_000
+        let m = (ms % 3_600_000) / 60_000
+        let s = (ms % 60_000) / 1000
+        let rem = ms % 1000
+        return String(format: "%02d:%02d:%02d,%03d", h, m, s, rem)
+    }
 
     // MARK: 对话
 

@@ -5,6 +5,7 @@ import type {
   AudioSourceOption,
   ConversationMeta,
   EngineSource,
+  LlmApiConfig,
   LocalServerInstallStatus,
   LocalServerProgress,
   OutputAudioDevice,
@@ -146,6 +147,14 @@ const DEFAULT_PLAYBACK: RecordingPlaybackState = {
   peaks: [],
 };
 
+const DEFAULT_LLM_CONFIG: LlmApiConfig = {
+  enabled: false,
+  provider: "openai",
+  baseUrl: "https://api.deepseek.com/v1",
+  apiKey: "",
+  model: "deepseek-chat",
+};
+
 const DEFAULT_UPDATE_CONFIG: UpdateConfig = {
   repo: "qianyueping1211/Hear",
   githubToken: "",
@@ -241,6 +250,8 @@ interface HearStoreState extends AppSnapshot {
   openLocalServerDir: () => Promise<void>;
   openLogsDir: () => Promise<void>;
   saveUpdateConfig: (patch: Partial<UpdateConfig>) => Promise<UpdateConfig>;
+  llmConfig: LlmApiConfig;
+  saveLlmConfig: (patch: Partial<LlmApiConfig>) => Promise<LlmApiConfig>;
   checkForUpdates: (override?: UpdateConfig) => Promise<UpdateCheckResult | null>;
   downloadAndInstallUpdate: () => Promise<void>;
   openGithubUrl: (url: string) => Promise<void>;
@@ -307,6 +318,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   ttsSettings: DEFAULT_TTS,
   playback: DEFAULT_PLAYBACK,
   glossary: "",
+  llmConfig: DEFAULT_LLM_CONFIG,
   updateConfig: DEFAULT_UPDATE_CONFIG,
   updateInfo: undefined,
 
@@ -355,6 +367,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       set({
         ...snap,
         ttsSettings: { ...DEFAULT_TTS, ...snap.ttsSettings },
+        llmConfig: { ...DEFAULT_LLM_CONFIG, ...(snap.llmConfig ?? {}) },
         hydrated: true,
       });
     } else {
@@ -1011,6 +1024,18 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         sessionError: err instanceof Error ? err.message : String(err),
       });
     }
+  },
+
+  saveLlmConfig: async (patch) => {
+    if (!get().hydrated) {
+      await get().hydrate();
+    }
+    const merged: LlmApiConfig = { ...get().llmConfig, ...patch };
+    set({ llmConfig: merged });
+    const saved = await tauriInvoke<LlmApiConfig>("save_llm_config", {
+      config: merged,
+    });
+    return saved ?? merged;
   },
 
   saveUpdateConfig: async (patch) => {

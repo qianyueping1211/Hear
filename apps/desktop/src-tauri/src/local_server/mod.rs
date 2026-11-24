@@ -3,6 +3,7 @@ use crate::updater::{clean_repo, parse_semver, CURRENT_VERSION};
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
@@ -99,7 +100,7 @@ fn build_http_client() -> Result<Client, String> {
 async fn find_latest_server_asset(
     client: &Client,
     cfg: &UpdateConfig,
-) -> Result<(String, String, String, String), String> {
+) -> Result<(String, String, String, String, Option<String>), String> {
     let repo = clean_repo(&cfg.repo);
     let api_url = format!("https://api.github.com/repos/{}/releases?per_page=100", repo);
     let mut req = client
@@ -141,14 +142,26 @@ async fn find_latest_server_asset(
         .filter(|r| !r.draft.unwrap_or(false) && r.tag_name.starts_with("win-server-v"))
         .filter_map(|r| {
             let ver = parse_semver(&r.tag_name)?;
-            let asset = r.assets.as_ref()?.iter().find(|a| {
+            let assets = r.assets.as_ref()?;
+            let asset = assets.iter().find(|a| {
                 let lower = a.name.to_lowercase();
                 (lower.starts_with("hear-win-server-") || lower.starts_with("hear-server-win-"))
                     && lower.ends_with(".zip")
             })?;
-            Some((ver, r.tag_name.clone(), asset.name.clone(), asset.url.clone()))
+            let expected_sha_name = format!("{}.sha256", asset.name).to_lowercase();
+            let sha_url = assets
+                .iter()
+                .find(|a| a.name.to_lowercase() == expected_sha_name)
+                .map(|a| a.url.clone());
+            Some((
+                ver,
+                r.tag_name.clone(),
+                asset.name.clone(),
+                asset.url.clone(),
+                sha_url,
+            ))
         })
-        .max_by_key(|(v, _, _, _)| *v);
+        .max_by_key(|(v, _, _, _, _)| *v);
 
     let found = preferred.or_else(|| {
         releases
@@ -156,20 +169,32 @@ async fn find_latest_server_asset(
             .filter(|r| !r.draft.unwrap_or(false) && r.tag_name.starts_with("win-v"))
             .filter_map(|r| {
                 let ver = parse_semver(&r.tag_name)?;
-                let asset = r.assets.unwrap_or_default().into_iter().find(|a| {
+                let assets = r.assets.unwrap_or_default();
+                let asset = assets.iter().find(|a| {
                     let lower = a.name.to_lowercase();
                     lower.starts_with("hear-server-win-") && lower.ends_with(".zip")
                 })?;
-                Some((ver, r.tag_name, asset.name, asset.url))
+                let expected_sha_name = format!("{}.sha256", asset.name).to_lowercase();
+                let sha_url = assets
+                    .iter()
+                    .find(|a| a.name.to_lowercase() == expected_sha_name)
+                    .map(|a| a.url.clone());
+                Some((
+                    ver,
+                    r.tag_name,
+                    asset.name.clone(),
+                    asset.url.clone(),
+                    sha_url,
+                ))
             })
-            .max_by_key(|(v, _, _, _)| *v)
+            .max_by_key(|(v, _, _, _, _)| *v)
     });
 
-    let Some((ver, tag_name, asset_name, asset_url)) = found else {
+    let Some((ver, tag_name, asset_name, asset_url, sha_url)) = found else {
         return Err("仓库发布页中尚未找到 Hear-Win-Server-*-x64.zip 服务端整合包".to_string());
     };
     let ver_str = format!("{}.{}.{}", ver.0, ver.1, ver.2);
-    Ok((ver_str, tag_name, asset_name, asset_url))
+    Ok((ver_str, tag_name, asset_name, asset_url, sha_url))
 }
 
 fn strip_single_top_dir(rel: &Path) -> Option<PathBuf> {
@@ -299,7 +324,7 @@ where
     });
 
     let client = build_http_client()?;
-    let (ver_str, tag_name, asset_name, asset_url) =
+    let (ver_str, tag_name, asset_name, asset_url, sha_url) =
         find_latest_server_asset(&client, update_cfg).await?;
 
     on_progress(LocalServerProgress {
@@ -336,6 +361,7 @@ where
     let mut stream = resp.bytes_stream();
     let mut downloaded: u64 = 0;
     let mut header = Vec::new();
+    let mut hasher = Sha256::new();
     let mut last_emit = std::time::Instant::now();
 
     while let Some(chunk_res) = stream.next().await {
@@ -343,6 +369,7 @@ where
         if header.len() < 4 {
             header.extend_from_slice(&chunk[..chunk.len().min(4 - header.len())]);
         }
+        hasher.update(&chunk);
         file.write_all(&chunk)
             .map_err(|e| format!("写入下载缓存失败：{}", e))?;
         downloaded += chunk.len() as u64;
@@ -363,6 +390,49 @@ where
     if header.len() < 4 || &header[..4] != b"PK\x03\x04" {
         let _ = fs::remove_file(&zip_tmp);
         return Err("下载的文件不是有效的 ZIP 服务端整合包".to_string());
+    }
+
+    // 若 Release 附带了 .sha256 校验文件，解压前先核对 SHA-256，防止弱网损坏安装包
+    if let Some(ref sha_asset_url) = sha_url {
+        let mut sha_req = client
+            .get(sha_asset_url)
+            .header("Accept", "application/octet-stream")
+            .timeout(Duration::from_secs(15));
+        if !token.is_empty() {
+            sha_req = sha_req.header("Authorization", format!("Bearer {}", token));
+        }
+        if let Ok(sha_resp) = sha_req.send().await {
+            if sha_resp.status().is_success() {
+                if let Ok(sha_text) = sha_resp.text().await {
+                    let expected = sha_text
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_lowercase();
+                    if expected.len() == 64 && expected.chars().all(|c| c.is_ascii_hexdigit()) {
+                        let actual: String = hasher
+                            .finalize()
+                            .iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect();
+                        if actual != expected {
+                            let _ = fs::remove_file(&zip_tmp);
+                            return Err(format!(
+                                "服务端整合包 SHA-256 校验失败（文件可能下载损坏），请重试。期望 {}，实际 {}",
+                                &expected[..12],
+                                &actual[..12]
+                            ));
+                        }
+                        crate::logger::info(format!(
+                            "[local_server] {} SHA-256 校验通过 ({}…)",
+                            asset_name,
+                            &actual[..12]
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     on_progress(LocalServerProgress {

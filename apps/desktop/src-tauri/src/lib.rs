@@ -13,7 +13,7 @@ pub mod vad;
 use cloud::HearCloudClient;
 use config_store::{load_config, save_config, PersistedConfig};
 use state::{
-    AppSnapshot, AudioCaptureMode, AudioChannel, AudioSourceOption, EngineSource,
+    AppSnapshot, AudioCaptureMode, AudioChannel, AudioSourceOption, EngineSource, LlmApiConfig,
     LocalServerInstallStatus, ServiceConfig, ServiceProbeResult, SessionMode, SubtitleLayoutMode,
     SubtitleSegment, SubtitleStyle, TtsOutputSettings, UpdateCheckResult, UpdateConfig,
 };
@@ -128,6 +128,7 @@ impl AppRuntime {
                 subtitle_style: snap.subtitle_style.clone(),
                 tts_settings: snap.tts_settings.clone(),
                 glossary: snap.glossary.clone(),
+                llm_config: snap.llm_config.clone(),
                 update_config: snap.update_config.clone(),
                 source_lang: snap.source_lang.clone(),
                 target_lang: snap.target_lang.clone(),
@@ -1482,6 +1483,20 @@ async fn test_service_connection(
 }
 
 #[tauri::command]
+async fn save_llm_config(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    config: LlmApiConfig,
+) -> Result<LlmApiConfig, String> {
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.llm_config = config.clone();
+    }
+    rt.persist(&app).await;
+    Ok(config)
+}
+
+#[tauri::command]
 async fn save_update_config(
     app: AppHandle,
     rt: State<'_, Arc<AppRuntime>>,
@@ -1890,11 +1905,15 @@ async fn generate_summary(
     rt: State<'_, Arc<AppRuntime>>,
     template_id: String,
 ) -> Result<String, String> {
-    let (base_url, token, transcript) = {
+    let (base_url, token, llm_cfg, transcript) = {
         let snap = rt.snapshot.lock().await;
         if snap.segments.is_empty() {
             return Err("当前还没有可总结的字幕记录".to_string());
         }
+        let llm = snap.llm_config.clone();
+        let use_external_llm = llm.enabled
+            && !llm.base_url.trim().is_empty()
+            && !llm.model.trim().is_empty();
         let (addr, tok) = match snap.service_config.mt_source {
             EngineSource::Local => (
                 snap.service_config.local_service_address.clone(),
@@ -1905,8 +1924,8 @@ async fn generate_summary(
                 snap.service_config.cloud_access_token.clone(),
             ),
         };
-        if addr.trim().is_empty() {
-            return Err("请先在「设置 → 模型服务」配置文本翻译/大模型服务地址".to_string());
+        if !use_external_llm && addr.trim().is_empty() {
+            return Err("请先在「设置 → 模型服务」配置大模型总结 API 或文本翻译服务地址".to_string());
         }
         let mut lines = Vec::with_capacity(snap.segments.len());
         let mut char_budget = 0usize;
@@ -1926,12 +1945,12 @@ async fn generate_summary(
                 )
             };
             char_budget += line.chars().count();
-            if char_budget > 12_000 {
+            if char_budget > 16_000 {
                 break;
             }
             lines.push(line);
         }
-        (addr, tok, lines.join("\n"))
+        (addr, tok, llm, lines.join("\n"))
     };
 
     let instruction = match template_id.as_str() {
@@ -1947,21 +1966,41 @@ async fn generate_summary(
     };
 
     let prompt = format!("{}\n\n<transcript>\n{}\n</transcript>", instruction, transcript);
-    let tok_opt = if token.trim().is_empty() {
-        None
-    } else {
-        Some(token.as_str())
-    };
     let app_stream = app.clone();
-    let raw = rt
-        .cloud
-        .translate_stream(&base_url, &prompt, false, tok_opt, |partial| {
-            let cleaned = audio::clean_translation_output(partial);
-            if !cleaned.is_empty() {
-                let _ = app_stream.emit("summary:delta", cleaned);
-            }
-        })
-        .await?;
+    let raw = if llm_cfg.enabled
+        && !llm_cfg.base_url.trim().is_empty()
+        && !llm_cfg.model.trim().is_empty()
+    {
+        rt.cloud
+            .llm_chat_stream(
+                &llm_cfg.provider,
+                &llm_cfg.base_url,
+                &llm_cfg.api_key,
+                &llm_cfg.model,
+                "你是专业的双语会议纪要与内容总结助手，输出结构清晰、简洁准确的 Markdown，严禁编造对话中未提及的信息。",
+                &prompt,
+                |partial| {
+                    if !partial.trim().is_empty() {
+                        let _ = app_stream.emit("summary:delta", partial);
+                    }
+                },
+            )
+            .await?
+    } else {
+        let tok_opt = if token.trim().is_empty() {
+            None
+        } else {
+            Some(token.as_str())
+        };
+        rt.cloud
+            .translate_stream(&base_url, &prompt, false, tok_opt, |partial| {
+                let cleaned = audio::clean_translation_output(partial);
+                if !cleaned.is_empty() {
+                    let _ = app_stream.emit("summary:delta", cleaned);
+                }
+            })
+            .await?
+    };
 
     let final_md = audio::clean_translation_output(&raw);
     if final_md.is_empty() {
@@ -2448,6 +2487,7 @@ pub fn run() {
                 snap.subtitle_style = loaded.subtitle_style;
                 snap.tts_settings = loaded.tts_settings;
                 snap.glossary = loaded.glossary;
+                snap.llm_config = loaded.llm_config;
                 snap.update_config = loaded.update_config;
                 if !loaded.source_lang.trim().is_empty() {
                     snap.source_lang = loaded.source_lang;
@@ -2685,6 +2725,7 @@ pub fn run() {
             set_subtitle_style,
             save_service_config,
             test_service_connection,
+            save_llm_config,
             save_update_config,
             check_for_updates,
             download_and_install_update,

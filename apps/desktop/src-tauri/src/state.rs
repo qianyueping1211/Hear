@@ -315,6 +315,30 @@ pub struct LocalServerInstallStatus {
     pub launcher_path: Option<String>,
 }
 
+/// 外部大模型 API 配置（仅用于会议纪要总结与自动标题提炼，不参与实时翻译链路）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LlmApiConfig {
+    pub enabled: bool,
+    /// "openai"（兼容 OpenAI / DeepSeek / 通义千问 / Kimi / OpenRouter / Ollama）或 "anthropic"
+    pub provider: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl Default for LlmApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "openai".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            api_key: String::new(),
+            model: "deepseek-chat".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
@@ -339,6 +363,7 @@ pub struct AppSnapshot {
     pub tts_settings: TtsOutputSettings,
     pub playback: RecordingPlaybackState,
     pub glossary: String,
+    pub llm_config: LlmApiConfig,
     pub update_config: UpdateConfig,
     pub update_info: Option<UpdateCheckResult>,
 }
@@ -367,6 +392,7 @@ impl Default for AppSnapshot {
             tts_settings: TtsOutputSettings::default(),
             playback: RecordingPlaybackState::default(),
             glossary: String::new(),
+            llm_config: LlmApiConfig::default(),
             update_config: UpdateConfig::default(),
             update_info: None,
         }

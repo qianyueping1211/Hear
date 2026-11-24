@@ -8,6 +8,8 @@ import {
   MicOff,
   PanelTop,
   ShieldCheck,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import { findActiveSegmentIndex } from "../../lib/export";
 import { useHearStore } from "../../stores/useHearStore";
@@ -37,10 +39,12 @@ export function SubtitleApp() {
     livePartialSource,
     livePartialTranslation,
     subtitleStyle,
+    ttsSettings,
     playback,
     hydrate,
     toggleRecording,
     updateSubtitleStyle,
+    updateTtsSettings,
   } = useHearStore();
 
   const [hovered, setHovered] = useState(false);
@@ -179,6 +183,28 @@ export function SubtitleApp() {
               <Mic className="w-3.5 h-3.5 text-rose-400" />
             ) : (
               <MicOff className="w-3.5 h-3.5 text-slate-400" />
+            )}
+          </button>
+          <button
+            onClick={() => {
+              const nextEnabled = !ttsSettings.enabled;
+              if (nextEnabled && !ttsSettings.autoSpeakMyMic && !ttsSettings.autoSpeakOther) {
+                void updateTtsSettings({
+                  enabled: true,
+                  autoSpeakMyMic: true,
+                  autoSpeakOther: true,
+                });
+              } else {
+                void updateTtsSettings({ enabled: nextEnabled });
+              }
+            }}
+            title={ttsSettings.enabled ? "关闭自动朗读译文" : "开启自动朗读译文"}
+            className="p-1 rounded hover:bg-white/10"
+          >
+            {ttsSettings.enabled ? (
+              <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+            ) : (
+              <VolumeX className="w-3.5 h-3.5 text-slate-400" />
             )}
           </button>
           <button
