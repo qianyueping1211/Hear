@@ -44,31 +44,24 @@ jobs:
           echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
           echo "macOS Server 版本：$VER ($TAG -> $ASSET)"
 
-      - name: Cache llama.cpp Apple Silicon Metal build
-        id: cache-llama
-        uses: actions/cache@v4
-        with:
-          path: llama.cpp/build/bin
-          key: llama-macos-arm64-metal-${{ env.LLAMA_TAG }}
-
-      - name: Build llama-server with Apple Metal GPU
-        if: steps.cache-llama.outputs.cache-hit != 'true'
+      - name: Download official llama.cpp Apple Silicon Metal binary
         run: |
-          brew install cmake || true
-          git clone --depth 1 --branch "$LLAMA_TAG" https://github.com/ggml-org/llama.cpp llama.cpp
-          cmake -S llama.cpp -B llama.cpp/build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DGGML_METAL=ON \
-            -DGGML_METAL_EMBED_LIBRARY=ON \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DLLAMA_CURL=OFF
-          cmake --build llama.cpp/build --config Release -j "$(sysctl -n hw.ncpu)" --target llama-server
-          ls -lh llama.cpp/build/bin/llama-server
+          mkdir -p llama-bin
+          gh release download "${LLAMA_TAG}" -R ggml-org/llama.cpp -p "llama-${LLAMA_TAG}-bin-macos-arm64.tar.gz" -D llama-bin --clobber
+          tar -xzf "llama-bin/llama-${LLAMA_TAG}-bin-macos-arm64.tar.gz" -C llama-bin
+          BIN_PATH="$(find llama-bin -type f -name 'llama-server' | head -n 1)"
+          if [ -z "$BIN_PATH" ]; then
+            echo "未在压缩包中找到 llama-server"
+            exit 1
+          fi
+          BIN_DIR="$(dirname "$BIN_PATH")"
+          echo "LLAMA_BIN_DIR=$PWD/$BIN_DIR" >> "$GITHUB_ENV"
+          ls -lh "$BIN_DIR"
 
       - name: Package macOS Apple Silicon Server bundle
         run: |
           chmod +x server/start-macos.sh server/macos/build_macos_server_bundle.sh
-          bash server/macos/build_macos_server_bundle.sh "$PWD/llama.cpp/build/bin" "$PWD/dist-macos-server"
+          bash server/macos/build_macos_server_bundle.sh "$LLAMA_BIN_DIR" "$PWD/dist-macos-server"
 
       - name: Upload macOS Server artifact
         uses: actions/upload-artifact@v4
