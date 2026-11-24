@@ -5,6 +5,7 @@ from http.client import HTTPConnection, HTTPSConnection, HTTPException
 from http.server import BaseHTTPRequestHandler
 import re
 import secrets
+import struct
 import socket
 import ssl
 import threading
@@ -22,6 +23,27 @@ ERROR_CODES = {
     408: "REQUEST_TIMEOUT", 413: "PAYLOAD_TOO_LARGE", 500: "INTERNAL_ERROR",
     502: "BAD_GATEWAY", 503: "SERVICE_BUSY", 504: "GATEWAY_TIMEOUT",
 }
+
+
+def wav_duration_ms(data):
+    """从 WAV 头里读出时长（毫秒）。只看 fmt 和 data 两个块，不解码音频；格式不对返回 0。"""
+    try:
+        if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+            return 0
+        offset, byte_rate, size = 12, 0, None
+        while offset + 8 <= len(data):
+            chunk, length = data[offset:offset + 4], struct.unpack("<I", data[offset + 4:offset + 8])[0]
+            if chunk == b"fmt " and length >= 16:
+                byte_rate = struct.unpack("<I", data[offset + 16:offset + 20])[0]
+            elif chunk == b"data":
+                size = min(length, len(data) - offset - 8)
+                break
+            offset += 8 + length + (length & 1)
+        if not byte_rate or size is None:
+            return 0
+        return int(size * 1000 // byte_rate)
+    except (struct.error, ValueError):
+        return 0
 
 
 def clone_upstream(url, payload, deadline, max_bytes):
@@ -195,6 +217,11 @@ class RequestHandler(BaseHTTPRequestHandler):
     def log_notice(self, message):
         self.log_message("%s", message)
 
+    def send_response(self, code, message=None):
+        # 记下回给客户端的状态码：用量只统计成功的推理
+        self._response_status = code
+        super().send_response(code, message)
+
     def do_GET(self):
         route = urlsplit(self.path).path
         try:
@@ -226,7 +253,8 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _auth_denied(self, result, route):
         body = {"code": result.code, "message": result.message, "error": result.message,
                 "request_id": self.request_id}
-        for key in ("status", "starts_at", "expires_at", "effective_expires_at", "invalidated_at", "server_time"):
+        for key in ("status", "starts_at", "expires_at", "effective_expires_at", "invalidated_at", "server_time",
+                    "limit", "quota", "limit_minutes", "used_minutes", "resets_at", "retry_after_seconds"):
             if key in result.details:
                 body[key] = result.details[key]
         # 不记录口令本身，只记录结果和请求 ID
@@ -242,7 +270,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         result = policy.authorize(self.connection, self.client_address[0],
                                   (self.headers.get("X-Hear-Token") or "").strip())
         if result.ok:
-            self._send_json(dict(result.details))
+            body = dict(result.details)
+            usage_status = getattr(policy.authenticator, "usage_status", None)
+            if usage_status is not None:
+                body.update(usage_status(result))
+            self._send_json(body)
         else:
             self._auth_denied(result, "/v1/auth/check")
 
@@ -290,7 +322,24 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._auth_denied(auth, route)
             return
+        # 托管模式：每个 Token 的并发数、每分钟请求数和识别时长额度（都在内存里判断）
+        meter = policy.authenticator if auth.subject is not None and hasattr(policy.authenticator, "admit") else None
+        if meter is not None:
+            limited = meter.admit(auth)
+            if limited is not None:
+                self.close_connection = True
+                self._auth_denied(limited, route)
+                return
+        self._response_status = None
+        self._usage = {}
+        try:
+            self._handle_post(route, handler, policy)
+        finally:
+            if meter is not None:
+                status = self._response_status or 0
+                meter.release(auth, 200 <= status < 300, **self._usage)
 
+    def _handle_post(self, route, handler, policy):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -328,6 +377,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         correction = route == "/v1/asr" and self.headers.get("X-ASR-Stage", "").strip() == "correct"
         revision = route == "/v1/translate" and self.headers.get("X-MT-Stage", "").strip() == "revision"
         background = preview is not None or correction or revision or route not in ("/v1/asr", "/v1/translate")
+        # 计入用量的部分：识别时长只算首次识别（预览和后台精修是同一段话，不重复算）
+        self._usage = {"translation": route == "/v1/translate" and not is_mt_preview and not revision,
+                       "clone": route == "/v1/clone"}
+        if route == "/v1/asr" and preview is None and not correction:
+            self._usage["asr_ms"] = wav_duration_ms(body)
         # One in-flight clone per gateway, independent of per-device live ASR/MT preview lanes.
         exclusive = route if route == "/v1/clone" else preview_key
         with policy.reserve(background=background, preview=exclusive) as admitted:
