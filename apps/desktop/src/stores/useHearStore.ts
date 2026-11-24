@@ -1348,6 +1348,29 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     }
 
     set({ speakingSegmentId: id });
+    const guardLoopback = isTauriRuntime() && get().mode === "recording";
+    const startSystemGuard = () => {
+      if (guardLoopback) {
+        void tauriInvoke("set_system_tts_muted", {
+          muted: true,
+          spokenText: trimmed,
+        });
+      }
+    };
+    const endSystemGuard = () => {
+      if (guardLoopback) {
+        void tauriInvoke("set_system_tts_muted", {
+          muted: true,
+          spokenText: trimmed,
+        });
+        window.setTimeout(() => {
+          void tauriInvoke("set_system_tts_muted", {
+            muted: false,
+            spokenText: null,
+          });
+        }, 400);
+      }
+    };
 
     const bcp47Map: Record<string, string> = {
       zh: "zh-CN",
@@ -1369,18 +1392,23 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         utter.lang = targetBcp;
         if (matched) utter.voice = matched;
         utter.onend = () => {
+          endSystemGuard();
           if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
         };
         utter.onerror = () => {
+          endSystemGuard();
           if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
         };
+        startSystemGuard();
         window.speechSynthesis.speak(utter);
         return;
       }
     }
     try {
+      startSystemGuard();
       await tauriInvoke("speak_text_sapi", { text: trimmed });
     } finally {
+      endSystemGuard();
       if (get().speakingSegmentId === id) {
         set({ speakingSegmentId: null });
       }

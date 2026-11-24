@@ -125,8 +125,9 @@ impl AcousticEchoCanceller {
             return;
         }
 
-        // 双讲判断：若麦克风能量明显高于远端回声预期（人近距离说话），冻结自适应权值防止发散
-        let double_talk = mic_rms > (far_rms * 0.65).max(0.025);
+        // 双讲判断：笔记本扬声器紧邻麦克风时纯回声幅值可接近 far_rms，阈值设在 1.15x 且 >= 0.06，
+        // 避免纯回声误触发双讲冻结 NLMS 权值；用户近距离开口说话时仍会触发双讲保护人声。
+        let double_talk = mic_rms > (far_rms * 1.15).max(0.06);
         let step = if double_talk { 0.0 } else { self.mu };
 
         let taps = self.taps;
@@ -174,9 +175,9 @@ impl AcousticEchoCanceller {
 
         // 残余回声温和抑制（仅在非双讲且远端明显发声时压低残余线性/非线性回声，双讲时全额保留人声）
         let res_rms = (residual_energy / n as f32).sqrt();
-        if !double_talk && far_rms > 0.004 && res_rms < far_rms * 0.35 {
+        if !double_talk && far_rms > 0.003 && res_rms < far_rms * 0.65 {
             for s in &mut mic_frame[..n] {
-                *s *= 0.12;
+                *s *= 0.08;
             }
         }
     }

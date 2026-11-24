@@ -161,6 +161,51 @@ pub fn resolve_translation_direction(
     }
 }
 
+/// 过滤纯标点/空白噪声（如 ASR 对短杂音输出 "."、"。"、"?"，避免送给翻译模型引发上下文幻觉复读上一句）
+pub fn has_real_speech_text(text: &str) -> bool {
+    text.chars().any(|c| c.is_alphanumeric())
+}
+
+/// 文本级回声相似度判定：若扬声器刚播报过译文，且麦克风识别出的文本与该译文高度重合，则判定为扬声器回声复录
+pub fn is_likely_tts_echo(recognized: &str, spoken_tts: &str) -> bool {
+    let norm = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+            .flat_map(|c| c.to_lowercase())
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let a = norm(recognized);
+    let b = norm(spoken_tts);
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b || (a.len() >= 4 && b.contains(&a)) || (b.len() >= 4 && a.contains(&b)) {
+        return true;
+    }
+    let a_words: Vec<&str> = a.split_whitespace().collect();
+    let b_words: std::collections::HashSet<&str> = b.split_whitespace().collect();
+    if a_words.len() >= 2 && !b_words.is_empty() {
+        let hits = a_words.iter().filter(|w| b_words.contains(**w)).count();
+        if hits * 2 >= a_words.len() {
+            return true;
+        }
+    }
+    // 中文/CJK 字符级重合度检测
+    let a_chars: Vec<char> = a.chars().filter(|c| !c.is_whitespace()).collect();
+    let b_chars: std::collections::HashSet<char> =
+        b.chars().filter(|c| !c.is_whitespace()).collect();
+    if a_chars.len() >= 3 && !b_chars.is_empty() {
+        let hits = a_chars.iter().filter(|c| b_chars.contains(*c)).count();
+        if hits * 10 >= a_chars.len() * 6 {
+            return true;
+        }
+    }
+    false
+}
+
 /// 构造与 Hy-MT2 官方推荐一致的翻译提示词（附带匹配的自定义术语表）
 pub fn build_translation_prompt(text: &str, src: &str, dst: &str, glossary_raw: &str) -> String {
     build_translation_prompt_with_context(text, src, dst, glossary_raw, &[])
@@ -1843,7 +1888,7 @@ impl LiveCaptureHandle {
                             .await
                         {
                             let clean_src = text.trim().to_string();
-                            if !clean_src.is_empty() {
+                            if has_real_speech_text(&clean_src) {
                                 // 1. 检查原文是否与上一轮预览完全一致：若中文/原文未变且已有译文，直接跳过重复翻译，绝不反复重写！
                                 let (same_src, has_existing_tr, keep_tr) = {
                                     let mut snap = rt.snapshot.lock().await;
@@ -1972,7 +2017,7 @@ impl LiveCaptureHandle {
                             }
                         };
 
-                        if source_text.trim().is_empty() {
+                        if !has_real_speech_text(&source_text) {
                             let mut snap = rt.snapshot.lock().await;
                             snap.live_partial_source.clear();
                             snap.live_partial_translation.clear();
@@ -1981,6 +2026,33 @@ impl LiveCaptureHandle {
                                 serde_json::json!({ "source": "", "translation": "" }),
                             );
                             continue;
+                        }
+
+                        // 文本级回声防御：若正在播报或 6 秒内刚播报过高度重合的译文，直接丢弃，杜绝自动朗读被再次收音翻译
+                        {
+                            let is_echo = {
+                                let guard = rt.last_spoken_tts.lock().await;
+                                if let Some((ref spoken_text, spoken_at)) = *guard {
+                                    spoken_at.elapsed().as_secs() <= 6
+                                        && is_likely_tts_echo(&source_text, spoken_text)
+                                } else {
+                                    false
+                                }
+                            };
+                            if is_echo {
+                                logger::info(format!(
+                                    "[echo-filter] 丢弃疑似扬声器回声复录: {}",
+                                    source_text.trim()
+                                ));
+                                let mut snap = rt.snapshot.lock().await;
+                                snap.live_partial_source.clear();
+                                snap.live_partial_translation.clear();
+                                let _ = app.emit(
+                                    "subtitle:partial",
+                                    serde_json::json!({ "source": "", "translation": "" }),
+                                );
+                                continue;
+                            }
                         }
 
                         let (actual_src, actual_dst) = resolve_translation_direction(
@@ -2409,5 +2481,24 @@ mod tests {
             resolve_translation_direction("Hello world today", "en-US", "en", "zh", false),
             ("en".to_string(), "zh".to_string())
         );
+    }
+
+    #[test]
+    fn filters_punctuation_only_and_detects_tts_echo() {
+        assert!(!has_real_speech_text("."));
+        assert!(!has_real_speech_text("... 。?! "));
+        assert!(has_real_speech_text("你好。"));
+        assert!(is_likely_tts_echo(
+            "Let me see how the results are now",
+            "Let me see how the results are now."
+        ));
+        assert!(is_likely_tts_echo(
+            "how the results are",
+            "Let me see how the results are now."
+        ));
+        assert!(!is_likely_tts_echo(
+            "我不知道你到底是怎么想的",
+            "Let me see how the results are now."
+        ));
     }
 }
