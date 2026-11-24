@@ -50,6 +50,18 @@ pub fn normalize_service_url(raw: &str) -> Result<String, String> {
 pub struct HearCloudClient {
     http: Client,
     device_id: String,
+    /// 参考声纹上传 ID 缓存：(base_url, wav_fnv64) -> (ref_id, uploaded_at)
+    /// 复用固定声纹时跳过每次 200KB 重复上传与往返握手，并让服务端命中 speaker reference 缓存
+    ref_id_cache: std::sync::Mutex<std::collections::HashMap<(String, u64), (String, Instant)>>,
+}
+
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 impl HearCloudClient {
@@ -69,6 +81,7 @@ impl HearCloudClient {
         Self {
             http,
             device_id: format!("desktop-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            ref_id_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -378,36 +391,62 @@ impl HearCloudClient {
         };
 
         let mut ref_id: Option<String> = None;
+        let mut ref_from_cache = false;
         let ref_len = reference_wav.as_ref().map(|w| w.len()).unwrap_or(0);
+        let ref_cache_key = reference_wav
+            .as_ref()
+            .filter(|w| !w.is_empty())
+            .map(|w| (base_url.clone(), fnv1a_64(w)));
 
-        if let Some(wav) = reference_wav {
-            if !wav.is_empty() {
-                let ref_url = format!("{}/v1/clone/reference", base_url);
-                let req = self.apply_headers(
-                    self.http
-                        .post(&ref_url)
-                        .header("Content-Type", "audio/wav")
-                        .body(wav),
-                    token,
-                );
-                match req.timeout(Duration::from_secs(12)).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        if let Ok(val) = resp.json::<serde_json::Value>().await {
-                            ref_id = val.get("id").and_then(|v| v.as_str()).map(str::to_string);
+        if let Some(ref key) = ref_cache_key {
+            if let Ok(cache) = self.ref_id_cache.lock() {
+                if let Some((cached_id, ts)) = cache.get(key) {
+                    if ts.elapsed() < Duration::from_secs(20 * 60) {
+                        ref_id = Some(cached_id.clone());
+                        ref_from_cache = true;
+                    }
+                }
+            }
+        }
+
+        if ref_id.is_none() {
+            if let Some(ref wav) = reference_wav {
+                if !wav.is_empty() {
+                    let ref_url = format!("{}/v1/clone/reference", base_url);
+                    let req = self.apply_headers(
+                        self.http
+                            .post(&ref_url)
+                            .header("Content-Type", "audio/wav")
+                            .body(wav.clone()),
+                        token,
+                    );
+                    match req.timeout(Duration::from_secs(12)).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            if let Ok(val) = resp.json::<serde_json::Value>().await {
+                                ref_id = val.get("id").and_then(|v| v.as_str()).map(str::to_string);
+                                if let (Some(rid), Some(key)) = (ref_id.as_ref(), ref_cache_key.as_ref()) {
+                                    if let Ok(mut cache) = self.ref_id_cache.lock() {
+                                        if cache.len() >= 16 {
+                                            cache.clear();
+                                        }
+                                        cache.insert(key.clone(), (rid.clone(), Instant::now()));
+                                    }
+                                }
+                            }
                         }
-                    }
-                    Ok(resp) => {
-                        crate::logger::warn(format!(
-                            "[clone:reference] HTTP {} from {}",
-                            resp.status().as_u16(),
-                            ref_url
-                        ));
-                    }
-                    Err(e) => {
-                        crate::logger::warn(format!(
-                            "[clone:reference] request failed {}: {}",
-                            ref_url, e
-                        ));
+                        Ok(resp) => {
+                            crate::logger::warn(format!(
+                                "[clone:reference] HTTP {} from {}",
+                                resp.status().as_u16(),
+                                ref_url
+                            ));
+                        }
+                        Err(e) => {
+                            crate::logger::warn(format!(
+                                "[clone:reference] request failed {}: {}",
+                                ref_url, e
+                            ));
+                        }
                     }
                 }
             }
@@ -415,12 +454,13 @@ impl HearCloudClient {
 
         let clone_url = format!("{}/v1/clone", base_url);
         crate::logger::info(format!(
-            "[clone] POST {} lang={} text_chars={} ref_bytes={} ref_id={:?}",
+            "[clone] POST {} lang={} text_chars={} ref_bytes={} ref_id={:?} cached_ref={}",
             clone_url,
             cloud_lang,
             text.chars().count(),
             ref_len,
-            ref_id
+            ref_id,
+            ref_from_cache
         ));
         let mut payload = serde_json::json!({
             "text": text,
@@ -434,8 +474,9 @@ impl HearCloudClient {
             }
         }
 
-        let backoff_ms = [1200u64, 2000, 3000];
+        let backoff_ms = [1000u64, 1800, 2800];
         let max_attempts = backoff_ms.len() + 1;
+        let mut reuploaded_ref = false;
         for attempt in 1..=max_attempts {
             let req = self.apply_headers(
                 self.http
@@ -468,6 +509,46 @@ impl HearCloudClient {
 
             let code = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
+            // 若服务端重启导致缓存的 reference_id 失效（400/404），立即剔除缓存并重新上传一次参考音后重试
+            if ref_from_cache && !reuploaded_ref && (code == 400 || code == 404) {
+                reuploaded_ref = true;
+                if let Some(ref key) = ref_cache_key {
+                    if let Ok(mut cache) = self.ref_id_cache.lock() {
+                        cache.remove(key);
+                    }
+                }
+                if let Some(ref wav) = reference_wav {
+                    if !wav.is_empty() {
+                        let ref_url = format!("{}/v1/clone/reference", base_url);
+                        let req = self.apply_headers(
+                            self.http
+                                .post(&ref_url)
+                                .header("Content-Type", "audio/wav")
+                                .body(wav.clone()),
+                            token,
+                        );
+                        if let Ok(r) = req.timeout(Duration::from_secs(12)).send().await {
+                            if r.status().is_success() {
+                                if let Ok(val) = r.json::<serde_json::Value>().await {
+                                    if let Some(new_id) = val.get("id").and_then(|v| v.as_str()) {
+                                        payload["reference_id"] =
+                                            serde_json::Value::String(new_id.to_string());
+                                        if let Some(ref key) = ref_cache_key {
+                                            if let Ok(mut cache) = self.ref_id_cache.lock() {
+                                                cache.insert(
+                                                    key.clone(),
+                                                    (new_id.to_string(), Instant::now()),
+                                                );
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if code == 503 && attempt < max_attempts {
                 let wait = backoff_ms[attempt - 1];
                 crate::logger::warn(format!(

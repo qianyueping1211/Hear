@@ -188,6 +188,7 @@ export function MainApp() {
     editSegmentSpeaker,
     playSegmentOriginal,
     speakSegment,
+    resumeAutoSpeakFromNext,
     updateTtsSettings,
     generateSummary,
     saveSummaryMarkdown,
@@ -425,22 +426,25 @@ export function MainApp() {
       {/* 声音克隆前面的「自动朗读译文」快捷开关 */}
       <button
         type="button"
-        onClick={() => {
+        onClick={async () => {
           const nextEnabled = !ttsSettings.enabled;
           if (nextEnabled && !ttsSettings.autoSpeakMyMic && !ttsSettings.autoSpeakOther) {
-            void updateTtsSettings({
+            await updateTtsSettings({
               enabled: true,
               autoSpeakMyMic: true,
               autoSpeakOther: true,
             });
           } else {
-            void updateTtsSettings({ enabled: nextEnabled });
+            await updateTtsSettings({ enabled: nextEnabled });
+          }
+          if (nextEnabled) {
+            void resumeAutoSpeakFromNext();
           }
         }}
         title={
           ttsSettings.enabled
-            ? "自动朗读译文已开启（点击关闭）"
-            : "自动朗读译文已关闭（点击开启）"
+            ? "自动朗读译文已开启（手动点击单句播报会自动暂停）"
+            : "自动朗读译文已暂停（点击开启并从上次播放的下一行继续）"
         }
         className={`h-9 px-2.5 rounded-lg border text-xs inline-flex items-center gap-1.5 transition ${
           ttsSettings.enabled

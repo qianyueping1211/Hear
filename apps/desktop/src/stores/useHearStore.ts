@@ -165,6 +165,7 @@ interface HearStoreState extends AppSnapshot {
   sessionError: string | null;
   sessionNotice: string | null;
   speakingSegmentId: string | null;
+  lastSpokenSegmentId: string | null;
   preparingCloneSegmentId: string | null;
   cloneStates: Record<string, "cloning" | "ready">;
   outputDevices: OutputAudioDevice[];
@@ -253,7 +254,13 @@ interface HearStoreState extends AppSnapshot {
     speakerLabel: string,
     applyToSameSpeaker: boolean
   ) => Promise<void>;
-  speakSegment: (id: string, text: string, lang: string) => Promise<void>;
+  speakSegment: (
+    id: string,
+    text: string,
+    lang: string,
+    options?: { fromResume?: boolean }
+  ) => Promise<void>;
+  resumeAutoSpeakFromNext: () => Promise<void>;
   prepareSegmentClone: (
     id: string,
     text: string,
@@ -312,6 +319,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   sessionError: null,
   sessionNotice: null,
   speakingSegmentId: null,
+  lastSpokenSegmentId: null,
   preparingCloneSegmentId: null,
   cloneStates: {},
   outputDevices: [],
@@ -381,6 +389,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
               preparingCloneSegmentId:
                 s.preparingCloneSegmentId === id ? null : s.preparingCloneSegmentId,
               speakingSegmentId: id,
+              lastSpokenSegmentId: id,
             }));
           } else {
             set((s) => ({
@@ -1248,18 +1257,23 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     }
   },
 
-  speakSegment: async (id, text, lang) => {
+  speakSegment: async (id, text, lang, options) => {
     const trimmed = text.trim();
     if (!trimmed) return;
     if (get().speakingSegmentId === id) {
       get().stopSpeakingSegment();
       return;
     }
+    // 用户手动点击某句译文播放时：自动将顶栏「自动朗读译文」置为暂停状态，
+    // 方便用户专心回听该句；之后再次点开「自动朗读译文」时会从本句的下一行继续往下播
+    if (!options?.fromResume && get().ttsSettings.enabled) {
+      void get().updateTtsSettings({ enabled: false });
+    }
     stopActiveCloneAudio();
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
-    set({ speakingSegmentId: id });
+    set({ speakingSegmentId: id, lastSpokenSegmentId: id });
 
     // 若开启了 Qwen3-TTS 原声克隆且在桌面端，优先使用指定设备输出（会议虚拟麦 / 物理耳机 / 面对面自动静音麦）
     if (isTauriRuntime() && get().ttsSettings.useVoiceClone) {
@@ -1428,6 +1442,32 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       window.speechSynthesis.cancel();
     }
     set({ speakingSegmentId: null, preparingCloneSegmentId: null });
+  },
+
+  resumeAutoSpeakFromNext: async () => {
+    const { segments, lastSpokenSegmentId, targetLang } = get();
+    if (segments.length === 0) return;
+    const foundIdx = lastSpokenSegmentId
+      ? segments.findIndex((s) => s.id === lastSpokenSegmentId)
+      : -1;
+    const startIdx = foundIdx >= 0 ? foundIdx + 1 : 0;
+    const queue = segments
+      .slice(startIdx)
+      .filter(
+        (s) =>
+          s.translatedText.trim().length > 0 &&
+          s.translatedText.trim() !== s.sourceText.trim()
+      );
+    for (const seg of queue) {
+      if (!get().ttsSettings.enabled) break;
+      autoSpokenSegmentIds.add(seg.id);
+      await get().speakSegment(
+        seg.id,
+        seg.translatedText,
+        seg.targetLang || targetLang,
+        { fromResume: true }
+      );
+    }
   },
 
   refreshOutputDevices: async () => {

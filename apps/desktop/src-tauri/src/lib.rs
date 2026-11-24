@@ -325,6 +325,9 @@ async fn start_recording_impl(
     rt: &Arc<AppRuntime>,
 ) -> Result<SessionMode, String> {
     let mut cap_guard = rt.capture.lock().await;
+    // 新一轮录音开始时重置克隆熔断计数，避免上一场偶发超时拖累新会话
+    rt.clone_consecutive_failures.store(0, Ordering::Relaxed);
+    *rt.clone_circuit_open_until.lock().await = None;
     if let Some(ref handle) = *cap_guard {
         handle.set_paused(false);
         let mut snap = rt.snapshot.lock().await;
@@ -894,7 +897,8 @@ async fn synthesize_cloned_segment_wav(
                 || first_err.to_ascii_lowercase().contains("timed out");
             let fails = rt.clone_consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
             if is_timeout_504 || fails >= 2 {
-                let cooldown = if is_timeout_504 { 45 } else { 30 };
+                // 单次偶发超时仅短熔断 10s，连续失败才延长到 25s，避免单次超时把后续近一分钟的克隆全部卡住
+                let cooldown = if fails >= 2 { 25 } else { 10 };
                 *rt.clone_circuit_open_until.lock().await =
                     Some(std::time::Instant::now() + std::time::Duration::from_secs(cooldown));
                 logger::warn(format!(
