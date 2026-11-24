@@ -27,7 +27,7 @@ sys.path.insert(0, HERE)
 
 import hear_auth  # noqa: E402
 import hear_token_service  # noqa: E402
-from hear_http import RequestPolicy  # noqa: E402
+from hear_http import RequestPolicy, wav_duration_ms  # noqa: E402
 from hear_token_store import Store, StoreError  # noqa: E402
 
 PASSED, FAILED = [], []
@@ -132,7 +132,7 @@ class StubASR(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def make_wav():
+def make_wav(seconds=1):
     import io
     import struct
     import wave
@@ -141,8 +141,76 @@ def make_wav():
         file.setnchannels(1)
         file.setsampwidth(2)
         file.setframerate(16000)
-        file.writeframes(struct.pack("<16000h", *([800] * 16000)))
+        file.writeframes(struct.pack("<16000h", *([800] * 16000)) * seconds)
     return buffer.getvalue()
+
+
+# ====================================================================== 单元：限流、额度与用量
+
+def unit_usage():
+    print("\n== per-token limits and usage (fake clocks) ==")
+    check("wav_duration_ms reads the WAV header", wav_duration_ms(make_wav(3)) == 3000)
+    check("wav_duration_ms returns 0 for non-WAV data", wav_duration_ms(b"not a wav") == 0)
+    float_wav = (b"RIFF" + (40).to_bytes(4, "little") + b"WAVEfmt " + (16).to_bytes(4, "little")
+                 + (3).to_bytes(2, "little") + (1).to_bytes(2, "little") + (16000).to_bytes(4, "little")
+                 + (64000).to_bytes(4, "little") + (4).to_bytes(2, "little") + (32).to_bytes(2, "little")
+                 + b"data" + (32000).to_bytes(4, "little") + b"\0" * 32000)
+    check("wav_duration_ms handles 32-bit float WAV", wav_duration_ms(float_wav) == 500)
+    clock = {"mono": 100.0, "wall": 1_900_000_000.0}
+    meter = hear_auth.UsageMeter(monotonic=lambda: clock["mono"], wall=lambda: clock["wall"])
+    limits = {"max_concurrent": 1, "rate_per_minute": 3}
+    check("a request under the limits is admitted", meter.admit("tok_a", limits) is None)
+    busy = meter.admit("tok_a", limits)
+    check("a second concurrent request is CONCURRENCY_LIMITED (429)",
+          busy is not None and busy.http_status == 429 and busy.code == "CONCURRENCY_LIMITED")
+    meter.release("tok_a", True, asr_ms=1000)
+    check("other tokens are not affected", meter.admit("tok_b", limits) is None)
+    meter.release("tok_b", True)
+    for _ in range(2):
+        meter.admit("tok_a", limits)
+        meter.release("tok_a", True)
+    limited = meter.admit("tok_a", limits)
+    check("the fourth request in a minute is RATE_LIMITED with a retry hint",
+          limited is not None and limited.code == "RATE_LIMITED" and 1 <= limited.details["retry_after_seconds"] <= 60)
+    clock["mono"] += 61
+    check("the rate window slides after 60 seconds", meter.admit("tok_a", limits) is None)
+    meter.release("tok_a", False)
+    quota = {"daily_audio_minutes": 1}
+    meter.admit("tok_q", quota)
+    meter.release("tok_q", True, asr_ms=59000)
+    check("audio under the daily quota is admitted", meter.admit("tok_q", quota) is None)
+    meter.release("tok_q", True, asr_ms=2000)
+    over = meter.admit("tok_q", quota)
+    check("audio over the daily quota is QUOTA_EXCEEDED with the reset time",
+          over is not None and over.code == "QUOTA_EXCEEDED" and over.details["quota"] == "daily"
+          and over.details["used_minutes"] >= 1 and over.details["resets_at"] and over.message == "今日识别时长已用完")
+    check("a failed request is not counted", meter.status("tok_b", {"daily_audio_minutes": 5})["usage"]["today_audio_minutes"] == 0)
+    batch_id, items = meter.take_batch()
+    again_id, again_items = meter.take_batch()
+    check("an unconfirmed batch is resent with the same batch_id", again_id == batch_id and again_items == items)
+    check("pending usage still counts toward the quota while a report is in flight",
+          meter.admit("tok_q", quota) is not None)
+    total_ms = sum(item["asr_ms"] for item in items if item["token_id"] == "tok_q")
+    check("the batch carries bucketed usage and last_used_at",
+          total_ms == 61000 and all(item["last_used_at"] for item in items)
+          and all(hear_auth.parse_time(item["bucket_start"]) % hear_auth.USAGE_BUCKET_US == 0 for item in items))
+    window = {"day_start": "2030-03-17T00:00:00Z", "day_end": "2030-03-18T00:00:00Z",
+              "month_start": "2030-03-01T00:00:00Z", "month_end": "2030-04-01T00:00:00Z"}
+    clock["wall"] = 1_900_000_000.0  # 2030-03-17T17:46:40Z
+    meter.confirm(batch_id, {"window": window, "totals": [{"token_id": "tok_q", "day_asr_ms": 10000, "month_asr_ms": 10000}]})
+    check("after confirmation the quota uses the service's totals",
+          meter.admit("tok_q", quota) is None and not meter.has_pending())
+    meter.release("tok_q", False)
+    meter.confirm(batch_id, {"window": window, "totals": [{"token_id": "tok_q", "day_asr_ms": 70000, "month_asr_ms": 70000}]})
+    check("a stale confirmation is ignored", meter.admit("tok_q", quota) is None)
+    meter.release("tok_q", False)
+    clock["wall"] = hear_auth.parse_time("2030-03-18T00:00:01Z") / 1e6
+    batch_id, _ = meter.take_batch()
+    meter.confirm(batch_id, {"window": window, "totals": [{"token_id": "tok_q", "day_asr_ms": 70000, "month_asr_ms": 70000}]})
+    check("the daily quota resets once the day ends", meter.admit("tok_q", quota) is None)
+    meter.release("tok_q", False)
+    check("the monthly usage survives the day change",
+          meter.admit("tok_q", {"monthly_audio_minutes": 1}).code == "QUOTA_EXCEEDED")
 
 
 # ====================================================================== 单元：网关端校验器
@@ -226,6 +294,18 @@ def unit_authenticator():
           auth.sync_once() and auth.ready() and auth.verify("hear_ut_good").code == "TOKEN_INVALID")
     responses.append((401, b"", {}))
     check("a rejected gateway credential is a failed sync", not auth.sync_once())
+    limited = dict(good, limits={"rate_per_minute": 1, "daily_audio_minutes": 30})
+    responses.append((200, snapshot(7, [limited]), {}))
+    auth.sync_once()
+    result = auth.verify("hear_ut_good")
+    check("a verified token carries its id and limits for the meter",
+          result.ok and result.subject == "tok_1" and result.limits == {"rate_per_minute": 1, "daily_audio_minutes": 30})
+    check("limits are not part of the client-facing details", "limits" not in result.details)
+    responses.append((200, snapshot(8, [dict(good, limits={"rate_per_minute": 0})]), {}))
+    check("a snapshot with an invalid limit is rejected", not auth.sync_once())
+    responses.append((404, b"", {}))
+    check("an old token service without the usage endpoint disables reporting quietly",
+          not auth.report_usage() and auth.report_usage() is True and not responses)
 
     policy = RequestPolicy(1024, 1, authenticator=auth)
 
@@ -288,7 +368,7 @@ def unit_store(tmp):
     clock = {"t": 1_900_000_000.0}
     store = Store(os.path.join(tmp, "unit.db"), clock=lambda: clock["t"])
     store.migrate()
-    check("migrations are idempotent", store.migrate() == [] and store.schema_version() == 1)
+    check("migrations are idempotent", store.migrate() == [] and store.schema_version() == 2)
     actor = {"type": "cli", "id": "test", "username": "test"}
     store.create_gateway("gw-unit")
     user = store.create_user({"username": "Alice", "display_name": "爱丽丝"}, actor)
@@ -354,6 +434,60 @@ def unit_store(tmp):
     clock["t"] += 100 * 86400
     body, _ = store.snapshot("gw-unit")
     check("tokens invalidated more than 90 days ago leave the snapshot", body["tokens"] == [])
+
+    # 限流与额度、用量统计
+    store.create_gateway("gw-other")
+    limited = store.issue_token(user["user_id"], {"label": "limited", "gateway_id": "gw-unit",
+                                                  "expires_at": hear_auth.format_time(int((clock["t"] + 86400 * 60) * 1e6)),
+                                                  "rate_per_minute": 30, "daily_audio_minutes": 60}, actor)
+    check("issued tokens carry their limits", limited["limits"] == {"rate_per_minute": 30, "max_concurrent": None,
+                                                                    "daily_audio_minutes": 60, "monthly_audio_minutes": None})
+    body, _ = store.snapshot("gw-unit")
+    check("the snapshot carries only the limits that are set",
+          body["tokens"][-1]["limits"] == {"rate_per_minute": 30, "daily_audio_minutes": 60})
+    for field, value in (("rate_per_minute", 0), ("max_concurrent", 1000), ("daily_audio_minutes", "10"),
+                         ("monthly_audio_minutes", True)):
+        try:
+            store.update_token(limited["token_id"], {field: value}, actor)
+            check("an invalid %s is 422" % field, False)
+        except StoreError as error:
+            check("an invalid %s is 422" % field, error.http_status == 422 and error.field == field)
+    unit_revision = lambda: next(g["revision"] for g in store.list_gateways()["items"] if g["gateway_id"] == "gw-unit")
+    revision = unit_revision()
+    clock["t"] += 1
+    store.update_token(limited["token_id"], {"max_concurrent": 4, "rate_per_minute": None}, actor)
+    check("changing limits bumps the gateway revision", unit_revision() > revision
+          and store.get_token(limited["token_id"])["limits"]["rate_per_minute"] is None)
+    now_us = int(clock["t"] * 1e6)
+    bucket = hear_auth.format_time(now_us - now_us % hear_auth.USAGE_BUCKET_US)
+    foreign = store.issue_token(user["user_id"], {"label": "foreign", "gateway_id": "gw-other",
+                                                  "expires_at": hear_auth.format_time(now_us + 86400 * 10 ** 6)}, actor)
+    report = {"batch_id": "b_unit_0001", "items": [
+        {"token_id": limited["token_id"], "bucket_start": bucket, "requests": 5, "asr_ms": 90000, "mt_requests": 3,
+         "clone_requests": 1, "last_used_at": hear_auth.format_time(now_us)},
+        {"token_id": foreign["token_id"], "bucket_start": bucket, "requests": 9, "asr_ms": 9000}]}
+    result = store.record_usage("gw-unit", report)
+    check("a usage report is accepted and returns quota totals",
+          result["accepted"] == 1 and not result["duplicate"]
+          and result["totals"] == [{"token_id": limited["token_id"], "day_asr_ms": 90000, "month_asr_ms": 90000}])
+    again = store.record_usage("gw-unit", report)
+    usage = store.get_token(limited["token_id"])["usage"]
+    check("a repeated batch_id is counted once", again["duplicate"] and usage["today"]["requests"] == 5)
+    check("tokens of another gateway are ignored", store.get_token(foreign["token_id"])["usage"]["total"]["requests"] == 0)
+    check("usage summaries show today, month, total and last use",
+          usage["today"] == {"requests": 5, "audio_seconds": 90.0, "translations": 3, "clones": 1}
+          and usage["month"]["requests"] == 5 and usage["last_used_at"])
+    for bad in ({"batch_id": "x", "items": []},
+                {"batch_id": "b_unit_0002", "items": [{"token_id": limited["token_id"], "bucket_start": hear_auth.format_time(now_us + 1)}]},
+                {"batch_id": "b_unit_0003", "items": [{"token_id": limited["token_id"], "bucket_start": bucket, "requests": -1}]}):
+        try:
+            store.record_usage("gw-unit", bad)
+            check("an invalid usage report is 422", False)
+        except StoreError as error:
+            check("an invalid usage report is 422", error.http_status == 422)
+    series = store.token_usage(limited["token_id"], 7)
+    check("the daily usage series covers the requested days",
+          len(series["daily"]) == 7 and series["daily"][-1]["requests"] == 5 and series["daily"][0]["requests"] == 0)
 
 
 # ====================================================================== 端到端
@@ -517,7 +651,7 @@ def end_to_end(tmp):
     status, body, headers = snap(credential)
     check("the snapshot has the documented shape", status == 200 and body["gateway_id"] == "hear-test"
           and body["digest_algorithm"] == "sha256" and len(body["tokens"]) == 4
-          and set(body["tokens"][0]) == {"token_id", "user_id", "sha256", "starts_at", "expires_at", "revoked_at"})
+          and set(body["tokens"][0]) == {"token_id", "user_id", "sha256", "starts_at", "expires_at", "revoked_at", "limits"})
     check("the snapshot contains digests, not raw tokens", not any(raw in json.dumps(body) for raw in raw_tokens))
     check("the snapshot is not cacheable and has an ETag", headers.get("Cache-Control") == "no-store" and headers.get("ETag"))
     check("If-None-Match returns 304 when unchanged", snap(credential, etag=headers["ETag"])[0] == 304)
@@ -568,6 +702,50 @@ def end_to_end(tmp):
         plain = json.loads(response.read())
         connection.close()
         check("plain HTTP inference is refused", response.status == 403 and plain["code"] == "HTTPS_REQUIRED")
+
+        # 限流与额度：在网关内存里执行；用量批量上报回管理服务
+        status, rated = admin.call("POST", "/users/%s/tokens" % uid, {"label": "rated", "gateway_id": "hear-test",
+                                                                     "expires_at": iso(3600), "rate_per_minute": 2})[:2]
+        status, quota = admin.call("POST", "/users/%s/tokens" % uid, {"label": "quota", "gateway_id": "hear-test",
+                                                                     "expires_at": iso(3600), "daily_audio_minutes": 1})[:2]
+        check("tokens with limits work after the next sync",
+              wait_for(lambda: https_get(gw_port, "/v1/auth/check", quota["token"])[0] == 200, REFRESH * 4))
+        codes = [https_post(gw_port, "/v1/asr", wav, rated["token"])[0] for _ in range(3)]
+        status, body, _ = https_post(gw_port, "/v1/asr", wav, rated["token"])
+        check("the gateway enforces rate_per_minute with 429 RATE_LIMITED",
+              codes[:2] == [200, 200] and codes[2] == 429 and body["code"] == "RATE_LIMITED"
+              and body["retry_after_seconds"] >= 1 and body["request_id"])
+        long_wav = make_wav(61)
+        status, _, _ = https_post(gw_port, "/v1/asr", long_wav, quota["token"])
+        status, body, _ = https_post(gw_port, "/v1/asr", wav, quota["token"])
+        check("the gateway enforces daily_audio_minutes with 429 QUOTA_EXCEEDED",
+              status == 429 and body["code"] == "QUOTA_EXCEEDED" and body["quota"] == "daily"
+              and body["limit_minutes"] == 1 and body["resets_at"])
+        status, body, _ = https_get(gw_port, "/v1/auth/check", quota["token"])
+        check("/v1/auth/check shows limits and usage without consuming them",
+              status == 200 and body["limits"] == {"daily_audio_minutes": 1}
+              and body["usage"]["today_audio_minutes"] >= 1)
+        check("usage is reported back to the token service",
+              wait_for(lambda: admin.call("GET", "/tokens/" + quota["token_id"])[1]["usage"]["today"]["audio_seconds"] >= 61,
+                       REFRESH * 6))
+        status, meta, _ = admin.call("GET", "/tokens/" + rated["token_id"])
+        check("the admin API shows requests and last use per token",
+              meta["usage"]["today"]["requests"] == 2 and meta["usage"]["last_used_at"] and meta["limits"]["rate_per_minute"] == 2)
+        status, series, _ = admin.call("GET", "/tokens/%s/usage?days=7" % quota["token_id"])
+        check("the admin API returns a daily usage series", status == 200 and len(series["daily"]) == 7
+              and series["daily"][-1]["audio_seconds"] >= 61)
+        foreign_report = urllib.request.Request(base + "/internal/v1/gateways/hear-test/usage", method="POST",
+                                                data=b'{"batch_id":"b_foreign_01","items":[]}',
+                                                headers={"Content-Type": "application/json",
+                                                         "Authorization": "Bearer " + other_credential})
+        try:
+            urllib.request.urlopen(foreign_report, context=service_ctx, timeout=10)
+            check("another gateway's credential cannot report usage for this gateway", False)
+        except urllib.error.HTTPError as error:
+            check("another gateway's credential cannot report usage for this gateway", error.code == 403)
+        status, after_quota, _ = admin.call("PATCH", "/tokens/" + quota["token_id"], {"daily_audio_minutes": 5})
+        check("raising the quota lets the token work again after a sync",
+              status == 200 and wait_for(lambda: https_post(gw_port, "/v1/asr", wav, quota["token"])[0] == 200, REFRESH * 4))
 
         # 请求计数：推理和检查不产生清单请求
         before = store.list_gateways()["items"][0]["snapshot_requests"]
@@ -688,6 +866,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="hear-token-")
     try:
         unit_authenticator()
+        unit_usage()
         unit_request_guards()
         unit_store(tmp)
         end_to_end(tmp)
