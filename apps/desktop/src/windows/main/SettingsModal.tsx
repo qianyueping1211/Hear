@@ -208,7 +208,7 @@ export function SettingsModal() {
   const [voiceRecorderOpen, setVoiceRecorderOpen] = useState(false);
   const [previewingVoiceSample, setPreviewingVoiceSample] = useState(false);
 
-  // 仅在弹窗打开瞬间（或刚完成首屏 hydrate 时）同步草稿并做只读状态探测，避免刚启动点开设置读到空默认值
+  // 仅在弹窗打开瞬间（或刚完成首屏 hydrate 时）同步草稿，避免刚启动点开设置读到空默认值
   useEffect(() => {
     if (!settingsOpen || !hydrated) return;
     const snap = useHearStore.getState();
@@ -223,20 +223,19 @@ export function SettingsModal() {
     setSavedHint(null);
     setConfirmUninstall(false);
     void refreshLocalServerInstallStatus();
-    // 若已配置本机或远端地址且本次尚未探测过，打开设置页自动做一次只读 /health 检测
-    const localTested = Boolean(
-      snap.localStatus.address || snap.localStatus.error || snap.localStatus.latencyMs > 0
-    );
-    if (!localTested && snap.serviceConfig.localServiceAddress.trim()) {
+  }, [settingsOpen, hydrated, refreshLocalServerInstallStatus]);
+
+  // 每次打开设置窗口或切到「模型服务」页时，自动重新测试一次已配置的本机/远端连接状态
+  useEffect(() => {
+    if (!settingsOpen || !hydrated || activeSettingsTab !== "server") return;
+    const snap = useHearStore.getState();
+    if (snap.serviceConfig.localServiceAddress.trim()) {
       void testServiceConnection("local");
     }
-    const cloudTested = Boolean(
-      snap.cloudStatus.address || snap.cloudStatus.error || snap.cloudStatus.latencyMs > 0
-    );
-    if (!cloudTested && snap.serviceConfig.cloudServiceAddress.trim()) {
+    if (snap.serviceConfig.cloudServiceAddress.trim()) {
       void testServiceConnection("cloud");
     }
-  }, [settingsOpen, hydrated, refreshLocalServerInstallStatus, testServiceConnection]);
+  }, [settingsOpen, hydrated, activeSettingsTab, testServiceConnection]);
 
   if (!settingsOpen) return null;
 
@@ -269,12 +268,17 @@ export function SettingsModal() {
   };
 
   const handleSaveLocal = async () => {
+    const addr = localAddress.trim();
+    const tok = localToken.trim();
     await saveServiceConfig({
-      localServiceAddress: localAddress.trim(),
-      localAccessToken: localToken.trim(),
+      localServiceAddress: addr,
+      localAccessToken: tok,
     });
     setSavedHint("local");
     setTimeout(() => setSavedHint((h) => (h === "local" ? null : h)), 2000);
+    if (addr) {
+      await testServiceConnection("local", addr, tok);
+    }
   };
 
   const handleTestLocal = async () => {
@@ -285,12 +289,17 @@ export function SettingsModal() {
   };
 
   const handleSaveCloud = async () => {
+    const addr = cloudAddress.trim();
+    const tok = cloudToken.trim();
     await saveServiceConfig({
-      cloudServiceAddress: cloudAddress.trim(),
-      cloudAccessToken: cloudToken.trim(),
+      cloudServiceAddress: addr,
+      cloudAccessToken: tok,
     });
     setSavedHint("cloud");
     setTimeout(() => setSavedHint((h) => (h === "cloud" ? null : h)), 2000);
+    if (addr) {
+      await testServiceConnection("cloud", addr, tok);
+    }
   };
 
   const handleTestCloud = async () => {
