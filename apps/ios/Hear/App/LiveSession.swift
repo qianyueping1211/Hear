@@ -2282,9 +2282,9 @@ final class LiveSession: ObservableObject {
         clonePipeline.allowRetry(item.id)
         stopReading()
         readIndex = i
-        // 扬声器模式 + 正在聆听 + 未开启硬件语音增强（AEC）时：不出声，只记住从这句开始，停止实时翻译后再读；
-        // 开启了语音增强（VoiceProcessingIO 硬件回声消除）时可直接全双工朗读，不阻塞实时识别！
-        if outputMode == .speaker && isRunning && !voiceProcessing {
+        // 扬声器模式 + 正在聆听时：由于 AudioCapture 与 Speaker 使用独立音频引擎，VoiceProcessingIO 无法完全抵消外放声；
+        // 点某句时记住位置，停止实时翻译后再读，避免外放译文被麦克风回采为新原文（戴耳机模式保持全双工直接朗读）。
+        if outputMode == .speaker && isRunning {
             activity = "停止实时翻译后从这句开始朗读"
             return
         }
@@ -2503,6 +2503,7 @@ final class LiveSession: ObservableObject {
                         String(r.1.prefix(30)))
             guard isRunning, id == currentSeg, id > finishedSeg, partialSeg == id,
                   SpeechTextFilter.isMeaningful(r.text),
+                  !(outputMode == .speaker && isLikelySpokenEcho(r.text)),
                   let language = forced?.id ?? SpeechTextFilter.resolveLanguage(r.text, detected: r.lang,
                                                                                  candidates: cands, fallback: fallback)
             else { continue }
@@ -3149,6 +3150,13 @@ final class LiveSession: ObservableObject {
         }
         guard gen == runGen else { return }              // 已经停止：结果丢弃
         guard isCurrentJob(itemID, token: token) else { return }   // 这一句已经被放弃/顶掉
+        if outputMode == .speaker && isLikelySpokenEcho(text) {
+            hearLogText("丢弃疑似扬声器回声复录：", String(text.prefix(30)), .info)
+            removeItem(itemID)
+            jobTokens[itemID] = nil
+            activity = isRunning ? "正在聆听" : ""
+            return
+        }
         // 语种与预览用同一规则，识别失败时已有译文仍可读。
         guard SpeechTextFilter.isMeaningful(text),
               let language = forced?.id ?? SpeechTextFilter.resolveLanguage(text, detected: detected,
@@ -3414,9 +3422,9 @@ final class LiveSession: ObservableObject {
         }
 
         AudioRoute.apply(outputMode)
-        // 仅在扬声器外放且关闭了「语音增强（VoiceProcessingIO 硬件回声消除）」时才静音麦克风；
-        // 默认开启语音增强时由苹果硬件 AEC 自动消回声，麦克风保持开启，边播译文边说话也能实时解析！
-        let mute = outputMode == .speaker && isRunning && !voiceProcessing
+        // 扬声器外放模式下播报译文时始终静音麦克风（戴耳机 .headphones 保持全双工不静音），
+        // 避免 Speaker 独立引擎 / AVSpeechSynthesizer 放出的译文声被麦克风回采为新原文。
+        let mute = outputMode == .speaker && isRunning
         // 声音克隆：优先直接命中已完成的按句缓存（即使后续切换本地/云端、打开历史或服务暂时离线，也 0ms 秒播，绝不再提示「克隆服务不可用」）
         let cloneWait: Double = 60
         var cloned: CloneAudio?
@@ -3467,7 +3475,9 @@ final class LiveSession: ObservableObject {
             return
         }
         if mute { capture.muted = true }
+        if outputMode == .speaker { recordSpokenTTS(text) }
         defer {
+            if outputMode == .speaker { recordSpokenTTS(text) }
             // 停播会清理静音；过期朗读不能解除新一轮朗读的静音。
             // 手机外放结束后留 400ms 房间残响消散窗口再恢复麦克风，防止尾音被拾回。
             if mute && token == playbackToken {
@@ -3505,6 +3515,52 @@ final class LiveSession: ObservableObject {
     // MARK: - 修改原文后重新翻译
 
     /// 长按气泡改了原文：保存新原文，重新翻译并替换译文
+    /// 最近 10 秒内通过扬声器播报的译文队列，用于文本级回声兜底过滤（防止房间残响拖尾被复录为原文）
+    private var recentSpokenTTS: [(text: String, at: Date)] = []
+
+    private func recordSpokenTTS(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        recentSpokenTTS.append((trimmed, Date()))
+        if recentSpokenTTS.count > 4 {
+            recentSpokenTTS.removeFirst(recentSpokenTTS.count - 4)
+        }
+    }
+
+    private func isLikelySpokenEcho(_ recognized: String) -> Bool {
+        let now = Date()
+        func normalize(_ s: String) -> String {
+            s.unicodeScalars
+                .filter { CharacterSet.alphanumerics.contains($0) || CharacterSet.whitespaces.contains($0) }
+                .map { Character($0).lowercased() }
+                .joined()
+                .split(whereSeparator: \.isWhitespace)
+                .joined(separator: " ")
+        }
+        let a = normalize(recognized)
+        guard !a.isEmpty else { return false }
+        for entry in recentSpokenTTS where now.timeIntervalSince(entry.at) <= 10.0 {
+            let b = normalize(entry.text)
+            if b.isEmpty { continue }
+            if a == b || (a.count >= 4 && b.contains(a)) || (b.count >= 4 && a.contains(b)) {
+                return true
+            }
+            let aWords = a.split(separator: " ")
+            let bWords = Set(b.split(separator: " "))
+            if aWords.count >= 2 && !bWords.isEmpty {
+                let hits = aWords.filter { bWords.contains($0) }.count
+                if hits * 2 >= aWords.count { return true }
+            }
+            let aChars = a.filter { !$0.isWhitespace }
+            let bChars = Set(b.filter { !$0.isWhitespace })
+            if aChars.count >= 3 && !bChars.isEmpty {
+                let hits = aChars.filter { bChars.contains($0) }.count
+                if hits * 10 >= aChars.count * 6 { return true }
+            }
+        }
+        return false
+    }
+
     /// 每一句的版本号：改了原文就 +1。
     /// 翻译回来的时候核对版本，对不上就丢掉——
     /// 否则连续改同一句时，会出现"新原文配旧译文"。
