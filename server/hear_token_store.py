@@ -5,6 +5,7 @@
 数据库事务里同时提升对应网关的修订号。
 """
 import base64
+import datetime
 import hashlib
 import hmac
 import json
@@ -25,6 +26,20 @@ SESSION_ABSOLUTE_US = 8 * 3600 * 1000000
 SESSION_IDLE_US = 60 * 60 * 1000000
 PASSWORD_ITERATIONS = 600000
 MAX_LIMIT = 200
+# 用量按 15 分钟一格累计：所有时区（含 +5:30、+5:45）的整点和半点都能对齐
+USAGE_BUCKET_US = 15 * 60 * 1000000
+USAGE_RETENTION_US = 400 * 86400 * 1000000
+USAGE_BATCH_RETENTION_US = 2 * 86400 * 1000000
+MAX_USAGE_ITEMS = 10000
+MAX_USAGE_VALUE = 10 ** 12
+BATCH_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+# Token 限流与额度：None 表示不限制
+LIMIT_FIELDS = {
+    "rate_per_minute": (1, 100000, "每分钟请求数"),
+    "max_concurrent": (1, 256, "同时进行的请求数"),
+    "daily_audio_minutes": (1, 1440, "每日识别时长（分钟）"),
+    "monthly_audio_minutes": (1, 44640, "每月识别时长（分钟）"),
+}
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$")
 GATEWAY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
@@ -114,6 +129,30 @@ MIGRATIONS = [
     CREATE INDEX audit_time ON audit_events(occurred_us);
     CREATE INDEX audit_user ON audit_events(user_id);
     CREATE INDEX audit_token ON audit_events(token_id);
+    """,
+    # 2: Token 限流与额度、用量统计
+    """
+    ALTER TABLE tokens ADD COLUMN rate_per_minute INTEGER;
+    ALTER TABLE tokens ADD COLUMN max_concurrent INTEGER;
+    ALTER TABLE tokens ADD COLUMN daily_audio_minutes INTEGER;
+    ALTER TABLE tokens ADD COLUMN monthly_audio_minutes INTEGER;
+    ALTER TABLE tokens ADD COLUMN last_used_us INTEGER;
+    CREATE TABLE token_usage (
+        token_id       TEXT NOT NULL REFERENCES tokens(token_id),
+        bucket_us      INTEGER NOT NULL,
+        requests       INTEGER NOT NULL DEFAULT 0,
+        asr_ms         INTEGER NOT NULL DEFAULT 0,
+        mt_requests    INTEGER NOT NULL DEFAULT 0,
+        clone_requests INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (token_id, bucket_us)
+    );
+    CREATE INDEX token_usage_bucket ON token_usage(bucket_us);
+    CREATE TABLE usage_batches (
+        gateway_id  TEXT NOT NULL,
+        batch_id    TEXT NOT NULL,
+        received_us INTEGER NOT NULL,
+        PRIMARY KEY (gateway_id, batch_id)
+    );
     """,
 ]
 
@@ -210,6 +249,55 @@ def clean_text(value, field, max_length, required=False):
         raise invalid(field, "%s 最长 %d 个字符" % (field, max_length))
     if any(ord(ch) < 32 and ch not in "\n\t" for ch in value):
         raise invalid(field, "%s 含有控制字符" % field)
+    return value
+
+
+def parse_limits(body):
+    """取出请求体里的限流与额度字段：正整数或 null（不限制）。返回 {列名: 值}，只含出现过的字段。"""
+    out = {}
+    for field, (low, high, name) in LIMIT_FIELDS.items():
+        if field not in body:
+            continue
+        value = body[field]
+        if value is None or value == "":
+            out[field] = None
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise invalid(field, "%s需要是整数，留空表示不限制" % name)
+        if not low <= value <= high:
+            raise invalid(field, "%s需要在 %d 到 %d 之间" % (name, low, high))
+        out[field] = value
+    return out
+
+
+def limits_view(row):
+    keys = row.keys()
+    return {field: (row[field] if field in keys else None) for field in LIMIT_FIELDS}
+
+
+def _local_start_us(year, month, day):
+    return int(time.mktime((year, month, day, 0, 0, 0, 0, 0, -1)) * 1000000)
+
+
+def usage_window(now_us):
+    """按管理服务所在电脑的本地时区算出「今天」和「本月」的起止（微秒）。夏令时由 mktime 处理。"""
+    local = datetime.datetime.fromtimestamp(now_us / 1000000.0)
+    day_start = _local_start_us(local.year, local.month, local.day)
+    following = datetime.date(local.year, local.month, local.day) + datetime.timedelta(days=1)
+    day_end = _local_start_us(following.year, following.month, following.day)
+    month_start = _local_start_us(local.year, local.month, 1)
+    year, month = (local.year + 1, 1) if local.month == 12 else (local.year, local.month + 1)
+    month_end = _local_start_us(year, month, 1)
+    return {"day_start": day_start, "day_end": day_end, "month_start": month_start, "month_end": month_end}
+
+
+def window_view(window):
+    return {key: format_time(value) for key, value in window.items()}
+
+
+def _usage_counter(value, field):
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_USAGE_VALUE:
+        raise invalid(field, "%s 需要是非负整数" % field)
     return value
 
 
@@ -544,7 +632,8 @@ class Store:
                 items, etag = cached[2], cached[3]
             else:
                 tokens = connection.execute(
-                    "SELECT token_id, user_id, sha256, starts_us, expires_us, revoked_us FROM tokens"
+                    "SELECT token_id, user_id, sha256, starts_us, expires_us, revoked_us, rate_per_minute,"
+                    " max_concurrent, daily_audio_minutes, monthly_audio_minutes FROM tokens"
                     " WHERE gateway_id = ? AND expires_us >= ?"
                     " AND (revoked_us IS NULL OR revoked_us >= ?)"
                     " ORDER BY token_id", (gateway_id, cutoff, cutoff)).fetchall()
@@ -555,6 +644,7 @@ class Store:
                     "starts_at": format_time(token["starts_us"]),
                     "expires_at": format_time(token["expires_us"]),
                     "revoked_at": format_time(token["revoked_us"]),
+                    "limits": {key: value for key, value in limits_view(token).items() if value is not None},
                 } for token in tokens]
                 content = json.dumps({"revision": revision, "tokens": items}, sort_keys=True,
                                      separators=(",", ":")).encode()
@@ -780,6 +870,7 @@ class Store:
             "effective_expires_at": state["effective_expires_at"],
             "invalidated_at": state["invalidated_at"],
             "revocation_reason": row["revocation_reason"],
+            "limits": limits_view(row),
             "created_at": format_time(row["created_us"]),
             "updated_at": format_time(row["updated_us"]),
         }
@@ -791,7 +882,10 @@ class Store:
         return row
 
     def get_token(self, token_id):
-        return self.token_view(self._token_row(self.conn(), token_id))
+        connection = self.conn()
+        view = self.token_view(self._token_row(connection, token_id))
+        view["usage"] = self.usage_summaries(connection, [token_id])[token_id]
+        return view
 
     def list_user_tokens(self, user_id, status=None, limit=None, cursor=None):
         limit = parse_limit(limit)
@@ -818,6 +912,9 @@ class Store:
         rows = connection.execute("SELECT rowid AS seq, * FROM tokens WHERE %s ORDER BY rowid DESC LIMIT ?"
                                   % " AND ".join(where), params + [limit + 1]).fetchall()
         items = [self.token_view(row, now) for row in rows[:limit]]
+        usage = self.usage_summaries(connection, [item["token_id"] for item in items], now)
+        for item in items:
+            item["usage"] = usage[item["token_id"]]
         return {"items": items, "next_cursor": encode_cursor(rows[limit - 1]["seq"]) if len(rows) > limit else None}
 
     def _validity(self, body, starts_default, expires_default, now):
@@ -835,8 +932,9 @@ class Store:
         return starts, expires
 
     def issue_token(self, user_id, body, actor, request_id=None, _allow_past=False):
-        check_fields(body, ("label", "gateway_id", "starts_at", "expires_at"))
+        check_fields(body, ("label", "gateway_id", "starts_at", "expires_at") + tuple(LIMIT_FIELDS))
         label = clean_text(body.get("label"), "label", 100, required=True)
+        limits = parse_limits(body)
         gateway_id = body.get("gateway_id")
         if not isinstance(gateway_id, str) or not gateway_id:
             raise invalid("gateway_id", "gateway_id 必填")
@@ -858,9 +956,10 @@ class Store:
                 raise invalid("gateway_id", "没有这个网关")
             connection.execute(
                 "INSERT INTO tokens (token_id, user_id, gateway_id, label, sha256, token_suffix, starts_us,"
-                " expires_us, created_us, updated_us, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " expires_us, created_us, updated_us, created_by, rate_per_minute, max_concurrent,"
+                " daily_audio_minutes, monthly_audio_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (token_id, user_id, gateway_id, label, sha256_hex(raw), raw[-6:], starts, expires, now, now,
-                 actor["id"]))
+                 actor["id"]) + tuple(limits.get(field) for field in LIMIT_FIELDS))
             self.bump(connection, [gateway_id], now)
             view = self.token_view(self._token_row(connection, token_id), now)
             self.audit(connection, actor, "token.issue", "token", token_id, after=view, user_id=user_id,
@@ -870,7 +969,8 @@ class Store:
         return result
 
     def update_token(self, token_id, body, actor, request_id=None):
-        check_fields(body, ("label", "starts_at", "expires_at"))
+        check_fields(body, ("label", "starts_at", "expires_at") + tuple(LIMIT_FIELDS))
+        limits = parse_limits(body)
         now = self.now()
         with self.tx() as connection:
             row = self._token_row(connection, token_id)
@@ -888,12 +988,16 @@ class Store:
                     changes["starts_us"] = starts
                 if expires != row["expires_us"]:
                     changes["expires_us"] = expires
+            for field, value in limits.items():
+                if value != row[field]:
+                    changes[field] = value
             if not changes:
                 return before
             changes["updated_us"] = now
             connection.execute("UPDATE tokens SET %s WHERE token_id = ?" % ", ".join("%s = ?" % c for c in changes),
                                list(changes.values()) + [token_id])
-            if "starts_us" in changes or "expires_us" in changes:
+            # 有效期、限流和额度都在网关清单里：变了就提升修订号
+            if set(changes) & ({"starts_us", "expires_us"} | set(LIMIT_FIELDS)):
                 self.bump(connection, [row["gateway_id"]], now)
             after = self.token_view(self._token_row(connection, token_id), now)
             self.audit(connection, actor, "token.update", "token", token_id, before, after, user_id=row["user_id"],
@@ -915,3 +1019,176 @@ class Store:
             self.audit(connection, actor, "token.revoke", "token", token_id, before, after, user_id=row["user_id"],
                        token_id=token_id, gateway_id=row["gateway_id"], request_id=request_id)
         return after
+
+    # ------------------------------------------------------------ 用量与额度
+
+    @staticmethod
+    def _sum_usage(connection, token_ids, since=None, until=None):
+        if not token_ids:
+            return {}
+        where = ["token_id IN (%s)" % ",".join("?" * len(token_ids))]
+        params = list(token_ids)
+        if since is not None:
+            where.append("bucket_us >= ?")
+            params.append(since)
+        if until is not None:
+            where.append("bucket_us < ?")
+            params.append(until)
+        rows = connection.execute(
+            "SELECT token_id, SUM(requests) AS requests, SUM(asr_ms) AS asr_ms, SUM(mt_requests) AS mt_requests,"
+            " SUM(clone_requests) AS clone_requests FROM token_usage WHERE %s GROUP BY token_id"
+            % " AND ".join(where), params).fetchall()
+        return {row["token_id"]: row for row in rows}
+
+    @staticmethod
+    def _usage_view(row):
+        if row is None:
+            return {"requests": 0, "audio_seconds": 0, "translations": 0, "clones": 0}
+        return {"requests": row["requests"] or 0, "audio_seconds": round((row["asr_ms"] or 0) / 1000.0, 1),
+                "translations": row["mt_requests"] or 0, "clones": row["clone_requests"] or 0}
+
+    def usage_summaries(self, connection, token_ids, now=None):
+        """每个 Token 的今日、本月、累计用量和最近使用时间（按管理服务本地时区划分日、月）。"""
+        now = self.now() if now is None else now
+        token_ids = list(dict.fromkeys(token_ids))
+        out = {}
+        if not token_ids:
+            return out
+        window = usage_window(now)
+        today = self._sum_usage(connection, token_ids, window["day_start"], window["day_end"])
+        month = self._sum_usage(connection, token_ids, window["month_start"], window["month_end"])
+        total = self._sum_usage(connection, token_ids)
+        last = {row["token_id"]: row["last_used_us"] for row in connection.execute(
+            "SELECT token_id, last_used_us FROM tokens WHERE token_id IN (%s)" % ",".join("?" * len(token_ids)),
+            token_ids)}
+        for token_id in token_ids:
+            out[token_id] = {
+                "last_used_at": format_time(last.get(token_id)),
+                "today": self._usage_view(today.get(token_id)),
+                "month": self._usage_view(month.get(token_id)),
+                "total": self._usage_view(total.get(token_id)),
+            }
+        return out
+
+    def token_usage(self, token_id, days=30):
+        """一个 Token 最近 N 天每天的用量（本地日期）。"""
+        try:
+            days = int(days)
+        except (TypeError, ValueError):
+            raise invalid("days", "days 需要是整数")
+        days = max(1, min(days, 400))
+        connection = self.conn()
+        row = self._token_row(connection, token_id)
+        now = self.now()
+        window = usage_window(now)
+        today = datetime.date.fromtimestamp(now / 1000000.0)
+        first = today - datetime.timedelta(days=days - 1)
+        since = _local_start_us(first.year, first.month, first.day)
+        buckets = connection.execute(
+            "SELECT bucket_us, requests, asr_ms, mt_requests, clone_requests FROM token_usage"
+            " WHERE token_id = ? AND bucket_us >= ? AND bucket_us < ?",
+            (token_id, since, window["day_end"])).fetchall()
+        daily = {}
+        for bucket in buckets:
+            date = datetime.date.fromtimestamp(bucket["bucket_us"] / 1000000.0).isoformat()
+            entry = daily.setdefault(date, [0, 0, 0, 0])
+            entry[0] += bucket["requests"]
+            entry[1] += bucket["asr_ms"]
+            entry[2] += bucket["mt_requests"]
+            entry[3] += bucket["clone_requests"]
+        series = []
+        for offset in range(days):
+            date = (first + datetime.timedelta(days=offset)).isoformat()
+            requests, asr_ms, mt, clone = daily.get(date, [0, 0, 0, 0])
+            series.append({"date": date, "requests": requests, "audio_seconds": round(asr_ms / 1000.0, 1),
+                           "translations": mt, "clones": clone})
+        summary = self.usage_summaries(connection, [token_id], now)[token_id]
+        return {"token_id": token_id, "limits": limits_view(row), "window": window_view(window),
+                "timezone": time.strftime("%z"), "daily": series, **summary}
+
+    def _quota_totals(self, connection, gateway_id, window):
+        rows = connection.execute(
+            "SELECT token_id FROM tokens WHERE gateway_id = ? AND expires_us > ?"
+            " AND (revoked_us IS NULL OR revoked_us > ?)"
+            " AND (daily_audio_minutes IS NOT NULL OR monthly_audio_minutes IS NOT NULL)",
+            (gateway_id, window["month_start"], window["month_start"])).fetchall()
+        ids = [row["token_id"] for row in rows]
+        totals = []
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            day = self._sum_usage(connection, chunk, window["day_start"], window["day_end"])
+            month = self._sum_usage(connection, chunk, window["month_start"], window["month_end"])
+            for token_id in chunk:
+                totals.append({"token_id": token_id,
+                               "day_asr_ms": (day[token_id]["asr_ms"] or 0) if token_id in day else 0,
+                               "month_asr_ms": (month[token_id]["asr_ms"] or 0) if token_id in month else 0})
+        return totals
+
+    def record_usage(self, gateway_id, body):
+        """网关批量上报用量（幂等：同一个 batch_id 只记一次），返回本网关有额度限制的 Token 的已用量。"""
+        if not isinstance(body, dict):
+            raise invalid("body", "请求体需要是 JSON 对象")
+        batch_id = body.get("batch_id")
+        if not isinstance(batch_id, str) or not BATCH_ID_RE.match(batch_id):
+            raise invalid("batch_id", "batch_id 不合法")
+        items = body.get("items", [])
+        if not isinstance(items, list) or len(items) > MAX_USAGE_ITEMS:
+            raise invalid("items", "items 需要是列表，最多 %d 条" % MAX_USAGE_ITEMS)
+        now = self.now()
+        parsed = []
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("token_id"), str):
+                raise invalid("items", "用量记录格式不对")
+            try:
+                bucket = parse_time(item.get("bucket_start"))
+            except (TypeError, ValueError):
+                raise invalid("bucket_start", "bucket_start 不合法")
+            if bucket % USAGE_BUCKET_US or not now - 40 * 86400 * 1000000 <= bucket <= now + 3600 * 1000000:
+                raise invalid("bucket_start", "bucket_start 需要是最近 40 天内的 15 分钟整格")
+            last_used = item.get("last_used_at")
+            if last_used is not None:
+                try:
+                    last_used = min(parse_time(last_used), now)
+                except (TypeError, ValueError):
+                    raise invalid("last_used_at", "last_used_at 不合法")
+            parsed.append((item["token_id"], bucket, _usage_counter(item.get("requests", 0), "requests"),
+                           _usage_counter(item.get("asr_ms", 0), "asr_ms"),
+                           _usage_counter(item.get("mt_requests", 0), "mt_requests"),
+                           _usage_counter(item.get("clone_requests", 0), "clone_requests"), last_used))
+        window = usage_window(now)
+        with self.tx() as connection:
+            if connection.execute("SELECT 1 FROM gateways WHERE gateway_id = ?", (gateway_id,)).fetchone() is None:
+                raise StoreError(404, "NOT_FOUND", "没有这个网关")
+            duplicate = connection.execute("SELECT 1 FROM usage_batches WHERE gateway_id = ? AND batch_id = ?",
+                                           (gateway_id, batch_id)).fetchone() is not None
+            accepted = 0
+            if not duplicate:
+                connection.execute("INSERT INTO usage_batches VALUES (?, ?, ?)", (gateway_id, batch_id, now))
+                owned = set()
+                ids = sorted({entry[0] for entry in parsed})
+                for start in range(0, len(ids), 500):
+                    chunk = ids[start:start + 500]
+                    owned.update(row["token_id"] for row in connection.execute(
+                        "SELECT token_id FROM tokens WHERE gateway_id = ? AND token_id IN (%s)"
+                        % ",".join("?" * len(chunk)), [gateway_id] + chunk))
+                for token_id, bucket, requests, asr_ms, mt, clone, last_used in parsed:
+                    # 只认本网关签发的 Token：别的网关的记录直接丢弃
+                    if token_id not in owned:
+                        continue
+                    accepted += 1
+                    connection.execute(
+                        "INSERT INTO token_usage (token_id, bucket_us, requests, asr_ms, mt_requests, clone_requests)"
+                        " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(token_id, bucket_us) DO UPDATE SET"
+                        " requests = requests + excluded.requests, asr_ms = asr_ms + excluded.asr_ms,"
+                        " mt_requests = mt_requests + excluded.mt_requests,"
+                        " clone_requests = clone_requests + excluded.clone_requests",
+                        (token_id, bucket, requests, asr_ms, mt, clone))
+                    if last_used is not None:
+                        connection.execute("UPDATE tokens SET last_used_us = MAX(COALESCE(last_used_us, 0), ?)"
+                                           " WHERE token_id = ?", (last_used, token_id))
+                connection.execute("DELETE FROM usage_batches WHERE received_us < ?",
+                                   (now - USAGE_BATCH_RETENTION_US,))
+                connection.execute("DELETE FROM token_usage WHERE bucket_us < ?", (now - USAGE_RETENTION_US,))
+            totals = self._quota_totals(connection, gateway_id, window)
+        return {"gateway_id": gateway_id, "batch_id": batch_id, "duplicate": duplicate, "accepted": accepted,
+                "server_time": format_time(now), "window": window_view(window), "totals": totals}
