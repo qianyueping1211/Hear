@@ -1267,57 +1267,67 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
             lang,
             target,
           });
+          if (get().speakingSegmentId === id) {
+            set({ speakingSegmentId: null });
+          }
           return;
+        } catch {
+          // 克隆超时/失败时立刻清理播放与克隆中状态，直接降级到下方系统语音朗读，不再二次重复克隆或卡死在「播放中」
+          set((s) => ({
+            preparingCloneSegmentId:
+              s.preparingCloneSegmentId === id ? null : s.preparingCloneSegmentId,
+            speakingSegmentId:
+              s.speakingSegmentId === id ? null : s.speakingSegmentId,
+            sessionNotice: "声音克隆服务响应超时，已自动改用系统语音朗读",
+          }));
+        }
+      } else {
+        set({ preparingCloneSegmentId: id });
+        try {
+          const wav = await get().prepareSegmentClone(id, trimmed, lang);
+          if (get().preparingCloneSegmentId === id) {
+            set({ preparingCloneSegmentId: null });
+          }
+          if (wav && wav.byteLength > 44 && get().speakingSegmentId === id) {
+            const copy = new Uint8Array(wav.byteLength);
+            copy.set(wav);
+            const blob = new Blob([copy.buffer], { type: "audio/wav" });
+            const url = URL.createObjectURL(blob);
+            activeCloneUrl = url;
+            const audio = new Audio(url);
+            activeCloneAudio = audio;
+            const muteMic =
+              get().ttsSettings.muteMicWhileSpeaking && get().mode === "recording";
+            if (muteMic) void tauriInvoke("set_mic_muted", { muted: true });
+            const releaseMute = () => {
+              if (muteMic) {
+                window.setTimeout(() => {
+                  void tauriInvoke("set_mic_muted", { muted: false });
+                }, 220);
+              }
+            };
+            audio.onended = () => {
+              stopActiveCloneAudio();
+              releaseMute();
+              if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
+            };
+            audio.onerror = () => {
+              stopActiveCloneAudio();
+              releaseMute();
+              if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
+            };
+            await audio.play();
+            return;
+          }
         } catch {
           if (get().preparingCloneSegmentId === id) {
             set({ preparingCloneSegmentId: null });
           }
         }
       }
-
-      set({ preparingCloneSegmentId: id });
-      try {
-        const wav = await get().prepareSegmentClone(id, trimmed, lang);
-        if (get().speakingSegmentId === id) {
-          set({ preparingCloneSegmentId: null });
-        }
-        if (wav && wav.byteLength > 44 && get().speakingSegmentId === id) {
-          const copy = new Uint8Array(wav.byteLength);
-          copy.set(wav);
-          const blob = new Blob([copy.buffer], { type: "audio/wav" });
-          const url = URL.createObjectURL(blob);
-          activeCloneUrl = url;
-          const audio = new Audio(url);
-          activeCloneAudio = audio;
-          const muteMic =
-            get().ttsSettings.muteMicWhileSpeaking && get().mode === "recording";
-          if (muteMic) void tauriInvoke("set_mic_muted", { muted: true });
-          const releaseMute = () => {
-            if (muteMic) {
-              window.setTimeout(() => {
-                void tauriInvoke("set_mic_muted", { muted: false });
-              }, 220);
-            }
-          };
-          audio.onended = () => {
-            stopActiveCloneAudio();
-            releaseMute();
-            if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
-          };
-          audio.onerror = () => {
-            stopActiveCloneAudio();
-            releaseMute();
-            if (get().speakingSegmentId === id) set({ speakingSegmentId: null });
-          };
-          await audio.play();
-          return;
-        }
-      } catch {
-        if (get().preparingCloneSegmentId === id) {
-          set({ preparingCloneSegmentId: null });
-        }
-      }
     }
+
+    set({ speakingSegmentId: id });
 
     const bcp47Map: Record<string, string> = {
       zh: "zh-CN",

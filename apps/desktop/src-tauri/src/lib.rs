@@ -536,6 +536,9 @@ async fn delete_conversation(
     rt: State<'_, Arc<AppRuntime>>,
     id: String,
 ) -> Result<Vec<history_store::ConversationMeta>, String> {
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = std::fs::remove_dir_all(dir.join("clone_cache").join(sanitize_cache_key(&id)));
+    }
     let metas = history_store::delete_conversation(&app, &id)?;
     {
         let mut snap = rt.snapshot.lock().await;
@@ -550,6 +553,55 @@ async fn delete_conversation(
     }
     let _ = app.emit("history:updated", &metas);
     Ok(metas)
+}
+
+fn sanitize_cache_key(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+fn segment_clone_disk_paths(
+    app: &AppHandle,
+    conv_id: &str,
+    seg_id: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let base = app
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join("clone_cache")
+        .join(sanitize_cache_key(conv_id));
+    let _ = std::fs::create_dir_all(&base);
+    let safe_seg = sanitize_cache_key(seg_id);
+    Some((
+        base.join(format!("{}.wav", safe_seg)),
+        base.join(format!("{}.txt", safe_seg)),
+    ))
+}
+
+fn load_cloned_wav_from_disk(app: &AppHandle, conv_id: &str, seg_id: &str, text: &str) -> Option<Vec<u8>> {
+    let (wav_p, txt_p) = segment_clone_disk_paths(app, conv_id, seg_id)?;
+    let saved_text = std::fs::read_to_string(&txt_p).ok()?;
+    if saved_text.trim() != text.trim() {
+        return None;
+    }
+    let wav = std::fs::read(&wav_p).ok()?;
+    if wav.len() > 44 {
+        Some(wav)
+    } else {
+        None
+    }
+}
+
+fn save_cloned_wav_to_disk(app: &AppHandle, conv_id: &str, seg_id: &str, text: &str, wav: &[u8]) {
+    if wav.len() <= 44 {
+        return;
+    }
+    if let Some((wav_p, txt_p)) = segment_clone_disk_paths(app, conv_id, seg_id) {
+        let _ = std::fs::write(&wav_p, wav);
+        let _ = std::fs::write(&txt_p, text.trim());
+    }
 }
 
 fn my_voice_ref_paths(app: &AppHandle) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
@@ -569,7 +621,8 @@ async fn synthesize_cloned_segment_wav(
     if trimmed.is_empty() {
         return Err("朗读文本为空".to_string());
     }
-    // 优先命中 Rust 侧克隆 WAV 缓存：已预克隆好的句子 0ms 直接返回，不占 clone_gate 也不重复请求模型
+    let active_conv_id = rt.snapshot.lock().await.active_conversation_id.clone();
+    // 1. 优先命中内存缓存，其次命中按会话落盘的克隆 WAV 文件（重开软件/翻看历史 0ms 直接播，绝不重复调用服务端）
     {
         let cache = rt.cloned_tts_cache.lock().await;
         if let Some((cached_text, cached_wav)) = cache.get(id) {
@@ -577,6 +630,14 @@ async fn synthesize_cloned_segment_wav(
                 return Ok(cached_wav.clone());
             }
         }
+    }
+    if let Some(disk_wav) = load_cloned_wav_from_disk(app, &active_conv_id, id, &trimmed) {
+        let mut cache = rt.cloned_tts_cache.lock().await;
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(id.to_string(), (trimmed.clone(), disk_wav.clone()));
+        return Ok(disk_wav);
     }
     let (primary_url, primary_tok, fallback_url, fallback_tok, audio_path_opt, seg_info, same_ch_candidates) = {
         let snap = rt.snapshot.lock().await;
@@ -748,6 +809,7 @@ async fn synthesize_cloned_segment_wav(
     };
     if let Ok(ref wav_bytes) = synthesized {
         if wav_bytes.len() > 44 {
+            save_cloned_wav_to_disk(app, &active_conv_id, id, &trimmed, wav_bytes);
             let mut cache = rt.cloned_tts_cache.lock().await;
             if cache.len() >= 64 {
                 cache.clear();
@@ -838,15 +900,17 @@ async fn play_cloned_segment_to_device(
         next_ep
     };
 
-    // 先查缓存：已克隆好（小喇叭就绪）时跳过 "cloning" 状态，直接 0ms 播放
+    // 先查内存 + 按会话落盘 WAV 缓存：已克隆好的句子跳过 "cloning" 状态，0ms 直接播放
     let trimmed = text.trim().to_string();
+    let active_conv_id = rt.snapshot.lock().await.active_conversation_id.clone();
     let cached_wav = {
         let cache = rt.cloned_tts_cache.lock().await;
         cache
             .get(&id)
             .filter(|(t, w)| t == &trimmed && w.len() > 44)
             .map(|(_, w)| w.clone())
-    };
+    }
+    .or_else(|| load_cloned_wav_from_disk(&app, &active_conv_id, &id, &trimmed));
     let wav_bytes = if let Some(b) = cached_wav {
         b
     } else {
