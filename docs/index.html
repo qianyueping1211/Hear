@@ -373,16 +373,16 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>iPhone 版</dt><dd>iOS 18+ · 0.4.86</dd></div>
-        <div><dt>Windows 版</dt><dd>x64 · 0.1.0 预览版</dd></div>
-        <div><dt>iPhone 本地模型</dt><dd>SenseVoice · Hy-MT2 · ZipVoice</dd></div>
-        <div><dt>可选模型服务</dt><dd>Windows 自建或远端服务</dd></div>
-        <div><dt>后续平台</dt><dd>iPad · Android · 鸿蒙 · macOS 尚未发布</dd></div>
+        <div><dt>iPhone 客户端</dt><dd>iOS 18+ · 0.4.106</dd></div>
+        <div><dt>Windows 客户端</dt><dd>x64 · 0.1.36</dd></div>
+        <div><dt>独立模型服务端</dt><dd>Win-Server 1.0.1 · Apple-Server 1.0.2</dd></div>
+        <div><dt>核心模型</dt><dd>SenseVoice · Whisper · Hy-MT2 · ZipVoice / Qwen3-TTS</dd></div>
+        <div><dt>后续平台</dt><dd>iPad · Android · 鸿蒙 · macOS 客户端尚未发布</dd></div>
       </dl>
 
       <div class="cta-row">
-        <a class="btn" href="https://github.com/qianyueping1211/Hear/releases/tag/v0.4.86" target="_blank" rel="noopener">下载 iPhone 版</a>
-        <a class="btn ghost" href="https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0" target="_blank" rel="noopener">下载 Windows 预览版</a>
+        <a class="btn" href="https://github.com/qianyueping1211/Hear/releases" target="_blank" rel="noopener">前往 Releases 下载最新版</a>
+        <a class="btn ghost" href="#platforms">查看各端与服务端说明</a>
       </div>
     </div>
 
@@ -476,18 +476,28 @@ section.band{scroll-margin-top:62px}
     </div>
     <div class="fgroups">
       <div class="fgroup">
-        <h3>iPhone <em>iOS 18+</em></h3>
+        <h3>iPhone 客户端 <em>iOS 18+ · 0.4.106</em></h3>
         <ul>
-          <li>实时识别、翻译和朗读；可选择本机模型或连接模型服务。</li>
-          <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases/tag/v0.4.86" target="_blank" rel="noopener">听见 iOS 0.4.86</a>（IPA）。</li>
+          <li>实时识别、翻译和朗读；支持本机离线模型或连接自建云端/局域网模型服务。</li>
+          <li>支持录制 3~10 秒「我的固定声纹」（自动裁切首尾空白，本机 ZipVoice 与云端 Qwen3-TTS 通用）及按说话人独立控制。</li>
+          <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases" target="_blank" rel="noopener">Releases · 听见 iOS</a>（IPA）。</li>
         </ul>
       </div>
       <div class="fgroup">
-        <h3>Windows <em>x64 · 预览版</em></h3>
+        <h3>Windows 客户端 <em>x64 · 0.1.36</em></h3>
         <ul>
-          <li>桌面翻译工作台、悬浮字幕与本机模型服务入口。</li>
-          <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0" target="_blank" rel="noopener">听见 Windows 0.1.0</a>（EXE）；<a href="https://github.com/qianyueping1211/Hear/blob/main/desktop/README.md" target="_blank" rel="noopener">桌面端说明</a>。</li>
-          <li>只想让电脑为 iPhone 提供模型服务，可使用下方的 Windows 启动脚本。</li>
+          <li>Tauri + Rust + React 桌面实时翻译工作台，支持双路采集（系统内录 + 麦克风）、悬浮字幕、15 阶抗混叠重采样、NLMS AEC 全双工防回声与会议虚拟麦路由。</li>
+          <li>支持原生 SAPI 按语种朗读、固定声纹录制（自动裁切前后空白）、克隆参考音 <code>ref_id</code> 缓存、手动点播自动暂停并在重开时从下一行续播。</li>
+          <li>公网 HTTPS 严格校验证书，仅本机/局域网放宽自签证书；内置自动更新与配置双备份防丢。</li>
+          <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases" target="_blank" rel="noopener">Releases · 听见 Windows</a>（EXE）；<a href="https://github.com/qianyueping1211/Hear/blob/main/apps/desktop/README.md" target="_blank" rel="noopener">桌面端说明</a>。</li>
+        </ul>
+      </div>
+      <div class="fgroup">
+        <h3>独立模型服务端 <em>Win-Server 1.0.1 · Apple-Server 1.0.2</em></h3>
+        <ul>
+          <li><b>听见 Win-Server</b>：内置便携 Python 3.12 与全套依赖（免装 Python），含 <code>start-hear-cloud.bat</code> 与 <code>start-hear-token-admin.bat</code>，自动探测 NVIDIA CUDA 加速 Whisper。</li>
+          <li><b>听见 Apple-Server</b>：针对 Apple Silicon（M1~M4 Max 统一内存）预编译 Metal GPU <code>llama-server</code>，64GB 自动推荐 Hy-MT2-30B-A3B + Qwen3-TTS-1.7B，含双击 <code>听见服务端.app</code>、开机自启与口令管理后台快捷入口。</li>
+          <li>两端模型端口（8081/8082）均默认仅监听 <code>127.0.0.1</code>，默认开启口令鉴权，支持多用户托管后台（<code>127.0.0.1:8443</code>）。</li>
         </ul>
       </div>
     </div>
@@ -765,7 +775,7 @@ section.band{scroll-margin-top:62px}
         <div class="term"><span class="tag">MT</span><h4>翻译模型与提示词</h4></div>
         <div class="detail">
           <p>本机 Hy-MT2 的上下文为 <code>2048</code>，批大小 <code>256</code>。正式翻译最多生成 512 个 token，实时预览最多 256 个。前台优先 GPU，后台使用 CPU。</p>
-          <p><code>PromptBuilder</code> 构建中英文提示词，并加入与当前语段匹配的术语。推理使用模型对话模板和参数 <code>top_k 20 / top_p 0.6 / temperature 0.7</code>。</p>
+          <p><code>PromptBuilder</code> 构建中英文提示词，并加入与当前语段匹配的术语。推理使用 Hy-MT2 官方推荐参数：1.8B/7B 使用 <code>top_k 20 / top_p 0.6 / temperature 0.7 / repeat_penalty 1.05</code>，服务端 30B-A3B 自动切换为 <code>top_k -1 / top_p 1.0 / temperature 0.7 / repeat_penalty 1.0</code>。</p>
         </div>
       </div>
 
@@ -886,12 +896,10 @@ section.band{scroll-margin-top:62px}
     </div>
 
     <div class="note">
-      <span class="h">启动时按类型选模型</span>
-      <p>下载仓库根目录的 <a href="https://github.com/qianyueping1211/Hear/blob/main/start-hear-cloud.bat" target="_blank" rel="noopener">start-hear-cloud.bat</a> 并在 Windows 启动。单独下载的脚本默认获取最新服务文件；放在仓库内时使用当前工作副本。</p>
-      <p>默认由 SenseVoice 先输出原文，Whisper 后续校正。菜单可选 Whisper base、small、medium 或 large-v3，首次默认 small。
-         翻译可选 Hy-MT2 1.8B、7B 或 30B-A3B，克隆可选 Qwen3-TTS 0.6B 或 1.7B。
-         每项直接回车或 5 秒无操作时沿用上次选择，首次使用脚本默认值。</p>
-      <p>电脑和 iPhone 连同一个局域网后，在「功能设置 → 模型管理 → 云端模型」填写启动窗口显示的 HTTPS 地址，并点「测试连接」。Whisper 档位由 Windows 启动脚本管理。</p>
+      <span class="h">一键部署（Windows &amp; macOS Apple Silicon 独立服务端）</span>
+      <p>推荐直接从 <a href="https://github.com/qianyueping1211/Hear/releases" target="_blank" rel="noopener">GitHub Releases</a> 下载对应平台的独立整合包：<b>听见 Win-Server</b>（解压后双击 <code>start-hear-cloud.bat</code>）或 <b>听见 Apple-Server</b>（解压后双击 <code>听见服务端.app</code> / <code>启动听见服务端.command</code>）。</p>
+      <p>若从源码仓库启动，Windows 脚本位于 <a href="https://github.com/qianyueping1211/Hear/tree/main/server/windows" target="_blank" rel="noopener">server/windows/</a>，macOS 脚本位于 <a href="https://github.com/qianyueping1211/Hear/blob/main/server/start-macos.sh" target="_blank" rel="noopener">server/start-macos.sh</a>。默认由 SenseVoice 先输出原文，Whisper（精修阶段 <code>beam_size=5</code>）后续校正；翻译可选 Hy-MT2 1.8B / 7B / 30B-A3B，克隆可选 Qwen3-TTS 0.6B / 1.7B。</p>
+      <p>两端默认启用访问口令鉴权（8081/8082 模型端口仅监听本机 <code>127.0.0.1</code>），可通过本机口令管理后台（<code>http://127.0.0.1:8443/admin/</code>）签发与管理多用户 Token。</p>
     </div>
 
     <!-- ---------- A. 自建服务 ---------- -->
@@ -1142,8 +1150,8 @@ section.band{scroll-margin-top:62px}
       <div class="key">
         <div class="term"><span class="tag">DEPLOY</span><h4>一键启动</h4></div>
         <div class="detail">
-          <p>Windows 推荐运行仓库根目录的 <code>start-hear-cloud.bat</code>，由脚本准备服务文件、运行环境和模型。首次下载耗时取决于网络与模型大小。</p>
-          <p>局域网只需访问总服务端口 8000，8081 和 8082 默认只在电脑本机监听。占用端口时，脚本仅自动处理能确认归属的旧服务实例。</p>
+          <p>Windows 推荐下载独立整合包 <b>听见 Win-Server</b> 或运行 <code>server/windows/start-hear-cloud.bat</code>；Mac Studio / Apple Silicon 推荐下载 <b>听见 Apple-Server</b> 或运行 <code>server/start-macos.sh</code>。</p>
+          <p>局域网只需访问总服务端口 8000，8081 和 8082 默认只在电脑本机 <code>127.0.0.1</code> 监听。占用端口时，脚本仅自动处理能确认归属的旧服务实例。</p>
         </div>
       </div>
 
@@ -1165,7 +1173,7 @@ section.band{scroll-margin-top:62px}
                 <tr><td class="mono">HEAR_CTX</td><td>Windows 服务的模型上下文长度</td><td class="mono">4096</td></tr>
                 <tr><td class="mono">HEAR_MAX_INFLIGHT</td><td>总服务推理并发上限</td><td class="mono">3</td></tr>
                 <tr><td class="mono">HEAR_LOG_CONTENT</td><td>是否记录原文或译文（当前内测默认）</td><td class="mono">1</td></tr>
-                <tr><td class="mono">HEAR_TOP_K / HEAR_TOP_P / HEAR_TEMPERATURE</td><td>采样参数</td><td class="mono">20 / 0.6 / 0.7</td></tr>
+                <tr><td class="mono">HEAR_TOP_K / HEAR_TOP_P / HEAR_TEMPERATURE / HEAR_REPEAT_PENALTY</td><td>采样参数（30B-A3B 默认 -1 / 1.0 / 0.7 / 1.0）</td><td class="mono">20 / 0.6 / 0.7 / 1.05</td></tr>
               </tbody>
             </table>
           </div>
@@ -1264,7 +1272,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 与 Windows 实时语音翻译<br>iOS 0.4.86 · Windows 0.1.0 预览版</p>
+      <p>听见 Hear · iPhone 与 Windows 实时语音翻译<br>iOS 0.4.106 · Windows 0.1.36 · Win-Server 1.0.1 · Apple-Server 1.0.2</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>

@@ -2,10 +2,12 @@
 
 听见是面向 **iPhone 和 Windows** 的实时语音翻译项目。iPhone App 支持本机识别、翻译和朗读，也可以连接模型服务；Windows 桌面端提供翻译工作台、悬浮字幕和本机模型服务。选择本地模型并完成下载后，iPhone 可以离线使用。
 
-| 当前平台 | 版本 | 下载与说明 |
+| 当前平台 / 产物 | 版本 | 下载与说明 |
 | --- | --- | --- |
-| iPhone（iOS 18+） | 0.4.86 | [下载 iOS 安装包](https://github.com/qianyueping1211/Hear/releases/tag/v0.4.86) |
-| Windows x64 | 0.1.0 预览版 | [下载 Windows 安装程序](https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0) · [桌面端说明](apps/desktop/README.md) |
+| iPhone（iOS 18+） | 0.4.106 | [Releases · 听见 iOS](https://github.com/qianyueping1211/Hear/releases) |
+| Windows x64 客户端 | 0.1.36 | [Releases · 听见 Windows](https://github.com/qianyueping1211/Hear/releases) · [桌面端说明](apps/desktop/README.md) |
+| Windows x64 服务端 | Win-Server 1.0.1 | [Releases · 听见 Win-Server](https://github.com/qianyueping1211/Hear/releases) · [服务端说明](server/README.md) |
+| Mac Studio / Apple Silicon 服务端 | Apple-Server 1.0.2 | [Releases · 听见 Apple-Server](https://github.com/qianyueping1211/Hear/releases) · [服务端说明](server/README.md) |
 
 iPad、Android、鸿蒙和 macOS 客户端尚未发布；仓库中的 Android、鸿蒙目录目前只是预留。
 
@@ -21,15 +23,15 @@ iPad、Android、鸿蒙和 macOS 客户端尚未发布；仓库中的 Android、
 📄 产品与技术介绍（两个平台的定位、iPhone 功能架构、服务接口）：**[docs/index.html](docs/index.html)**
 （下载后用浏览器打开就行）
 
-🪟 Windows 桌面程序见 **[apps/desktop/README.md](apps/desktop/README.md)**。如果只想用 Windows 电脑为 iPhone 提供模型服务，见 **[docs/windows-deploy.md](docs/windows-deploy.md)**。
+🪟 Windows 桌面程序见 **[apps/desktop/README.md](apps/desktop/README.md)**。如果想用 Windows 或 Mac Studio 电脑为客户端提供模型服务，见 **[server/README.md](server/README.md)**。
 
 ---
 
 ## Windows 桌面端
 
-从 [Windows 0.1.0 预览版](https://github.com/qianyueping1211/Hear/releases/tag/win-v0.1.0) 下载 `Hear-Win-0.1.0.exe` 并安装。桌面程序可以连接已有的模型服务，也包含本机模型服务入口；首次使用本机模型需要准备模型。功能与开发说明见 [apps/desktop/README.md](apps/desktop/README.md)。
+从 [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) 下载最新版 `Hear-Win-*.exe` 并安装。桌面程序支持双路采集、悬浮字幕、NLMS AEC 全双工防回声、固定声纹录制与自动更新；功能与开发说明见 [apps/desktop/README.md](apps/desktop/README.md)。
 
-`start-hear-cloud.bat` 是单独启动模型服务的脚本，适合让 iPhone 连接电脑上的模型；它不是 Windows 桌面程序的安装包。
+`server/windows/start-hear-cloud.bat`（及独立发布的 **听见 Win-Server** 整合包）与 `server/start-macos.sh`（**听见 Apple-Server** 整合包）是独立的模型服务端，供 iPhone 与 Windows 客户端局域网或公网连接。
 
 ## iPhone 安装方法（二选一）
 
@@ -37,7 +39,7 @@ iPad、Android、鸿蒙和 macOS 客户端尚未发布；仓库中的 Android、
 
 ### 方法 A：直接下载安装包 + Sideloadly 安装（不用学 Xcode，Windows 也行）
 
-1. 打开 [iPhone 版发布页](https://github.com/qianyueping1211/Hear/releases/tag/v0.4.86)，下载 `Hear-iOS-0.4.86.ipa`。以后更新时从 Releases 中选名称带 **iOS** 的版本。
+1. 打开 [GitHub Releases](https://github.com/qianyueping1211/Hear/releases)，下载最新的 `Hear-iOS-*.ipa`。以后更新时从 Releases 中选名称带 **iOS** 的版本。
    （每次更新代码后，GitHub 会自动打包并发布一个新版本，大约 3～15 分钟。）
 2. 如果想手动重新打包：**Actions** → **Build IPA (unsigned)** → **Run workflow**。
 3. 在电脑上安装 [Sideloadly](https://sideloadly.io)（Mac / Windows 都有）。Windows 还需要装 iTunes 和 iCloud 的官网版本。
@@ -108,16 +110,10 @@ powershell -ExecutionPolicy Bypass -File server\start-windows.ps1
 最后打印一个地址，填到手机 App 的 **功能设置 → 模型管理 → 云端模型** 里，
 再把「引擎管理」里需要的模型改成「云端：自己电脑上的服务」。
 
-**更省事：双击 `start-hear-cloud.bat`**（Windows）
+**更省事：直接下载独立服务端整合包或运行 `server/windows/start-hear-cloud.bat`**（Windows / macOS）
 
-仓库根目录里的 `start-hear-cloud.bat` 是给不想敲命令的人准备的：
-双击之后它会自己下载（或更新）最新代码、装好依赖、生成证书、启动服务，
-中间会问你识别 / 翻译 / 声音克隆各用哪个模型。
-
-两种摆法都行：
-
-- 把 `start-hear-cloud.bat` 单独放在一个空文件夹里 → 它会把代码下到旁边的 `Hear` 目录
-- 把整个仓库下载下来解压，直接双击里面的 `start-hear-cloud.bat` → 它就在原地跑
+- **Windows**：从 Releases 下载 **听见 Win-Server**（内置便携 Python 3.12 与全套依赖），解压后双击 `start-hear-cloud.bat` 即可启动；源码内脚本位于 `server/windows/start-hear-cloud.bat` 与 `server/windows/start-hear-token-admin.bat`。
+- **macOS (Apple Silicon / Mac Studio)**：从 Releases 下载 **听见 Apple-Server**（内置 Metal GPU 预编译 `llama-server`），解压后双击 `听见服务端.app` 或 `启动听见服务端.command`，支持一键安装开机自启与口令管理后台（`http://127.0.0.1:8443/admin/`）。
 
 Intel 核显（NPU 也行）机器上，翻译可以走核显的 Vulkan 或 NPU 的 OpenVINO 后端；
 WSL2 里访问不到 NPU，所以想用满硬件就别装 WSL。完整说明（端口、防火墙、性能、常见问题）
@@ -137,11 +133,14 @@ apps/ios/                       iPhone App 与实时活动扩展
 └── VERSION                     iOS 独立版本号
 apps/desktop/                   Windows 桌面端及未来 macOS 桌面端
 server/                         桌面端与移动端共用的模型服务
+├── windows/                    Windows 一键启动与口令管理 .bat
+├── macos/                      macOS Apple Silicon 整合包构建脚本
+└── start-macos.sh              Mac Studio Metal GPU 服务端启动器
 branding/                       两端共用的图标源文件
+docs/index.html                 项目完整产品与技术介绍页
 setup.sh                        Mac 一键生成 iOS 工程
-start-hear-cloud.bat            Windows 一键启动模型服务
 scripts/fetch_llama.sh          下载 llama.cpp 的 iOS 框架
-.github/workflows/build-ipa.yml GitHub 自动打包 iOS IPA
+.github/workflows/              四端独立自动构建与发布工作流
 ```
 
 `apps/android/` 和 `apps/harmony/` 已预留给未来的手机、平板客户端；同一平台在一个工程内适配不同屏幕。当前 iOS 工程仍只面向 iPhone，尚未开启 iPad 构建目标。
