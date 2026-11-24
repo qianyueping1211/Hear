@@ -1844,17 +1844,27 @@ impl LiveCaptureHandle {
                         {
                             let clean_src = text.trim().to_string();
                             if !clean_src.is_empty() {
-                                // 保留已有预览译文，避免每次增量识别都闪回「正在翻译…」造成界面跳动
-                                let keep_tr = {
+                                // 1. 检查原文是否与上一轮预览完全一致：若中文/原文未变且已有译文，直接跳过重复翻译，绝不反复重写！
+                                let (same_src, has_existing_tr, keep_tr) = {
                                     let mut snap = rt.snapshot.lock().await;
+                                    let prev_src = snap.live_partial_source.trim().to_string();
+                                    let prev_tr = snap.live_partial_translation.trim().to_string();
+                                    let has_tr = !prev_tr.is_empty()
+                                        && prev_tr != "正在翻译…"
+                                        && prev_tr != "翻译中…"
+                                        && prev_tr != "正在识别…";
+                                    let same = !prev_src.is_empty() && prev_src == clean_src;
                                     snap.live_partial_source = clean_src.clone();
-                                    let prev = snap.live_partial_translation.trim().to_string();
-                                    if prev.is_empty() {
-                                        "正在翻译…".to_string()
+                                    let display_tr = if has_tr {
+                                        prev_tr
                                     } else {
-                                        prev
-                                    }
+                                        "正在翻译…".to_string()
+                                    };
+                                    (same, has_tr, display_tr)
                                 };
+                                if same_src && has_existing_tr {
+                                    continue;
+                                }
                                 let _ = app.emit(
                                     "subtitle:partial",
                                     serde_json::json!({
@@ -1862,7 +1872,9 @@ impl LiveCaptureHandle {
                                         "translation": keep_tr
                                     }),
                                 );
-                                // 边说边译：说话过程中实时调用预览翻译，流式更新译文预览
+                                // 边说边译：
+                                // - 首次尚无译文时，流式逐字输出保证最低首字延迟；
+                                // - 已有译文时，不再在流式阶段用短前缀擦掉已显示译文，而是等新译文完整生成后一次性平滑修正替换！
                                 let (p_src, p_dst) = resolve_translation_direction(
                                     &clean_src,
                                     &detected_lang,
@@ -1882,6 +1894,10 @@ impl LiveCaptureHandle {
                                         true,
                                         mt_token_opt,
                                         |delta_p| {
+                                            if has_existing_tr {
+                                                // 已有完整预览译文时，禁止用流式短前缀反复清空重写
+                                                return;
+                                            }
                                             let c = clean_translation_output(delta_p);
                                             if !c.is_empty() {
                                                 let _ = app_p.emit(
@@ -1897,7 +1913,7 @@ impl LiveCaptureHandle {
                                     .await
                                 {
                                     let final_p = clean_translation_output(&raw_p);
-                                    if !final_p.is_empty() {
+                                    if !final_p.is_empty() && final_p != keep_tr {
                                         {
                                             let mut snap = rt.snapshot.lock().await;
                                             snap.live_partial_translation = final_p.clone();
@@ -2074,10 +2090,16 @@ impl LiveCaptureHandle {
                         );
                         let app_stream = app.clone();
                         let mut seg_cb = seg.clone();
+                        let has_baseline = seg.baseline_translated.is_some();
 
                         match rt
                             .cloud
                             .translate_stream(&mt_url, &prompt, false, mt_token_opt, |partial_raw| {
+                                // 若该句已有预览译文（baseline_translated），流式阶段不再用短前缀擦掉重打，
+                                // 等终稿译文完成后一次性平滑替换为 diff 修正高亮！
+                                if has_baseline {
+                                    return;
+                                }
                                 let cleaned = clean_translation_output(partial_raw);
                                 if !cleaned.is_empty() {
                                     seg_cb.translated_text = cleaned;
