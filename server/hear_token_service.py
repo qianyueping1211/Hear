@@ -11,6 +11,7 @@
     /admin/                                    浏览器管理后台
     /admin/api/v1/...                          管理 API（管理员会话 + CSRF）
     /internal/v1/gateways/{id}/token-snapshot  网关清单（Bearer 网关凭据）
+    /internal/v1/gateways/{id}/usage           网关批量上报用量（Bearer 网关凭据）
     /healthz                                   服务存活检查
 """
 import argparse
@@ -457,6 +458,11 @@ def get_token(handler, token_id):
     handler._json(200, handler.store.get_token(token_id))
 
 
+@route("GET", r"/admin/api/v1/tokens/([^/]+)/usage", "read")
+def token_usage(handler, token_id):
+    handler._json(200, handler.store.token_usage(token_id, handler.query.get("days", 30)))
+
+
 @route("PATCH", r"/admin/api/v1/tokens/([^/]+)", "write")
 def update_token(handler, token_id):
     handler._json(200, handler.store.update_token(token_id, handler._read_json(), handler.actor, handler.request_id))
@@ -506,8 +512,7 @@ def rotate_gateway(handler, gateway_id):
 
 # ------------------------------------------------------------------ 网关内部 API
 
-@route("GET", r"/internal/v1/gateways/([^/]+)/token-snapshot", "gateway")
-def token_snapshot(handler, gateway_id):
+def require_gateway(handler, gateway_id):
     header = handler.headers.get("Authorization") or ""
     scheme, _, credential = header.partition(" ")
     owner = handler.store.gateway_for_credential(credential.strip()) if scheme.lower() == "bearer" else None
@@ -515,13 +520,25 @@ def token_snapshot(handler, gateway_id):
         raise ApiError(401, "GATEWAY_UNAUTHORIZED", "网关凭据无效",
                        headers={"WWW-Authenticate": 'Bearer realm="hear-gateway"'})
     if not compare_digest(owner.encode(), gateway_id.encode()):
-        raise ApiError(403, "GATEWAY_FORBIDDEN", "网关凭据无权读取这个网关的清单")
+        raise ApiError(403, "GATEWAY_FORBIDDEN", "网关凭据无权访问这个网关的数据")
+
+
+@route("GET", r"/internal/v1/gateways/([^/]+)/token-snapshot", "gateway")
+def token_snapshot(handler, gateway_id):
+    require_gateway(handler, gateway_id)
     body, etag = handler.store.snapshot(gateway_id)
     tags = [tag.strip() for tag in (handler.headers.get("If-None-Match") or "").split(",") if tag.strip()]
     if etag in tags:
         handler._send(304, headers={"ETag": etag})
         return
     handler._json(200, body, headers={"ETag": etag})
+
+
+@route("POST", r"/internal/v1/gateways/([^/]+)/usage", "gateway")
+def usage_report(handler, gateway_id):
+    # 先核对凭据再读请求体：凭据不对不接收任何数据
+    require_gateway(handler, gateway_id)
+    handler._json(200, handler.store.record_usage(gateway_id, handler._read_json()))
 
 
 # ------------------------------------------------------------------ 服务器
