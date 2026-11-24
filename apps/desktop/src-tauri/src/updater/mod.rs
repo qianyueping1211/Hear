@@ -81,7 +81,7 @@ pub async fn check_for_updates(cfg: &UpdateConfig) -> UpdateCheckResult {
         }
     };
 
-    let api_url = format!("https://api.github.com/repos/{}/releases?per_page=30", repo);
+    let api_url = format!("https://api.github.com/repos/{}/releases?per_page=100", repo);
     let mut req = client
         .get(&api_url)
         .header("Accept", "application/vnd.github+json")

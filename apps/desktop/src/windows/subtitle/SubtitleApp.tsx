@@ -44,10 +44,27 @@ export function SubtitleApp() {
   } = useHearStore();
 
   const [hovered, setHovered] = useState(false);
+  const [fadedOut, setFadedOut] = useState(false);
 
   useEffect(() => {
     void hydrate();
   }, [hydrate]);
+
+  // 静音自动淡出：当 subtitleStyle.autoFadeSeconds > 0 时，连续 N 秒无新字幕更新则平滑淡出，有新字幕或悬停时立刻恢复显示
+  const latestActivityKey = useMemo(() => {
+    const last = segments[segments.length - 1];
+    return `${last?.id ?? ""}|${last?.translatedText ?? ""}|${livePartialSource}|${livePartialTranslation}|${playback.isPlaying ? Math.floor(playback.positionMs / 500) : 0}`;
+  }, [segments, livePartialSource, livePartialTranslation, playback.isPlaying, playback.positionMs]);
+
+  useEffect(() => {
+    setFadedOut(false);
+    const sec = subtitleStyle.autoFadeSeconds;
+    if (!sec || sec <= 0 || hovered) return;
+    const timer = window.setTimeout(() => {
+      setFadedOut(true);
+    }, sec * 1000);
+    return () => window.clearTimeout(timer);
+  }, [latestActivityKey, subtitleStyle.autoFadeSeconds, hovered]);
 
   const bg = useMemo(
     () =>
@@ -135,8 +152,8 @@ export function SubtitleApp() {
       data-tauri-drag-region={!subtitleStyle.clickThrough ? "" : undefined}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      style={{ backgroundColor: bg.rgba }}
-      className={`relative h-full w-full rounded-2xl border ${borderClass} backdrop-blur-md px-5 py-3 flex flex-col justify-center transition-colors`}
+      style={{ backgroundColor: bg.rgba, opacity: fadedOut && !hovered ? 0 : 1 }}
+      className={`relative h-full w-full rounded-2xl border ${borderClass} backdrop-blur-md px-5 py-3 flex flex-col justify-center transition-all duration-500`}
     >
       {/* 悬停迷你工具栏（穿透锁定时不拦截鼠标） */}
       {!subtitleStyle.clickThrough && (

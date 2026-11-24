@@ -1,4 +1,4 @@
-use crate::state::{ServiceConfig, SubtitleStyle, TtsOutputSettings, UpdateConfig};
+use crate::state::{AudioCaptureMode, ServiceConfig, SubtitleStyle, TtsOutputSettings, UpdateConfig};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
@@ -16,6 +16,14 @@ pub struct PersistedConfig {
     pub glossary: String,
     #[serde(default)]
     pub update_config: UpdateConfig,
+    #[serde(default)]
+    pub source_lang: String,
+    #[serde(default)]
+    pub target_lang: String,
+    #[serde(default)]
+    pub lock_source_lang: bool,
+    #[serde(default)]
+    pub capture_mode: Option<AudioCaptureMode>,
     /// v0.1.21 一次性迁移标记：老版本默认勾选了「播报时静音麦克风」，升级到带 NLMS AEC 的版本后自动切为全双工
     #[serde(default)]
     pub aec_migrated_v1: bool,
@@ -108,6 +116,20 @@ pub(crate) fn parse_config_resilient(raw: &str) -> Result<PersistedConfig, Strin
 
     if let Some(m) = obj.get("aecMigratedV1").and_then(|v| v.as_bool()) {
         cfg.aec_migrated_v1 = m;
+    }
+    if let Some(v) = obj.get("sourceLang").and_then(|v| v.as_str()) {
+        cfg.source_lang = v.to_string();
+    }
+    if let Some(v) = obj.get("targetLang").and_then(|v| v.as_str()) {
+        cfg.target_lang = v.to_string();
+    }
+    if let Some(v) = obj.get("lockSourceLang").and_then(|v| v.as_bool()) {
+        cfg.lock_source_lang = v;
+    }
+    if let Some(cm_val) = obj.get("captureMode") {
+        if let Ok(cm) = serde_json::from_value::<AudioCaptureMode>(cm_val.clone()) {
+            cfg.capture_mode = Some(cm);
+        }
     }
 
     Ok(cfg)

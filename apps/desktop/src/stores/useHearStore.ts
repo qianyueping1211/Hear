@@ -257,7 +257,8 @@ interface HearStoreState extends AppSnapshot {
   prepareSegmentClone: (
     id: string,
     text: string,
-    lang: string
+    lang: string,
+    isPreclone?: boolean
   ) => Promise<Uint8Array | null>;
   playSegmentOriginal: (id: string) => Promise<void>;
   stopSpeakingSegment: () => void;
@@ -267,6 +268,13 @@ interface HearStoreState extends AppSnapshot {
   readMyVoiceSampleWav: () => Promise<Uint8Array | null>;
   clearMyVoiceSample: () => Promise<void>;
   generateSummary: () => Promise<void>;
+  saveSummaryMarkdown: (markdown: string) => Promise<void>;
+  exportTextFile: (
+    defaultName: string,
+    ext: string,
+    filterName: string,
+    content: string
+  ) => Promise<boolean>;
   importMediaFile: () => Promise<void>;
   cancelImportMedia: () => Promise<void>;
   exportRecordingWav: () => Promise<void>;
@@ -446,11 +454,14 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
               );
             }
           } else if (tts.useVoiceClone) {
-            void get().prepareSegmentClone(
-              seg.id,
-              seg.translatedText.trim(),
-              seg.targetLang
-            );
+            const trText = seg.translatedText.trim();
+            // 后台自动预克隆跳过 <= 2 字的极短词（如「好」「嗯」「OK」），避免占满单并发克隆队列；用户手动点击小喇叭仍可按需合成/朗读
+            const cleanLen = trText.replace(/[\s\p{P}\p{S}]/gu, "").length;
+            if (cleanLen > 2) {
+              void get().prepareSegmentClone(seg.id, trText, seg.targetLang, true);
+            } else {
+              set((s) => ({ cloneStates: { ...s.cloneStates, [seg.id]: "ready" } }));
+            }
           }
         }
       });
@@ -1129,7 +1140,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     });
   },
 
-  prepareSegmentClone: async (id, text, lang) => {
+  prepareSegmentClone: async (id, text, lang, isPreclone = false) => {
     const trimmed = text.trim();
     if (!trimmed || !isTauriRuntime()) return null;
     const cached = cloneWavCache.get(id);
@@ -1156,6 +1167,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
             id,
             text: trimmed,
             lang,
+            isPreclone,
           }
         );
         // 若期间 Whisper 二次校对或手动修改已发起更新版本的克隆任务，丢弃过期结果，避免覆盖新译文缓存
@@ -1498,6 +1510,44 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     } finally {
       set({ summaryGenerating: false });
     }
+  },
+
+  saveSummaryMarkdown: async (markdown) => {
+    const clean = markdown.trim();
+    set({ summaryMarkdown: clean });
+    if (isTauriRuntime()) {
+      await tauriInvoke("save_summary_markdown", { markdown: clean });
+    }
+  },
+
+  exportTextFile: async (defaultName, ext, filterName, content) => {
+    if (isTauriRuntime()) {
+      try {
+        const { save } = await import("@tauri-apps/plugin-dialog");
+        const dest = await save({
+          title: `导出 ${filterName}`,
+          defaultPath: defaultName,
+          filters: [{ name: filterName, extensions: [ext] }],
+        });
+        if (!dest) return false;
+        await tauriInvoke("export_text_file", { destPath: dest, content });
+        set({ sessionNotice: `已导出至：${dest}` });
+        return true;
+      } catch (err) {
+        set({
+          sessionError: err instanceof Error ? err.message : String(err),
+        });
+        return false;
+      }
+    }
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = defaultName;
+    a.click();
+    URL.revokeObjectURL(url);
+    return true;
   },
 
   importMediaFile: async () => {

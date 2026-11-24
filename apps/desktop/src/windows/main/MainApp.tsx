@@ -190,12 +190,17 @@ export function MainApp() {
     speakSegment,
     updateTtsSettings,
     generateSummary,
+    saveSummaryMarkdown,
+    exportTextFile,
     importMediaFile,
     cancelImportMedia,
     exportRecordingWav,
   } = useHearStore();
 
   const [autoFollow, setAutoFollow] = useState(true);
+  const [editingSummary, setEditingSummary] = useState(false);
+  const [summaryDraft, setSummaryDraft] = useState("");
+  const [summaryCopied, setSummaryCopied] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editSourceDraft, setEditSourceDraft] = useState("");
   const [editingSpeakerId, setEditingSpeakerId] = useState<string | null>(null);
@@ -360,14 +365,13 @@ export function MainApp() {
     autoFollow,
   ]);
 
-  const downloadBlob = (filename: string, content: string) => {
-    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+  const exportBaseFilename = () => {
+    const meta = conversations.find((c) => c.id === activeConversationId);
+    const raw = (meta?.title || "听见会议记录")
+      .replace(/[\\/:*?"<>|]/g, "_")
+      .trim()
+      .slice(0, 48);
+    return raw || "听见会议记录";
   };
 
   const renderSummaryWithAnchors = (text: string) => {
@@ -1000,7 +1004,14 @@ export function MainApp() {
               </button>
               <button
                 disabled={segments.length === 0}
-                onClick={() => downloadBlob("hear-subtitles.srt", buildSrt(segments, true))}
+                onClick={() =>
+                  void exportTextFile(
+                    `${exportBaseFilename()}.srt`,
+                    "srt",
+                    "SRT 双语字幕",
+                    buildSrt(segments, true)
+                  )
+                }
                 className="px-2.5 py-1 rounded-md bg-surface-900 border border-white/10 text-slate-300 hover:text-white disabled:opacity-35 flex items-center gap-1"
               >
                 <Download className="w-3.5 h-3.5" /> 导出 SRT
@@ -1008,7 +1019,12 @@ export function MainApp() {
               <button
                 disabled={segments.length === 0}
                 onClick={() =>
-                  downloadBlob("hear-transcript.md", buildMarkdown(segments, summaryMarkdown))
+                  void exportTextFile(
+                    `${exportBaseFilename()}.md`,
+                    "md",
+                    "Markdown 会议纪要",
+                    buildMarkdown(segments, summaryMarkdown)
+                  )
                 }
                 className="px-2.5 py-1 rounded-md bg-surface-900 border border-white/10 text-slate-300 hover:text-white disabled:opacity-35 flex items-center gap-1"
               >
@@ -1584,11 +1600,53 @@ export function MainApp() {
         {summaryOpen && (
           <aside className="w-80 xl:w-96 border-l border-white/10 bg-surface-900/70 flex flex-col shrink-0">
             <div className="p-3.5 border-b border-white/10 space-y-2.5">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <span className="text-xs font-semibold text-white flex items-center gap-1.5">
                   <Sparkles className="w-4 h-4 text-purple-400" />
                   一键总结（支持时间锚点回跳）
                 </span>
+                {summaryMarkdown && !summaryGenerating && (
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(summaryMarkdown);
+                        setSummaryCopied(true);
+                        window.setTimeout(() => setSummaryCopied(false), 1800);
+                      }}
+                      title="复制总结全文"
+                      className="px-2 py-1 rounded bg-surface-950 border border-white/10 hover:bg-white/10 text-[11px] text-slate-300 hover:text-white flex items-center gap-1"
+                    >
+                      <Copy className="w-3 h-3" />
+                      {summaryCopied ? "已复制" : "复制"}
+                    </button>
+                    {editingSummary ? (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await saveSummaryMarkdown(summaryDraft);
+                          setEditingSummary(false);
+                        }}
+                        className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-[11px] text-white font-medium"
+                      >
+                        保存
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSummaryDraft(summaryMarkdown);
+                          setEditingSummary(true);
+                        }}
+                        title="手动编辑总结并保存到历史"
+                        className="px-2 py-1 rounded bg-surface-950 border border-white/10 hover:bg-white/10 text-[11px] text-slate-300 hover:text-white flex items-center gap-1"
+                      >
+                        <Edit3 className="w-3 h-3" />
+                        编辑
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <select
@@ -1604,7 +1662,10 @@ export function MainApp() {
                 </select>
                 <button
                   disabled={segments.length === 0 || summaryGenerating}
-                  onClick={() => void generateSummary()}
+                  onClick={() => {
+                    setEditingSummary(false);
+                    void generateSummary();
+                  }}
                   className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium disabled:opacity-40 shrink-0"
                 >
                   {summaryGenerating ? "生成中…" : "生成"}
@@ -1613,7 +1674,34 @@ export function MainApp() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 select-text">
-              {summaryMarkdown ? (
+              {editingSummary ? (
+                <div className="h-full flex flex-col gap-2">
+                  <textarea
+                    value={summaryDraft}
+                    onChange={(e) => setSummaryDraft(e.target.value)}
+                    className="flex-1 w-full rounded-lg bg-surface-950 border border-white/15 p-3 text-xs text-slate-100 leading-relaxed font-mono resize-none focus:outline-none focus:border-purple-400"
+                  />
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditingSummary(false)}
+                      className="px-2.5 py-1 rounded bg-surface-800 text-xs text-slate-300"
+                    >
+                      取消
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await saveSummaryMarkdown(summaryDraft);
+                        setEditingSummary(false);
+                      }}
+                      className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-xs text-white font-medium"
+                    >
+                      保存修改
+                    </button>
+                  </div>
+                </div>
+              ) : summaryMarkdown ? (
                 <div>{renderSummaryWithAnchors(summaryMarkdown)}</div>
               ) : (
                 <div className="h-full flex flex-col items-center justify-center text-center text-xs text-slate-500 px-4">

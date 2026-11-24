@@ -18,7 +18,7 @@ use state::{
     SubtitleSegment, SubtitleStyle, TtsOutputSettings, UpdateCheckResult, UpdateConfig,
 };
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -36,6 +36,9 @@ pub struct AppRuntime {
     pub cloned_tts_cache: Mutex<std::collections::HashMap<String, (String, Vec<u8>)>>,
     /// 声音克隆单并发闸门：防止多句预克隆或用户点击并发打到服务端触发 503 SERVICE_BUSY
     pub clone_gate: Mutex<()>,
+    /// 声音克隆 504/连续失败短时熔断截止时间，避免服务端超时时队列阻塞数分钟
+    pub clone_circuit_open_until: Mutex<Option<std::time::Instant>>,
+    pub clone_consecutive_failures: AtomicU32,
     /// 强制静音全路采集（仅在用户手动勾选「播报时完全静音麦克风」时启用）
     pub mic_muted: Arc<AtomicBool>,
     /// 播报译文到本机扬声器/耳机时，仅静音 System 系统内录通道（防 WASAPI Loopback 自回环），麦克风保持开启并走 AEC 回声消除
@@ -65,6 +68,8 @@ impl AppRuntime {
             segment_wavs: Mutex::new(std::collections::HashMap::new()),
             cloned_tts_cache: Mutex::new(std::collections::HashMap::new()),
             clone_gate: Mutex::new(()),
+            clone_circuit_open_until: Mutex::new(None),
+            clone_consecutive_failures: AtomicU32::new(0),
             mic_muted: Arc::new(AtomicBool::new(false)),
             system_tts_muted: Arc::new(AtomicBool::new(false)),
             aec_far_end: Arc::new(audio::aec::FarEndReference::new()),
@@ -86,6 +91,10 @@ impl AppRuntime {
                 tts_settings: snap.tts_settings.clone(),
                 glossary: snap.glossary.clone(),
                 update_config: snap.update_config.clone(),
+                source_lang: snap.source_lang.clone(),
+                target_lang: snap.target_lang.clone(),
+                lock_source_lang: snap.lock_source_lang,
+                capture_mode: Some(snap.capture_mode),
                 aec_migrated_v1: true,
             }
         };
@@ -237,27 +246,35 @@ async fn list_audio_sources() -> Result<Vec<AudioSourceOption>, String> {
 
 #[tauri::command]
 async fn set_language_pair(
+    app: AppHandle,
     rt: State<'_, Arc<AppRuntime>>,
     source_lang: String,
     target_lang: String,
     lock_source_lang: bool,
 ) -> Result<(), String> {
-    let mut snap = rt.snapshot.lock().await;
-    snap.source_lang = source_lang;
-    snap.target_lang = target_lang;
-    snap.lock_source_lang = lock_source_lang;
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.source_lang = source_lang;
+        snap.target_lang = target_lang;
+        snap.lock_source_lang = lock_source_lang;
+    }
+    rt.persist(&app).await;
     Ok(())
 }
 
 #[tauri::command]
 async fn set_capture_mode(
+    app: AppHandle,
     rt: State<'_, Arc<AppRuntime>>,
     capture_mode: AudioCaptureMode,
     selected_app_pid: Option<u32>,
 ) -> Result<(), String> {
-    let mut snap = rt.snapshot.lock().await;
-    snap.capture_mode = capture_mode;
-    snap.selected_app_pid = selected_app_pid;
+    {
+        let mut snap = rt.snapshot.lock().await;
+        snap.capture_mode = capture_mode;
+        snap.selected_app_pid = selected_app_pid;
+    }
+    rt.persist(&app).await;
     Ok(())
 }
 
@@ -616,6 +633,8 @@ async fn synthesize_cloned_segment_wav(
     id: &str,
     text: &str,
     lang: &str,
+    expected_session_epoch: Option<u64>,
+    is_background_preclone: bool,
 ) -> Result<Vec<u8>, String> {
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
@@ -770,8 +789,44 @@ async fn synthesize_cloned_segment_wav(
         Some(fallback_tok.as_str())
     };
 
+    // 后台预克隆在抢锁前先检查熔断与会话代次，避免 504 队列越积越多
+    if is_background_preclone {
+        if let Some(exp) = expected_session_epoch {
+            if rt.session_epoch.load(Ordering::SeqCst) != exp {
+                return Err("会话已切换，跳过过期后台预克隆".to_string());
+            }
+        }
+        if let Some(until) = *rt.clone_circuit_open_until.lock().await {
+            if std::time::Instant::now() < until {
+                return Err("声音克隆服务短时熔断中，暂跳过后台预克隆".to_string());
+            }
+        }
+    }
+
     // 串行排队调用服务端克隆，避免多句并发导致服务端返回 503 SERVICE_BUSY
     let _clone_guard = rt.clone_gate.lock().await;
+
+    // 拿到 clone_gate 锁后再做一次会话代次、熔断与缓存复检，彻底杜绝停录后旧预克隆堵死新会话长达数分钟
+    if let Some(exp) = expected_session_epoch {
+        if rt.session_epoch.load(Ordering::SeqCst) != exp {
+            return Err("会话已结束或切换，放弃过期预克隆任务".to_string());
+        }
+    }
+    if is_background_preclone {
+        if let Some(until) = *rt.clone_circuit_open_until.lock().await {
+            if std::time::Instant::now() < until {
+                return Err("声音克隆服务短时熔断中，跳过排队预克隆".to_string());
+            }
+        }
+    }
+    {
+        let cache = rt.cloned_tts_cache.lock().await;
+        if let Some((cached_text, cached_wav)) = cache.get(id) {
+            if cached_text == &trimmed && cached_wav.len() > 44 {
+                return Ok(cached_wav.clone());
+            }
+        }
+    }
 
     let synthesized = match rt
         .cloud
@@ -785,9 +840,32 @@ async fn synthesize_cloned_segment_wav(
         )
         .await
     {
-        Ok(wav_bytes) => Ok(wav_bytes),
+        Ok(wav_bytes) => {
+            rt.clone_consecutive_failures.store(0, Ordering::Relaxed);
+            *rt.clone_circuit_open_until.lock().await = None;
+            Ok(wav_bytes)
+        }
         Err(first_err) => {
-            if !primary_url.is_empty() && !fallback_url.is_empty() && primary_url != fallback_url {
+            let is_timeout_504 = first_err.contains("504")
+                || first_err.contains("GATEWAY_TIMEOUT")
+                || first_err.contains("超时")
+                || first_err.to_ascii_lowercase().contains("timed out");
+            let fails = rt.clone_consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            if is_timeout_504 || fails >= 2 {
+                let cooldown = if is_timeout_504 { 45 } else { 30 };
+                *rt.clone_circuit_open_until.lock().await =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(cooldown));
+                logger::warn(format!(
+                    "[clone] 触发短时熔断 {}s（timeout={} consecutive_fails={}），避免队列阻塞",
+                    cooldown, is_timeout_504, fails
+                ));
+            }
+            // HTTP 504 推理超时时不再回退备用地址白等第二个 45s；仅在连接拒绝/404/非超时错误时尝试备用地址
+            if !is_timeout_504
+                && !primary_url.is_empty()
+                && !fallback_url.is_empty()
+                && primary_url != fallback_url
+            {
                 let f_tok_opt = if fallback_tok.trim().is_empty() {
                     None
                 } else {
@@ -798,6 +876,8 @@ async fn synthesize_cloned_segment_wav(
                     .clone_voice(&fallback_url, &trimmed, lang, ref_wav, &ref_text, f_tok_opt)
                     .await
                 {
+                    rt.clone_consecutive_failures.store(0, Ordering::Relaxed);
+                    *rt.clone_circuit_open_until.lock().await = None;
                     Ok(wav_bytes)
                 } else {
                     Err(first_err)
@@ -827,11 +907,18 @@ async fn clone_segment_speech(
     id: String,
     text: String,
     lang: String,
+    is_preclone: Option<bool>,
 ) -> Result<tauri::ipc::Response, String> {
     if !rt.snapshot.lock().await.tts_settings.use_voice_clone {
         return Err("声音克隆已关闭".to_string());
     }
-    let wav = synthesize_cloned_segment_wav(&app, rt.inner(), &id, &text, &lang).await?;
+    let preclone = is_preclone.unwrap_or(false);
+    let exp_epoch = if preclone {
+        Some(rt.session_epoch.load(Ordering::SeqCst))
+    } else {
+        None
+    };
+    let wav = synthesize_cloned_segment_wav(&app, rt.inner(), &id, &text, &lang, exp_epoch, preclone).await?;
     Ok(tauri::ipc::Response::new(wav))
 }
 
@@ -918,7 +1005,17 @@ async fn play_cloned_segment_to_device(
             "tts:state",
             serde_json::json!({ "id": id, "state": "cloning" }),
         );
-        match synthesize_cloned_segment_wav(&app, rt.inner(), &id, &text, &lang).await {
+        match synthesize_cloned_segment_wav(
+            &app,
+            rt.inner(),
+            &id,
+            &text,
+            &lang,
+            if is_auto_flag { Some(start_session_epoch) } else { None },
+            is_auto_flag,
+        )
+        .await
+        {
             Ok(b) => b,
             Err(e) => {
                 let _ = app.emit(
@@ -1393,6 +1490,13 @@ async fn download_and_install_update(
     })
     .await?;
 
+    // 安装包成功拉起后延迟 400ms 自动退出旧托盘常驻进程，避免 NSIS 覆盖安装提示文件被占用
+    let app_exit = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        app_exit.exit(0);
+    });
+
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -1775,6 +1879,32 @@ async fn generate_summary(
     rt.save_history(&app).await;
     rt.inner().spawn_auto_title(app.clone());
     Ok(final_md)
+}
+
+#[tauri::command]
+async fn save_summary_markdown(
+    app: AppHandle,
+    rt: State<'_, Arc<AppRuntime>>,
+    markdown: String,
+) -> Result<String, String> {
+    let clean = markdown.trim().to_string();
+    *rt.summary_markdown.lock().await = clean.clone();
+    let _ = app.emit("summary:delta", &clean);
+    rt.save_history(&app).await;
+    Ok(clean)
+}
+
+#[tauri::command]
+async fn export_text_file(dest_path: String, content: String) -> Result<String, String> {
+    let trimmed = dest_path.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("未指定导出文件路径".to_string());
+    }
+    tokio::task::spawn_blocking(move || std::fs::write(&trimmed, content.as_bytes()))
+        .await
+        .map_err(|e| format!("导出文件任务异常：{}", e))?
+        .map_err(|e| format!("写入导出文件失败：{}", e))?;
+    Ok(dest_path)
 }
 
 #[tauri::command]
@@ -2226,6 +2356,16 @@ pub fn run() {
                 snap.tts_settings = loaded.tts_settings;
                 snap.glossary = loaded.glossary;
                 snap.update_config = loaded.update_config;
+                if !loaded.source_lang.trim().is_empty() {
+                    snap.source_lang = loaded.source_lang;
+                }
+                if !loaded.target_lang.trim().is_empty() {
+                    snap.target_lang = loaded.target_lang;
+                }
+                snap.lock_source_lang = loaded.lock_source_lang;
+                if let Some(cm) = loaded.capture_mode {
+                    snap.capture_mode = cm;
+                }
                 snap.local_server_install = install_status;
                 snap.conversations = initial_conversations;
             }
@@ -2459,6 +2599,8 @@ pub fn run() {
             update_segment_speaker,
             speak_text_sapi,
             generate_summary,
+            save_summary_markdown,
+            export_text_file,
             import_media_file,
             cancel_import_media,
             export_recording_wav,

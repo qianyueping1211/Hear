@@ -50,13 +50,6 @@ pub fn default_audio_sources() -> Vec<AudioSourceOption> {
             process_id: None,
             process_name: None,
         },
-        AudioSourceOption {
-            id: "app_loopback".into(),
-            label: "单应用进程内录（暂同系统内录）".into(),
-            kind: AudioCaptureMode::AppLoopback,
-            process_id: None,
-            process_name: None,
-        },
     ]
 }
 
