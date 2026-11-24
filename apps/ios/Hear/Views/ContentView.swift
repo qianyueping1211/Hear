@@ -3,6 +3,7 @@ import Translation
 
 struct ContentView: View {
     @EnvironmentObject var session: LiveSession
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @ObservedObject private var llm = LLMSettings.shared
     @State private var showSettings = false
     @State private var showHistory = false
@@ -15,7 +16,35 @@ struct ContentView: View {
     @State private var editingSpeaker: TranslationItem?
     @State private var showMenu = false          // 右上角 ⋯ 菜单
 
+    private var useIPadWorkbench: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular
+    }
+
     var body: some View {
+        Group {
+            if useIPadWorkbench {
+                IPadWorkbenchView()
+            } else {
+                compactPhoneBody
+            }
+        }
+        // 用云端模型但本地网络权限没开：弹提示告诉用户去哪儿开。
+        // （挂在最外层容器上，iPad 横竖屏/分屏切换时不中断引导任务与翻译语言包准备）
+        .localNetworkHelp($session.localNetworkHelp)
+        .task { await session.bootstrap() }
+        // 苹果自带模式：语言包没下载时，由系统弹出下载窗口
+        .translationTask(session.translationPrepConfig) { ts in
+            do {
+                try await ts.prepareTranslation()
+                await session.appleTranslationPrepared(true)
+            } catch {
+                hearLog("苹果翻译语言包准备失败：\(error)", .warning)
+                await session.appleTranslationPrepared(false)
+            }
+        }
+    }
+
+    private var compactPhoneBody: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 TopBar(onMore: { showMenu = true })
@@ -117,20 +146,6 @@ struct ContentView: View {
                 Button("好", role: .cancel) {}
             } message: {
                 Text("本页已保存到历史。配置好 API 后，可以在 历史 → 总结 里随时生成。")
-            }
-        }
-        // 用云端模型但本地网络权限没开：弹提示告诉用户去哪儿开。
-        // （挂在 NavigationStack 上：里面已经有一个 .alert 了，同一个视图挂两个会互相顶掉）
-        .localNetworkHelp($session.localNetworkHelp)
-        .task { await session.bootstrap() }
-        // 苹果自带模式：语言包没下载时，由系统弹出下载窗口
-        .translationTask(session.translationPrepConfig) { ts in
-            do {
-                try await ts.prepareTranslation()
-                await session.appleTranslationPrepared(true)
-            } catch {
-                hearLog("苹果翻译语言包准备失败：\(error)", .warning)
-                await session.appleTranslationPrepared(false)
             }
         }
     }
