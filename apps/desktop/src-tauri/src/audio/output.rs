@@ -288,6 +288,53 @@ fn trim_edge_silence_and_normalize(samples: &[f32], sample_rate: u32) -> Option<
     Some(clipped)
 }
 
+/// 裁切 16kHz 单声道参考声纹 WAV 的前后空白音并温和归一化（对标 iOS FixedVoiceSampleStore.saveRecordedWav），
+/// 防止按下录音到开口前/结束后的静音混入 Qwen3-TTS 参考声纹导致克隆开头无声。
+pub fn trim_wav_edge_silence_16k_mono(wav_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let (raw_mono, src_rate) = decode_wav_mono_f32(wav_bytes)?;
+    let trimmed = trim_edge_silence_and_normalize(&raw_mono, src_rate)
+        .ok_or_else(|| "未检测到有效人声，请在安静环境下重新清晰朗读 3~10 秒".to_string())?;
+    let mono_16k = if src_rate == 16_000 {
+        trimmed
+    } else {
+        resample_linear_to_interleaved(&trimmed, src_rate, 16_000, 1)
+    };
+    let secs = mono_16k.len() as f32 / 16_000.0;
+    if secs < 2.2 {
+        return Err("有效人声时长不足，请在安静环境下清晰朗读 3~10 秒".to_string());
+    }
+    let clipped = if mono_16k.len() > 160_000 {
+        &mono_16k[..160_000]
+    } else {
+        &mono_16k[..]
+    };
+    let data_bytes = (clipped.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + data_bytes as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36u32 + data_bytes).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&1u16.to_le_bytes()); // mono
+    out.extend_from_slice(&16_000u32.to_le_bytes());
+    out.extend_from_slice(&32_000u32.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_bytes.to_le_bytes());
+    for &s in clipped {
+        let clamped = s.clamp(-1.0, 1.0);
+        let i16_val = if clamped < 0.0 {
+            (clamped * 32768.0) as i16
+        } else {
+            (clamped * 32767.0) as i16
+        };
+        out.extend_from_slice(&i16_val.to_le_bytes());
+    }
+    Ok(out)
+}
+
 /// 将 WAV 字节定向播放到指定的输出设备（支持物理耳机/扬声器或 VB-Cable 等虚拟麦克风）
 /// 若传入 `far_end`，则在播放期间按真实播放进度同步推送 16kHz 远端参考样本供麦克风 AEC 实时消除回声。
 pub fn play_wav_to_device(

@@ -304,8 +304,9 @@ if [ ! -x "$SERVER_DIR/.venv/bin/python" ]; then
 fi
 PY="$SERVER_DIR/.venv/bin/python"
 
-# 生成自签 HTTPS 证书（如果不存在）
-if [ -f "$SERVER_DIR/make_cert.py" ] && [ ! -f "$SERVER_DIR/cert.pem" ]; then
+# 生成自签 HTTPS 证书（如果不存在；hear_cloud.py 默认路径为 certs/cert.pem）
+CERT_FILE="${HEAR_TLS_CERT:-$SERVER_DIR/certs/cert.pem}"
+if [ -f "$SERVER_DIR/make_cert.py" ] && [ ! -f "$CERT_FILE" ]; then
   say "生成局域网 HTTPS 自签证书…"
   "$PY" "$SERVER_DIR/make_cert.py" || warn "证书生成跳过，将由 hear_cloud.py 自动处理"
 fi
@@ -367,16 +368,16 @@ wait_health "http://127.0.0.1:$CLONE_PORT" "声音克隆模型 (Qwen3-TTS)"
 
 LAN_IP="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "Mac的局域网IP")"
 SCHEME="http"
-[ -f "$SERVER_DIR/cert.pem" ] && SCHEME="https"
+[ -f "$CERT_FILE" ] && SCHEME="https"
 
 echo
 echo "=================================================================="
 ok "听见 (Hear) Mac Studio 服务端已就绪！（Apple Metal GPU 加速）"
 echo "  局域网地址： ${SCHEME}://${LAN_IP}:${PORT}"
 echo "  本机自检：   ${SCHEME}://127.0.0.1:${PORT}/health"
-echo "  口令管理页： ${SCHEME}://${LAN_IP}:${PORT}/admin"
+echo "  口令管理：   双击「启动口令管理后台.command」开启（默认端口 8090）"
 echo "  模型日志：   $LOG_DIR/"
-echo "  提示：iPhone / Windows 客户端填入上方地址即可极速连接。"
+echo "  提示：iPhone / Windows 客户端填入上方局域网地址即可极速连接。"
 echo "=================================================================="
 echo
 
@@ -387,6 +388,7 @@ export HEAR_ASR_MODEL="$ASR_MODEL"
 export HEAR_ASR_SCHEME="${HEAR_ASR_SCHEME:-sensevoice+whisper}"
 export HEAR_SENSEVOICE="${HEAR_SENSEVOICE:-1}"
 export HEAR_SENSEVOICE_DIR="$SV_DIR"
+export HEAR_SPEAKER_MODEL="$SPK_FILE"
 export HEAR_MODEL_DIR="$MODEL_DIR"
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 

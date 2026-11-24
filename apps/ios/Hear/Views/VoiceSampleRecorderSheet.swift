@@ -270,7 +270,11 @@ struct VoiceSampleRecorderSheet: View {
 
         let audioSession = AVAudioSession.sharedInstance()
         do {
-            try audioSession.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker, .allowBluetooth])
+            try audioSession.setCategory(
+                .playAndRecord,
+                mode: .measurement,
+                options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+            )
             try audioSession.setActive(true)
         } catch {
             errorMessage = "无法配置录音会话：\(error.localizedDescription)"
@@ -399,5 +403,7 @@ struct VoiceSampleRecorderSheet: View {
         recorder = nil
         stopPreview()
         isRecording = false
+        // 录完或关闭声纹弹窗后交还给 AudioRoute 统一恢复音频会话与蓝牙耳机路由
+        try? AudioRoute.updateSession()
     }
 }

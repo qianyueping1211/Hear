@@ -70,6 +70,17 @@ read -r -p "按回车键关闭窗口…" _
 EOF
 chmod +x "$STAGE/卸载开机自启.command"
 
+cat > "$STAGE/启动口令管理后台.command" <<'EOF'
+#!/usr/bin/env bash
+cd "$(dirname "$0")/server"
+PY="./.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  PY="$(command -v python3 || true)"
+fi
+exec "$PY" ./hear_token_service.py "$@"
+EOF
+chmod +x "$STAGE/启动口令管理后台.command"
+
 # 4. 创建原生 macOS 双击应用「听见服务端.app」
 APP_DIR="$STAGE/听见服务端.app"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"

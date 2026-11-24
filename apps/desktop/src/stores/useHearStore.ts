@@ -1407,7 +1407,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     }
     try {
       startSystemGuard();
-      await tauriInvoke("speak_text_sapi", { text: trimmed });
+      await tauriInvoke("speak_text_sapi", { text: trimmed, lang: targetBcp });
     } finally {
       endSystemGuard();
       if (get().speakingSegmentId === id) {

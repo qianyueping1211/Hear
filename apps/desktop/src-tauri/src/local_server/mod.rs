@@ -101,7 +101,7 @@ async fn find_latest_server_asset(
     cfg: &UpdateConfig,
 ) -> Result<(String, String, String, String), String> {
     let repo = clean_repo(&cfg.repo);
-    let api_url = format!("https://api.github.com/repos/{}/releases?per_page=30", repo);
+    let api_url = format!("https://api.github.com/repos/{}/releases?per_page=100", repo);
     let mut req = client
         .get(&api_url)
         .header("Accept", "application/vnd.github+json")
@@ -134,21 +134,39 @@ async fn find_latest_server_asset(
         .await
         .map_err(|e| format!("解析 Release 列表失败：{}", e))?;
 
-    let found = releases
-        .into_iter()
-        .filter(|r| !r.draft.unwrap_or(false) && r.tag_name.starts_with("win-v"))
+    // 优先匹配独立发布的 Windows 服务端 Release（win-server-v* -> Hear-Win-Server-*-x64.zip），
+    // 若仓库尚未发布独立服务端，则回退兼容旧版附带在 win-v* 下的 Hear-Server-Win-*.zip
+    let preferred = releases
+        .iter()
+        .filter(|r| !r.draft.unwrap_or(false) && r.tag_name.starts_with("win-server-v"))
         .filter_map(|r| {
             let ver = parse_semver(&r.tag_name)?;
-            let asset = r.assets.unwrap_or_default().into_iter().find(|a| {
+            let asset = r.assets.as_ref()?.iter().find(|a| {
                 let lower = a.name.to_lowercase();
-                lower.starts_with("hear-server-win-") && lower.ends_with(".zip")
+                (lower.starts_with("hear-win-server-") || lower.starts_with("hear-server-win-"))
+                    && lower.ends_with(".zip")
             })?;
-            Some((ver, r.tag_name, asset.name, asset.url))
+            Some((ver, r.tag_name.clone(), asset.name.clone(), asset.url.clone()))
         })
         .max_by_key(|(v, _, _, _)| *v);
 
+    let found = preferred.or_else(|| {
+        releases
+            .into_iter()
+            .filter(|r| !r.draft.unwrap_or(false) && r.tag_name.starts_with("win-v"))
+            .filter_map(|r| {
+                let ver = parse_semver(&r.tag_name)?;
+                let asset = r.assets.unwrap_or_default().into_iter().find(|a| {
+                    let lower = a.name.to_lowercase();
+                    lower.starts_with("hear-server-win-") && lower.ends_with(".zip")
+                })?;
+                Some((ver, r.tag_name, asset.name, asset.url))
+            })
+            .max_by_key(|(v, _, _, _)| *v)
+    });
+
     let Some((ver, tag_name, asset_name, asset_url)) = found else {
-        return Err("仓库发布页中尚未找到 Hear-Server-Win-*.zip 服务端整合包".to_string());
+        return Err("仓库发布页中尚未找到 Hear-Win-Server-*-x64.zip 服务端整合包".to_string());
     };
     let ver_str = format!("{}.{}.{}", ver.0, ver.1, ver.2);
     Ok((ver_str, tag_name, asset_name, asset_url))

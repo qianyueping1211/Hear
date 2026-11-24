@@ -57,6 +57,8 @@ pub struct AppRuntime {
     pub auto_spoken_ids: Mutex<std::collections::HashSet<String>>,
     /// 当前正在通过指定输出设备（如虚拟麦克风）播放的 TTS 取消标记
     pub tts_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    /// 当前正在运行的 Windows 原生 SAPI 朗读子进程 PID（便于 stop_device_tts 或切句时立即打断）
+    pub sapi_pid: Arc<AtomicU32>,
     pub import_cancel: AtomicBool,
 }
 
@@ -81,7 +83,23 @@ impl AppRuntime {
             session_epoch: Arc::new(AtomicU64::new(0)),
             auto_spoken_ids: Mutex::new(std::collections::HashSet::new()),
             tts_cancel: Mutex::new(None),
+            sapi_pid: Arc::new(AtomicU32::new(0)),
             import_cancel: AtomicBool::new(false),
+        }
+    }
+
+    pub fn kill_active_sapi(&self) {
+        let pid = self.sapi_pid.swap(0, Ordering::SeqCst);
+        if pid == 0 {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .creation_flags(0x0800_0000)
+                .status();
         }
     }
 
@@ -976,6 +994,7 @@ async fn stop_device_tts(rt: State<'_, Arc<AppRuntime>>) -> Result<(), String> {
     if let Some(flag) = rt.tts_cancel.lock().await.take() {
         flag.store(true, Ordering::Relaxed);
     }
+    rt.kill_active_sapi();
     rt.mic_muted.store(false, Ordering::Relaxed);
     rt.system_tts_muted.store(false, Ordering::Relaxed);
     rt.aec_far_end.clear();
@@ -1233,13 +1252,16 @@ async fn save_recorded_my_voice_sample(
     if wav_bytes.len() < 12 || &wav_bytes[0..4] != b"RIFF" || &wav_bytes[8..12] != b"WAVE" {
         return Err("音频格式无效，需要 16kHz 单声道 WAV".to_string());
     }
+    // 自动裁掉按下录制到开口前、以及读完到停止之间的前后空白音并温和归一化（对标 iOS FixedVoiceSampleStore）
+    let canonical_wav = audio::output::trim_wav_edge_silence_16k_mono(&wav_bytes)?;
     let (wav_p, txt_p) = my_voice_ref_paths(&app).ok_or_else(|| "无法访问应用数据目录".to_string())?;
-    std::fs::write(&wav_p, &wav_bytes).map_err(|e| format!("保存声纹样本失败：{}", e))?;
+    std::fs::write(&wav_p, &canonical_wav).map_err(|e| format!("保存声纹样本失败：{}", e))?;
     std::fs::write(&txt_p, trimmed_text).map_err(|e| format!("保存参考文本失败：{}", e))?;
     logger::info(format!(
-        "[voice] 已保存弹出录制的固定声纹样本：{} bytes ({:.1}s), text_chars={}",
+        "[voice] 已保存弹出录制的固定声纹样本（已自动裁切首尾空白）：raw={} bytes -> trimmed={} bytes ({:.1}s), text_chars={}",
         wav_bytes.len(),
-        (wav_bytes.len().saturating_sub(44)) as f32 / 32_000.0,
+        canonical_wav.len(),
+        (canonical_wav.len().saturating_sub(44)) as f32 / 32_000.0,
         trimmed_text.chars().count()
     ));
     Ok(true)
@@ -1792,24 +1814,51 @@ async fn update_segment_speaker(
 }
 
 #[tauri::command]
-async fn speak_text_sapi(text: String) -> Result<(), String> {
+async fn speak_text_sapi(
+    rt: State<'_, Arc<AppRuntime>>,
+    text: String,
+    lang: Option<String>,
+) -> Result<(), String> {
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
         return Ok(());
     }
+    let lang_tag = lang.unwrap_or_default().trim().to_string();
+    // 朗读新句前立即打断可能残留的旧 SAPI 子进程，避免两句系统语音叠声
+    rt.kill_active_sapi();
     #[cfg(target_os = "windows")]
     {
+        let sapi_pid = rt.sapi_pid.clone();
         tokio::task::spawn_blocking(move || {
             use std::os::windows::process::CommandExt;
+            let script = r#"
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$lang = $env:HEAR_SPEAK_LANG
+if ($lang) {
+    $voices = $s.GetInstalledVoices() | Where-Object { $_.Enabled }
+    $v = $voices | Where-Object { $_.VoiceInfo.Culture.Name.StartsWith($lang, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+    if (-not $v) {
+        $base = ($lang -split '-')[0]
+        if ($base) {
+            $v = $voices | Where-Object { $_.VoiceInfo.Culture.Name.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+        }
+    }
+    if ($v) { $s.SelectVoice($v.VoiceInfo.Name) }
+}
+$s.Speak($env:HEAR_SPEAK_TEXT)
+"#;
             let mut cmd = std::process::Command::new("powershell");
-            cmd.args([
-                "-NoProfile",
-                "-Command",
-                "Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak($env:HEAR_SPEAK_TEXT)",
-            ])
-            .env("HEAR_SPEAK_TEXT", trimmed)
-            .creation_flags(0x0800_0000);
-            let _ = cmd.status();
+            cmd.args(["-NoProfile", "-Command", script])
+                .env("HEAR_SPEAK_TEXT", trimmed)
+                .env("HEAR_SPEAK_LANG", lang_tag)
+                .creation_flags(0x0800_0000);
+            if let Ok(mut child) = cmd.spawn() {
+                let pid = child.id();
+                sapi_pid.store(pid, Ordering::SeqCst);
+                let _ = child.wait();
+                let _ = sapi_pid.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
+            }
         })
         .await
         .map_err(|e| format!("系统朗读任务异常：{}", e))?;
