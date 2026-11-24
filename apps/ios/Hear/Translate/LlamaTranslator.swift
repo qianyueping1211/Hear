@@ -167,8 +167,9 @@ actor LlamaTranslator {
         }
 
         // Hy-MT2-1.8B/7B 官方推荐采样参数：repeat_penalty 1.05, top_k 20, top_p 0.6, temperature 0.7
+        let v = llama_model_get_vocab(m)
         let s = llama_sampler_chain_init(llama_sampler_chain_default_params())
-        llama_sampler_chain_add(s, llama_sampler_init_penalties(64, 1.05, 0, 0))
+        llama_sampler_chain_add(s, llama_sampler_init_penalties(llama_vocab_n_tokens(v), 64, 1.05, 0.0, 0.0))
         llama_sampler_chain_add(s, llama_sampler_init_top_k(20))
         llama_sampler_chain_add(s, llama_sampler_init_top_p(0.6, 1))
         llama_sampler_chain_add(s, llama_sampler_init_temp(0.7))
@@ -176,7 +177,7 @@ actor LlamaTranslator {
 
         model = m
         ctx = c
-        vocab = llama_model_get_vocab(m)
+        vocab = v
         sampler = s
         self.backend = backend
         hearLog("本地翻译：已启用 \(backend.rawValue)")
