@@ -74,8 +74,8 @@ struct CloneAudio: Sendable {
             previous = index
         }
         guard let first else { return nil }
-        let start = max(0, (first - 5) * window)
-        let end = min(samples.count, (last + 9) * window)
+        let start = max(0, (first - 8) * window)
+        let end = min(samples.count, (last + 11) * window)
         let trailing = samples.count - end
         guard start > 0 || trailing > 0 else { return (self, 0, 0) }
 
