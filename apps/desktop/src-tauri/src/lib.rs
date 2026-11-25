@@ -2208,16 +2208,18 @@ async fn set_virtual_cables_os_enabled(enabled: bool) -> Result<(), String> {
             use std::os::windows::process::CommandExt;
             let action = if enabled { "enable" } else { "disable" };
             let ps1_path = std::env::temp_dir().join("hear_toggle_vbcable_os.ps1");
+            let elevated_ps1 = std::env::temp_dir().join("hear_toggle_vbcable_run.ps1");
+            let elevated_str = elevated_ps1.to_string_lossy().replace('\'', "''");
             let script = format!(
                 "\u{FEFF}$action = '{}'\r\n\
-$devs = Get-PnpDevice -Class MEDIA -ErrorAction SilentlyContinue | Where-Object {{ $_.FriendlyName -match 'VB-Audio' }}\r\n\
-if (-not $devs) {{ exit 0 }}\r\n\
+$devs = @(Get-PnpDevice -Class MEDIA -ErrorAction SilentlyContinue | Where-Object {{ $_.FriendlyName -match 'VB-Audio' }})\r\n\
+if ($devs.Count -eq 0) {{ exit 0 }}\r\n\
 $targets = if ($action -eq 'enable') {{\r\n\
-    $devs | Where-Object {{ $_.Problem -eq 22 }}\r\n\
+    @($devs | Where-Object {{ $_.Problem -eq 'CM_PROB_DISABLED' -or $_.Problem -eq 22 }})\r\n\
 }} else {{\r\n\
-    $devs | Where-Object {{ $_.Status -eq 'OK' }}\r\n\
+    @($devs | Where-Object {{ $_.Status -eq 'OK' }})\r\n\
 }}\r\n\
-if (-not $targets) {{ exit 0 }}\r\n\
+if ($targets.Count -eq 0) {{ exit 0 }}\r\n\
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)\r\n\
 if ($isAdmin) {{\r\n\
     foreach ($d in $targets) {{\r\n\
@@ -2225,12 +2227,12 @@ if ($isAdmin) {{\r\n\
         else {{ Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }}\r\n\
     }}\r\n\
 }} else {{\r\n\
-    $ids = ($targets | ForEach-Object {{ \"'\" + $_.InstanceId + \"'\" }}) -join ','\r\n\
     $verbCmd = if ($action -eq 'enable') {{ 'Enable-PnpDevice' }} else {{ 'Disable-PnpDevice' }}\r\n\
-    $inner = \"foreach (`$id in @($ids)) {{ $verbCmd -InstanceId `$id -Confirm:`$false -ErrorAction SilentlyContinue }}\"\r\n\
-    Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$inner)\r\n\
+    $lines = $targets | ForEach-Object {{ \"$verbCmd -InstanceId '$($_.InstanceId)' -Confirm:`$false -ErrorAction SilentlyContinue\" }}\r\n\
+    Set-Content -Path '{}' -Value ($lines -join \"`r`n\") -Encoding UTF8\r\n\
+    Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
 }}\r\n",
-                action
+                action, elevated_str, elevated_str
             );
             if std::fs::write(&ps1_path, script.as_bytes()).is_ok() {
                 let _ = std::process::Command::new("powershell")
