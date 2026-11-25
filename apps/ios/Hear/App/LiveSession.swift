@@ -1601,6 +1601,7 @@ final class LiveSession: ObservableObject {
         isRunning = false
         meter.level = 0
         UIApplication.shared.isIdleTimerDisabled = false
+        muteGeneration += 1
         capture.muted = false
         translator.cancelPreview()
         cancelASRPreview()
@@ -1973,6 +1974,7 @@ final class LiveSession: ObservableObject {
                 CloudSync.shared.scheduleSync(delay: 1.5)
             }
         }
+        muteGeneration += 1
         capture.muted = false
         isRunning = false
         endLiveActivity()
@@ -2270,6 +2272,7 @@ final class LiveSession: ObservableObject {
         readingID = nil
         speakingID = nil
         if wasReading { speaker.stop() }
+        muteGeneration += 1
         capture.muted = false
         // 朗读停了：没在收音的话就把麦克风放开
         scheduleMicrophoneRelease()
@@ -2282,13 +2285,9 @@ final class LiveSession: ObservableObject {
         clonePipeline.allowRetry(item.id)
         stopReading()
         readIndex = i
-        // 扬声器模式 + 正在聆听时：由于 AudioCapture 与 Speaker 使用独立音频引擎，VoiceProcessingIO 无法完全抵消外放声；
-        // 点某句时记住位置，停止实时翻译后再读，避免外放译文被麦克风回采为新原文（戴耳机模式保持全双工直接朗读）。
-        if outputMode == .speaker && isRunning {
-            activity = "停止实时翻译后从这句开始朗读"
-            return
-        }
-        // 能连续读（戴耳机，或已停止聆听）就一直往后读；否则只读这一句
+        // 点读与自动朗读行为保持一致：扬声器模式下 speak() 会自动静音麦克风并在播完 400ms 后恢复，
+        // 戴耳机模式保持全双工直接朗读。
+        // 能连续读（自动朗读开、戴耳机，或已停止聆听）就一直往后读；否则只读这一句
         startReader(oneShot: !autoReadAllowed)
     }
 
@@ -2526,7 +2525,8 @@ final class LiveSession: ObservableObject {
         guard liveActive, isRunning, currentSeg > finishedSeg, partialSeg == currentSeg,
               let live else { return }
         let text = live.segmentText(currentSeg).text
-        guard SpeechTextFilter.isMeaningful(text) else { return }
+        guard SpeechTextFilter.isMeaningful(text),
+              !(outputMode == .speaker && isLikelySpokenEcho(text)) else { return }
         let src = (live.languageID == langB.id) ? langB : langA
         partialSource = src
         partial = text
@@ -3474,16 +3474,25 @@ final class LiveSession: ObservableObject {
             hearLog("朗读：这一句不用播了（切到后台或者被取消）", .info)
             return
         }
-        if mute { capture.muted = true }
+        var myMuteGen = 0
+        if mute {
+            muteGeneration += 1
+            myMuteGen = muteGeneration
+            capture.muted = true
+        }
         if outputMode == .speaker { recordSpokenTTS(text) }
         defer {
             if outputMode == .speaker { recordSpokenTTS(text) }
-            // 停播会清理静音；过期朗读不能解除新一轮朗读的静音。
-            // 手机外放结束后留 400ms 房间残响消散窗口再恢复麦克风，防止尾音被拾回。
-            if mute && token == playbackToken {
+            // 连续朗读多句时，必须核对 muteGeneration（每次关麦自增）：
+            // 若下一句已在 400ms 残响窗口内开始播放并再次关麦，旧句的延迟开麦回调直接作废，
+            // 彻底杜绝“第 2 句播到一半被第 1 句的定时器把麦打开”的回声漏洞。
+            if mute {
+                let expectedMuteGen = myMuteGen
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(nanoseconds: 400_000_000)
-                    guard let self, self.playbackToken == token else { return }
+                    guard let self,
+                          self.muteGeneration == expectedMuteGen,
+                          self.playbackToken == token else { return }
                     self.capture.muted = false
                 }
             }
@@ -3507,15 +3516,14 @@ final class LiveSession: ObservableObject {
         } else {
             await speaker.speak(SpeakRequest(text: text, locale: item.target.tts, pan: pan))
         }
-        if mute {
-            try? await Task.sleep(nanoseconds: 300_000_000)
-        }
     }
 
     // MARK: - 修改原文后重新翻译
 
-    /// 长按气泡改了原文：保存新原文，重新翻译并替换译文
-    /// 最近 10 秒内通过扬声器播报的译文队列，用于文本级回声兜底过滤（防止房间残响拖尾被复录为原文）
+    /// 每次外放关麦/主动开麦自增，用于防止连续朗读时上一句的 400ms 延迟开麦任务误开下一句的麦克风
+    private var muteGeneration = 0
+
+    /// 最近通过扬声器播报的译文队列，用于极短窗口（2.5s）的近完全一致回声兜底过滤
     private var recentSpokenTTS: [(text: String, at: Date)] = []
 
     private func recordSpokenTTS(_ text: String) {
@@ -3528,37 +3536,7 @@ final class LiveSession: ObservableObject {
     }
 
     private func isLikelySpokenEcho(_ recognized: String) -> Bool {
-        let now = Date()
-        func normalize(_ s: String) -> String {
-            s.unicodeScalars
-                .filter { CharacterSet.alphanumerics.contains($0) || CharacterSet.whitespaces.contains($0) }
-                .map { Character($0).lowercased() }
-                .joined()
-                .split(whereSeparator: \.isWhitespace)
-                .joined(separator: " ")
-        }
-        let a = normalize(recognized)
-        guard !a.isEmpty else { return false }
-        for entry in recentSpokenTTS where now.timeIntervalSince(entry.at) <= 10.0 {
-            let b = normalize(entry.text)
-            if b.isEmpty { continue }
-            if a == b || (a.count >= 4 && b.contains(a)) || (b.count >= 4 && a.contains(b)) {
-                return true
-            }
-            let aWords = a.split(separator: " ")
-            let bWords = Set(b.split(separator: " "))
-            if aWords.count >= 2 && !bWords.isEmpty {
-                let hits = aWords.filter { bWords.contains($0) }.count
-                if hits * 2 >= aWords.count { return true }
-            }
-            let aChars = a.filter { !$0.isWhitespace }
-            let bChars = Set(b.filter { !$0.isWhitespace })
-            if aChars.count >= 3 && !bChars.isEmpty {
-                let hits = aChars.filter { bChars.contains($0) }.count
-                if hits * 10 >= aChars.count * 6 { return true }
-            }
-        }
-        return false
+        SpeechTextFilter.isLikelySpokenEcho(recognized, recentSpoken: recentSpokenTTS)
     }
 
     /// 每一句的版本号：改了原文就 +1。

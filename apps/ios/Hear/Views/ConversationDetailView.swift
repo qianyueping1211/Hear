@@ -1,4 +1,25 @@
 import SwiftUI
+import UniformTypeIdentifiers
+
+/// 惰性生成导出文件（.md / .srt）：仅在用户点击分享时才拼装内容并写出临时文件，
+/// 避免每次界面刷新都重复拼接全文，同时确保分享到“文件”或剪辑软件时保留正确扩展名。
+private struct ExportTextFile: Transferable {
+    let filename: String
+    let buildContent: @Sendable () -> String
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(exportedContentType: .plainText) { item in
+            let safeName = item.filename
+                .replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: ":", with: "-")
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(safeName)
+            let data = Data(item.buildContent().utf8)
+            try data.write(to: url, options: .atomic)
+            return SentTransferredFile(url)
+        }
+    }
+}
 
 /// 历史对话详情：「对话」和「总结」两个标签
 struct ConversationDetailView: View {
@@ -72,17 +93,34 @@ struct ConversationDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if let conv, !conv.items.isEmpty {
+                let lang = session.chineseDisplayLanguage
+                let baseName = conv.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? "听见对话记录"
+                    : conv.title.trimmingCharacters(in: .whitespacesAndNewlines)
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        ShareLink(item: exportMarkdown(for: conv)) {
-                            Label("分享双语记录 (Markdown)", systemImage: "doc.richtext")
+                        ShareLink(
+                            item: ExportTextFile(filename: "\(baseName).md") {
+                                Self.exportMarkdown(for: conv, displayLanguage: lang)
+                            },
+                            preview: SharePreview("\(baseName).md")
+                        ) {
+                            Label("分享双语记录 (.md)", systemImage: "doc.richtext")
                         }
-                        ShareLink(item: exportSrt(for: conv)) {
-                            Label("分享字幕文本 (SRT)", systemImage: "captions.bubble")
+                        ShareLink(
+                            item: ExportTextFile(filename: "\(baseName).srt") {
+                                Self.exportSrt(for: conv, displayLanguage: lang)
+                            },
+                            preview: SharePreview("\(baseName).srt")
+                        ) {
+                            Label("分享字幕文件 (.srt)", systemImage: "captions.bubble")
                         }
                         if let content = record?.content, !content.isEmpty {
-                            ShareLink(item: content) {
-                                Label("分享当前总结", systemImage: "text.document")
+                            ShareLink(
+                                item: ExportTextFile(filename: "\(baseName)-纪要.md") { content },
+                                preview: SharePreview("\(baseName)-纪要.md")
+                            ) {
+                                Label("分享当前总结 (.md)", systemImage: "text.document")
                             }
                         }
                     } label: {
@@ -137,15 +175,20 @@ struct ConversationDetailView: View {
     private func reload() { conv = store.load(id) }
 
     /// 导出双语记录为 Markdown 文本，便于通过系统分享发送至微信、备忘录或文件
-    private func exportMarkdown(for c: Conversation) -> String {
-        let lang = session.chineseDisplayLanguage
+    private static func exportMarkdown(for c: Conversation, displayLanguage lang: ChineseDisplayLanguage) -> String {
         var lines: [String] = []
         let title = c.title.isEmpty ? "听见对话记录" : c.title
         lines.append("# \(title)")
         lines.append("")
+        func singleLine(_ s: String) -> String {
+            s.replacingOccurrences(of: "\r\n", with: " ")
+                .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\r", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         for item in c.items {
-            let src = item.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
-            let tr = item.displayedTranslation(using: lang).trimmingCharacters(in: .whitespacesAndNewlines)
+            let src = singleLine(item.sourceText)
+            let tr = singleLine(item.displayedTranslation(using: lang))
             if src.isEmpty && tr.isEmpty { continue }
             let ts = item.audioStartSec.map { formatMmSs($0) } ?? ""
             let spk = item.speakerLabel ?? ""
@@ -164,8 +207,7 @@ struct ConversationDetailView: View {
     }
 
     /// 导出双语记录为标准 SRT 字幕文本
-    private func exportSrt(for c: Conversation) -> String {
-        let lang = session.chineseDisplayLanguage
+    private static func exportSrt(for c: Conversation, displayLanguage lang: ChineseDisplayLanguage) -> String {
         var blocks: [String] = []
         var idx = 1
         var fallbackSec: Double = 0
@@ -185,12 +227,12 @@ struct ConversationDetailView: View {
         return blocks.joined(separator: "\n\n")
     }
 
-    private func formatMmSs(_ seconds: Double) -> String {
+    private static func formatMmSs(_ seconds: Double) -> String {
         let total = max(0, Int(seconds.rounded(.down)))
         return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
-    private func formatSrtTime(_ seconds: Double) -> String {
+    private static func formatSrtTime(_ seconds: Double) -> String {
         let ms = max(0, Int((seconds * 1000.0).rounded()))
         let h = ms / 3_600_000
         let m = (ms % 3_600_000) / 60_000

@@ -111,4 +111,60 @@ enum SpeechTextFilter {
         if raw.contains("*") || raw.contains("♪") { return false }      // 例如 “Burz*.”
         return true
     }
+
+    /// 扬声器外放文本级回声兜底过滤：
+    /// 仅拦截“极短时间窗口内（默认 2.5s）与刚播完的译文几乎完全一致”的复录，
+    /// 绝不用字符集/词袋/短子串匹配，避免把对方的正常短回复（如 "Sure"、"12点"）误判为回声。
+    static func isLikelySpokenEcho(
+        _ recognized: String,
+        recentSpoken: [(text: String, at: Date)],
+        now: Date = Date(),
+        window: TimeInterval = 2.5
+    ) -> Bool {
+        func normalize(_ s: String) -> String {
+            s.unicodeScalars
+                .filter { CharacterSet.alphanumerics.contains($0) }
+                .map { Character($0).lowercased() }
+                .joined()
+        }
+        let a = normalize(recognized)
+        guard !a.isEmpty else { return false }
+        for entry in recentSpoken {
+            let dt = now.timeIntervalSince(entry.at)
+            guard dt >= -0.5, dt <= window else { continue }
+            let b = normalize(entry.text)
+            guard !b.isEmpty else { continue }
+            if a == b { return true }
+            let minLen = min(a.count, b.count)
+            let maxLen = max(a.count, b.count)
+            guard minLen >= 8 else { continue }
+            let maxDist = max(1, Int(Double(maxLen) * 0.12))
+            if abs(a.count - b.count) <= maxDist, editDistance(a, b, limit: maxDist) <= maxDist {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func editDistance(_ s1: String, _ s2: String, limit: Int) -> Int {
+        let a = Array(s1)
+        let b = Array(s2)
+        if a.isEmpty { return b.count }
+        if b.isEmpty { return a.count }
+        var prev = Array(0...b.count)
+        var curr = Array(repeating: 0, count: b.count + 1)
+        for i in 1...a.count {
+            curr[0] = i
+            var rowMin = i
+            for j in 1...b.count {
+                let cost = a[i - 1] == b[j - 1] ? 0 : 1
+                let v = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+                curr[j] = v
+                if v < rowMin { rowMin = v }
+            }
+            if rowMin > limit { return limit + 1 }
+            swap(&prev, &curr)
+        }
+        return prev[b.count]
+    }
 }

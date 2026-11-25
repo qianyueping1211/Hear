@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var originalDraft = ""
     @State private var editingSpeaker: TranslationItem?
     @State private var showMenu = false          // 右上角 ⋯ 菜单
+    @State private var ipadSelectedConversationID: UUID?  // iPad 宽窄屏切换时保留当前选中的历史对话
 
     private var useIPadWorkbench: Bool {
         UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular
@@ -23,13 +24,68 @@ struct ContentView: View {
     var body: some View {
         Group {
             if useIPadWorkbench {
-                IPadWorkbenchView()
+                IPadWorkbenchView(
+                    selectedConversationID: $ipadSelectedConversationID,
+                    showSettings: $showSettings,
+                    showGlossary: $showGlossary,
+                    askNew: $askNew,
+                    noLLMAlert: $noLLMAlert,
+                    onEditSource: beginEditingSource,
+                    onEditSpeaker: { editingSpeaker = $0 }
+                )
             } else {
                 compactPhoneBody
             }
         }
-        // 用云端模型但本地网络权限没开：弹提示告诉用户去哪儿开。
-        // （挂在最外层容器上，iPad 横竖屏/分屏切换时不中断引导任务与翻译语言包准备）
+        // 所有弹窗、编辑浮层与引导任务都挂在最外层容器上，
+        // iPad 旋转 / 分屏 / Stage Manager 宽窄切换时不丢窗口、不丢编辑草稿、不中断翻译任务
+        .overlay {
+            if let id = editingID, let item = session.items.first(where: { $0.id == id }) {
+                SourceEditor(text: $draft, flag: item.source.flag,
+                             translation: item.displayedTranslation(using: session.chineseDisplayLanguage),
+                             targetFlag: item.displayedTranslationTarget.flag,
+                             onCancel: {
+                                 editingID = nil
+                             },
+                             onDone: {
+                                 if draft != originalDraft { session.editSource(id, to: draft) }
+                                 editingID = nil
+                             })
+            }
+        }
+        .sheet(isPresented: $showSettings) { SettingsView() }
+        .sheet(isPresented: $showHistory) { HistoryView() }
+        .sheet(isPresented: $showGlossary) { GlossaryView() }
+        .sheet(item: $editingSpeaker) { item in
+            let conversation = session.conversationID
+            SpeakerEditor(item: item, labels: session.items.speakerLabels) { change in
+                session.editSpeaker(in: conversation, itemID: item.id, change: change)
+            }
+        }
+        .confirmationDialog("是否需要把本页内容进行后台总结？", isPresented: $askNew, titleVisibility: .visible) {
+            Button("总结并新建") {
+                if llm.isReady {
+                    session.newConversation(summarize: true)
+                } else {
+                    session.newConversation(summarize: false)
+                    noLLMAlert = true
+                }
+                ipadSelectedConversationID = nil
+            }
+            Button("不总结，直接新建") {
+                session.newConversation(summarize: false)
+                ipadSelectedConversationID = nil
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("会用默认模板「高效会议纪要」生成报告，可以在 历史 → 总结 中查看和修改。本页内容都会保存在历史里。")
+        }
+        .alert("还没有配置大模型 API", isPresented: $noLLMAlert) {
+            Button("去设置") { showSettings = true }
+            Button("好", role: .cancel) {}
+        } message: {
+            Text("本页已保存到历史。配置好 API 后，可以在 历史 → 总结 里随时生成。")
+        }
         .localNetworkHelp($session.localNetworkHelp)
         .task { await session.bootstrap() }
         // 苹果自带模式：语言包没下载时，由系统弹出下载窗口
@@ -44,6 +100,13 @@ struct ContentView: View {
         }
     }
 
+    private func beginEditingSource(_ item: TranslationItem) {
+        let source = item.displayedSource(using: session.chineseDisplayLanguage)
+        draft = source
+        originalDraft = source
+        editingID = item.id
+    }
+
     private var compactPhoneBody: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -53,12 +116,10 @@ struct ContentView: View {
                 Group {
                     if session.phase == .ready || session.isLoadingPhase {
                         // 加载模型时也显示对话页。
-                        TranscriptView(onEdit: { item in
-                            let source = item.displayedSource(using: session.chineseDisplayLanguage)
-                            draft = source
-                            originalDraft = source
-                            editingID = item.id
-                        }, onSpeaker: { editingSpeaker = $0 })
+                        TranscriptView(
+                            onEdit: beginEditingSource,
+                            onSpeaker: { editingSpeaker = $0 }
+                        )
                             .overlay(alignment: .top) {
                                 if session.usingAppleTranslation, let note = session.appleNote {
                                     NotePill(text: note).padding(.top, 8)
@@ -104,49 +165,6 @@ struct ContentView: View {
                 }
             }
             .animation(.spring(duration: 0.28), value: showMenu)
-            .overlay {
-                if let id = editingID, let item = session.items.first(where: { $0.id == id }) {
-                    SourceEditor(text: $draft, flag: item.source.flag,
-                                 translation: item.displayedTranslation(using: session.chineseDisplayLanguage),
-                                 targetFlag: item.displayedTranslationTarget.flag,
-                                 onCancel: {
-                                     editingID = nil
-                                 },
-                                 onDone: {
-                                     if draft != originalDraft { session.editSource(id, to: draft) }
-                                     editingID = nil
-                                 })
-                }
-            }
-            .sheet(isPresented: $showSettings) { SettingsView() }
-            .sheet(isPresented: $showHistory) { HistoryView() }
-            .sheet(isPresented: $showGlossary) { GlossaryView() }
-            .sheet(item: $editingSpeaker) { item in
-                let conversation = session.conversationID
-                SpeakerEditor(item: item, labels: session.items.speakerLabels) { change in
-                    session.editSpeaker(in: conversation, itemID: item.id, change: change)
-                }
-            }
-            .confirmationDialog("是否需要把本页内容进行后台总结？", isPresented: $askNew, titleVisibility: .visible) {
-                Button("总结并新建") {
-                    if llm.isReady {
-                        session.newConversation(summarize: true)
-                    } else {
-                        session.newConversation(summarize: false)
-                        noLLMAlert = true
-                    }
-                }
-                Button("不总结，直接新建") { session.newConversation(summarize: false) }
-                Button("取消", role: .cancel) {}
-            } message: {
-                Text("会用默认模板「高效会议纪要」生成报告，可以在 历史 → 总结 中查看和修改。本页内容都会保存在历史里。")
-            }
-            .alert("还没有配置大模型 API", isPresented: $noLLMAlert) {
-                Button("去设置") { showSettings = true }
-                Button("好", role: .cancel) {}
-            } message: {
-                Text("本页已保存到历史。配置好 API 后，可以在 历史 → 总结 里随时生成。")
-            }
         }
     }
 

@@ -7,27 +7,49 @@ struct IPadWorkbenchView: View {
     @ObservedObject private var store = ConversationStore.shared
     @ObservedObject private var llm = LLMSettings.shared
 
+    /// 宽窄屏切换时保留的外部共享状态（由 ContentView 持有）
+    @Binding var selectedConversationID: UUID?
+    @Binding var showSettings: Bool
+    @Binding var showGlossary: Bool
+    @Binding var askNew: Bool
+    @Binding var noLLMAlert: Bool
+    var onEditSource: (TranslationItem) -> Void
+    var onEditSpeaker: (TranslationItem) -> Void
+
     private enum SidebarItem: Hashable {
         case live
         case conversation(UUID)
     }
 
-    @State private var selection: SidebarItem? = .live
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
     @State private var searchQuery = ""
-    @State private var showSummaryInspector = true
-    @State private var showSettings = false
-    @State private var showGlossary = false
-    @State private var askNew = false
-    @State private var noLLMAlert = false
-    @State private var editingID: UUID?
-    @State private var draft = ""
-    @State private var originalDraft = ""
-    @State private var editingSpeaker: TranslationItem?
+    @State private var showSummaryInspector = false
+    @State private var inspectorUserToggled = false
+    @State private var liveConv: Conversation?
+    @State private var selectedTemplateID = SummaryTemplate.defaultID
     @State private var renaming: ConversationMeta?
     @State private var newTitle = ""
     @State private var deleting: ConversationMeta?
     @State private var summaryCopied = false
+
+    private var sidebarSelection: Binding<SidebarItem?> {
+        Binding(
+            get: {
+                if let id = selectedConversationID {
+                    return .conversation(id)
+                }
+                return .live
+            },
+            set: { newValue in
+                switch newValue {
+                case .conversation(let id):
+                    selectedConversationID = id
+                case .live, .none:
+                    selectedConversationID = nil
+                }
+            }
+        )
+    }
 
     private var filteredMetas: [ConversationMeta] {
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -42,58 +64,14 @@ struct IPadWorkbenchView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebarContent
-                .navigationSplitViewColumnWidth(min: 250, ideal: 290, max: 350)
+                .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 340)
         } detail: {
             detailContent
         }
         .navigationSplitViewStyle(.balanced)
-        .sheet(isPresented: $showSettings) { SettingsView() }
-        .sheet(isPresented: $showGlossary) { GlossaryView() }
-        .sheet(item: $editingSpeaker) { item in
-            let conversation = session.conversationID
-            SpeakerEditor(item: item, labels: session.items.speakerLabels) { change in
-                session.editSpeaker(in: conversation, itemID: item.id, change: change)
-            }
-        }
-        .overlay {
-            if let id = editingID, let item = session.items.first(where: { $0.id == id }) {
-                SourceEditor(
-                    text: $draft,
-                    flag: item.source.flag,
-                    translation: item.displayedTranslation(using: session.chineseDisplayLanguage),
-                    targetFlag: item.displayedTranslationTarget.flag,
-                    onCancel: { editingID = nil },
-                    onDone: {
-                        if draft != originalDraft { session.editSource(id, to: draft) }
-                        editingID = nil
-                    }
-                )
-            }
-        }
-        .confirmationDialog("是否需要把本页内容进行后台总结？", isPresented: $askNew, titleVisibility: .visible) {
-            Button("总结并新建") {
-                if llm.isReady {
-                    session.newConversation(summarize: true)
-                } else {
-                    session.newConversation(summarize: false)
-                    noLLMAlert = true
-                }
-                selection = .live
-            }
-            Button("不总结，直接新建") {
-                session.newConversation(summarize: false)
-                selection = .live
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("会用默认模板「高效会议纪要」生成报告，之后可在左侧历史或右侧纪要栏查看和编辑。")
-        }
-        .alert("还没有配置大模型 API", isPresented: $noLLMAlert) {
-            Button("去设置") { showSettings = true }
-            Button("好", role: .cancel) {}
-        } message: {
-            Text("本页已保存到历史。配置好大模型 API 后，即可一键生成结构化会议纪要。")
-        }
+        .onAppear { reloadLiveConversation() }
+        .onChange(of: store.revision) { _, _ in reloadLiveConversation() }
+        .onChange(of: session.conversationID) { _, _ in reloadLiveConversation() }
         .alert("重命名对话", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("对话名称", text: $newTitle)
             Button("取消", role: .cancel) { renaming = nil }
@@ -102,15 +80,14 @@ struct IPadWorkbenchView: View {
                 renaming = nil
             }
         }
-        .confirmationDialog(
+        .alert(
             "删除这段对话？",
             isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
-            titleVisibility: .visible,
             presenting: deleting
         ) { m in
             Button("删除「\(m.title)」", role: .destructive) {
                 let deletingActive = (m.id == session.conversationID)
-                if selection == .conversation(m.id) { selection = .live }
+                if selectedConversationID == m.id { selectedConversationID = nil }
                 store.delete(m.id)
                 if deletingActive { session.clearPage() }
             }
@@ -120,10 +97,18 @@ struct IPadWorkbenchView: View {
         }
     }
 
+    private func reloadLiveConversation() {
+        let loaded = store.load(session.conversationID)
+        liveConv = loaded
+        if let activeID = loaded?.activeTemplateID {
+            selectedTemplateID = activeID
+        }
+    }
+
     // MARK: - 左侧边栏（实时入口 + 历史列表 + 设置）
 
     private var sidebarContent: some View {
-        List(selection: $selection) {
+        List(selection: sidebarSelection) {
             Section {
                 HStack(spacing: 10) {
                     Image(systemName: session.isRunning ? "waveform.circle.fill" : "mic.circle.fill")
@@ -192,7 +177,8 @@ struct IPadWorkbenchView: View {
                 } label: {
                     Image(systemName: "square.and.pencil")
                 }
-                .help("新建对话")
+                .keyboardShortcut("n", modifiers: .command)
+                .help("新建对话 (⌘N)")
             }
             ToolbarItemGroup(placement: .bottomBar) {
                 Button { showGlossary = true } label: {
@@ -202,6 +188,7 @@ struct IPadWorkbenchView: View {
                 Button { showSettings = true } label: {
                     Label("设置", systemImage: "gearshape")
                 }
+                .keyboardShortcut(",", modifiers: .command)
             }
         }
     }
@@ -210,108 +197,114 @@ struct IPadWorkbenchView: View {
 
     @ViewBuilder
     private var detailContent: some View {
-        switch selection ?? .live {
-        case .live:
-            liveWorkbench
-        case .conversation(let convID):
+        if let convID = selectedConversationID {
             ConversationDetailView(id: convID)
                 .id(convID)
+        } else {
+            liveWorkbench
         }
     }
 
     private var liveWorkbench: some View {
-        HStack(spacing: 0) {
-            // 中间实时双语翻译区
-            VStack(spacing: 0) {
-                workbenchHeader
-                Divider()
-                Group {
-                    if session.phase == .ready || session.isLoadingPhase {
-                        TranscriptView(
-                            onEdit: { item in
-                                let source = item.displayedSource(using: session.chineseDisplayLanguage)
-                                draft = source
-                                originalDraft = source
-                                editingID = item.id
-                            },
-                            onSpeaker: { editingSpeaker = $0 }
-                        )
-                        .frame(maxWidth: 880)
-                        .frame(maxWidth: .infinity)
-                        .overlay(alignment: .top) {
-                            if session.usingAppleTranslation, let note = session.appleNote {
-                                NotePill(text: note).padding(.top, 8)
+        GeometryReader { geo in
+            // 仅当详情区宽度足够（如横屏 / 13 寸 iPad）时默认展开右侧纪要栏，
+            // 避免 11 寸竖屏或 2/3 分屏下中间字幕区被挤压
+            let canFitSideBySide = geo.size.width >= 760
+            let inspectorWidth: CGFloat = geo.size.width >= 960 ? 330 : 285
+
+            HStack(spacing: 0) {
+                // 中间实时双语翻译区
+                VStack(spacing: 0) {
+                    workbenchHeader
+                    Divider()
+                    Group {
+                        if session.phase == .ready || session.isLoadingPhase {
+                            TranscriptView(
+                                onEdit: onEditSource,
+                                onSpeaker: onEditSpeaker
+                            )
+                            .frame(maxWidth: 880)
+                            .frame(maxWidth: .infinity)
+                            .overlay(alignment: .top) {
+                                if session.usingAppleTranslation, let note = session.appleNote {
+                                    NotePill(text: note).padding(.top, 8)
+                                }
+                            }
+                        } else {
+                            SetupView()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    Divider()
+                        .overlay {
+                            let loading = session.loadingHint
+                            if let hint = loading ?? session.modelReadyHint {
+                                ModelStatusPill(text: hint, isLoading: loading != nil)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .allowsHitTesting(false)
                             }
                         }
-                    } else {
-                        SetupView()
-                    }
+                        .zIndex(1)
+
+                    ControlBar()
+                        .frame(maxWidth: 680)
+                        .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .ignoresSafeArea(.keyboard, edges: .bottom)
 
-                Divider()
-                    .overlay {
-                        let loading = session.loadingHint
-                        if let hint = loading ?? session.modelReadyHint {
-                            ModelStatusPill(text: hint, isLoading: loading != nil)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .allowsHitTesting(false)
-                        }
-                    }
-                    .zIndex(1)
-
-                ControlBar()
-                    .frame(maxWidth: 680)
-                    .frame(maxWidth: .infinity)
+                // 右侧会议纪要面板（参考 Windows 桌面端右侧总结栏）
+                if showSummaryInspector {
+                    Divider()
+                    liveSummaryInspector
+                        .frame(width: inspectorWidth)
+                        .background(Color(.secondarySystemGroupedBackground))
+                }
             }
-            .ignoresSafeArea(.keyboard, edges: .bottom)
-
-            // 右侧会议纪要面板（参考 Windows 桌面端右侧总结栏）
-            if showSummaryInspector {
-                Divider()
-                liveSummaryInspector
-                    .frame(width: 330)
-                    .background(Color(.secondarySystemGroupedBackground))
+            .onAppear {
+                if !inspectorUserToggled {
+                    showSummaryInspector = canFitSideBySide
+                }
+            }
+            .onChange(of: canFitSideBySide) { _, fits in
+                if !inspectorUserToggled {
+                    showSummaryInspector = fits
+                }
             }
         }
         .toolbar(.hidden, for: .navigationBar)
     }
 
-    /// 顶部桌面风格工具栏：语言切换 + 自动朗读 + 声音克隆 + 纪要面板开关
+    /// 顶部桌面风格工具栏：侧边栏开关 + 语言切换 + 声音克隆 + 清空 + 纪要面板开关
+    /// （自动朗读已在底部 ControlBar 左下角 SpeakToggle 提供，此处不再重复占用宽度）
     private var workbenchHeader: some View {
         HStack(spacing: 10) {
-            if columnVisibility == .detailOnly {
-                Button {
-                    withAnimation { columnVisibility = .all }
-                } label: {
-                    Image(systemName: "sidebar.left")
-                        .font(.subheadline.weight(.medium))
-                        .padding(8)
-                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
-                }
-                .help("展开左侧历史栏")
-            }
-
-            LanguageBar()
-                .frame(maxWidth: 360)
-
-            Spacer(minLength: 8)
-
-            // 自动朗读快捷开关
             Button {
-                session.speakOutput.toggle()
+                withAnimation {
+                    columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+                }
             } label: {
-                Label("自动朗读", systemImage: session.speakOutput ? "speaker.wave.2.fill" : "speaker.slash")
-                    .font(.caption.weight(.medium))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        session.speakOutput ? Color.green.opacity(0.16) : Color(.secondarySystemBackground),
-                        in: Capsule()
-                    )
-                    .foregroundStyle(session.speakOutput ? .green : .secondary)
+                Image(systemName: "sidebar.left")
+                    .font(.subheadline.weight(.medium))
+                    .padding(8)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
             }
             .buttonStyle(.plain)
+            .help("展开/收起左侧历史栏")
+
+            HStack(spacing: 8) {
+                LanguageMenu(selection: $session.langA)
+                Button { session.swapLanguages() } label: {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                LanguageMenu(selection: $session.langB)
+            }
+            .frame(maxWidth: 320)
+
+            Spacer(minLength: 6)
 
             // 声音克隆快捷开关
             Button {
@@ -319,6 +312,7 @@ struct IPadWorkbenchView: View {
             } label: {
                 Label("声音克隆", systemImage: "waveform.badge.mic")
                     .font(.caption.weight(.medium))
+                    .fixedSize()
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(
@@ -344,6 +338,7 @@ struct IPadWorkbenchView: View {
 
             // 展开/收起右侧会议纪要栏
             Button {
+                inspectorUserToggled = true
                 withAnimation(.easeInOut(duration: 0.2)) {
                     showSummaryInspector.toggle()
                 }
@@ -358,19 +353,20 @@ struct IPadWorkbenchView: View {
                     .foregroundStyle(showSummaryInspector ? Color.accentColor : .primary)
             }
             .buttonStyle(.plain)
-            .help(showSummaryInspector ? "收起会议纪要栏" : "展开会议纪要栏")
+            .keyboardShortcut("\\", modifiers: .command)
+            .help(showSummaryInspector ? "收起会议纪要栏 (⌘\\)" : "展开会议纪要栏 (⌘\\)")
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(.bar)
     }
 
-    // MARK: - 右侧实时会议纪要面板
+    // MARK: - 右侧实时会议纪要面板（使用 @State liveConv 缓存，不随实时字幕重绘反复读盘）
 
     private var liveSummaryInspector: some View {
-        let conv = store.load(session.conversationID)
-        let activeTemplate = SummaryTemplate.find(conv?.activeTemplateID ?? SummaryTemplate.defaultID)
-        let record = conv?.summaries[activeTemplate.id]
+        let activeTemplate = SummaryTemplate.find(liveConv?.activeTemplateID ?? selectedTemplateID)
+        let record = liveConv?.summaries[activeTemplate.id]
+        let hasDoneSummary = (record?.status == .done && !(record?.content.isEmpty ?? true))
 
         return VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -407,12 +403,15 @@ struct IPadWorkbenchView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    // 模板选择与一键生成
+                    // 模板选择与一键生成/更新
                     HStack {
                         Menu {
                             ForEach(SummaryTemplate.all) { t in
                                 Button {
+                                    selectedTemplateID = t.id
+                                    session.persist()
                                     store.setActiveTemplate(session.conversationID, templateID: t.id)
+                                    reloadLiveConversation()
                                 } label: {
                                     if t.id == activeTemplate.id {
                                         Label(t.title, systemImage: "checkmark")
@@ -425,6 +424,7 @@ struct IPadWorkbenchView: View {
                             HStack(spacing: 4) {
                                 Text(activeTemplate.title)
                                     .font(.caption.weight(.medium))
+                                    .lineLimit(1)
                                 Image(systemName: "chevron.down")
                                     .font(.caption2)
                             }
@@ -437,6 +437,9 @@ struct IPadWorkbenchView: View {
 
                         Button {
                             if llm.isReady {
+                                // 先同步落盘，确保刚说完的第一句也能立即触发总结
+                                session.persist()
+                                reloadLiveConversation()
                                 SummaryService.shared.generate(
                                     conversationID: session.conversationID,
                                     templateID: activeTemplate.id
@@ -446,10 +449,13 @@ struct IPadWorkbenchView: View {
                             }
                         } label: {
                             Label(
-                                record?.status == .generating ? "生成中…" : "生成纪要",
-                                systemImage: "wand.and.stars"
+                                record?.status == .generating
+                                    ? "生成中…"
+                                    : (hasDoneSummary ? "更新纪要" : "生成纪要"),
+                                systemImage: hasDoneSummary ? "arrow.clockwise" : "wand.and.stars"
                             )
                             .font(.caption.weight(.medium))
+                            .fixedSize()
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
@@ -459,13 +465,19 @@ struct IPadWorkbenchView: View {
                     if let record {
                         switch record.status {
                         case .generating:
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text("正在整理当前对话纪要…")
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 8) {
+                                    ProgressView().controlSize(.small)
+                                    Text("正在整理当前对话纪要…")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if !record.content.isEmpty {
+                                    MarkdownView(text: record.content)
+                                        .textSelection(.enabled)
+                                }
                             }
-                            .padding(.top, 12)
+                            .padding(.top, 8)
                         case .failed:
                             Text(record.error ?? "总结生成失败，请检查大模型 API 配置后重试。")
                                 .font(.footnote)
@@ -506,7 +518,7 @@ struct IPadWorkbenchView: View {
             askNew = true
         } else {
             session.newConversation(summarize: false)
-            selection = .live
+            selectedConversationID = nil
         }
     }
 }

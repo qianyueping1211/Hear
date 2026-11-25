@@ -61,6 +61,7 @@ struct SessionJobQueueTests {
         testClonePlaybackGain()
         testChineseDisplayLanguage()
         testConversationMerge()
+        testSpokenEchoFilter()
         print("Session queue regressions passed")
     }
 
@@ -681,4 +682,51 @@ private func testZipVoiceArchive() throws {
         try ZipVoiceArchive.extract(archive, into: model, root: "root", modelFiles: [])
         preconditionFailure("Unsafe archive path was accepted")
     } catch ZipVoiceArchive.Failure.invalidArchive { }
+}
+
+private func testSpokenEchoFilter() {
+    let now = Date()
+    // 1. 正常回复绝对不能被误判为回声（覆盖字符集/子串误杀的 4 组经典用例）
+    let normalPairs: [(spoken: String, reply: String)] = [
+        ("Would you like some coffee?", "Sure"),
+        ("How much does this cost?", "Where is the station"),
+        ("Muchas gracias por su ayuda", "Gracias"),
+        ("明天12点在门口等你", "12点"),
+        ("明天上午十点在会议室开会", "好的没问题"),
+    ]
+    for pair in normalPairs {
+        let recent = [(text: pair.spoken, at: now.addingTimeInterval(-1.0))]
+        precondition(
+            !SpeechTextFilter.isLikelySpokenEcho(pair.reply, recentSpoken: recent, now: now),
+            "Normal reply '\(pair.reply)' was wrongly dropped as echo of '\(pair.spoken)'"
+        )
+    }
+
+    // 2. 2.5 秒窗口内完全一致或极近一致（<= 12% 编辑距离）的复录应当被拦截
+    precondition(
+        SpeechTextFilter.isLikelySpokenEcho(
+            "Would you like some coffee",
+            recentSpoken: [(text: "Would you like some coffee?", at: now.addingTimeInterval(-0.8))],
+            now: now
+        ),
+        "Exact echo within window should be filtered"
+    )
+    precondition(
+        SpeechTextFilter.isLikelySpokenEcho(
+            "明天12点在门口等",
+            recentSpoken: [(text: "明天12点在门口等你。", at: now.addingTimeInterval(-1.2))],
+            now: now
+        ),
+        "Near-identical echo within window should be filtered"
+    )
+
+    // 3. 超过 2.5 秒窗口后，即便复述同一句也不应再误杀
+    precondition(
+        !SpeechTextFilter.isLikelySpokenEcho(
+            "Would you like some coffee?",
+            recentSpoken: [(text: "Would you like some coffee?", at: now.addingTimeInterval(-3.5))],
+            now: now
+        ),
+        "Expired echo entry (>2.5s) should not filter new speech"
+    )
 }

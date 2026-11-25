@@ -1079,7 +1079,8 @@ actor CloudClient {
         try await transcribe(samples: samples, candidates: candidates, fallback: fallback, preview: false)
     }
 
-    /// 从用户术语表提取左值原词并做 UTF-8 百分号编码，随 X-ASR-Hotwords 传给服务端 Whisper 精修
+    /// 从用户术语表提取原词别名并做 UTF-8 百分号编码，随 X-ASR-Hotwords 传给服务端 Whisper 精修
+    /// 与翻译提示词共用 PromptBuilder.parseGlossary，确保「原文=译文」及「别名1|别名2=译文」解析规则完全一致
     private func encodedGlossaryHotwords() -> String? {
         guard let raw = UserDefaults.standard.string(forKey: "glossary"), !raw.isEmpty else {
             return nil
@@ -1087,21 +1088,17 @@ actor CloudClient {
         var seen = Set<String>()
         var terms: [String] = []
         var totalChars = 0
-        for line in raw.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
-            let term: String
-            if let eq = trimmed.firstIndex(where: { $0 == "=" || $0 == "＝" || $0 == ":" }) {
-                term = String(trimmed[..<eq]).trimmingCharacters(in: .whitespacesAndNewlines)
-            } else {
-                term = trimmed
+        for entry in PromptBuilder.parseGlossary(raw) {
+            for alias in entry.aliases {
+                let term = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !term.isEmpty else { continue }
+                let key = term.lowercased()
+                guard seen.insert(key).inserted else { continue }
+                if terms.count >= 32 || totalChars + term.count > 400 { break }
+                totalChars += term.count + 2
+                terms.append(term)
             }
-            guard !term.isEmpty else { continue }
-            let key = term.lowercased()
-            guard seen.insert(key).inserted else { continue }
-            if terms.count >= 32 || totalChars + term.count > 400 { break }
-            totalChars += term.count + 2
-            terms.append(term)
+            if terms.count >= 32 || totalChars > 400 { break }
         }
         guard !terms.isEmpty else { return nil }
         return terms.joined(separator: ", ").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
