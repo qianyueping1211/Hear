@@ -1229,6 +1229,8 @@ export function SettingsModal() {
                   const hasHiFiCable = Boolean(vcStatus?.hasHifiCable) || Boolean(liveHiFi);
                   const lockedVbId = liveVb?.id || "CABLE Input (VB-Audio Virtual Cable)";
                   const lockedHiFiId = liveHiFi?.id || "Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)";
+                  const displayVbName = "CABLE Input (VB-Audio Virtual Cable)";
+                  const displayHiFiName = "CABLE Output (VB-Audio Hi-Fi Cable)";
                   const loopbackEnabled = Boolean(ttsSettings.meetingLoopbackDeviceId);
                   const micEnabled = Boolean(ttsSettings.meetingMicOutputDeviceId);
                   const installedCount = (hasVbCable ? 1 : 0) + (hasHiFiCable ? 1 : 0);
@@ -1304,7 +1306,7 @@ export function SettingsModal() {
                           )}
                         </div>
                         <div className="text-[11px] text-slate-300 font-mono truncate">
-                          {lockedVbId}
+                          {displayVbName}
                         </div>
                         <div className="text-[11px] text-slate-400">
                           会议软件「扬声器」固定选 CABLE Input，耳机里就只听译文（关闭则保留原声并在朗读时自动调小）。
@@ -1356,7 +1358,7 @@ export function SettingsModal() {
                           )}
                         </div>
                         <div className="text-[11px] text-slate-300 font-mono truncate">
-                          {lockedHiFiId}
+                          {displayHiFiName}
                         </div>
                         <div className="text-[11px] text-slate-400">
                           会议软件「麦克风」固定选 Hi-Fi Cable Output，对方就只听你的译文。
