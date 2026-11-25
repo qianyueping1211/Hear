@@ -4,12 +4,14 @@ import {
   ArrowDownCircle,
   ArrowLeft,
   ArrowUpCircle,
+  AudioLines,
   Calendar,
   Check,
   Clock,
   Copy,
   Download,
   FileAudio,
+  Headphones,
   History,
   Info,
   Loader2,
@@ -475,7 +477,7 @@ export function MainApp() {
             : "bg-surface-800 border-white/10 text-slate-400 hover:text-white hover:bg-white/5"
         }`}
       >
-        <Volume2 className="w-3.5 h-3.5" />
+        <AudioLines className="w-3.5 h-3.5" />
         <span>声音克隆</span>
       </button>
 
@@ -500,6 +502,7 @@ export function MainApp() {
             : "bg-surface-800 border-white/10 text-slate-400 hover:text-white hover:bg-white/5"
         }`}
       >
+        <Headphones className="w-3.5 h-3.5" />
         <span>会议同传</span>
       </button>
 
