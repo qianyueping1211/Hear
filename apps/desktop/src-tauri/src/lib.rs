@@ -2221,8 +2221,11 @@ try { [HearAudioNorm]::Run($enableFlag) } catch {}
 async fn install_vb_cable() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let norm_ps1 = std::env::temp_dir().join("hear_norm_vbaudio.ps1");
-        let _ = std::fs::write(&norm_ps1, format!("\u{FEFF}{}", NORMALIZE_VB_AUDIO_ENDPOINTS_PS).as_bytes());
+        let norm_ps1 = std::env::temp_dir().join("hear_norm_vbaudio_init.ps1");
+        let _ = std::fs::write(
+            &norm_ps1,
+            format!("\u{FEFF}$env:HEAR_VC_ENABLE = '0'\r\n{}", NORMALIZE_VB_AUDIO_ENDPOINTS_PS).as_bytes(),
+        );
         let norm_str = norm_ps1.to_string_lossy().replace('\'', "''");
         let script = format!("\u{FEFF}$ErrorActionPreference = 'Stop'\r\n\
 Write-Host '=== 正在准备 VB-Cable 虚拟声卡安装程序（会议同传专用）===' -ForegroundColor Cyan\r\n\
@@ -2249,9 +2252,9 @@ try {{\r\n\
     Write-Host '请在弹出的 VB-Cable 窗口中点击 [Install Driver]，完成后会自动规范化名称并隐藏 16ch 端口。' -ForegroundColor Yellow\r\n\
     Start-Process -FilePath $setup.FullName -Verb RunAs -Wait\r\n\
     Start-Sleep -Seconds 2\r\n\
-    Write-Host '正在自动禁用多余的 CABLE In 16ch 并固定命名为 CABLE Input...' -ForegroundColor Cyan\r\n\
+    Write-Host '正在自动规范化名称并设为待命禁用状态（开始会议同传录音时自动启用）...' -ForegroundColor Cyan\r\n\
     Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
-    Write-Host '安装与规范化已完成，窗口将在 3 秒后自动关闭...' -ForegroundColor Green\r\n\
+    Write-Host '安装与初始化已完成，窗口将在 3 秒后自动关闭...' -ForegroundColor Green\r\n\
     Start-Sleep -Seconds 3\r\n\
 }} catch {{\r\n\
     Write-Host \"自动下载或启动安装失败：$($_.Exception.Message)\" -ForegroundColor Red\r\n\
@@ -2289,8 +2292,11 @@ try {{\r\n\
 async fn install_hifi_cable() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let norm_ps1 = std::env::temp_dir().join("hear_norm_vbaudio.ps1");
-        let _ = std::fs::write(&norm_ps1, format!("\u{FEFF}{}", NORMALIZE_VB_AUDIO_ENDPOINTS_PS).as_bytes());
+        let norm_ps1 = std::env::temp_dir().join("hear_norm_vbaudio_init.ps1");
+        let _ = std::fs::write(
+            &norm_ps1,
+            format!("\u{FEFF}$env:HEAR_VC_ENABLE = '0'\r\n{}", NORMALIZE_VB_AUDIO_ENDPOINTS_PS).as_bytes(),
+        );
         let norm_str = norm_ps1.to_string_lossy().replace('\'', "''");
         let script = format!("\u{FEFF}$ErrorActionPreference = 'Stop'\r\n\
 Write-Host '=== 正在准备第 2 路虚拟声卡：VB-Audio Hi-Fi Cable ===' -ForegroundColor Cyan\r\n\
@@ -2316,9 +2322,9 @@ try {{\r\n\
     Write-Host '请在弹出窗口点击 [Install]，完成后会自动将名称固定为 CABLE Output。' -ForegroundColor Yellow\r\n\
     Start-Process -FilePath $setup.FullName -Verb RunAs -Wait\r\n\
     Start-Sleep -Seconds 2\r\n\
-    Write-Host '正在自动将 Hi-Fi Cable 端点命名为 CABLE Output...' -ForegroundColor Cyan\r\n\
+    Write-Host '正在自动将 Hi-Fi Cable 端点命名为 CABLE Output 并设为待命禁用状态...' -ForegroundColor Cyan\r\n\
     Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
-    Write-Host '安装与规范化已完成，窗口将在 3 秒后自动关闭...' -ForegroundColor Green\r\n\
+    Write-Host '安装与初始化已完成，窗口将在 3 秒后自动关闭...' -ForegroundColor Green\r\n\
     Start-Sleep -Seconds 3\r\n\
 }} catch {{\r\n\
     Write-Host \"自动下载或启动安装失败：$($_.Exception.Message)\" -ForegroundColor Red\r\n\
