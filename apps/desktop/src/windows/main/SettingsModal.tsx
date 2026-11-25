@@ -256,6 +256,30 @@ export function SettingsModal() {
     }
   }, [settingsOpen, hydrated, activeSettingsTab, testServiceConnection]);
 
+  const [vcStatus, setVcStatus] = useState<{
+    hasVbCable: boolean;
+    hasHiFiCable: boolean;
+  } | null>(null);
+
+  const refreshVirtualCableStatus = async () => {
+    await refreshOutputDevices();
+    try {
+      const st = await invoke<{
+        hasVbCable: boolean;
+        hasHiFiCable: boolean;
+      }>("get_virtual_cable_install_status");
+      if (st) setVcStatus(st);
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    if (settingsOpen && activeSettingsTab === "audio") {
+      void refreshVirtualCableStatus();
+    }
+  }, [settingsOpen, activeSettingsTab]);
+
   if (!settingsOpen) return null;
 
   const tabs: { id: typeof activeSettingsTab; label: string; icon: React.ReactNode }[] = [
@@ -1191,16 +1215,21 @@ export function SettingsModal() {
                     standardVirtuals.length > 0
                       ? standardVirtuals
                       : outputDevices.filter((d) => d.isVirtual);
-                  const hasHiFiCable = virtualDevices.some((d) =>
-                    d.name.toLowerCase().includes("hi-fi")
-                  );
-                  const hasVbCable = virtualDevices.some((d) => {
-                    const lower = d.name.toLowerCase();
-                    return (
-                      lower.includes("vb-audio virtual cable") ||
-                      (lower.includes("cable input") && !lower.includes("hi-fi"))
+                  const hasHiFiCable =
+                    Boolean(vcStatus?.hasHiFiCable) ||
+                    virtualDevices.some((d) =>
+                      d.name.toLowerCase().includes("hi-fi")
                     );
-                  });
+                  const hasVbCable =
+                    Boolean(vcStatus?.hasVbCable) ||
+                    virtualDevices.some((d) => {
+                      const lower = d.name.toLowerCase();
+                      return (
+                        lower.includes("vb-audio virtual cable") ||
+                        (lower.includes("cable input") && !lower.includes("hi-fi"))
+                      );
+                    });
+                  const installedCount = (hasVbCable ? 1 : 0) + (hasHiFiCable ? 1 : 0);
                   return (
                   <div className="pt-3 space-y-3 border-t border-white/10">
                     <div className="flex items-center justify-between">
@@ -1208,9 +1237,9 @@ export function SettingsModal() {
                         <span className="text-xs font-medium text-slate-200">
                           虚拟声卡（会议同传）
                         </span>
-                        {virtualDevices.length > 0 ? (
+                        {installedCount > 0 ? (
                           <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-medium">
-                            已检测到 {virtualDevices.length} 路
+                            已安装 {installedCount} 路
                           </span>
                         ) : (
                           <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-medium">
@@ -1220,7 +1249,7 @@ export function SettingsModal() {
                       </div>
                       <button
                         type="button"
-                        onClick={() => void refreshOutputDevices()}
+                        onClick={() => void refreshVirtualCableStatus()}
                         className="px-2.5 py-1 rounded bg-surface-900 border border-white/10 hover:bg-surface-700 text-[11px] text-slate-300"
                       >
                         刷新虚拟声卡
@@ -1290,7 +1319,7 @@ export function SettingsModal() {
 
                       {!hasVbCable && !hasHiFiCable ? (
                         <div className="rounded-lg bg-amber-500/10 border border-amber-400/30 p-2.5 text-[11px] text-amber-200 flex flex-wrap items-center justify-between gap-2">
-                          <span>未检测到虚拟声卡（VB-Cable / Hi-Fi Cable），可按需分别安装。</span>
+                          <span>未检测到虚拟声卡，点击一键自动下载并启动安装。</span>
                           <div className="flex flex-wrap items-center gap-2">
                             <button
                               type="button"
@@ -1309,17 +1338,6 @@ export function SettingsModal() {
                               className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/35 border border-amber-400/50 text-amber-100 font-medium transition"
                             >
                               安装 Hi-Fi Cable
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                void invoke("open_github_url", {
-                                  url: "https://vb-audio.com/Cable/",
-                                }).catch(() => {});
-                              }}
-                              className="px-2.5 py-1 rounded-md bg-surface-900/80 hover:bg-surface-800 border border-white/15 text-slate-200 transition"
-                            >
-                              官网下载
                             </button>
                           </div>
                         </div>
@@ -1345,7 +1363,7 @@ export function SettingsModal() {
                         </div>
                       ) : (
                         <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200">
-                          已就绪 2 路独立虚拟声卡（VB-Cable + Hi-Fi Cable），上下分别选择即可双向只听译文。
+                          已安装 2 路虚拟声卡（VB-Cable + Hi-Fi Cable），开启会议同传并开始录音后自动启用。
                         </div>
                       )}
                     </div>

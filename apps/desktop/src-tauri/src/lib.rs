@@ -2198,6 +2198,71 @@ try {\r\n\
     }
 }
 
+/// 检测系统中是否已安装 VB-Cable 与 Hi-Fi Cable（即使当前因未录音而被系统禁用，也能准确识别为已安装）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VirtualCableInstallStatus {
+    has_vb_cable: bool,
+    has_hifi_cable: bool,
+    vb_cable_enabled: bool,
+    hifi_cable_enabled: bool,
+}
+
+#[tauri::command]
+async fn get_virtual_cable_install_status() -> Result<VirtualCableInstallStatus, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let res = tokio::task::spawn_blocking(move || {
+            use std::os::windows::process::CommandExt;
+            let script = r#"
+$devs = @(Get-PnpDevice -Class MEDIA -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -match 'VB-Audio' })
+$vb = @($devs | Where-Object { $_.FriendlyName -match 'Virtual Cable' -and ($_.Status -eq 'OK' -or $_.Problem -eq 'CM_PROB_DISABLED' -or $_.Problem -eq 22) })
+$hifi = @($devs | Where-Object { $_.FriendlyName -match 'Hi-Fi Cable' -and ($_.Status -eq 'OK' -or $_.Problem -eq 'CM_PROB_DISABLED' -or $_.Problem -eq 22) })
+$out = @{
+    hasVbCable = ($vb.Count -gt 0)
+    hasHiFiCable = ($hifi.Count -gt 0)
+    vbCableEnabled = (@($vb | Where-Object { $_.Status -eq 'OK' }).Count -gt 0)
+    hifiCableEnabled = (@($hifi | Where-Object { $_.Status -eq 'OK' }).Count -gt 0)
+}
+$out | ConvertTo-Json -Compress
+"#;
+            let output = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", script])
+                .creation_flags(0x0800_0000)
+                .output();
+            if let Ok(out) = output {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(text.trim()) {
+                    return VirtualCableInstallStatus {
+                        has_vb_cable: v["hasVbCable"].as_bool().unwrap_or(false),
+                        has_hifi_cable: v["hasHiFiCable"].as_bool().unwrap_or(false),
+                        vb_cable_enabled: v["vbCableEnabled"].as_bool().unwrap_or(false),
+                        hifi_cable_enabled: v["hifiCableEnabled"].as_bool().unwrap_or(false),
+                    };
+                }
+            }
+            VirtualCableInstallStatus {
+                has_vb_cable: false,
+                has_hifi_cable: false,
+                vb_cable_enabled: false,
+                hifi_cable_enabled: false,
+            }
+        })
+        .await
+        .map_err(|e| format!("检测虚拟声卡状态异常：{}", e))?;
+        return Ok(res);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(VirtualCableInstallStatus {
+            has_vb_cable: false,
+            has_hifi_cable: false,
+            vb_cable_enabled: false,
+            hifi_cable_enabled: false,
+        })
+    }
+}
+
 /// 在 Windows 系统层面启用/禁用 VB-Audio 虚拟声卡设备（VB-Audio Virtual Cable / Hi-Fi Cable），
 /// 确保仅在「会议同传 + 正在录音」期间出现在电脑声音列表中，停止录音或面对面模式自动禁用。
 #[tauri::command]
@@ -3151,6 +3216,7 @@ pub fn run() {
             speak_text_sapi,
             install_vb_cable,
             install_hifi_cable,
+            get_virtual_cable_install_status,
             set_virtual_cables_os_enabled,
             generate_summary,
             save_summary_markdown,
