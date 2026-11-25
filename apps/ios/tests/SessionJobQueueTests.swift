@@ -693,6 +693,10 @@ private func testSpokenEchoFilter() {
         ("Muchas gracias por su ayuda", "Gracias"),
         ("明天12点在门口等你", "12点"),
         ("明天上午十点在会议室开会", "好的没问题"),
+        // 常见短应答即使与刚播完的译文完全一致，也不能误删
+        ("Thank you.", "Thank you!"),
+        ("OK", "OK"),
+        ("好的。", "好的"),
     ]
     for pair in normalPairs {
         let recent = [(text: pair.spoken, at: now.addingTimeInterval(-1.0))]

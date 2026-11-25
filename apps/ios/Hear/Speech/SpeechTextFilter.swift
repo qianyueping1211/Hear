@@ -129,11 +129,16 @@ enum SpeechTextFilter {
         }
         let a = normalize(recognized)
         guard !a.isEmpty else { return false }
+        // 放行常见短应答（如 "OK"、"好的"、"谢谢"、"Thank you!"）：
+        // 面对面对话里对方紧接着回同样一句短话非常常见；含 CJK 等非拉丁字符至少 6 字，纯拉丁/数字至少 10 字符才做文本级拦截。
+        let hasNonLatin = a.unicodeScalars.contains { !isLatin($0.value) && !CharacterSet.decimalDigits.contains($0) }
+        let minExactLen = hasNonLatin ? 6 : 10
+        guard a.count >= minExactLen else { return false }
         for entry in recentSpoken {
             let dt = now.timeIntervalSince(entry.at)
             guard dt >= -0.5, dt <= window else { continue }
             let b = normalize(entry.text)
-            guard !b.isEmpty else { continue }
+            guard b.count >= minExactLen else { continue }
             if a == b { return true }
             let minLen = min(a.count, b.count)
             let maxLen = max(a.count, b.count)

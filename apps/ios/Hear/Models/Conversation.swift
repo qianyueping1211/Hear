@@ -24,6 +24,8 @@ final class ConversationStore: ObservableObject {
     @Published private(set) var metas: [ConversationMeta] = []
     /// 任意对话保存后加一，打开的页面据此刷新
     @Published private(set) var revision = 0
+    /// 仅在总结内容、选中模板、删除或同步导入变化时加一，供 iPad 纪要栏按需刷新，避免实时转写期间反复读盘
+    @Published private(set) var summaryRevision = 0
 
     private let dir: URL
     private let indexURL: URL
@@ -115,6 +117,7 @@ final class ConversationStore: ObservableObject {
         metas.removeAll { $0.id == id }
         writeIndex()
         revision += 1
+        summaryRevision += 1
         hearLog("删除对话 \(id.uuidString.prefix(8))")
     }
 
@@ -130,12 +133,14 @@ final class ConversationStore: ObservableObject {
         guard var c = load(id) else { return }
         c.activeTemplateID = templateID
         save(c)
+        summaryRevision += 1
     }
 
     func updateSummary(_ id: UUID, templateID: String, _ record: SummaryRecord) {
         guard var c = load(id) else { return }
         c.summaries[templateID] = record
         save(c)
+        summaryRevision += 1
     }
 
     // MARK: iCloud 备份用
@@ -188,6 +193,7 @@ final class ConversationStore: ObservableObject {
             guard save(alternate) else { return nil }
         }
         guard save(merged.conversation), let saved = rawData(id) else { return nil }
+        summaryRevision += 1
         // The remote snapshot is now incorporated even if the upload below needs a retry.
         rememberSyncBase(remoteData, id: id)
         return saved
@@ -203,6 +209,7 @@ final class ConversationStore: ObservableObject {
         metas.sort { $0.updatedAt > $1.updatedAt }
         writeIndex()
         revision += 1
+        summaryRevision += 1
         return true
     }
 
@@ -216,6 +223,7 @@ final class ConversationStore: ObservableObject {
         metas.removeAll { $0.id == id }
         writeIndex()
         revision += 1
+        summaryRevision += 1
     }
 
     // MARK: 索引

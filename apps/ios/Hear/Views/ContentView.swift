@@ -22,20 +22,24 @@ struct ContentView: View {
     }
 
     var body: some View {
-        Group {
-            if useIPadWorkbench {
-                IPadWorkbenchView(
-                    selectedConversationID: $ipadSelectedConversationID,
-                    showSettings: $showSettings,
-                    showGlossary: $showGlossary,
-                    askNew: $askNew,
-                    noLLMAlert: $noLLMAlert,
-                    onEditSource: beginEditingSource,
-                    onEditSpeaker: { editingSpeaker = $0 }
-                )
-            } else {
-                compactPhoneBody
+        ZStack {
+            Group {
+                if useIPadWorkbench {
+                    IPadWorkbenchView(
+                        selectedConversationID: $ipadSelectedConversationID,
+                        showSettings: $showSettings,
+                        showGlossary: $showGlossary,
+                        askNew: $askNew,
+                        noLLMAlert: $noLLMAlert,
+                        onEditSource: beginEditingSource,
+                        onEditSpeaker: { editingSpeaker = $0 }
+                    )
+                } else {
+                    compactPhoneBody
+                }
             }
+            // 本地网络权限提示（内部是 .alert）单独挂在内层，与外层 noLLMAlert 隔开，避免同视图双 .alert 冲突
+            .localNetworkHelp($session.localNetworkHelp)
         }
         // 所有弹窗、编辑浮层与引导任务都挂在最外层容器上，
         // iPad 旋转 / 分屏 / Stage Manager 宽窄切换时不丢窗口、不丢编辑草稿、不中断翻译任务
@@ -86,7 +90,6 @@ struct ContentView: View {
         } message: {
             Text("本页已保存到历史。配置好 API 后，可以在 历史 → 总结 里随时生成。")
         }
-        .localNetworkHelp($session.localNetworkHelp)
         .task { await session.bootstrap() }
         // 苹果自带模式：语言包没下载时，由系统弹出下载窗口
         .translationTask(session.translationPrepConfig) { ts in

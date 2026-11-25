@@ -65,20 +65,42 @@ struct IPadWorkbenchView: View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebarContent
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 340)
+                // 重命名弹窗挂在侧栏层，与外层删除弹窗分处不同层级，避免同视图双 .alert 冲突
+                .alert("重命名对话", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+                    TextField("对话名称", text: $newTitle)
+                    Button("取消", role: .cancel) { renaming = nil }
+                    Button("保存") {
+                        if let m = renaming { store.rename(m.id, to: newTitle) }
+                        renaming = nil
+                    }
+                }
         } detail: {
             detailContent
         }
         .navigationSplitViewStyle(.balanced)
         .onAppear { reloadLiveConversation() }
-        .onChange(of: store.revision) { _, _ in reloadLiveConversation() }
+        // 仅在总结/模板/同步变化或切换对话时读盘，实时转写期间每 250ms 保存不触发磁盘读取
+        .onChange(of: store.summaryRevision) { _, _ in reloadLiveConversation() }
         .onChange(of: session.conversationID) { _, _ in reloadLiveConversation() }
-        .alert("重命名对话", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
-            TextField("对话名称", text: $newTitle)
-            Button("取消", role: .cancel) { renaming = nil }
-            Button("保存") {
-                if let m = renaming { store.rename(m.id, to: newTitle) }
-                renaming = nil
+        // 全局外接键盘快捷键（侧栏收起或查看历史详情时同样生效）
+        .background {
+            Group {
+                Button("") { newTapped() }
+                    .keyboardShortcut("n", modifiers: .command)
+                Button("") { showSettings = true }
+                    .keyboardShortcut(",", modifiers: .command)
+                Button("") {
+                    selectedConversationID = nil
+                    inspectorUserToggled = true
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showSummaryInspector.toggle()
+                    }
+                }
+                .keyboardShortcut("\\", modifiers: .command)
             }
+            .frame(width: 0, height: 0)
+            .opacity(0.001)
+            .accessibilityHidden(true)
         }
         .alert(
             "删除这段对话？",
@@ -177,7 +199,6 @@ struct IPadWorkbenchView: View {
                 } label: {
                     Image(systemName: "square.and.pencil")
                 }
-                .keyboardShortcut("n", modifiers: .command)
                 .help("新建对话 (⌘N)")
             }
             ToolbarItemGroup(placement: .bottomBar) {
@@ -188,7 +209,6 @@ struct IPadWorkbenchView: View {
                 Button { showSettings = true } label: {
                     Label("设置", systemImage: "gearshape")
                 }
-                .keyboardShortcut(",", modifiers: .command)
             }
         }
     }
@@ -353,7 +373,6 @@ struct IPadWorkbenchView: View {
                     .foregroundStyle(showSummaryInspector ? Color.accentColor : .primary)
             }
             .buttonStyle(.plain)
-            .keyboardShortcut("\\", modifiers: .command)
             .help(showSummaryInspector ? "收起会议纪要栏 (⌘\\)" : "展开会议纪要栏 (⌘\\)")
         }
         .padding(.horizontal, 14)
