@@ -1,6 +1,6 @@
 [package]
 name = "hear-desktop"
-version = "0.1.47"
+version = "0.1.48"
 description = "听见 (Hear) 跨平台桌面实时翻译与悬浮字幕客户端"
 authors = ["Hear"]
 edition = "2021"
@@ -31,6 +31,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Media_SpeechSynthesis",
+    "Storage_Streams",
     "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
     "Win32_Media_Audio",

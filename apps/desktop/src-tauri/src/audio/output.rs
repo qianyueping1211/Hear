@@ -647,3 +647,79 @@ impl AudioDuckGuard {
         Self
     }
 }
+
+/// 通过 Windows 10/11 原生 WinRT OneCore 语音库合成 PCM WAV（支持中文男声 Microsoft Kangkang、女声 Huihui/Yaoyao 及更多系统男女声）
+/// 若系统 OneCore 语音库未安装目标语种，返回 None 以便上层回退经典 SAPI。
+#[cfg(target_os = "windows")]
+pub fn synthesize_winrt_onecore_wav(text: &str, lang: &str, gender: &str) -> Option<Vec<u8>> {
+    use windows::core::HSTRING;
+    use windows::Media::SpeechSynthesis::{SpeechSynthesizer, VoiceGender, VoiceInformation};
+    use windows::Storage::Streams::DataReader;
+
+    let synth = SpeechSynthesizer::new().ok()?;
+    let all = SpeechSynthesizer::AllVoices().ok()?;
+    let count = all.Size().ok()?;
+    let lang_lower = lang.trim().to_ascii_lowercase();
+    let lang_base = lang_lower.split('-').next().unwrap_or("").to_string();
+
+    let mut exact_pool: Vec<VoiceInformation> = Vec::new();
+    let mut base_pool: Vec<VoiceInformation> = Vec::new();
+    for i in 0..count {
+        let Ok(v) = all.GetAt(i) else {
+            continue;
+        };
+        let Ok(vlang) = v.Language() else {
+            continue;
+        };
+        let vl = vlang.to_string_lossy().to_ascii_lowercase();
+        if !lang_lower.is_empty() && vl.starts_with(&lang_lower) {
+            exact_pool.push(v);
+        } else if !lang_base.is_empty() && vl.starts_with(&lang_base) {
+            base_pool.push(v);
+        }
+    }
+    let pool = if !exact_pool.is_empty() {
+        exact_pool
+    } else if !base_pool.is_empty() {
+        base_pool
+    } else {
+        // 目标语种在 OneCore 语音库中未安装，返回 None 回退到经典 SAPI（避免用中文声音硬读英文）
+        return None;
+    };
+
+    let want_gender = match gender.to_ascii_lowercase().as_str() {
+        "male" => Some(VoiceGender::Male),
+        "female" => Some(VoiceGender::Female),
+        _ => None,
+    };
+    let chosen = if let Some(wg) = want_gender {
+        pool.iter()
+            .find(|v| v.Gender().ok() == Some(wg))
+            .or_else(|| pool.first())
+    } else {
+        pool.first()
+    }?;
+    synth.SetVoice(chosen).ok()?;
+
+    let htext = HSTRING::from(text);
+    let stream = synth.SynthesizeTextToStreamAsync(&htext).ok()?.get().ok()?;
+    let size = stream.Size().ok()? as u32;
+    if size <= 44 {
+        return None;
+    }
+    let input = stream.GetInputStreamAt(0).ok()?;
+    let reader = DataReader::CreateInputStreamReader(&input).ok()?;
+    let _ = reader.LoadAsync(size).ok()?.get().ok()?;
+    let mut buf = vec![0u8; size as usize];
+    reader.ReadBytes(&mut buf).ok()?;
+    if buf.len() > 44 && &buf[0..4] == b"RIFF" {
+        Some(buf)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn synthesize_winrt_onecore_wav(_text: &str, _lang: &str, _gender: &str) -> Option<Vec<u8>> {
+    None
+}

@@ -1923,7 +1923,7 @@ async fn speak_text_sapi(
         return Ok(());
     }
     let lang_tag = lang.unwrap_or_default().trim().to_string();
-    let (duck_ratio_opt, is_recording, voice_pref) = {
+    let (duck_ratio_opt, is_recording, voice_pref, output_dev) = {
         let snap = rt.snapshot.lock().await;
         // 仅在会议同传模式下压低会议原声；非同传模式不干预系统音量
         let duck = if snap.tts_settings.routing_mode == "meeting"
@@ -1933,10 +1933,23 @@ async fn speak_text_sapi(
         } else {
             None
         };
+        let is_meeting = snap.tts_settings.routing_mode == "meeting";
+        let seg_ch = segment_id
+            .as_deref()
+            .and_then(|sid| snap.segments.iter().find(|s| s.id == sid).map(|s| s.channel));
+        let dev = if is_meeting
+            && seg_ch == Some(AudioChannel::Mic)
+            && !snap.tts_settings.meeting_mic_output_device_id.trim().is_empty()
+        {
+            snap.tts_settings.meeting_mic_output_device_id.clone()
+        } else {
+            snap.tts_settings.output_device_id.clone()
+        };
         (
             duck,
             snap.mode == SessionMode::Recording,
             snap.tts_settings.system_voice_preference.clone(),
+            dev,
         )
     };
     let gender_tag = match voice_pref.as_str() {
@@ -1956,13 +1969,51 @@ async fn speak_text_sapi(
             }
         }
     };
-    // 朗读新句前立即打断可能残留的旧 SAPI 子进程，避免两句系统语音叠声
+    // 朗读新句前立即打断可能残留的旧 SAPI / 设备播报，避免叠声
     rt.kill_active_sapi();
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut slot = rt.tts_cancel.lock().await;
+        if let Some(prev) = slot.replace(cancel.clone()) {
+            prev.store(true, Ordering::Relaxed);
+        }
+    }
     if is_recording {
         rt.system_tts_muted.store(true, Ordering::Relaxed);
     }
     #[cfg(target_os = "windows")]
     {
+        // 优先走 Windows 10/11 原生 WinRT OneCore 语音库（内置中文男声 Microsoft Kangkang、女声 Huihui/Yaoyao，且支持定向输出到指定耳机/虚拟声卡）
+        let t_winrt = trimmed.clone();
+        let l_winrt = lang_tag.clone();
+        let g_winrt = gender_tag.clone();
+        let one_core_wav = tokio::task::spawn_blocking(move || {
+            audio::output::synthesize_winrt_onecore_wav(&t_winrt, &l_winrt, &g_winrt)
+        })
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(wav_bytes) = one_core_wav {
+            let far_end_opt = if is_recording {
+                Some(rt.aec_far_end.clone())
+            } else {
+                None
+            };
+            let cancel_for_play = cancel.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let _duck = duck_ratio_opt
+                    .map(|r| audio::output::AudioDuckGuard::enter(r, &[std::process::id()]));
+                audio::output::play_wav_to_device(&wav_bytes, &output_dev, cancel_for_play, far_end_opt)
+            })
+            .await;
+            if is_recording {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                rt.system_tts_muted.store(false, Ordering::Relaxed);
+            }
+            return Ok(());
+        }
+
         let sapi_pid = rt.sapi_pid.clone();
         tokio::task::spawn_blocking(move || {
             use std::os::windows::process::CommandExt;
