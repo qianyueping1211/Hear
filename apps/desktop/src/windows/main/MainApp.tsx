@@ -485,14 +485,23 @@ export function MainApp() {
             onClick={() => {
               const nextMode =
                 ttsSettings.routingMode === "meeting" ? "face_to_face" : "meeting";
+              // 切换到会议同传时，若尚未开启自动朗读，自动打开「总开关 + 朗读对方译文」，避免开了同传却听不到译文声音
+              const patch =
+                nextMode === "meeting"
+                  ? {
+                      routingMode: nextMode as "meeting",
+                      enabled: true,
+                      ...(ttsSettings.autoSpeakOther || ttsSettings.autoSpeakMyMic
+                        ? {}
+                        : { autoSpeakOther: true }),
+                    }
+                  : { routingMode: nextMode as "face_to_face" };
+              void updateTtsSettings(patch);
               if (
                 nextMode === "meeting" &&
                 !ttsSettings.meetingMicOutputDeviceId
               ) {
-                void updateTtsSettings({ routingMode: nextMode });
                 setSettingsOpen(true, "audio");
-              } else {
-                void updateTtsSettings({ routingMode: nextMode });
               }
             }}
             title={

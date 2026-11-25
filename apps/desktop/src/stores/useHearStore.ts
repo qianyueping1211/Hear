@@ -467,13 +467,23 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
                   speakingSegmentId:
                     s.speakingSegmentId === seg.id ? null : s.speakingSegmentId,
                 }));
+                // 克隆失败/超时时自动降级到系统语音朗读，确保会议同传不会静默无声
+                if (get().mode === "recording" && get().ttsSettings.enabled) {
+                  void get().speakSegment(
+                    seg.id,
+                    seg.translatedText.trim(),
+                    seg.targetLang,
+                    { fromResume: true }
+                  );
+                }
               });
             } else {
-              // 声音克隆已关闭：严格使用系统语音朗读译文，绝不触发声音克隆
+              // 声音克隆已关闭：严格使用系统语音朗读译文，传 fromResume: true 避免误把自动朗读总开关关掉
               void get().speakSegment(
                 seg.id,
                 seg.translatedText.trim(),
-                seg.targetLang
+                seg.targetLang,
+                { fromResume: true }
               );
             }
           } else if (tts.useVoiceClone) {

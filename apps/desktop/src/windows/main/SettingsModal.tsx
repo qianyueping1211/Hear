@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import { useHearStore } from "../../stores/useHearStore";
+import { tauriInvoke } from "../../lib/tauri";
 import { VoiceSampleRecorderModal } from "./VoiceSampleRecorderModal";
 import type {
   EngineSource,
@@ -1105,7 +1106,15 @@ export function SettingsModal() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => updateTtsSettings({ routingMode: "meeting" })}
+                    onClick={() =>
+                      updateTtsSettings({
+                        routingMode: "meeting",
+                        enabled: true,
+                        ...(ttsSettings.autoSpeakOther || ttsSettings.autoSpeakMyMic
+                          ? {}
+                          : { autoSpeakOther: true }),
+                      })
+                    }
                     className={`p-3 rounded-lg border text-left space-y-1 transition ${
                       ttsSettings.routingMode === "meeting"
                         ? "bg-emerald-500/20 border-emerald-400/60 text-white"
@@ -1203,8 +1212,39 @@ export function SettingsModal() {
                           </select>
                         </label>
                         {!outputDevices.some((d) => d.isVirtual) ? (
-                          <div className="rounded-lg bg-amber-500/10 border border-amber-400/30 p-2.5 text-[11px] text-amber-200 leading-relaxed">
-                            未检测到虚拟声卡（如 VB-Cable）。要让腾讯会议 / Teams / 微信只听到你克隆后的译文而不听到原声，请先安装免费的 VB-Cable 虚拟声卡，然后在此处选择 <span className="font-mono">CABLE Input</span>，并在会议软件里把麦克风设为 <span className="font-mono">CABLE Output</span>。
+                          <div className="rounded-lg bg-amber-500/10 border border-amber-400/30 p-2.5 text-[11px] text-amber-200 leading-relaxed space-y-2">
+                            <div>
+                              未检测到虚拟声卡（如 VB-Cable）。要让腾讯会议 / Teams / 微信只听到你克隆后的译文而不听到原声，请先安装免费的 VB-Cable 虚拟声卡，然后在此处选择 <span className="font-mono">CABLE Input</span>，并在会议软件里把麦克风设为 <span className="font-mono">CABLE Output</span>。
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void tauriInvoke("install_vb_cable").catch(() => {});
+                                }}
+                                className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/35 border border-amber-400/50 text-amber-100 font-medium transition"
+                              >
+                                一键安装 VB-Cable 虚拟声卡
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void tauriInvoke("open_github_url", {
+                                    url: "https://vb-audio.com/Cable/",
+                                  }).catch(() => {});
+                                }}
+                                className="px-2.5 py-1 rounded-md bg-surface-900/80 hover:bg-surface-800 border border-white/15 text-slate-200 transition"
+                              >
+                                官网手动下载
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void refreshOutputDevices()}
+                                className="px-2.5 py-1 rounded-md bg-surface-900/80 hover:bg-surface-800 border border-white/15 text-slate-200 transition"
+                              >
+                                安装后刷新设备
+                              </button>
+                            </div>
                           </div>
                         ) : (
                           <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200 leading-relaxed">

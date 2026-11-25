@@ -1101,7 +1101,7 @@ async fn play_cloned_segment_to_device(
         );
         return Ok(());
     }
-    let (device_name, mute_system_loopback, hard_mute_all) = {
+    let (device_name, mute_system_loopback, hard_mute_all, duck_ratio_opt) = {
         let snap = rt.snapshot.lock().await;
         let seg_ch = snap.segments.iter().find(|s| s.id == id).map(|s| s.channel);
         let tts = &snap.tts_settings;
@@ -1128,7 +1128,12 @@ async fn play_cloned_segment_to_device(
             || (is_meeting && target == "auto" && seg_ch == Some(AudioChannel::Mic) && !tts.meeting_mic_output_device_id.trim().is_empty());
         let mute_sys = !routed_to_virtual_mic;
         let hard_mute = !routed_to_virtual_mic && tts.mute_mic_while_speaking;
-        (dev, mute_sys, hard_mute)
+        let duck = if !routed_to_virtual_mic && tts.duck_original_audio {
+            Some(tts.duck_ratio.clamp(0.0, 1.0))
+        } else {
+            None
+        };
+        (dev, mute_sys, hard_mute, duck)
     };
 
     // 串行排队播报：拿到播报闸门后再做一次代次校验，防止排在后面的旧句子覆盖刚点的句子或上一场残留自动播报突然发声
@@ -1174,6 +1179,8 @@ async fn play_cloned_segment_to_device(
     rt.record_spoken_tts(&trimmed).await;
     let cancel_for_play = cancel.clone();
     let res = tokio::task::spawn_blocking(move || {
+        let _duck = duck_ratio_opt
+            .map(|r| audio::output::AudioDuckGuard::enter(r, &[std::process::id()]));
         audio::output::play_wav_to_device(&wav_bytes, &device_name, cancel_for_play, far_end_opt)
     })
     .await
@@ -1865,8 +1872,20 @@ async fn speak_text_sapi(
         return Ok(());
     }
     let lang_tag = lang.unwrap_or_default().trim().to_string();
+    let (duck_ratio_opt, is_recording) = {
+        let snap = rt.snapshot.lock().await;
+        let duck = if snap.tts_settings.duck_original_audio {
+            Some(snap.tts_settings.duck_ratio.clamp(0.0, 1.0))
+        } else {
+            None
+        };
+        (duck, snap.mode == SessionMode::Recording)
+    };
     // 朗读新句前立即打断可能残留的旧 SAPI 子进程，避免两句系统语音叠声
     rt.kill_active_sapi();
+    if is_recording {
+        rt.system_tts_muted.store(true, Ordering::Relaxed);
+    }
     #[cfg(target_os = "windows")]
     {
         let sapi_pid = rt.sapi_pid.clone();
@@ -1897,6 +1916,9 @@ $s.Speak($env:HEAR_SPEAK_TEXT)
             if let Ok(mut child) = cmd.spawn() {
                 let pid = child.id();
                 sapi_pid.store(pid, Ordering::SeqCst);
+                let _duck = duck_ratio_opt.map(|r| {
+                    audio::output::AudioDuckGuard::enter(r, &[std::process::id(), pid])
+                });
                 let _ = child.wait();
                 let _ = sapi_pid.compare_exchange(pid, 0, Ordering::SeqCst, Ordering::SeqCst);
             }
@@ -1904,7 +1926,52 @@ $s.Speak($env:HEAR_SPEAK_TEXT)
         .await
         .map_err(|e| format!("系统朗读任务异常：{}", e))?;
     }
+    if is_recording {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        rt.system_tts_muted.store(false, Ordering::Relaxed);
+    }
     Ok(())
+}
+
+/// 一键快捷安装 VB-Cable 虚拟声卡（优先通过 winget 安装，无 winget 时自动打开官网下载页）
+#[tauri::command]
+async fn install_vb_cable() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let script = r#"
+Write-Host '=== 正在安装 VB-Cable 虚拟声卡（会议同传专用）===' -ForegroundColor Cyan
+if (Get-Command winget -ErrorAction SilentlyContinue) {
+    winget install --id VB-Audio.Cable --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host '安装完成！请回到 Hear 点击「安装后刷新设备」，然后选择 CABLE Input。' -ForegroundColor Green
+    } else {
+        Write-Host 'winget 安装未完成，正在为您打开 VB-Cable 官方下载页...' -ForegroundColor Yellow
+        Start-Process 'https://vb-audio.com/Cable/'
+    }
+} else {
+    Write-Host '当前系统未检测到 winget，正在为您打开 VB-Cable 官方下载页...' -ForegroundColor Yellow
+    Start-Process 'https://vb-audio.com/Cable/'
+}
+"#;
+        std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "start",
+                "VB-Cable 虚拟声卡安装",
+                "powershell",
+                "-NoExit",
+                "-NoProfile",
+                "-Command",
+                script,
+            ])
+            .spawn()
+            .map_err(|e| format!("无法启动安装窗口：{}", e))?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        updater::open_github_url("https://vb-audio.com/Cable/")
+    }
 }
 
 fn format_mm_ss(ms: u64) -> String {
@@ -2759,6 +2826,7 @@ pub fn run() {
             update_segment_translation,
             update_segment_speaker,
             speak_text_sapi,
+            install_vb_cable,
             generate_summary,
             save_summary_markdown,
             export_text_file,

@@ -532,3 +532,103 @@ pub fn play_wav_to_device(
     drop(stream);
     Ok(())
 }
+
+/// Windows 会议原声自动压低守卫（Audio Ducking）：
+/// 朗读译文期间，通过 Windows CoreAudio (IAudioSessionManager2 + ISimpleAudioVolume)
+/// 将本进程与指定排除进程之外的其他应用（如腾讯会议 / Teams / 浏览器）音量按比例临时压低，
+/// 离开作用域（Drop）时自动恢复原音量。非 Windows 平台为空实现。
+#[cfg(target_os = "windows")]
+pub struct AudioDuckGuard {
+    saved: Vec<(windows::Win32::Media::Audio::ISimpleAudioVolume, f32)>,
+    com_inited: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl AudioDuckGuard {
+    pub fn enter(ratio: f32, exclude_pids: &[u32]) -> Self {
+        use windows::core::Interface;
+        use windows::Win32::Media::Audio::{
+            eConsole, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
+            ISimpleAudioVolume, MMDeviceEnumerator,
+        };
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+        };
+
+        let clamped = ratio.clamp(0.0, 1.0);
+        if clamped >= 0.98 {
+            return Self {
+                saved: Vec::new(),
+                com_inited: false,
+            };
+        }
+        unsafe {
+            let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+            let com_inited = hr.is_ok();
+            let mut saved = Vec::new();
+            if let Ok(enumerator) =
+                CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            {
+                if let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
+                    if let Ok(mgr) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+                        if let Ok(session_enum) = mgr.GetSessionEnumerator() {
+                            if let Ok(count) = session_enum.GetCount() {
+                                for i in 0..count {
+                                    let Ok(ctrl) = session_enum.GetSession(i) else {
+                                        continue;
+                                    };
+                                    let Ok(ctrl2) = ctrl.cast::<IAudioSessionControl2>() else {
+                                        continue;
+                                    };
+                                    let Ok(pid) = ctrl2.GetProcessId() else {
+                                        continue;
+                                    };
+                                    if pid == 0 || exclude_pids.contains(&pid) {
+                                        continue;
+                                    }
+                                    let Ok(vol) = ctrl.cast::<ISimpleAudioVolume>() else {
+                                        continue;
+                                    };
+                                    let Ok(orig) = vol.GetMasterVolume() else {
+                                        continue;
+                                    };
+                                    let target = (orig * clamped).clamp(0.0, 1.0);
+                                    if (orig - target).abs() > 0.01
+                                        && vol.SetMasterVolume(target, std::ptr::null()).is_ok()
+                                    {
+                                        saved.push((vol, orig));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Self { saved, com_inited }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for AudioDuckGuard {
+    fn drop(&mut self) {
+        unsafe {
+            for (vol, orig) in self.saved.drain(..) {
+                let _ = vol.SetMasterVolume(orig, std::ptr::null());
+            }
+            if self.com_inited {
+                windows::Win32::System::Com::CoUninitialize();
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub struct AudioDuckGuard;
+
+#[cfg(not(target_os = "windows"))]
+impl AudioDuckGuard {
+    pub fn enter(_ratio: f32, _exclude_pids: &[u32]) -> Self {
+        Self
+    }
+}
