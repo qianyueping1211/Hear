@@ -2157,14 +2157,15 @@ public static class HearAudioNorm {
     [DllImport("ole32.dll")]
     static extern int PropVariantClear(ref PROPVARIANT pvar);
 
-    public static void Run() {
+    public static void Run(bool enableMeeting) {
         var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
         var policy = (IPolicyConfig)new PolicyConfigClient();
         var pkeyDesc = new PROPERTYKEY { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 2 };
         var pkeyIf = new PROPERTYKEY { fmtid = new Guid("b3f8fa53-0004-438e-9003-51a46e139bfc"), pid = 6 };
+        // dwStateMask = 3 (DEVICE_STATE_ACTIVE | DEVICE_STATE_DISABLED)
         for (int flow = 0; flow <= 1; flow++) {
             IMMDeviceCollection col;
-            if (enumerator.EnumAudioEndpoints(flow, 1, out col) != 0) continue;
+            if (enumerator.EnumAudioEndpoints(flow, 3, out col) != 0) continue;
             uint count;
             col.GetCount(out count);
             for (uint i = 0; i < count; i++) {
@@ -2181,33 +2182,36 @@ public static class HearAudioNorm {
                 string descName = pvDesc.vt == 31 ? Marshal.PtrToStringUni(pvDesc.p) : "";
                 PropVariantClear(ref pvIf);
                 PropVariantClear(ref pvDesc);
-                if (flow == 0 && ifName.IndexOf("VB-Audio Virtual Cable", StringComparison.OrdinalIgnoreCase) >= 0 && descName.IndexOf("16ch", StringComparison.OrdinalIgnoreCase) >= 0) {
+                bool isVb = ifName.IndexOf("VB-Audio Virtual Cable", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool isHiFi = ifName.IndexOf("VB-Audio Hi-Fi Cable", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (!isVb && !isHiFi) continue;
+
+                bool is16ch = descName.IndexOf("16ch", StringComparison.OrdinalIgnoreCase) >= 0;
+                // 永远禁止启用 16ch 端点与 Hi-Fi Cable 麦克风端点
+                if ((flow == 0 && isVb && is16ch) || (flow == 1 && isHiFi)) {
                     policy.SetEndpointVisibility(devId, 0);
-                } else if (flow == 1 && ifName.IndexOf("VB-Audio Hi-Fi Cable", StringComparison.OrdinalIgnoreCase) >= 0) {
-                    policy.SetEndpointVisibility(devId, 0);
-                } else if (flow == 1 && ifName.IndexOf("VB-Audio Virtual Cable", StringComparison.OrdinalIgnoreCase) >= 0 && descName != "CABLE Input") {
-                    var pvNew = new PROPVARIANT { vt = 31, p = Marshal.StringToCoTaskMemUni("CABLE Input") };
-                    store.SetValue(ref pkeyDesc, ref pvNew);
-                    store.Commit();
-                    PropVariantClear(ref pvNew);
-                } else if (flow == 0 && ifName.IndexOf("VB-Audio Hi-Fi Cable", StringComparison.OrdinalIgnoreCase) >= 0 && descName != "CABLE Output") {
-                    var pvNew = new PROPVARIANT { vt = 31, p = Marshal.StringToCoTaskMemUni("CABLE Output") };
-                    store.SetValue(ref pkeyDesc, ref pvNew);
-                    store.Commit();
-                    PropVariantClear(ref pvNew);
-                } else if (flow == 0 && ifName.IndexOf("VB-Audio Virtual Cable", StringComparison.OrdinalIgnoreCase) >= 0 && descName.IndexOf("16ch", StringComparison.OrdinalIgnoreCase) < 0 && descName != "CABLE Input") {
-                    var pvNew = new PROPVARIANT { vt = 31, p = Marshal.StringToCoTaskMemUni("CABLE Input") };
+                    continue;
+                }
+                // 固定端点名称
+                string wantName = null;
+                if (flow == 0 && isHiFi && descName != "CABLE Output") wantName = "CABLE Output";
+                else if (isVb && !is16ch && descName != "CABLE Input") wantName = "CABLE Input";
+                if (wantName != null) {
+                    var pvNew = new PROPVARIANT { vt = 31, p = Marshal.StringToCoTaskMemUni(wantName) };
                     store.SetValue(ref pkeyDesc, ref pvNew);
                     store.Commit();
                     PropVariantClear(ref pvNew);
                 }
+                // 仅按需启用或隐藏对应的有效端点，绝不触碰 16ch 或 Hi-Fi 麦克风
+                policy.SetEndpointVisibility(devId, enableMeeting ? 1 : 0);
             }
         }
     }
 }
 "@
 Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
-try { [HearAudioNorm]::Run() } catch {}
+$enableFlag = ($env:HEAR_VC_ENABLE -ne '0')
+try { [HearAudioNorm]::Run($enableFlag) } catch {}
 "#;
 
 /// 一键快捷安装 VB-Cable 虚拟声卡：
@@ -2411,15 +2415,16 @@ $out | ConvertTo-Json -Compress
     }
 }
 
-/// 在 Windows 系统层面启用/禁用 VB-Audio 虚拟声卡设备（VB-Audio Virtual Cable / Hi-Fi Cable），
-/// 确保仅在「会议同传 + 正在录音」期间出现在电脑声音列表中，停止录音或面对面模式自动禁用。
+/// 在 Windows 系统层面按端点精细启用/隐藏 VB-Audio 虚拟声卡：
+/// 不再反复启停底层 MEDIA 驱动，直接通过 CoreAudio IPolicyConfig 仅启用/隐藏需要的有效端点，
+/// 确保 `CABLE In 16ch` 与 `Hi-Fi Cable` 麦克风端点永远不会被顺带唤醒。
 #[tauri::command]
 async fn set_virtual_cables_os_enabled(enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         tokio::task::spawn_blocking(move || {
             use std::os::windows::process::CommandExt;
-            let action = if enabled { "enable" } else { "disable" };
+            let enable_flag = if enabled { "1" } else { "0" };
             let ps1_path = std::env::temp_dir().join("hear_toggle_vbcable_os.ps1");
             let elevated_ps1 = std::env::temp_dir().join("hear_toggle_vbcable_run.ps1");
             let elevated_str = elevated_ps1.to_string_lossy().replace('\'', "''");
@@ -2427,64 +2432,61 @@ async fn set_virtual_cables_os_enabled(enabled: bool) -> Result<(), String> {
             let _ = std::fs::write(&norm_ps1, format!("\u{FEFF}{}", NORMALIZE_VB_AUDIO_ENDPOINTS_PS).as_bytes());
             let norm_str = norm_ps1.to_string_lossy().replace('\'', "''");
             let script = format!(
-                "\u{FEFF}$action = '{}'\r\n\
+                "\u{FEFF}$enableFlag = '{}'\r\n\
 $devs = @(Get-PnpDevice -Class MEDIA -ErrorAction SilentlyContinue | Where-Object {{ $_.FriendlyName -match 'VB-Audio' }})\r\n\
 if ($devs.Count -eq 0) {{ exit 0 }}\r\n\
-$targets = if ($action -eq 'enable') {{\r\n\
-    @($devs | Where-Object {{ $_.Problem -eq 'CM_PROB_DISABLED' -or $_.Problem -eq 22 }})\r\n\
-}} else {{\r\n\
-    @($devs | Where-Object {{ $_.Status -eq 'OK' }})\r\n\
-}}\r\n\
-$needsNorm = $false\r\n\
-if ($action -eq 'enable') {{\r\n\
-    $hasExtra = @(Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Where-Object {{ $_.Status -eq 'OK' -and (($_.FriendlyName -match '16ch' -and $_.FriendlyName -match 'VB-Audio|CABLE') -or ($_.InstanceId -match '\\{{0\\.0\\.1\\.' -and $_.FriendlyName -match 'VB-Audio Hi-Fi Cable')) }}).Count -gt 0\r\n\
-    if ($hasExtra) {{ $needsNorm = $true }}\r\n\
-    if (-not $needsNorm) {{\r\n\
-        Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render' -ErrorAction SilentlyContinue | ForEach-Object {{\r\n\
+$disabledDrivers = @($devs | Where-Object {{ $_.Problem -eq 'CM_PROB_DISABLED' -or $_.Problem -eq 22 }})\r\n\
+$needsAction = $false\r\n\
+if ($enableFlag -eq '1' -and $disabledDrivers.Count -gt 0) {{ $needsAction = $true }}\r\n\
+if (-not $needsAction) {{\r\n\
+    foreach ($flowName in @('Render','Capture')) {{\r\n\
+        Get-ChildItem \"HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\$flowName\" -ErrorAction SilentlyContinue | ForEach-Object {{\r\n\
             $st = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DeviceState\r\n\
-            if ($st -ne 1) {{ return }}\r\n\
+            if ($st -ne 1 -and $st -ne 2) {{ return }}\r\n\
             $p = Join-Path $_.PSPath 'Properties'\r\n\
             if (-not (Test-Path $p)) {{ return }}\r\n\
             $props = Get-ItemProperty $p -ErrorAction SilentlyContinue\r\n\
             $desc = [string]$props.'{{b3f8fa53-0004-438e-9003-51a46e139bfc}},6'\r\n\
             $curName = [string]$props.'{{a45c254e-df1c-4efd-8020-67d146a850e0}},2'\r\n\
-            if ($desc -match 'VB-Audio Virtual Cable' -and $curName -notmatch '16ch' -and $curName -ne 'CABLE Input') {{ $needsNorm = $true }}\r\n\
-            if ($desc -match 'VB-Audio Hi-Fi Cable' -and $curName -ne 'CABLE Output') {{ $needsNorm = $true }}\r\n\
-        }}\r\n\
-    }}\r\n\
-    if (-not $needsNorm) {{\r\n\
-        Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture' -ErrorAction SilentlyContinue | ForEach-Object {{\r\n\
-            $st = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DeviceState\r\n\
-            if ($st -ne 1) {{ return }}\r\n\
-            $p = Join-Path $_.PSPath 'Properties'\r\n\
-            if (-not (Test-Path $p)) {{ return }}\r\n\
-            $props = Get-ItemProperty $p -ErrorAction SilentlyContinue\r\n\
-            $desc = [string]$props.'{{b3f8fa53-0004-438e-9003-51a46e139bfc}},6'\r\n\
-            $curName = [string]$props.'{{a45c254e-df1c-4efd-8020-67d146a850e0}},2'\r\n\
-            if ($desc -match 'VB-Audio Virtual Cable' -and $curName -ne 'CABLE Input') {{ $needsNorm = $true }}\r\n\
-            if ($desc -match 'VB-Audio Hi-Fi Cable') {{ $needsNorm = $true }}\r\n\
+            $isVb = $desc -match 'VB-Audio Virtual Cable'\r\n\
+            $isHiFi = $desc -match 'VB-Audio Hi-Fi Cable'\r\n\
+            if (-not $isVb -and -not $isHiFi) {{ return }}\r\n\
+            $is16ch = $curName -match '16ch'\r\n\
+            if ($enableFlag -eq '0') {{\r\n\
+                if ($st -eq 1) {{ $needsAction = $true }}\r\n\
+            }} else {{\r\n\
+                if (($flowName -eq 'Render' -and $isVb -and $is16ch) -or ($flowName -eq 'Capture' -and $isHiFi)) {{\r\n\
+                    if ($st -eq 1) {{ $needsAction = $true }}\r\n\
+                }} else {{\r\n\
+                    if ($st -ne 1) {{ $needsAction = $true }}\r\n\
+                    if ($flowName -eq 'Render' -and $isHiFi -and $curName -ne 'CABLE Output') {{ $needsAction = $true }}\r\n\
+                    if ($isVb -and -not $is16ch -and $curName -ne 'CABLE Input') {{ $needsAction = $true }}\r\n\
+                }}\r\n\
+            }}\r\n\
         }}\r\n\
     }}\r\n\
 }}\r\n\
-if ($targets.Count -eq 0 -and -not $needsNorm) {{ exit 0 }}\r\n\
+if (-not $needsAction) {{ exit 0 }}\r\n\
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)\r\n\
 if ($isAdmin) {{\r\n\
-    foreach ($d in $targets) {{\r\n\
-        if ($action -eq 'enable') {{ Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }}\r\n\
-        else {{ Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }}\r\n\
+    if ($enableFlag -eq '1' -and $disabledDrivers.Count -gt 0) {{\r\n\
+        foreach ($d in $disabledDrivers) {{ Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }}\r\n\
+        Start-Sleep -Milliseconds 700\r\n\
     }}\r\n\
-    if ($action -eq 'enable') {{ Start-Sleep -Milliseconds 800; & '{}' }}\r\n\
+    $env:HEAR_VC_ENABLE = $enableFlag\r\n\
+    & '{}'\r\n\
 }} else {{\r\n\
-    $verbCmd = if ($action -eq 'enable') {{ 'Enable-PnpDevice' }} else {{ 'Disable-PnpDevice' }}\r\n\
-    $lines = @($targets | ForEach-Object {{ \"$verbCmd -InstanceId '$($_.InstanceId)' -Confirm:`$false -ErrorAction SilentlyContinue\" }})\r\n\
-    if ($action -eq 'enable') {{\r\n\
-        if ($targets.Count -gt 0) {{ $lines += 'Start-Sleep -Milliseconds 800' }}\r\n\
-        $lines += \"& '{}'\"\r\n\
+    $lines = @()\r\n\
+    if ($enableFlag -eq '1' -and $disabledDrivers.Count -gt 0) {{\r\n\
+        foreach ($d in $disabledDrivers) {{ $lines += \"Enable-PnpDevice -InstanceId '$($d.InstanceId)' -Confirm:`$false -ErrorAction SilentlyContinue\" }}\r\n\
+        $lines += 'Start-Sleep -Milliseconds 700'\r\n\
     }}\r\n\
+    $lines += \"$env:HEAR_VC_ENABLE = '$enableFlag'\"\r\n\
+    $lines += \"& '{}'\"\r\n\
     Set-Content -Path '{}' -Value ($lines -join \"`r`n\") -Encoding UTF8\r\n\
     Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
 }}\r\n",
-                action, norm_str, norm_str, elevated_str, elevated_str
+                enable_flag, norm_str, norm_str, elevated_str, elevated_str
             );
             if std::fs::write(&ps1_path, script.as_bytes()).is_ok() {
                 let _ = std::process::Command::new("powershell")
