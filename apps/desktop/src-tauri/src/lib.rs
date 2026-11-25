@@ -2198,6 +2198,59 @@ try {\r\n\
     }
 }
 
+/// 在 Windows 系统层面启用/禁用 VB-Audio 虚拟声卡设备（VB-Audio Virtual Cable / Hi-Fi Cable），
+/// 确保仅在「会议同传 + 正在录音」期间出现在电脑声音列表中，停止录音或面对面模式自动禁用。
+#[tauri::command]
+async fn set_virtual_cables_os_enabled(enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        tokio::task::spawn_blocking(move || {
+            use std::os::windows::process::CommandExt;
+            let action = if enabled { "enable" } else { "disable" };
+            let ps1_path = std::env::temp_dir().join("hear_toggle_vbcable_os.ps1");
+            let script = format!(
+                "\u{FEFF}$action = '{}'\r\n\
+$devs = Get-PnpDevice -Class MEDIA -ErrorAction SilentlyContinue | Where-Object {{ $_.FriendlyName -match 'VB-Audio' }}\r\n\
+if (-not $devs) {{ exit 0 }}\r\n\
+$targets = if ($action -eq 'enable') {{\r\n\
+    $devs | Where-Object {{ $_.Problem -eq 22 }}\r\n\
+}} else {{\r\n\
+    $devs | Where-Object {{ $_.Status -eq 'OK' }}\r\n\
+}}\r\n\
+if (-not $targets) {{ exit 0 }}\r\n\
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)\r\n\
+if ($isAdmin) {{\r\n\
+    foreach ($d in $targets) {{\r\n\
+        if ($action -eq 'enable') {{ Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }}\r\n\
+        else {{ Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }}\r\n\
+    }}\r\n\
+}} else {{\r\n\
+    $ids = ($targets | ForEach-Object {{ \"'\" + $_.InstanceId + \"'\" }}) -join ','\r\n\
+    $verbCmd = if ($action -eq 'enable') {{ 'Enable-PnpDevice' }} else {{ 'Disable-PnpDevice' }}\r\n\
+    $inner = \"foreach (`$id in @($ids)) {{ $verbCmd -InstanceId `$id -Confirm:`$false -ErrorAction SilentlyContinue }}\"\r\n\
+    Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command',$inner)\r\n\
+}}\r\n",
+                action
+            );
+            if std::fs::write(&ps1_path, script.as_bytes()).is_ok() {
+                let _ = std::process::Command::new("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        &ps1_path.to_string_lossy(),
+                    ])
+                    .creation_flags(0x0800_0000)
+                    .status();
+            }
+        })
+        .await
+        .map_err(|e| format!("切换虚拟声卡状态异常：{}", e))?;
+    }
+    Ok(())
+}
+
 fn format_mm_ss(ms: u64) -> String {
     let total_secs = ms / 1000;
     format!("{:02}:{:02}", total_secs / 60, total_secs % 60)
@@ -3052,6 +3105,7 @@ pub fn run() {
             speak_text_sapi,
             install_vb_cable,
             install_hifi_cable,
+            set_virtual_cables_os_enabled,
             generate_summary,
             save_summary_markdown,
             export_text_file,

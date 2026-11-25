@@ -456,7 +456,7 @@ export function MainApp() {
         <span>自动朗读译文</span>
       </button>
 
-      {/* 独立的「声音克隆」开关（与面对面/会议同传解耦，关闭克隆也可自由切换模式） */}
+      {/* 独立的「声音克隆」开关（选中颜色与其他开关统一为绿色） */}
       <button
         type="button"
         onClick={() =>
@@ -471,7 +471,7 @@ export function MainApp() {
         }
         className={`h-9 px-2.5 rounded-lg border text-xs inline-flex items-center gap-1.5 transition ${
           ttsSettings.useVoiceClone
-            ? "bg-brand-500/25 border-brand-400/40 text-brand-300 hover:bg-brand-500/35"
+            ? "bg-emerald-500/20 border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30"
             : "bg-surface-800 border-white/10 text-slate-400 hover:text-white hover:bg-white/5"
         }`}
       >
@@ -479,7 +479,7 @@ export function MainApp() {
         <span>声音克隆</span>
       </button>
 
-      {/* 独立的「面对面 / 会议同传」模式开关：点会议同传自动启用两路虚拟声卡，切面对面或停录自动禁用 */}
+      {/* 独立的「会议同传」开关：选中=会议同传模式，未选中=面对面模式；仅在会议同传+录音开启中启用虚拟声卡 */}
       <button
         type="button"
         onClick={async () => {
@@ -487,24 +487,20 @@ export function MainApp() {
             await useHearStore.getState().deactivateMeetingVirtualCables(true);
           } else {
             await useHearStore.getState().activateMeetingMode();
-            const after = useHearStore.getState().ttsSettings;
-            if (!after.meetingMicOutputDeviceId && !after.meetingLoopbackDeviceId) {
-              setSettingsOpen(true, "audio");
-            }
           }
         }}
         title={
           ttsSettings.routingMode === "meeting"
-            ? "当前：会议同传模式（点击切回面对面并禁用虚拟声卡）"
-            : "当前：面对面模式（点击切换到会议同传并启用虚拟声卡）"
+            ? "会议同传已开启（开始录音时自动启用虚拟声卡，停止录音后自动禁用；点击关闭回到面对面模式）"
+            : "会议同传未开启（当前为面对面模式，不使用虚拟声卡；点击开启会议同传）"
         }
         className={`h-9 px-2.5 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 transition ${
           ttsSettings.routingMode === "meeting"
             ? "bg-emerald-500/20 border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30"
-            : "bg-surface-800 border-white/10 text-slate-300 hover:text-white hover:bg-white/5"
+            : "bg-surface-800 border-white/10 text-slate-400 hover:text-white hover:bg-white/5"
         }`}
       >
-        <span>{ttsSettings.routingMode === "meeting" ? "会议同传" : "面对面"}</span>
+        <span>会议同传</span>
       </button>
 
       <div className="h-9 flex items-center gap-1 rounded-lg bg-surface-800 border border-white/10 px-2.5 text-xs">

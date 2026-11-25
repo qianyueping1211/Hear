@@ -729,6 +729,13 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       return;
     }
     try {
+      // 仅在「会议同传 + 正在录音」时启用系统虚拟声卡；开始录音前先拉起虚拟声卡并绑定两路通道
+      if (get().ttsSettings.routingMode === "meeting") {
+        await tauriInvoke("set_virtual_cables_os_enabled", { enabled: true }).catch(() => {});
+        await new Promise((r) => window.setTimeout(r, 450));
+        await get().refreshOutputDevices();
+        await get().activateMeetingMode();
+      }
       const mode = await tauriInvoke<SessionMode>("start_recording");
       if (mode) set({ mode, viewMode: "workspace" });
     } catch (err) {
@@ -784,11 +791,8 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         sessionError: err instanceof Error ? err.message : String(err),
       });
     } finally {
-      // 关闭录音后自动禁用两个虚拟声卡（保留上次选择，下次点击会议同传时重新启用）
-      const tts = get().ttsSettings;
-      if (tts.meetingLoopbackDeviceId || tts.meetingMicOutputDeviceId) {
-        await get().deactivateMeetingVirtualCables(false);
-      }
+      // 关闭录音后自动禁用虚拟声卡（同时在 Windows 声音设备中禁用，确保仅在同传+录音期间生效）
+      await get().deactivateMeetingVirtualCables(false);
     }
   },
 
@@ -1644,6 +1648,9 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       meetingMicOutputDeviceId: "",
       ...(switchToFaceToFace ? { routingMode: "face_to_face" } : {}),
     });
+    if (isTauriRuntime()) {
+      await tauriInvoke("set_virtual_cables_os_enabled", { enabled: false }).catch(() => {});
+    }
   },
 
   saveMyVoiceSample: async (segmentId) => {
