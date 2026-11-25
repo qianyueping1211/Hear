@@ -1528,15 +1528,48 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       }
       if (devices) {
         set({ outputDevices: devices });
-        // 如果用户还没选过会议虚拟麦，且系统里检测到了 VB-Cable / Virtual 设备，自动预填方便一键开启会议同传
+        // 优先选择标准 2 声道虚拟声卡（跳过 CABLE In 16ch），且绝不与另一路会议监听设备冲突
         const tts = get().ttsSettings;
-        if (!tts.meetingMicOutputDeviceId) {
-          const virt = devices.find((d) => d.isVirtual);
+        const standardVirtuals = devices.filter(
+          (d) => d.isVirtual && !d.name.toLowerCase().includes("16ch")
+        );
+        const virtualPool =
+          standardVirtuals.length > 0
+            ? standardVirtuals
+            : devices.filter((d) => d.isVirtual);
+        // 若之前误存了 16ch 且存在标准 CABLE Input，自动迁移到标准设备
+        let patched = { ...tts };
+        let changed = false;
+        if (
+          patched.meetingMicOutputDeviceId.toLowerCase().includes("16ch") &&
+          standardVirtuals.length > 0
+        ) {
+          const candidate = standardVirtuals.find(
+            (d) => d.id !== patched.meetingLoopbackDeviceId
+          );
+          patched.meetingMicOutputDeviceId = candidate ? candidate.id : "";
+          changed = true;
+        }
+        if (
+          patched.meetingLoopbackDeviceId.toLowerCase().includes("16ch") &&
+          standardVirtuals.length > 0
+        ) {
+          const candidate = standardVirtuals.find(
+            (d) => d.id !== patched.meetingMicOutputDeviceId
+          );
+          patched.meetingLoopbackDeviceId = candidate ? candidate.id : "";
+          changed = true;
+        }
+        if (!patched.meetingMicOutputDeviceId && !patched.meetingLoopbackDeviceId) {
+          const virt = virtualPool[0];
           if (virt) {
-            const next = { ...tts, meetingMicOutputDeviceId: virt.id };
-            set({ ttsSettings: next });
-            void tauriInvoke("set_tts_settings", { settings: next });
+            patched.meetingMicOutputDeviceId = virt.id;
+            changed = true;
           }
+        }
+        if (changed) {
+          set({ ttsSettings: patched });
+          void tauriInvoke("set_tts_settings", { settings: patched });
         }
       }
     } catch {
