@@ -2101,7 +2101,8 @@ $s.Speak($env:HEAR_SPEAK_TEXT)
 ///    - `CABLE Output (VB-Audio Hi-Fi Cable)`
 ///    - `CABLE Input (VB-Audio Virtual Cable)`
 #[cfg(target_os = "windows")]
-const NORMALIZE_VB_AUDIO_ENDPOINTS_PS: &str = r#"$code = @"
+const NORMALIZE_VB_AUDIO_ENDPOINTS_PS: &str = r#"param([string]$EnableFlag = '1')
+$code = @"
 using System;
 using System.Runtime.InteropServices;
 
@@ -2210,8 +2211,8 @@ public static class HearAudioNorm {
 }
 "@
 Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
-$enableFlag = ($env:HEAR_VC_ENABLE -ne '0')
-try { [HearAudioNorm]::Run($enableFlag) } catch {}
+$enableFlagBool = ($EnableFlag -ne '0')
+try { [HearAudioNorm]::Run($enableFlagBool) } catch {}
 "#;
 
 /// 一键快捷安装 VB-Cable 虚拟声卡：
@@ -2224,7 +2225,11 @@ async fn install_vb_cable() -> Result<(), String> {
         let norm_ps1 = std::env::temp_dir().join("hear_norm_vbaudio_init.ps1");
         let _ = std::fs::write(
             &norm_ps1,
-            format!("\u{FEFF}$env:HEAR_VC_ENABLE = '0'\r\n{}", NORMALIZE_VB_AUDIO_ENDPOINTS_PS).as_bytes(),
+            format!(
+                "\u{FEFF}{}",
+                NORMALIZE_VB_AUDIO_ENDPOINTS_PS.replace("param([string]$EnableFlag = '1')", "param([string]$EnableFlag = '0')")
+            )
+            .as_bytes(),
         );
         let norm_str = norm_ps1.to_string_lossy().replace('\'', "''");
         let script = format!("\u{FEFF}$ErrorActionPreference = 'Stop'\r\n\
@@ -2295,7 +2300,11 @@ async fn install_hifi_cable() -> Result<(), String> {
         let norm_ps1 = std::env::temp_dir().join("hear_norm_vbaudio_init.ps1");
         let _ = std::fs::write(
             &norm_ps1,
-            format!("\u{FEFF}$env:HEAR_VC_ENABLE = '0'\r\n{}", NORMALIZE_VB_AUDIO_ENDPOINTS_PS).as_bytes(),
+            format!(
+                "\u{FEFF}{}",
+                NORMALIZE_VB_AUDIO_ENDPOINTS_PS.replace("param([string]$EnableFlag = '1')", "param([string]$EnableFlag = '0')")
+            )
+            .as_bytes(),
         );
         let norm_str = norm_ps1.to_string_lossy().replace('\'', "''");
         let script = format!("\u{FEFF}$ErrorActionPreference = 'Stop'\r\n\
@@ -2479,16 +2488,14 @@ if ($isAdmin) {{\r\n\
         foreach ($d in $disabledDrivers) {{ Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }}\r\n\
         Start-Sleep -Milliseconds 700\r\n\
     }}\r\n\
-    $env:HEAR_VC_ENABLE = $enableFlag\r\n\
-    & '{}'\r\n\
+    & '{}' -EnableFlag $enableFlag\r\n\
 }} else {{\r\n\
     $lines = @()\r\n\
     if ($enableFlag -eq '1' -and $disabledDrivers.Count -gt 0) {{\r\n\
         foreach ($d in $disabledDrivers) {{ $lines += \"Enable-PnpDevice -InstanceId '$($d.InstanceId)' -Confirm:`$false -ErrorAction SilentlyContinue\" }}\r\n\
         $lines += 'Start-Sleep -Milliseconds 700'\r\n\
     }}\r\n\
-    $lines += \"$env:HEAR_VC_ENABLE = '$enableFlag'\"\r\n\
-    $lines += \"& '{}'\"\r\n\
+    $lines += \"& '{}' -EnableFlag '$enableFlag'\"\r\n\
     Set-Content -Path '{}' -Value ($lines -join \"`r`n\") -Encoding UTF8\r\n\
     Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
 }}\r\n",
