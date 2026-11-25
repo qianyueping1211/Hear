@@ -2199,9 +2199,9 @@ try {\r\n\
 }
 
 /// 检测系统中是否已安装 VB-Cable 与 Hi-Fi Cable（即使当前因未录音而被系统禁用，也能准确识别为已安装）
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct VirtualCableInstallStatus {
+pub struct VirtualCableInstallStatus {
     has_vb_cable: bool,
     has_hifi_cable: bool,
     vb_cable_enabled: bool,
