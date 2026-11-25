@@ -295,23 +295,42 @@ struct IPadWorkbenchView: View {
         .toolbar(.hidden, for: .navigationBar)
     }
 
-    /// 顶部桌面风格工具栏：侧边栏开关 + 语言切换 + 声音克隆 + 清空 + 纪要面板开关
-    /// （自动朗读已在底部 ControlBar 左下角 SpeakToggle 提供，此处不再重复占用宽度）
+    /// 顶部桌面风格工具栏：左侧（侧边栏开关 + 清空）· 中间（语言切换）· 右侧（声音克隆 + 纪要面板开关）
+    /// （清空按钮放在语言切换之前并靠左，语言切换居中，尽量贴近 iOS 端操作习惯）
     private var workbenchHeader: some View {
-        HStack(spacing: 10) {
-            Button {
-                withAnimation {
-                    columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+        HStack(spacing: 8) {
+            // 左侧：侧边栏开关 + 清空当前页
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation {
+                        columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+                    }
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .font(.subheadline.weight(.medium))
+                        .padding(8)
+                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
                 }
-            } label: {
-                Image(systemName: "sidebar.left")
-                    .font(.subheadline.weight(.medium))
-                    .padding(8)
-                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
-            }
-            .buttonStyle(.plain)
-            .help("展开/收起左侧历史栏")
+                .buttonStyle(.plain)
+                .help("展开/收起左侧历史栏")
 
+                Button {
+                    session.clearPage()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.subheadline)
+                        .padding(8)
+                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .disabled(session.items.isEmpty && session.partial.isEmpty)
+                .help("清空当前页")
+            }
+            .layoutPriority(1)
+
+            Spacer(minLength: 8)
+
+            // 中间：语言切换
             HStack(spacing: 8) {
                 LanguageMenu(selection: $session.langA)
                 Button { session.swapLanguages() } label: {
@@ -322,58 +341,47 @@ struct IPadWorkbenchView: View {
                 .buttonStyle(.plain)
                 LanguageMenu(selection: $session.langB)
             }
-            .frame(maxWidth: 320)
+            .frame(minWidth: 200, maxWidth: 300)
 
-            Spacer(minLength: 6)
+            Spacer(minLength: 8)
 
-            // 声音克隆快捷开关
-            Button {
-                session.voiceClone.toggle()
-            } label: {
-                Label("声音克隆", systemImage: "waveform.badge.mic")
-                    .font(.caption.weight(.medium))
-                    .fixedSize()
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(
-                        session.voiceClone ? Color.blue.opacity(0.16) : Color(.secondarySystemBackground),
-                        in: Capsule()
-                    )
-                    .foregroundStyle(session.voiceClone ? .blue : .secondary)
-            }
-            .buttonStyle(.plain)
-
-            // 清空当前页
-            Button {
-                session.clearPage()
-            } label: {
-                Image(systemName: "trash")
-                    .font(.subheadline)
-                    .padding(7)
-                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
-            }
-            .buttonStyle(.plain)
-            .disabled(session.items.isEmpty && session.partial.isEmpty)
-            .help("清空当前页")
-
-            // 展开/收起右侧会议纪要栏
-            Button {
-                inspectorUserToggled = true
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    showSummaryInspector.toggle()
+            // 右侧：声音克隆快捷开关 + 展开/收起会议纪要栏
+            HStack(spacing: 8) {
+                Button {
+                    session.voiceClone.toggle()
+                } label: {
+                    Label("声音克隆", systemImage: "waveform.badge.mic")
+                        .font(.caption.weight(.medium))
+                        .fixedSize()
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            session.voiceClone ? Color.blue.opacity(0.16) : Color(.secondarySystemBackground),
+                            in: Capsule()
+                        )
+                        .foregroundStyle(session.voiceClone ? .blue : .secondary)
                 }
-            } label: {
-                Image(systemName: "sidebar.right")
-                    .font(.subheadline.weight(.medium))
-                    .padding(7)
-                    .background(
-                        showSummaryInspector ? Color.accentColor.opacity(0.16) : Color(.secondarySystemBackground),
-                        in: RoundedRectangle(cornerRadius: 8)
-                    )
-                    .foregroundStyle(showSummaryInspector ? Color.accentColor : .primary)
+                .buttonStyle(.plain)
+
+                Button {
+                    inspectorUserToggled = true
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showSummaryInspector.toggle()
+                    }
+                } label: {
+                    Image(systemName: "sidebar.right")
+                        .font(.subheadline.weight(.medium))
+                        .padding(8)
+                        .background(
+                            showSummaryInspector ? Color.accentColor.opacity(0.16) : Color(.secondarySystemBackground),
+                            in: RoundedRectangle(cornerRadius: 8)
+                        )
+                        .foregroundStyle(showSummaryInspector ? Color.accentColor : .primary)
+                }
+                .buttonStyle(.plain)
+                .help(showSummaryInspector ? "收起会议纪要栏 (⌘\\)" : "展开会议纪要栏 (⌘\\)")
             }
-            .buttonStyle(.plain)
-            .help(showSummaryInspector ? "收起会议纪要栏 (⌘\\)" : "展开会议纪要栏 (⌘\\)")
+            .layoutPriority(1)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
