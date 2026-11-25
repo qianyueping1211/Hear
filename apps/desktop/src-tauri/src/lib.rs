@@ -2166,9 +2166,11 @@ try {{\r\n\
     Start-Sleep -Seconds 1\r\n\
     Write-Host '正在自动禁用多余的 CABLE In 16ch 并固定命名为 CABLE Input...' -ForegroundColor Cyan\r\n\
     Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
-    Write-Host '安装与规范化已完成。请回到 Hear 点击「刷新虚拟声卡」。' -ForegroundColor Green\r\n\
+    Write-Host '安装与规范化已完成，窗口将在 3 秒后自动关闭...' -ForegroundColor Green\r\n\
+    Start-Sleep -Seconds 3\r\n\
 }} catch {{\r\n\
     Write-Host \"自动下载或启动安装失败：$($_.Exception.Message)\" -ForegroundColor Red\r\n\
+    Start-Sleep -Seconds 6\r\n\
 }}\r\n", norm_str);
         let ps1_path = std::env::temp_dir().join("hear_install_vbcable.ps1");
         std::fs::write(&ps1_path, script.as_bytes())
@@ -2180,7 +2182,6 @@ try {{\r\n\
                 "start",
                 "VB-Cable 虚拟声卡安装",
                 "powershell",
-                "-NoExit",
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
@@ -2232,9 +2233,11 @@ try {{\r\n\
     Start-Sleep -Seconds 1\r\n\
     Write-Host '正在自动将 Hi-Fi Cable 端点命名为 CABLE Output...' -ForegroundColor Cyan\r\n\
     Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
-    Write-Host '安装与规范化已完成。请回到 Hear 点击「刷新虚拟声卡」。' -ForegroundColor Green\r\n\
+    Write-Host '安装与规范化已完成，窗口将在 3 秒后自动关闭...' -ForegroundColor Green\r\n\
+    Start-Sleep -Seconds 3\r\n\
 }} catch {{\r\n\
     Write-Host \"自动下载或启动安装失败：$($_.Exception.Message)\" -ForegroundColor Red\r\n\
+    Start-Sleep -Seconds 6\r\n\
 }}\r\n", norm_str);
         let ps1_path = std::env::temp_dir().join("hear_install_hificable.ps1");
         std::fs::write(&ps1_path, script.as_bytes())
@@ -2246,7 +2249,6 @@ try {{\r\n\
                 "start",
                 "Hi-Fi Cable 虚拟声卡安装",
                 "powershell",
-                "-NoExit",
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
