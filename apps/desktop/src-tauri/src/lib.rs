@@ -2001,17 +2001,39 @@ async fn speak_text_sapi(
                 None
             };
             let cancel_for_play = cancel.clone();
-            let _ = tokio::task::spawn_blocking(move || {
+            let dev_for_play = output_dev.clone();
+            let play_res = tokio::task::spawn_blocking(move || {
                 let _duck = duck_ratio_opt
                     .map(|r| audio::output::AudioDuckGuard::enter(r, &[std::process::id()]));
-                audio::output::play_wav_to_device(&wav_bytes, &output_dev, cancel_for_play, far_end_opt)
+                audio::output::play_wav_to_device(&wav_bytes, &dev_for_play, cancel_for_play, far_end_opt)
             })
             .await;
-            if is_recording {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                rt.system_tts_muted.store(false, Ordering::Relaxed);
+            match play_res {
+                Ok(Ok(())) => {
+                    if is_recording {
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        rt.system_tts_muted.store(false, Ordering::Relaxed);
+                    }
+                    return Ok(());
+                }
+                Ok(Err(e)) => {
+                    logger::warn(format!(
+                        "[tts:winrt] 播放失败（dev={}）：{}，自动回退经典 SAPI",
+                        output_dev, e
+                    ));
+                }
+                Err(e) => {
+                    logger::warn(format!(
+                        "[tts:winrt] 播放线程异常：{}，自动回退经典 SAPI",
+                        e
+                    ));
+                }
             }
-            return Ok(());
+        } else {
+            logger::info(format!(
+                "[tts:winrt] OneCore 未返回音频（lang={} gender={}），回退经典 SAPI",
+                lang_tag, gender_tag
+            ));
         }
 
         let sapi_pid = rt.sapi_pid.clone();

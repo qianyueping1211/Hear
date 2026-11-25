@@ -1607,30 +1607,54 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         ? standardVirtuals
         : devices.filter((d) => d.isVirtual);
 
-    let savedLoopback = "";
-    let savedMic = "";
+    const liveVb = virtuals.find((d) => {
+      const lower = d.name.toLowerCase();
+      return (
+        lower.includes("vb-audio virtual cable") ||
+        (lower.includes("cable input") && !lower.includes("hi-fi"))
+      );
+    });
+    const liveHiFi = virtuals.find((d) => d.name.toLowerCase().includes("hi-fi"));
+
+    let hasVbCable = Boolean(liveVb);
+    let hasHiFiCable = Boolean(liveHiFi);
+    if (isTauriRuntime()) {
+      try {
+        const st = await tauriInvoke<{
+          hasVbCable: boolean;
+          hasHifiCable: boolean;
+        }>("get_virtual_cable_install_status");
+        if (st) {
+          hasVbCable = hasVbCable || Boolean(st.hasVbCable);
+          hasHiFiCable = hasHiFiCable || Boolean(st.hasHifiCable);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // 固定锁定两路声卡分工，绝不互换：
+    // 听对方（屏蔽原声）= VB-Audio Virtual Cable
+    // 给对方听（发送我的译文）= VB-Audio Hi-Fi Cable
+    let wantLoopback = true;
+    let wantMic = true;
     try {
-      savedLoopback = localStorage.getItem("hear_saved_meeting_loopback") || "";
-      savedMic = localStorage.getItem("hear_saved_meeting_mic") || "";
+      const lbPref = localStorage.getItem("hear_meeting_loopback_enabled");
+      const micPref = localStorage.getItem("hear_meeting_mic_enabled");
+      if (lbPref === "0") wantLoopback = false;
+      if (micPref === "0") wantMic = false;
     } catch {
       // ignore
     }
-    const validIds = new Set(virtuals.map((v) => v.id));
-    let loopbackId = validIds.has(savedLoopback) ? savedLoopback : "";
-    let micId = validIds.has(savedMic) && savedMic !== loopbackId ? savedMic : "";
 
-    if (virtuals.length >= 2) {
-      if (!loopbackId) {
-        loopbackId = virtuals.find((v) => v.id !== micId)?.id || virtuals[0].id;
-      }
-      if (!micId) {
-        micId = virtuals.find((v) => v.id !== loopbackId)?.id || "";
-      }
-    } else if (virtuals.length === 1) {
-      if (!loopbackId && !micId) {
-        micId = virtuals[0].id;
-      }
-    }
+    const loopbackId =
+      hasVbCable && wantLoopback
+        ? liveVb?.id || "CABLE Input (VB-Audio Virtual Cable)"
+        : "";
+    const micId =
+      hasHiFiCable && wantMic
+        ? liveHiFi?.id || "Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)"
+        : "";
 
     const tts = get().ttsSettings;
     await get().updateTtsSettings({
@@ -1643,17 +1667,6 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   },
 
   deactivateMeetingVirtualCables: async (switchToFaceToFace = false) => {
-    const tts = get().ttsSettings;
-    try {
-      if (tts.meetingLoopbackDeviceId) {
-        localStorage.setItem("hear_saved_meeting_loopback", tts.meetingLoopbackDeviceId);
-      }
-      if (tts.meetingMicOutputDeviceId) {
-        localStorage.setItem("hear_saved_meeting_mic", tts.meetingMicOutputDeviceId);
-      }
-    } catch {
-      // ignore
-    }
     await get().updateTtsSettings({
       meetingLoopbackDeviceId: "",
       meetingMicOutputDeviceId: "",

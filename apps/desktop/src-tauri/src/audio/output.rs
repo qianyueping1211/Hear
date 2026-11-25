@@ -145,7 +145,10 @@ fn decode_wav_mono_f32(wav: &[u8]) -> Result<(Vec<f32>, u32), String> {
     let ch = channels as usize;
     let mut mono = Vec::new();
 
-    if audio_format == 1 && bits_per_sample == 16 {
+    let is_pcm16 = (audio_format == 1 || audio_format == 0xFFFE) && bits_per_sample == 16;
+    let is_f32 = (audio_format == 3 || audio_format == 0xFFFE) && bits_per_sample == 32;
+
+    if is_pcm16 {
         let frame_bytes = 2 * ch;
         let frames = raw.len() / frame_bytes;
         mono.reserve(frames);
@@ -158,7 +161,7 @@ fn decode_wav_mono_f32(wav: &[u8]) -> Result<(Vec<f32>, u32), String> {
             }
             mono.push((acc / ch as f32).clamp(-1.0, 1.0));
         }
-    } else if audio_format == 3 && bits_per_sample == 32 {
+    } else if is_f32 {
         let frame_bytes = 4 * ch;
         let frames = raw.len() / frame_bytes;
         mono.reserve(frames);
@@ -358,8 +361,28 @@ pub fn play_wav_to_device(
     let host = cpal::default_host();
     let trimmed = device_name.trim();
     let device = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
-        host.default_output_device()
-            .ok_or_else(|| "未找到默认音频输出设备".to_string())?
+        let def = host.default_output_device();
+        // 若系统默认播放设备被误设为虚拟声卡（如 VB-Cable），播放给本地听的译文时自动优先切回物理耳机/扬声器，避免无声
+        let def_is_virtual = def
+            .as_ref()
+            .and_then(|d| d.name().ok())
+            .map(|n| is_virtual_device_name(&n))
+            .unwrap_or(false);
+        if def_is_virtual {
+            host.output_devices()
+                .ok()
+                .and_then(|mut devs| {
+                    devs.find(|d| {
+                        d.name()
+                            .map(|n| !is_virtual_device_name(&n))
+                            .unwrap_or(false)
+                    })
+                })
+                .or(def)
+                .ok_or_else(|| "未找到默认音频输出设备".to_string())?
+        } else {
+            def.ok_or_else(|| "未找到默认音频输出设备".to_string())?
+        }
     } else {
         let needle = trimmed.to_ascii_lowercase();
         let want_vb = needle.contains("vb-audio virtual cable")
