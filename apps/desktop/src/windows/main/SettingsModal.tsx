@@ -258,7 +258,7 @@ export function SettingsModal() {
 
   const [vcStatus, setVcStatus] = useState<{
     hasVbCable: boolean;
-    hasHiFiCable: boolean;
+    hasHifiCable: boolean;
   } | null>(null);
 
   const refreshVirtualCableStatus = async () => {
@@ -266,7 +266,7 @@ export function SettingsModal() {
     try {
       const st = await invoke<{
         hasVbCable: boolean;
-        hasHiFiCable: boolean;
+        hasHifiCable: boolean;
       }>("get_virtual_cable_install_status");
       if (st) setVcStatus(st);
     } catch {
@@ -1225,7 +1225,7 @@ export function SettingsModal() {
                       (lower.includes("cable input") && !lower.includes("hi-fi"))
                     );
                   });
-                  const hasHiFiCable = Boolean(vcStatus?.hasHiFiCable) || hasLiveHiFi;
+                  const hasHiFiCable = Boolean(vcStatus?.hasHifiCable) || hasLiveHiFi;
                   const hasVbCable = Boolean(vcStatus?.hasVbCable) || hasLiveVb;
                   // 非录音状态下虚拟声卡会被系统禁用，cpal 不会列出已禁用设备；
                   // 只要 PnP 检测到已安装，就补充占位选项（优先沿用用户已保存的名称），确保随时可在下拉框中勾选两路虚拟声卡。
