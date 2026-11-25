@@ -166,8 +166,7 @@ struct SettingsView: View {
                                  status: session.senseStatus)
                         modelRow(.translation, title: "翻译模型（MT）", icon: "character.book.closed",
                                  status: session.translationStatus)
-                        modelRow(.voiceClone, title: "声音克隆（ZipVoice）", icon: "person.wave.2",
-                                 status: session.cloneStatus)
+                        // 本地声音克隆（ZipVoice）代码保留，界面暂隐藏
                         // 选哪个 .gguf、清缓存，都放到各自的"配置"窗口里
                     } else {
                         // 通用服务地址（三个模型共用的地址）
@@ -285,7 +284,7 @@ struct SettingsView: View {
                 } header: {
                     Text("朗读")
                 } footer: {
-                    Text("录制 3~10 秒固定声纹后，本地 ZipVoice 与云端 Qwen3-TTS 声音克隆均可直接使用。")
+                    Text("录制 3~10 秒固定声纹后，云端 Qwen3-TTS 声音克隆可直接使用。")
                 }
 
                 // MARK: 语言和日志
@@ -483,7 +482,6 @@ struct SettingsView: View {
     private var voiceCloneEngineRow: some View {
         Picker("声音克隆", selection: voiceCloneEngineBinding) {
             Text("云端：Qwen3-TTS").tag("cloud")
-            Text("本机：ZipVoice").tag("local")
         }
     }
 
@@ -498,7 +496,7 @@ struct SettingsView: View {
     }
 
     private var voiceCloneEngineBinding: Binding<String> {
-        Binding(get: { session.voiceCloneCloud ? "cloud" : "local" },
+        Binding(get: { "cloud" },
                 set: { applyVoiceCloneEngineSelection($0) })
     }
 
@@ -527,15 +525,11 @@ struct SettingsView: View {
     }
 
     private func applyVoiceCloneEngineSelection(_ engine: String) {
-        let cloud = engine == "cloud"
-        if cloud != session.voiceCloneCloud {
-            session.voiceCloneCloud = cloud
+        if !session.voiceCloneCloud {
+            session.voiceCloneCloud = true
         }
-
-        if cloud, !isCloudModelConfigured(.clone) {
+        if !isCloudModelConfigured(.clone) {
             openCloudModelConfiguration(.clone)
-        } else if !cloud, !session.isInstalled(.voiceClone) {
-            openLocalModelConfiguration(.voiceClone)
         }
     }
 

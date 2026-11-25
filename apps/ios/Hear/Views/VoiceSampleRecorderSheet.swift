@@ -197,7 +197,7 @@ struct VoiceSampleRecorderSheet: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(String(format: "当前已保存固定声纹（%.1f 秒）", store.durationSeconds))
                                     .font(.footnote.weight(.medium))
-                                Text("本地 ZipVoice 与云端 Qwen3-TTS 均可直接使用")
+                                Text("云端 Qwen3-TTS 声音克隆可直接使用")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }

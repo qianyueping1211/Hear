@@ -547,13 +547,10 @@ final class LiveSession: ObservableObject {
         leftEar = d.string(forKey: "leftEar") ?? "A"
         rightEar = d.string(forKey: "rightEar") ?? "B"
         voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
-        // 声音克隆默认用云端模型；已经设置过的沿用原选择
-        if let v = d.object(forKey: "voiceCloneCloud") as? Bool {
-            voiceCloneCloud = v
-        } else if d.object(forKey: "voiceCloneCloud") != nil {
-            voiceCloneCloud = d.bool(forKey: "voiceCloneCloud")
-        } else {
-            voiceCloneCloud = true
+        // 界面已隐藏本地 ZipVoice，统一固定走云端声音克隆（本地代码保留，后续如需恢复可重新放开）
+        voiceCloneCloud = true
+        if d.object(forKey: "voiceCloneCloud") as? Bool == false {
+            d.set(true, forKey: "voiceCloneCloud")
         }
         // init 里属性还没初始化完，只能用局部变量，不能直接读 self.cloudAddress
         let cloudAddr = d.string(forKey: "cloudAddress") ?? ""
@@ -3736,8 +3733,7 @@ final class LiveSession: ObservableObject {
         if cm != cloudModelAddress { cloudModelAddress = cm }
         let cas = d.string(forKey: "cloudASRScheme") ?? "sensevoice+whisper"
         if cas != cloudASRScheme { cloudASRScheme = cas }
-        let vcc = d.object(forKey: "voiceCloneCloud") as? Bool ?? true
-        if vcc != voiceCloneCloud { voiceCloneCloud = vcc }
+        if !voiceCloneCloud { voiceCloneCloud = true }
         let te = d.string(forKey: "translationEngine") ?? translationEngine
         if te != translationEngine { translationEngine = te }
         let hh = d.string(forKey: "hfHost") ?? "huggingface.co"
@@ -3842,8 +3838,9 @@ final class LiveSession: ObservableObject {
             }
         case .clone:
             if on { voiceCloneCloud = true; voiceClone = true; return nil }
-            // 关掉云端克隆，切回手机上的 ZipVoice。
-            voiceCloneCloud = false
+            // 本地克隆界面已隐藏，关闭云端克隆时直接关闭声音克隆开关
+            voiceClone = false
+            voiceCloneCloud = true
         }
         return nil
     }
