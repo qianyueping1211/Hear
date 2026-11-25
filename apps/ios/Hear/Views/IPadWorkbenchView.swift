@@ -31,6 +31,7 @@ struct IPadWorkbenchView: View {
     @State private var newTitle = ""
     @State private var deleting: ConversationMeta?
     @State private var summaryCopied = false
+    @State private var activeSpecialMode: IPadSpecialMode?
 
     private var sidebarSelection: Binding<SidebarItem?> {
         Binding(
@@ -97,10 +98,24 @@ struct IPadWorkbenchView: View {
                     }
                 }
                 .keyboardShortcut("\\", modifiers: .command)
+                Button("面对面双人同屏") { activeSpecialMode = .faceToFace }
+                    .keyboardShortcut("1", modifiers: .command)
+                Button("大屏专注字幕板") { activeSpecialMode = .captionBoard }
+                    .keyboardShortcut("2", modifiers: .command)
             }
             .frame(width: 0, height: 0)
             .opacity(0.001)
             .accessibilityHidden(true)
+        }
+        .fullScreenCover(item: $activeSpecialMode) { mode in
+            switch mode {
+            case .faceToFace:
+                IPadFaceToFaceView { activeSpecialMode = nil }
+                    .environmentObject(session)
+            case .captionBoard:
+                IPadCaptionBoardView { activeSpecialMode = nil }
+                    .environmentObject(session)
+            }
         }
         .alert(
             "删除这段对话？",
@@ -345,8 +360,28 @@ struct IPadWorkbenchView: View {
 
             Spacer(minLength: 8)
 
-            // 右侧：声音克隆快捷开关 + 展开/收起会议纪要栏
+            // 右侧：大屏场景模式 + 声音克隆快捷开关 + 展开/收起会议纪要栏
             HStack(spacing: 8) {
+                Menu {
+                    Button {
+                        activeSpecialMode = .faceToFace
+                    } label: {
+                        Label("面对面双人同屏 (⌘1)", systemImage: "person.2.wave.2")
+                    }
+                    Button {
+                        activeSpecialMode = .captionBoard
+                    } label: {
+                        Label("大屏专注字幕板 (⌘2)", systemImage: "captions.bubble")
+                    }
+                } label: {
+                    Image(systemName: "rectangle.split.1x2")
+                        .font(.subheadline.weight(.medium))
+                        .padding(8)
+                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .help("iPad 大屏模式：面对面双人同屏 / 专注字幕板")
+
                 Button {
                     session.voiceClone.toggle()
                 } label: {
