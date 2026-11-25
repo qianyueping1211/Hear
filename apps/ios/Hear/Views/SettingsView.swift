@@ -197,7 +197,7 @@ struct SettingsView: View {
                         Text("手机麦克风").tag("phone")
                         Text("耳机麦克风").tag("headset")
                     }
-                    Toggle("语音增强（降噪，外放朗读时仍会暂停收音）", isOn: $session.voiceProcessing)
+                    Toggle("语音增强", isOn: $session.voiceProcessing)
                     Toggle("保存完整录音", isOn: $session.saveFullRecording)
                     if session.speakerTrackingAvailable {
                         Toggle("实时翻译时区分说话人", isOn: $session.speakerTrackingEnabled)
