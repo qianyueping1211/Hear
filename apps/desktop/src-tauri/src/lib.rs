@@ -1937,24 +1937,41 @@ $s.Speak($env:HEAR_SPEAK_TEXT)
     Ok(())
 }
 
-/// 一键快捷安装 VB-Cable 虚拟声卡（写临时 .ps1 避免 cmd /C 换行截断；优先 winget 安装，失败则自动打开官网下载页）
+/// 一键快捷安装 VB-Cable 虚拟声卡：
+/// 自动下载官方驱动包 zip → 解压到临时目录 → 以管理员身份直接拉起 VBCABLE_Setup_x64.exe，
+/// 用户只需在弹出窗口点一次「Install Driver」即可完成安装。
 #[tauri::command]
 async fn install_vb_cable() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let script = "\u{FEFF}Write-Host '=== 正在安装 VB-Cable 虚拟声卡（会议同传专用）===' -ForegroundColor Cyan\r\n\
-Write-Host '提示：安装驱动时会弹出系统管理员授权与 Install Driver 窗口，请点击确认。' -ForegroundColor Gray\r\n\
-if (Get-Command winget -ErrorAction SilentlyContinue) {\r\n\
-    winget install --id VB-Audio.Cable --accept-package-agreements --accept-source-agreements\r\n\
-    if ($LASTEXITCODE -eq 0) {\r\n\
-        Write-Host ''\r\n\
-        Write-Host 'VB-Cable 安装完成！请回到 Hear 点击「安装后刷新设备」，即可看到 CABLE Input。' -ForegroundColor Green\r\n\
-    } else {\r\n\
-        Write-Host 'winget 未能自动完成安装，正在为您打开 VB-Cable 官方下载页...' -ForegroundColor Yellow\r\n\
-        Start-Process 'https://vb-audio.com/Cable/'\r\n\
-    }\r\n\
-} else {\r\n\
-    Write-Host '当前系统未检测到 winget，正在为您打开 VB-Cable 官方下载页...' -ForegroundColor Yellow\r\n\
+        let script = "\u{FEFF}$ErrorActionPreference = 'Stop'\r\n\
+Write-Host '=== 正在准备 VB-Cable 虚拟声卡安装程序（会议同传专用）===' -ForegroundColor Cyan\r\n\
+$workDir = Join-Path $env:TEMP 'Hear-VBCable'\r\n\
+$zipPath = Join-Path $workDir 'VBCABLE_Driver_Pack.zip'\r\n\
+$extractDir = Join-Path $workDir 'extracted'\r\n\
+New-Item -ItemType Directory -Force -Path $workDir | Out-Null\r\n\
+$downloadUrl = 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip'\r\n\
+try {\r\n\
+    $page = Invoke-WebRequest -Uri 'https://vb-audio.com/Cable/' -UseBasicParsing -TimeoutSec 10\r\n\
+    $m = [regex]::Match($page.Content, 'https://download\\.vb-audio\\.com/Download_CABLE/VBCABLE_Driver_Pack\\d+\\.zip')\r\n\
+    if ($m.Success) { $downloadUrl = $m.Value }\r\n\
+} catch {}\r\n\
+try {\r\n\
+    Write-Host \"1/3 正在下载官方驱动包：$downloadUrl\" -ForegroundColor White\r\n\
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing\r\n\
+    Write-Host '2/3 正在解压驱动包...' -ForegroundColor White\r\n\
+    if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }\r\n\
+    Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force\r\n\
+    $setup = Get-ChildItem -Path $extractDir -Recurse -Filter 'VBCABLE_Setup_x64.exe' | Select-Object -First 1\r\n\
+    if (-not $setup) { $setup = Get-ChildItem -Path $extractDir -Recurse -Filter 'VBCABLE_Setup.exe' | Select-Object -First 1 }\r\n\
+    if (-not $setup) { throw '压缩包内未找到 VBCABLE_Setup_x64.exe' }\r\n\
+    Write-Host '3/3 正在以管理员身份启动安装程序...' -ForegroundColor Green\r\n\
+    Write-Host '请在弹出的 VB-Cable 窗口中点击 [Install Driver]，完成后回到 Hear 点击「刷新虚拟声卡」。' -ForegroundColor Yellow\r\n\
+    Start-Process -FilePath $setup.FullName -Verb RunAs -Wait\r\n\
+    Write-Host '安装窗口已关闭。请回到 Hear 点击「刷新虚拟声卡」查看 CABLE Input。' -ForegroundColor Green\r\n\
+} catch {\r\n\
+    Write-Host \"自动下载或启动安装失败：$($_.Exception.Message)\" -ForegroundColor Red\r\n\
+    Write-Host '正在为您打开 VB-Cable 官网，可手动下载压缩包后解压运行 VBCABLE_Setup_x64.exe。' -ForegroundColor Yellow\r\n\
     Start-Process 'https://vb-audio.com/Cable/'\r\n\
 }\r\n";
         let ps1_path = std::env::temp_dir().join("hear_install_vbcable.ps1");
