@@ -177,6 +177,14 @@ final class LiveSession: ObservableObject {
     @Published private(set) var cloudASRSchemes: [String] = []
     /// 每个模型实际连上的地址（模型自己的地址不通、用通用服务地址顶上的，记通用那个）
     @Published private(set) var cloudStatusAddress: [String: String] = [:]
+    /// 系统朗读声音偏好："auto" 跟随说话人性别 / "default" 系统默认 / "female" 女声 / "male" 男声
+    @Published var systemVoicePreference: String {
+        didSet { save("systemVoicePreference", systemVoicePreference) }
+    }
+    /// 根据原声基频估算的每句说话人性别（用于未手动设置性别时的系统朗读男女声自动切换）
+    private var detectedGenders: [UUID: AVSpeechSynthesisVoiceGender] = [:]
+    private var detectedGenderOrder: [UUID] = []
+
     /// 声音克隆用云端模型（false = 用 iPhone 本机的 ZipVoice）
     @Published var voiceCloneCloud: Bool {
         didSet {
@@ -546,6 +554,7 @@ final class LiveSession: ObservableObject {
         manualSpeaker = d.bool(forKey: "manualSpeakerOutput") && savedOutput == .speaker
         leftEar = d.string(forKey: "leftEar") ?? "A"
         rightEar = d.string(forKey: "rightEar") ?? "B"
+        systemVoicePreference = d.string(forKey: "systemVoicePreference") ?? "auto"
         voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
         // 界面已隐藏本地 ZipVoice，统一固定走云端声音克隆（本地代码保留，后续如需恢复可重新放开）
         voiceCloneCloud = true
@@ -3531,11 +3540,48 @@ final class LiveSession: ObservableObject {
                 // 克隆声音放不出来，退回系统声音，别让用户听个寂寞
                 // （但如果这时用户已经停了朗读、或者切到后台了，就别再出声）
                 if Task.isCancelled || inBackground || token != playbackToken || readingID != item.id { return }
-                await speaker.speak(SpeakRequest(text: text, locale: item.target.tts, pan: pan))
+                let fallbackVoice = preferredSystemVoice(for: item)
+                await speaker.speak(SpeakRequest(text: text, locale: item.target.tts, voice: fallbackVoice, pan: pan))
             }
         } else {
-            await speaker.speak(SpeakRequest(text: text, locale: item.target.tts, pan: pan))
+            let sysVoice = preferredSystemVoice(for: item)
+            await speaker.speak(SpeakRequest(text: text, locale: item.target.tts, voice: sysVoice, pan: pan))
         }
+    }
+
+    /// 按「系统朗读声音」设置解析本句应使用的系统音色（支持自动跟随说话人性别或固定男/女声）
+    private func preferredSystemVoice(for item: TranslationItem) -> AVSpeechSynthesisVoice? {
+        let gender: AVSpeechSynthesisVoiceGender?
+        switch systemVoicePreference {
+        case "male":
+            gender = .male
+        case "female":
+            gender = .female
+        case "default":
+            gender = nil
+        default:
+            // "auto"：优先用说话人资料里的性别，其次用原声基频估算的性别
+            switch item.speakerDetails?.gender {
+            case .male:
+                gender = .male
+            case .female:
+                gender = .female
+            case nil:
+                gender = detectedGenders[item.id]
+            }
+        }
+        return Speaker.bestVoice(for: item.target.tts, gender: gender)
+    }
+
+    private func recordDetectedGender(_ gender: AVSpeechSynthesisVoiceGender, for id: UUID) {
+        if detectedGenders[id] == nil {
+            detectedGenderOrder.append(id)
+            if detectedGenderOrder.count > 200 {
+                let oldest = detectedGenderOrder.removeFirst()
+                detectedGenders.removeValue(forKey: oldest)
+            }
+        }
+        detectedGenders[id] = gender
     }
 
     // MARK: - 修改原文后重新翻译
@@ -4197,6 +4243,17 @@ final class LiveSession: ObservableObject {
 
     private func rememberReference(_ id: UUID, samples: [Float], text: String) {
         clonePipeline.remember(id, samples: samples, text: text, enabled: voiceClone)
+        // 后台异步估算原声基频（<1ms），供系统朗读自动区分男声 / 女声使用
+        if detectedGenders[id] == nil, samples.count >= 1_600 {
+            let slice = samples.count > 48_000 ? Array(samples.prefix(48_000)) : samples
+            Task.detached(priority: .utility) { [weak self] in
+                guard let f0 = VoiceAnalyzer.estimateF0(slice) else { return }
+                let gender: AVSpeechSynthesisVoiceGender = f0 < 165 ? .male : .female
+                await MainActor.run {
+                    self?.recordDetectedGender(gender, for: id)
+                }
+            }
+        }
     }
 
     private func cloneReference(for item: TranslationItem) -> SessionClonePipeline.Reference? {

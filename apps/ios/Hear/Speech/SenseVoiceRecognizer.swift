@@ -2,9 +2,6 @@ import Foundation
 import FluidAudio
 import CoreML
 import os
-#if canImport(UIKit)
-import UIKit
-#endif
 
 /// 本地语音识别：SenseVoiceSmall（阿里 FunASR，FluidAudio 转成的 Core ML，跑在神经引擎上）。
 /// 一次把整句文字算出来（不是一个字一个字往下生成），所以很快，也不会在噪声上“复读”卡住。
@@ -38,8 +35,7 @@ actor SenseVoiceRecognizer {
     func load(folder: URL) async throws {
         try await acquireEngine()
         defer { decoding = false }
-        let preferCPU = await Self.shouldPreferCPUOnCurrentDevice()
-        try loadModels(folder: folder, preferCPU: preferCPU)
+        try loadModels(folder: folder)
     }
 
     private func acquireEngine() async throws {
@@ -56,54 +52,28 @@ actor SenseVoiceRecognizer {
         try await acquireEngine()
         defer { decoding = false }
         unload()
-        let preferCPU = await Self.shouldPreferCPUOnCurrentDevice()
-        try loadModels(folder: folder, preferCPU: preferCPU)
+        try loadModels(folder: folder)
     }
 
-    /// M 系列 iPad 上 CoreML 首次为 ANE 编译 SenseVoiceSmall_int8（50 层 SANM）容易卡死超过 2 分钟；
-    /// iPad 直接走 CPU/AMX（.cpuOnly）可绕过 ANECompilerService，1~2 秒内秒开且推理速度充足；
-    /// iPhone 保持原有 ANE 默认路径不变。
-    private static func shouldPreferCPUOnCurrentDevice() async -> Bool {
-        #if canImport(UIKit)
-        await MainActor.run { UIDevice.current.userInterfaceIdiom == .pad }
-        #else
-        return false
-        #endif
-    }
-
-    private func loadModels(folder: URL, preferCPU: Bool) throws {
+    /// iPhone 与 iPad 统一优先通过 CPU/AMX（.cpuOnly）加载 SenseVoiceSmall_int8：
+    /// 彻底绕过 CoreML ANECompilerService 漫长的图编译（iPhone ~18s / M2 iPad >120s），
+    /// 双端均可 2~3 秒内完成加载，异常时再回退默认路径。
+    private func loadModels(folder: URL) throws {
         let t0 = Date()
         // 下载的是 int8（约 240 MB）；导入的文件夹里只有 fp16 时就用 fp16
         let precision: SenseVoiceEncoderPrecision =
             SenseVoiceModels.modelsExist(at: folder, precision: .int8) ? .int8 : .fp16
-        hearLog("SenseVoice：开始加载（\(precision.rawValue)，\(preferCPU ? "iPad CPU/AMX" : "默认 ANE")），可用内存 \(os_proc_available_memory() / 1_048_576) MB")
-        if preferCPU {
-            do {
-                models = try Self.loadOnCPU(folder, precision: precision)
-            } catch {
-                try Task.checkCancellation()
-                hearLog("SenseVoice iPad CPU 加载失败，回退默认加载：\(error)", .warning)
-                do {
-                    models = try SenseVoiceModels.load(from: folder, precision: precision)
-                } catch {
-                    hearLog("SenseVoice 回退加载失败：\(error)", .error)
-                    throw LoadFailure()
-                }
-            }
-        } else {
+        hearLog("SenseVoice：开始加载（\(precision.rawValue)，CPU/AMX），可用内存 \(os_proc_available_memory() / 1_048_576) MB")
+        do {
+            models = try Self.loadOnCPU(folder, precision: precision)
+        } catch {
+            try Task.checkCancellation()
+            hearLog("SenseVoice CPU/AMX 加载失败，回退默认加载：\(error)", .warning)
             do {
                 models = try SenseVoiceModels.load(from: folder, precision: precision)
             } catch {
-                try Task.checkCancellation()
-                hearLog("SenseVoice 首次加载失败：\(error)", .warning)
-                guard (error as NSError).domain == "com.apple.CoreML" else { throw LoadFailure() }
-                hearLog("SenseVoice：尝试 CPU 兼容加载，可用内存 \(os_proc_available_memory() / 1_048_576) MB")
-                do {
-                    models = try Self.loadOnCPU(folder, precision: precision)
-                } catch {
-                    hearLog("SenseVoice CPU 加载失败：\(error)", .error)
-                    throw LoadFailure()
-                }
+                hearLog("SenseVoice 回退加载失败：\(error)", .error)
+                throw LoadFailure()
             }
         }
         managers.removeAll()
