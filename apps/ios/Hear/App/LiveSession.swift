@@ -554,7 +554,8 @@ final class LiveSession: ObservableObject {
         manualSpeaker = d.bool(forKey: "manualSpeakerOutput") && savedOutput == .speaker
         leftEar = d.string(forKey: "leftEar") ?? "A"
         rightEar = d.string(forKey: "rightEar") ?? "B"
-        systemVoicePreference = d.string(forKey: "systemVoicePreference") ?? "auto"
+        let savedVoicePref = d.string(forKey: "systemVoicePreference") ?? "auto"
+        systemVoicePreference = (savedVoicePref == "male" || savedVoicePref == "female") ? savedVoicePref : "auto"
         voiceClone = d.object(forKey: "voiceClone") as? Bool ?? false
         // 界面已隐藏本地 ZipVoice，统一固定走云端声音克隆（本地代码保留，后续如需恢复可重新放开）
         voiceCloneCloud = true

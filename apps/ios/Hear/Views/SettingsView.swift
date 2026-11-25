@@ -241,8 +241,7 @@ struct SettingsView: View {
                 Section {
                     Toggle("自动朗读译文", isOn: $session.speakOutput)
                     Picker("系统朗读声音", selection: $session.systemVoicePreference) {
-                        Text("自动跟随说话人性别").tag("auto")
-                        Text("系统默认").tag("default")
+                        Text("自动识别").tag("auto")
                         Text("女声").tag("female")
                         Text("男声").tag("male")
                     }
