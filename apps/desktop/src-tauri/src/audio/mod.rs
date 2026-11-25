@@ -717,7 +717,11 @@ mod win_wasapi {
                 .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
                 .ok()?;
             let count = collection.GetCount().ok()?;
+            let want_vb = needle.contains("vb-audio virtual cable")
+                || (needle.contains("cable input") && !needle.contains("hi-fi"));
+            let want_hifi = needle.contains("hi-fi");
             let mut partial_match = None;
+            let mut family_match = None;
             for i in 0..count {
                 let Ok(dev) = collection.Item(i) else {
                     continue;
@@ -736,10 +740,20 @@ mod win_wasapi {
                     && (friendly.contains(&needle) || needle.contains(&friendly))
                     && !friendly.is_empty()
                 {
-                    partial_match = Some(dev);
+                    partial_match = Some(dev.clone());
+                }
+                if family_match.is_none() && !friendly.contains("16ch") {
+                    if want_vb && friendly.contains("vb-audio virtual cable") {
+                        family_match = Some(dev);
+                    } else if want_hifi
+                        && (friendly.contains("vb-audio hi-fi cable")
+                            || friendly.contains("hi-fi cable"))
+                    {
+                        family_match = Some(dev);
+                    }
                 }
             }
-            partial_match
+            partial_match.or(family_match)
         }
 
         unsafe fn open(

@@ -361,7 +361,12 @@ pub fn play_wav_to_device(
         host.default_output_device()
             .ok_or_else(|| "未找到默认音频输出设备".to_string())?
     } else {
+        let needle = trimmed.to_ascii_lowercase();
+        let want_vb = needle.contains("vb-audio virtual cable")
+            || (needle.contains("cable input") && !needle.contains("hi-fi"));
+        let want_hifi = needle.contains("hi-fi");
         let mut found = None;
+        let mut family_match = None;
         if let Ok(devices) = host.output_devices() {
             for d in devices {
                 if let Ok(name) = d.name() {
@@ -369,10 +374,24 @@ pub fn play_wav_to_device(
                         found = Some(d);
                         break;
                     }
+                    if family_match.is_none() {
+                        let lower = name.to_ascii_lowercase();
+                        if !lower.contains("16ch") {
+                            if want_vb && lower.contains("vb-audio virtual cable") {
+                                family_match = Some(d);
+                            } else if want_hifi
+                                && (lower.contains("vb-audio hi-fi cable")
+                                    || lower.contains("hi-fi cable"))
+                            {
+                                family_match = Some(d);
+                            }
+                        }
+                    }
                 }
             }
         }
         found
+            .or(family_match)
             .or_else(|| host.default_output_device())
             .ok_or_else(|| format!("未找到指定音频输出设备：{}", trimmed))?
     };

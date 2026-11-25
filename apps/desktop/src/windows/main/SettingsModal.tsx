@@ -1211,24 +1211,58 @@ export function SettingsModal() {
                   const standardVirtuals = outputDevices.filter(
                     (d) => d.isVirtual && !d.name.toLowerCase().includes("16ch")
                   );
-                  const virtualDevices =
+                  const liveVirtuals =
                     standardVirtuals.length > 0
                       ? standardVirtuals
                       : outputDevices.filter((d) => d.isVirtual);
-                  const hasHiFiCable =
-                    Boolean(vcStatus?.hasHiFiCable) ||
-                    virtualDevices.some((d) =>
-                      d.name.toLowerCase().includes("hi-fi")
+                  const hasLiveHiFi = liveVirtuals.some((d) =>
+                    d.name.toLowerCase().includes("hi-fi")
+                  );
+                  const hasLiveVb = liveVirtuals.some((d) => {
+                    const lower = d.name.toLowerCase();
+                    return (
+                      lower.includes("vb-audio virtual cable") ||
+                      (lower.includes("cable input") && !lower.includes("hi-fi"))
                     );
-                  const hasVbCable =
-                    Boolean(vcStatus?.hasVbCable) ||
-                    virtualDevices.some((d) => {
-                      const lower = d.name.toLowerCase();
+                  });
+                  const hasHiFiCable = Boolean(vcStatus?.hasHiFiCable) || hasLiveHiFi;
+                  const hasVbCable = Boolean(vcStatus?.hasVbCable) || hasLiveVb;
+                  // 非录音状态下虚拟声卡会被系统禁用，cpal 不会列出已禁用设备；
+                  // 只要 PnP 检测到已安装，就补充占位选项（优先沿用用户已保存的名称），确保随时可在下拉框中勾选两路虚拟声卡。
+                  const savedIds = [
+                    ttsSettings.meetingLoopbackDeviceId || "",
+                    ttsSettings.meetingMicOutputDeviceId || "",
+                  ];
+                  const virtualDevices = [...liveVirtuals];
+                  if (hasVbCable && !hasLiveVb) {
+                    const savedVb = savedIds.find((id) => {
+                      const lower = id.toLowerCase();
                       return (
                         lower.includes("vb-audio virtual cable") ||
                         (lower.includes("cable input") && !lower.includes("hi-fi"))
                       );
                     });
+                    const vbName = savedVb || "CABLE Input (VB-Audio Virtual Cable)";
+                    virtualDevices.push({
+                      id: vbName,
+                      name: vbName,
+                      isDefault: false,
+                      isVirtual: true,
+                    });
+                  }
+                  if (hasHiFiCable && !hasLiveHiFi) {
+                    const savedHiFi = savedIds.find((id) =>
+                      id.toLowerCase().includes("hi-fi")
+                    );
+                    const hifiName =
+                      savedHiFi || "Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)";
+                    virtualDevices.push({
+                      id: hifiName,
+                      name: hifiName,
+                      isDefault: false,
+                      isVirtual: true,
+                    });
+                  }
                   const installedCount = (hasVbCable ? 1 : 0) + (hasHiFiCable ? 1 : 0);
                   return (
                   <div className="pt-3 space-y-3 border-t border-white/10">
