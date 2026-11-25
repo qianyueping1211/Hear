@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>听见 Hear · iPhone 与 Windows 实时语音翻译</title>
-<meta name="description" content="听见 Hear 当前提供 iPhone 实时语音翻译 App 和 Windows x64 桌面预览版。了解两个平台的下载方式、iPhone 功能架构与可选的模型服务。">
+<title>听见 Hear · iPhone / iPad 与 Windows 实时语音翻译</title>
+<meta name="description" content="听见 Hear 提供 iPhone / iPad 实时语音翻译 App 和 Windows x64 会议同传桌面端。了解各平台下载方式、功能架构、技术实现与独立模型服务。">
 <style>
 /* ============================================================
    听见 Hear · 介绍文档
@@ -365,19 +365,19 @@ section.band{scroll-margin-top:62px}
 <section class="hero">
   <div class="wrap hero-grid">
     <div>
-      <span class="kicker">iPhone · Windows x64 · 实时语音翻译</span>
+      <span class="kicker">iPhone · iPad · Windows x64 · 实时语音翻译与会议同传</span>
       <h1>听见<span class="lat">HEAR</span></h1>
       <p class="lead">
-        听见目前提供 <b>iPhone App</b> 和 <b>Windows 桌面预览版</b>。iPhone 可在本机识别、翻译和朗读，也可连接电脑上的模型服务；Windows 提供翻译工作台、悬浮字幕和本机模型服务入口。
-        iPhone 配置好本地模型后可以离线使用。
+        听见提供 <b>iPhone / iPad App</b> 与 <b>Windows 桌面端</b>。移动端支持本机离线识别、翻译与朗读，iPad 配备面对面分屏与全屏字幕看板；Windows 提供会议同传（双路虚拟声卡自动管理）、悬浮字幕与一键总结。
+        两端均可自由连接自建的局域网或云端模型服务。
       </p>
 
       <dl class="facts">
-        <div><dt>iPhone 客户端</dt><dd>iOS 18+ · 0.4.106</dd></div>
-        <div><dt>Windows 客户端</dt><dd>x64 · 0.1.36</dd></div>
-        <div><dt>独立模型服务端</dt><dd>Win-Server 1.0.1 · Apple-Server 1.0.2</dd></div>
-        <div><dt>核心模型</dt><dd>SenseVoice · Whisper · Hy-MT2 · ZipVoice / Qwen3-TTS</dd></div>
-        <div><dt>后续平台</dt><dd>iPad · Android · 鸿蒙 · macOS 客户端尚未发布</dd></div>
+        <div><dt>iPhone / iPad 客户端</dt><dd>iOS / iPadOS 18+ · 0.4.119</dd></div>
+        <div><dt>Windows 客户端</dt><dd>x64 · 0.1.55</dd></div>
+        <div><dt>独立模型服务端</dt><dd>Win-Server 1.0.3 · Apple-Server 1.0.4</dd></div>
+        <div><dt>核心模型</dt><dd>SenseVoice · Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
+        <div><dt>后续平台</dt><dd>Android · 鸿蒙 · macOS 客户端尚未发布</dd></div>
       </dl>
 
       <div class="cta-row">
@@ -470,30 +470,31 @@ section.band{scroll-margin-top:62px}
     <div class="sechead">
       <div class="num">平台</div>
       <div>
-        <h2>当前提供 iPhone 与 Windows</h2>
-        <p class="lede">两个客户端使用同一套模型服务接口，但安装包和版本号分别管理。Windows 桌面程序与供 iPhone 调用的 Windows 模型服务是两个不同的使用方式。</p>
+        <h2>当前提供 iPhone / iPad 与 Windows</h2>
+        <p class="lede">两个客户端使用同一套模型服务接口，安装包和版本号独立管理。模型服务端（Win-Server / Apple-Server）作为独立整合包运行，供多端局域网或公网接入。</p>
       </div>
     </div>
     <div class="fgroups">
       <div class="fgroup">
-        <h3>iPhone 客户端 <em>iOS 18+ · 0.4.106</em></h3>
+        <h3>iPhone / iPad 客户端 <em>iOS / iPadOS 18+ · 0.4.119</em></h3>
         <ul>
-          <li>实时识别、翻译和朗读；支持本机离线模型或连接自建云端/局域网模型服务。</li>
-          <li>支持录制 3~10 秒「我的固定声纹」（自动裁切首尾空白，本机 ZipVoice 与云端 Qwen3-TTS 通用）及按说话人独立控制。</li>
-          <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases" target="_blank" rel="noopener">Releases · 听见 iOS</a>（IPA）。</li>
+          <li>支持本机离线识别（SenseVoice 统一 CPU/AMX 加速，2~3 秒就绪）与 Hy-MT2 翻译，或按需切换云端服务。</li>
+          <li><b>iPad 专属工作台</b>：大屏双栏布局、面对面 180° 桌面分屏（<code>⌘1</code>）、高对比全屏字幕看板（<code>⌘2</code>）及快捷操作。</li>
+          <li>系统朗读支持人声基频（F0）自动匹配男女声；声音克隆统一走云端 Qwen3-TTS，支持 3~10 秒固定声纹与说话人区分。</li>
+          <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases" target="_blank" rel="noopener">Releases · 听见 iOS</a>（IPA，iPhone 与 iPad 通用）。</li>
         </ul>
       </div>
       <div class="fgroup">
-        <h3>Windows 客户端 <em>x64 · 0.1.36</em></h3>
+        <h3>Windows 客户端 <em>x64 · 0.1.55</em></h3>
         <ul>
-          <li>Tauri + Rust + React 桌面实时翻译工作台，支持双路采集（系统内录 + 麦克风）、悬浮字幕、15 阶抗混叠重采样、NLMS AEC 全双工防回声与会议虚拟麦路由。</li>
-          <li>支持原生 SAPI 按语种朗读、固定声纹录制（自动裁切前后空白）、克隆参考音 <code>ref_id</code> 缓存、手动点播自动暂停并在重开时从下一行续播。</li>
-          <li>公网 HTTPS 严格校验证书，仅本机/局域网放宽自签证书；内置自动更新与配置双备份防丢。</li>
+          <li>Tauri + Rust + React 实时翻译与会议同传工作台，支持双路采集（系统内录 + 麦克风）、悬浮字幕、15 阶抗混叠重采样与 NLMS AEC 防回声。</li>
+          <li><b>会议同传虚拟声卡</b>：内置 <code>VB-Cable</code> 与 <code>Hi-Fi Cable</code> 一键安装与 PnP 独立检测；仅在「会议同传 + 录音中」自动在系统层启用，非录音自动禁用，并支持 CoreAudio 原声自动压低（DuckGuard）。</li>
+          <li><b>原生语音与总结</b>：Rust 原生 WinRT OneCore 语音引擎（解锁中文男女声与自动性别匹配）+ 云端 Qwen3-TTS 克隆；同步 iOS 全部 5 套一键总结模板（支持 <code>[mm:ss]</code> 时间锚点跳转）。</li>
           <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases" target="_blank" rel="noopener">Releases · 听见 Windows</a>（EXE）；<a href="https://github.com/qianyueping1211/Hear/blob/main/apps/desktop/README.md" target="_blank" rel="noopener">桌面端说明</a>。</li>
         </ul>
       </div>
       <div class="fgroup">
-        <h3>独立模型服务端 <em>Win-Server 1.0.1 · Apple-Server 1.0.2</em></h3>
+        <h3>独立模型服务端 <em>Win-Server 1.0.3 · Apple-Server 1.0.4</em></h3>
         <ul>
           <li><b>听见 Win-Server</b>：内置便携 Python 3.12 与全套依赖（免装 Python），含 <code>start-hear-cloud.bat</code> 与 <code>start-hear-token-admin.bat</code>，自动探测 NVIDIA CUDA 加速 Whisper。</li>
           <li><b>听见 Apple-Server</b>：针对 Apple Silicon（M1~M4 Max 统一内存）预编译 Metal GPU <code>llama-server</code>，64GB 自动推荐 Hy-MT2-30B-A3B + Qwen3-TTS-1.7B，含双击 <code>听见服务端.app</code>、开机自启与口令管理后台快捷入口。</li>
@@ -556,7 +557,7 @@ section.band{scroll-margin-top:62px}
       <span class="lab">引擎可选</span>
       <span class="opt"><b>识别</b>　本机 SenseVoice / 苹果自带 / 云端</span>
       <span class="opt"><b>翻译</b>　本机 Hy-MT2 / 苹果自带 / 云端 Hy-MT2</span>
-      <span class="opt"><b>声音克隆</b>　本机 ZipVoice / 云端 Qwen3-TTS</span>
+      <span class="opt"><b>声音克隆</b>　云端 Qwen3-TTS</span>
     </div>
 
     <div class="note">
@@ -572,7 +573,7 @@ section.band{scroll-margin-top:62px}
         <ul>
           <li><b>实时翻译模式</b>　轻点麦克风开始收音，App 会在选定的两种语言间判断方向。再点一次停止。</li>
           <li><b>对话翻译模式</b>　轻点左侧或右侧的语言圆圈开始，再点同一个圆圈停止。点另一侧会先收完当前语段，再切换语言。</li>
-          <li><b>模式切换</b>　底部横向滑动或点击圆点切换模式，应用会记住上次使用的模式。</li>
+          <li><b>模式切换与 iPad 视图</b>　iPhone 底部横向滑动切换实时/对话模式；iPad 除双栏工作台外，还提供面对面 180° 桌面分屏（<code>⌘1</code>）与高对比全屏字幕看板（<code>⌘2</code>）。</li>
           <li><b>翻译气泡</b>　先显示原文，再逐步显示译文。等待修正时保留已有译文，修正成功后标出变化。</li>
           <li><b>编辑和重试</b>　长按气泡可修改原文并重译，也可选择复制译文。翻译失败且有原文时，可直接点「重试翻译」。</li>
           <li><b>灵动岛和锁屏</b>　设置中可选「展示译文」或「展示原文和译文」。展开灵动岛或查看锁屏时可读译文，暂停收音后显示暂停状态。</li>
@@ -582,7 +583,7 @@ section.band{scroll-margin-top:62px}
       <div class="fgroup">
         <h3><em>02</em>语音识别</h3>
         <ul>
-          <li><b>本机 SenseVoice</b>　支持中文、英语、日语和韩语。实时识别可在语句结束前回显原文。</li>
+          <li><b>本机 SenseVoice</b>　支持中文、英语、日语和韩语。统一采用 CPU/AMX（<code>.cpuOnly</code>）加速加载，iPhone 与 iPad 均 2~3 秒就绪，支持语句结束前实时回显原文。</li>
           <li><b>苹果自带</b>　iOS 26 或以上提供系统听写，适用语种随设备可用的语言资源变化。</li>
           <li><b>云端语音识别</b>　从「模型管理 → 云端模型 → 语音识别」选择服务支持的 SenseVoice、Whisper 或 SenseVoice + Whisper。</li>
           <li><b>区分说话人</b>　云端由服务器提供说话人模型。本机 SenseVoice 需带 CAM++ 模型文件，在「语音识别」里开启「实时翻译时区分说话人」。</li>
@@ -606,7 +607,7 @@ section.band{scroll-margin-top:62px}
         <ul>
           <li><b>声音输出位置</b>　在「功能设置 → 朗读」选择手机扬声器或耳机。使用耳机时可分别指定左右耳听哪种译文或静音。</li>
           <li><b>播报时机</b>　扬声器模式通常在停止收音后朗读。App 切到后台时暂停播放，识别、翻译及克隆生成可继续处理。</li>
-          <li><b>声音克隆</b>　在「朗读」里开启后，可以选本机 ZipVoice 或云端 Qwen3-TTS。本机 ZipVoice 适用于中英文。</li>
+          <li><b>声音克隆与性别匹配</b>　开启声音克隆后通过云端 Qwen3-TTS 合成译文音色；使用系统语音朗读时，支持「自动识别 / 女声 / 男声」，基于人声基频（F0）自动匹配对应性别音色。</li>
           <li><b>样本和系统朗读</b>　优先使用这句的参考音频。同页中有已确认的相同说话人和同种语言时，可复用该说话人的合格样本。样本不足或克隆声音不可播放时，用系统声音朗读。</li>
           <li><b>图标状态</b>　克隆生成中显示转圈，音频开始输出时喇叭变绿。播放结束后显示灰色喇叭，可在「显示声音图标」中关闭灰色图标。</li>
           <li><b>静音与缓存</b>　播放前裁掉克隆音频首尾的长静音，保留句中的停顿。已有缓存首次读取也会处理。</li>
@@ -617,7 +618,7 @@ section.band{scroll-margin-top:62px}
         <h3><em>05</em>会话与历史</h3>
         <ul>
           <li><b>历史记录</b>　每页对话可独立存档，保留原文、译文及说话人资料。</li>
-          <li><b>大模型总结</b>　配置服务提供商后可选会议纪要、简明摘要、行动项清单、双语要点或沟通访谈记录，结果支持编辑。</li>
+          <li><b>大模型总结</b>　iOS/iPadOS 与 Windows 端共享同一套 5 种总结模板（德鲁克会议纪要、简明摘要、行动项清单、双语要点对照、沟通访谈记录），结果支持编辑；Windows 端支持点击 <code>[mm:ss]</code> 时间锚点跳转回放。</li>
           <li><b>继续使用</b>　异常中断的总结会标记为失败，可再次生成。</li>
         </ul>
       </div>
@@ -698,7 +699,8 @@ section.band{scroll-margin-top:62px}
       <div class="layer">
         <div class="lname">表现层</div>
         <div class="lbody">
-          <span class="chip">ContentView</span><span class="chip">HistoryView</span><span class="chip">ConversationDetailView</span>
+          <span class="chip">ContentView</span><span class="chip">IPadWorkbenchView</span><span class="chip">IPadModesView</span>
+          <span class="chip">HistoryView</span><span class="chip">ConversationDetailView</span>
           <span class="chip">SettingsView</span><span class="chip">LLMSettingsView</span><span class="chip">LogView</span>
           <span class="chip">CenterDialog</span><span class="chip">MarkdownView</span><span class="chip">SetupView</span>
         </div>
@@ -790,7 +792,7 @@ section.band{scroll-margin-top:62px}
       <div class="key">
         <div class="term"><span class="tag">TTS</span><h4>朗读与空间音频</h4></div>
         <div class="detail">
-          <p>系统声音通过 <code>AVSpeechSynthesizer</code> 朗读。分配到单耳时，将合成音频交给 <code>AVAudioPlayerNode</code> 并调整声道。</p>
+          <p>系统声音通过 <code>AVSpeechSynthesizer</code> 朗读，并借助 <code>VoiceAnalyzer</code> 的 F0 基频估计自动匹配男女声。分配到单耳时，将合成音频交给 <code>AVAudioPlayerNode</code> 并调整声道。Windows 端采用原生 Rust WinRT OneCore（<code>SpeechSynthesizer</code>）解锁系统男女声并支持指定设备输出。</p>
           <p>克隆播放根据播放器的渲染进度点亮喇叭，完成后解除播放状态。输出无法启动或停滞时尝试系统朗读。</p>
         </div>
       </div>
@@ -1272,7 +1274,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone 与 Windows 实时语音翻译<br>iOS 0.4.106 · Windows 0.1.36 · Win-Server 1.0.1 · Apple-Server 1.0.2</p>
+      <p>听见 Hear · iPhone / iPad 与 Windows 实时语音翻译<br>iOS / iPadOS 0.4.119 · Windows 0.1.55 · Win-Server 1.0.3 · Apple-Server 1.0.4</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>
@@ -1280,11 +1282,11 @@ section.band{scroll-margin-top:62px}
     </div>
     <div class="fcol">
       <h5>技术栈</h5>
-      <p>iPhone：Swift · SwiftUI · ActivityKit<br>Windows：Tauri · Rust · React</p>
+      <p>iPhone / iPad：Swift · SwiftUI · ActivityKit<br>Windows：Tauri · Rust · React · WinRT</p>
     </div>
     <div class="fcol">
       <h5>平台</h5>
-      <p>iPhone：iOS 18.0+<br>Windows：x64 预览版</p>
+      <p>移动端：iOS / iPadOS 18.0+<br>桌面端：Windows x64</p>
     </div>
   </div>
   <div class="foot-note">
