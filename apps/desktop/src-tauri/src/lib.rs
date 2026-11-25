@@ -2101,14 +2101,17 @@ $s.Speak($env:HEAR_SPEAK_TEXT)
 ///    - `CABLE Output (VB-Audio Hi-Fi Cable)`
 #[cfg(target_os = "windows")]
 const NORMALIZE_VB_AUDIO_ENDPOINTS_PS: &str = "\
-Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -match 'CABLE In 16ch' -and $_.Status -eq 'OK' } | ForEach-Object { Disable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }\r\n\
+Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -match '16ch' -and $_.FriendlyName -match 'VB-Audio|CABLE' -and $_.Status -eq 'OK' } | ForEach-Object { Disable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }\r\n\
 Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render' -ErrorAction SilentlyContinue | ForEach-Object {\r\n\
     $p = Join-Path $_.PSPath 'Properties'\r\n\
     if (-not (Test-Path $p)) { return }\r\n\
     $props = Get-ItemProperty $p -ErrorAction SilentlyContinue\r\n\
     $desc = [string]$props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},6'\r\n\
     $curName = [string]$props.'{a45c254e-df1c-4efd-8020-67d146a850e0},2'\r\n\
-    if ($desc -match 'VB-Audio Virtual Cable' -and $curName -notmatch '16ch' -and $curName -ne 'CABLE Input') {\r\n\
+    if ($desc -match 'VB-Audio Virtual Cable' -and $curName -match '16ch') {\r\n\
+        $st = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DeviceState\r\n\
+        if ($st -eq 1) { Set-ItemProperty -Path $_.PSPath -Name 'DeviceState' -Value 2 -Type DWord -ErrorAction SilentlyContinue }\r\n\
+    } elseif ($desc -match 'VB-Audio Virtual Cable' -and $curName -ne 'CABLE Input') {\r\n\
         Set-ItemProperty -Path $p -Name '{a45c254e-df1c-4efd-8020-67d146a850e0},2' -Value 'CABLE Input' -ErrorAction SilentlyContinue\r\n\
     } elseif ($desc -match 'VB-Audio Hi-Fi Cable' -and $curName -ne 'CABLE Output') {\r\n\
         Set-ItemProperty -Path $p -Name '{a45c254e-df1c-4efd-8020-67d146a850e0},2' -Value 'CABLE Output' -ErrorAction SilentlyContinue\r\n\
@@ -2363,12 +2366,12 @@ if ($isAdmin) {{\r\n\
         if ($action -eq 'enable') {{ Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }}\r\n\
         else {{ Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }}\r\n\
     }}\r\n\
-    if ($action -eq 'enable') {{ Start-Sleep -Milliseconds 600; & '{}' }}\r\n\
+    if ($action -eq 'enable') {{ Start-Sleep -Milliseconds 800; & '{}' }}\r\n\
 }} else {{\r\n\
     $verbCmd = if ($action -eq 'enable') {{ 'Enable-PnpDevice' }} else {{ 'Disable-PnpDevice' }}\r\n\
     $lines = @($targets | ForEach-Object {{ \"$verbCmd -InstanceId '$($_.InstanceId)' -Confirm:`$false -ErrorAction SilentlyContinue\" }})\r\n\
     if ($action -eq 'enable') {{\r\n\
-        if ($targets.Count -gt 0) {{ $lines += 'Start-Sleep -Milliseconds 600' }}\r\n\
+        if ($targets.Count -gt 0) {{ $lines += 'Start-Sleep -Milliseconds 800' }}\r\n\
         $lines += \"& '{}'\"\r\n\
     }}\r\n\
     Set-Content -Path '{}' -Value ($lines -join \"`r`n\") -Encoding UTF8\r\n\

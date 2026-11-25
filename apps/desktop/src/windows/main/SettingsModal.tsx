@@ -1261,16 +1261,16 @@ export function SettingsModal() {
                     </div>
 
                     <div className="grid grid-cols-1 gap-2.5 text-xs">
-                      {/* 第 1 路：听对方（屏蔽原声）— 固定锁定 VB-Audio Virtual Cable */}
+                      {/* 第 1 路：听对方（屏蔽原声）— 固定锁定 VB-Audio Hi-Fi Cable */}
                       <div className="rounded-lg bg-surface-900/80 border border-sky-500/30 p-3 space-y-1.5">
                         <div className="flex items-center justify-between gap-2">
                           <div className="flex items-center gap-2 min-w-0">
                             <span className="text-sky-300 font-medium">听对方（屏蔽原声）</span>
                             <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-200 text-[10px] border border-sky-400/25 truncate">
-                              已锁定 · VB-Cable
+                              已锁定 · Hi-Fi Cable
                             </span>
                           </div>
-                          {hasVbCable ? (
+                          {hasHiFiCable ? (
                             <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-200 cursor-pointer select-none shrink-0">
                               <input
                                 type="checkbox"
@@ -1286,64 +1286,12 @@ export function SettingsModal() {
                                     // ignore
                                   }
                                   void updateTtsSettings({
-                                    meetingLoopbackDeviceId: on ? lockedVbId : "",
+                                    meetingLoopbackDeviceId: on ? lockedHiFiId : "",
                                   });
                                 }}
                                 className="w-3.5 h-3.5 accent-sky-500"
                               />
                               <span>{loopbackEnabled ? "已启用" : "未启用"}</span>
-                            </label>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                void invoke("install_vb_cable").catch(() => {});
-                              }}
-                              className="px-2 py-0.5 rounded bg-amber-500/25 hover:bg-amber-500/35 border border-amber-400/50 text-[11px] text-amber-100 font-medium shrink-0"
-                            >
-                              安装 VB-Cable
-                            </button>
-                          )}
-                        </div>
-                        <div className="text-[11px] text-slate-300 font-mono truncate">
-                          {displayVbName}
-                        </div>
-                        <div className="text-[11px] text-slate-400">
-                          会议软件「扬声器」固定选 CABLE Input，耳机里就只听译文（关闭则保留原声并在朗读时自动调小）。
-                        </div>
-                      </div>
-
-                      {/* 第 2 路：给对方听（发送我的译文）— 固定锁定 VB-Audio Hi-Fi Cable */}
-                      <div className="rounded-lg bg-surface-900/80 border border-emerald-500/30 p-3 space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span className="text-emerald-300 font-medium">给对方听（发送我的译文）</span>
-                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-200 text-[10px] border border-emerald-400/25 truncate">
-                              已锁定 · Hi-Fi Cable
-                            </span>
-                          </div>
-                          {hasHiFiCable ? (
-                            <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-200 cursor-pointer select-none shrink-0">
-                              <input
-                                type="checkbox"
-                                checked={micEnabled}
-                                onChange={(e) => {
-                                  const on = e.target.checked;
-                                  try {
-                                    localStorage.setItem(
-                                      "hear_meeting_mic_enabled",
-                                      on ? "1" : "0"
-                                    );
-                                  } catch {
-                                    // ignore
-                                  }
-                                  void updateTtsSettings({
-                                    meetingMicOutputDeviceId: on ? lockedHiFiId : "",
-                                  });
-                                }}
-                                className="w-3.5 h-3.5 accent-emerald-500"
-                              />
-                              <span>{micEnabled ? "已启用" : "未启用"}</span>
                             </label>
                           ) : (
                             <button
@@ -1361,7 +1309,59 @@ export function SettingsModal() {
                           {displayHiFiName}
                         </div>
                         <div className="text-[11px] text-slate-400">
-                          会议软件「麦克风」固定选 Hi-Fi Cable Output，对方就只听你的译文。
+                          会议软件「扬声器」固定选 CABLE Output (VB-Audio Hi-Fi Cable)，耳机里就只听译文（关闭则保留原声并在朗读时自动调小）。
+                        </div>
+                      </div>
+
+                      {/* 第 2 路：给对方听（发送我的译文）— 固定锁定 VB-Audio Virtual Cable */}
+                      <div className="rounded-lg bg-surface-900/80 border border-emerald-500/30 p-3 space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="text-emerald-300 font-medium">给对方听（发送我的译文）</span>
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-200 text-[10px] border border-emerald-400/25 truncate">
+                              已锁定 · VB-Cable
+                            </span>
+                          </div>
+                          {hasVbCable ? (
+                            <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-200 cursor-pointer select-none shrink-0">
+                              <input
+                                type="checkbox"
+                                checked={micEnabled}
+                                onChange={(e) => {
+                                  const on = e.target.checked;
+                                  try {
+                                    localStorage.setItem(
+                                      "hear_meeting_mic_enabled",
+                                      on ? "1" : "0"
+                                    );
+                                  } catch {
+                                    // ignore
+                                  }
+                                  void updateTtsSettings({
+                                    meetingMicOutputDeviceId: on ? lockedVbId : "",
+                                  });
+                                }}
+                                className="w-3.5 h-3.5 accent-emerald-500"
+                              />
+                              <span>{micEnabled ? "已启用" : "未启用"}</span>
+                            </label>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void invoke("install_vb_cable").catch(() => {});
+                              }}
+                              className="px-2 py-0.5 rounded bg-amber-500/25 hover:bg-amber-500/35 border border-amber-400/50 text-[11px] text-amber-100 font-medium shrink-0"
+                            >
+                              安装 VB-Cable
+                            </button>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-300 font-mono truncate">
+                          {displayVbName}
+                        </div>
+                        <div className="text-[11px] text-slate-400">
+                          会议软件「麦克风」固定选 CABLE Output (VB-Audio Virtual Cable)，对方就只听你的译文。
                         </div>
                       </div>
 
@@ -1377,7 +1377,7 @@ export function SettingsModal() {
                         </div>
                       ) : (
                         <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200">
-                          已安装 2 路虚拟声卡并固定锁定（听对方 = VB-Cable，给对方听 = Hi-Fi Cable），开启会议同传并开始录音后自动启用。
+                          已安装 2 路虚拟声卡并固定锁定（听对方 = Hi-Fi Cable，给对方听 = VB-Cable），开启会议同传并开始录音后自动启用。
                         </div>
                       )}
                     </div>

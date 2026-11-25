@@ -1634,8 +1634,8 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     }
 
     // 固定锁定两路声卡分工，绝不互换：
-    // 听对方（屏蔽原声）= VB-Audio Virtual Cable
-    // 给对方听（发送我的译文）= VB-Audio Hi-Fi Cable
+    // 听对方（屏蔽原声）= CABLE Output (VB-Audio Hi-Fi Cable)
+    // 给对方听（发送我的译文）= CABLE Input (VB-Audio Virtual Cable)
     let wantLoopback = true;
     let wantMic = true;
     try {
@@ -1648,12 +1648,12 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     }
 
     const loopbackId =
-      hasVbCable && wantLoopback
-        ? liveVb?.id || "CABLE Input (VB-Audio Virtual Cable)"
+      hasHiFiCable && wantLoopback
+        ? liveHiFi?.id || "CABLE Output (VB-Audio Hi-Fi Cable)"
         : "";
     const micId =
-      hasHiFiCable && wantMic
-        ? liveHiFi?.id || "CABLE Output (VB-Audio Hi-Fi Cable)"
+      hasVbCable && wantMic
+        ? liveVb?.id || "CABLE Input (VB-Audio Virtual Cable)"
         : "";
 
     const tts = get().ttsSettings;
