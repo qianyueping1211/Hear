@@ -188,6 +188,9 @@ pub struct TtsOutputSettings {
     pub input_device_id: String,
     /// 会议同传时把「克隆我的译文」送给对方（腾讯会议/Teams/微信）的虚拟麦克风输入设备（如 CABLE Input）
     pub meeting_mic_output_device_id: String,
+    /// 会议同传时采集对方会议声音的指定输出设备（空=系统默认输出；设为虚拟声卡如 CABLE Input 可 100% 屏蔽对方原声）
+    #[serde(default)]
+    pub meeting_loopback_device_id: String,
     /// 面对面播报译文时自动静音麦克风，避免喇叭声回环录入
     pub mute_mic_while_speaking: bool,
     /// 我说的话翻译完成后自动克隆并播报（面对面播给老外，会议模式送给虚拟麦克风）
@@ -207,6 +210,7 @@ impl Default for TtsOutputSettings {
             output_device_id: "default".to_string(),
             input_device_id: "default".to_string(),
             meeting_mic_output_device_id: String::new(),
+            meeting_loopback_device_id: String::new(),
             mute_mic_while_speaking: false,
             auto_speak_my_mic: false,
             auto_speak_other: false,

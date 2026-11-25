@@ -1188,7 +1188,33 @@ export function SettingsModal() {
                     </label>
 
                     {ttsSettings.routingMode === "meeting" && (
-                      <div className="space-y-2">
+                      <div className="space-y-3">
+                        <label className="space-y-1 block">
+                          <span className="text-sky-300 font-medium">
+                            采集「对方会议声音」的监听设备（选虚拟声卡可 100% 屏蔽对方原声）
+                          </span>
+                          <select
+                            value={ttsSettings.meetingLoopbackDeviceId || ""}
+                            onChange={(e) =>
+                              updateTtsSettings({
+                                meetingLoopbackDeviceId: e.target.value,
+                              })
+                            }
+                            className="w-full rounded-lg bg-surface-900 border border-sky-500/30 px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-400"
+                          >
+                            <option value="">默认（系统当前扬声器/耳机 · 播报译文时自动压低原声）</option>
+                            {outputDevices.map((d) => (
+                              <option key={d.id} value={d.id}>
+                                {d.name}
+                                {d.isVirtual ? " ★ 虚拟声卡（彻底屏蔽原声）" : ""}
+                              </option>
+                            ))}
+                          </select>
+                          <div className="text-[11px] text-slate-400 leading-relaxed">
+                            想耳朵里 100% 只听翻译声、听不到对方原声：把会议软件的「扬声器」设为虚拟声卡（如 <span className="font-mono">CABLE Input</span>），此处也选同一虚拟声卡，上方「收听译文的输出设备」选你的物理耳机（重新开始收音生效）。
+                          </div>
+                        </label>
+
                         <label className="space-y-1 block">
                           <span className="text-emerald-300 font-medium">
                             把「克隆我的译文」送给会议对方的虚拟麦克风设备（如 VB-Cable Input）

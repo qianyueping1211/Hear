@@ -548,11 +548,11 @@ impl AudioDuckGuard {
     pub fn enter(ratio: f32, exclude_pids: &[u32]) -> Self {
         use windows::core::Interface;
         use windows::Win32::Media::Audio::{
-            eConsole, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
-            ISimpleAudioVolume, MMDeviceEnumerator,
+            eCommunications, eConsole, eRender, IAudioSessionControl2, IAudioSessionManager2,
+            IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
         };
         use windows::Win32::System::Com::{
-            CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
         };
 
         let clamped = ratio.clamp(0.0, 1.0);
@@ -566,10 +566,25 @@ impl AudioDuckGuard {
             let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
             let com_inited = hr.is_ok();
             let mut saved = Vec::new();
+            let mut seen_device_ids: Vec<String> = Vec::new();
             if let Ok(enumerator) =
                 CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
             {
-                if let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
+                // 同时覆盖默认多媒体设备 (eConsole) 与默认通信设备 (eCommunications，蓝牙/USB 会议耳机常走此路)
+                for role in [eConsole, eCommunications] {
+                    let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, role) else {
+                        continue;
+                    };
+                    if let Ok(id_pwstr) = device.GetId() {
+                        let id_str = id_pwstr.to_string().unwrap_or_default();
+                        CoTaskMemFree(Some(id_pwstr.0 as *const std::ffi::c_void));
+                        if !id_str.is_empty() {
+                            if seen_device_ids.contains(&id_str) {
+                                continue;
+                            }
+                            seen_device_ids.push(id_str);
+                        }
+                    }
                     if let Ok(mgr) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
                         if let Ok(session_enum) = mgr.GetSessionEnumerator() {
                             if let Ok(count) = session_enum.GetCount() {

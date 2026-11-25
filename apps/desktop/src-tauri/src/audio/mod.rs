@@ -700,10 +700,53 @@ mod win_wasapi {
     }
 
     impl WasapiLane {
+        /// 按名称匹配一个活跃的输出设备（用于会议同传时直接监听虚拟声卡如 CABLE Input，实现 100% 屏蔽对方原声）
+        unsafe fn find_render_device_by_name(
+            enumerator: &IMMDeviceEnumerator,
+            target_name: &str,
+        ) -> Option<windows::Win32::Media::Audio::IMMDevice> {
+            use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+            use windows::Win32::Media::Audio::DEVICE_STATE_ACTIVE;
+            use windows::Win32::System::Com::STGM_READ;
+
+            let needle = target_name.trim().to_lowercase();
+            if needle.is_empty() || needle == "default" {
+                return None;
+            }
+            let collection = enumerator
+                .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+                .ok()?;
+            let count = collection.GetCount().ok()?;
+            let mut partial_match = None;
+            for i in 0..count {
+                let Ok(dev) = collection.Item(i) else {
+                    continue;
+                };
+                let Ok(store) = dev.OpenPropertyStore(STGM_READ) else {
+                    continue;
+                };
+                let Ok(prop) = store.GetValue(&PKEY_Device_FriendlyName) else {
+                    continue;
+                };
+                let friendly = prop.to_string().trim().to_lowercase();
+                if friendly == needle {
+                    return Some(dev);
+                }
+                if partial_match.is_none()
+                    && (friendly.contains(&needle) || needle.contains(&friendly))
+                    && !friendly.is_empty()
+                {
+                    partial_match = Some(dev);
+                }
+            }
+            partial_match
+        }
+
         unsafe fn open(
             enumerator: &IMMDeviceEnumerator,
             channel: AudioChannel,
             is_loopback: bool,
+            preferred_render: Option<&str>,
         ) -> Result<Self, String> {
             let flow = if is_loopback { eRender } else { eCapture };
             // 麦克风优先取 eCommunications（插上蓝牙/USB 耳机时 Windows 通常把耳机麦设为默认通信设备），失败再退回 eConsole
@@ -711,6 +754,20 @@ mod win_wasapi {
                 enumerator
                     .GetDefaultAudioEndpoint(flow, eCommunications)
                     .or_else(|_| enumerator.GetDefaultAudioEndpoint(flow, eConsole))
+            } else if let Some(target_name) = preferred_render.filter(|s| !s.trim().is_empty() && *s != "default") {
+                if let Some(matched) = Self::find_render_device_by_name(enumerator, target_name) {
+                    logger::info(format!(
+                        "[audio] 会议同传：已绑定指定监听输出设备（虚拟声卡静音监听）：{}",
+                        target_name
+                    ));
+                    Ok(matched)
+                } else {
+                    logger::warn(format!(
+                        "[audio] 未找到指定的会议监听设备「{}」，回退系统默认播放设备",
+                        target_name
+                    ));
+                    enumerator.GetDefaultAudioEndpoint(flow, eConsole)
+                }
             } else {
                 enumerator.GetDefaultAudioEndpoint(flow, eConsole)
             }
@@ -932,6 +989,7 @@ mod win_wasapi {
             &mut self,
             enumerator: &IMMDeviceEnumerator,
             chosen_mic: &str,
+            preferred_render: Option<&str>,
         ) -> Result<(), String> {
             self.cpal_stream = None;
             if let Some(ref ac) = self.audio_client {
@@ -942,9 +1000,9 @@ mod win_wasapi {
 
             let fresh = if self.channel == AudioChannel::Mic && !chosen_mic.is_empty() && chosen_mic != "default" {
                 Self::open_cpal_mic(chosen_mic)
-                    .or_else(|_| Self::open(enumerator, AudioChannel::Mic, false))?
+                    .or_else(|_| Self::open(enumerator, AudioChannel::Mic, false, None))?
             } else {
-                Self::open(enumerator, self.channel, self.is_loopback)?
+                Self::open(enumerator, self.channel, self.is_loopback, preferred_render)?
             };
 
             let had_aec = self.processor.aec.is_some();
@@ -1280,7 +1338,22 @@ mod win_wasapi {
 
             let mut lanes: Vec<WasapiLane> = Vec::new();
             if want_system {
-                match WasapiLane::open(&enumerator, AudioChannel::System, true) {
+                let meeting_loopback = {
+                    let tts = &rt.snapshot.blocking_lock().tts_settings;
+                    if tts.routing_mode == "meeting"
+                        && !tts.meeting_loopback_device_id.trim().is_empty()
+                    {
+                        Some(tts.meeting_loopback_device_id.trim().to_string())
+                    } else {
+                        None
+                    }
+                };
+                match WasapiLane::open(
+                    &enumerator,
+                    AudioChannel::System,
+                    true,
+                    meeting_loopback.as_deref(),
+                ) {
                     Ok(lane) => lanes.push(lane),
                     Err(e) => {
                         logger::error(&e);
@@ -1305,11 +1378,11 @@ mod win_wasapi {
                         Ok(lane) => Ok(lane),
                         Err(e) => {
                             logger::warn(format!("{}，自动回退到系统默认通信麦克风", e));
-                            WasapiLane::open(&enumerator, AudioChannel::Mic, false)
+                            WasapiLane::open(&enumerator, AudioChannel::Mic, false, None)
                         }
                     }
                 } else {
-                    WasapiLane::open(&enumerator, AudioChannel::Mic, false)
+                    WasapiLane::open(&enumerator, AudioChannel::Mic, false, None)
                 };
                 match mic_res {
                     Ok(mut lane) => {
@@ -1422,14 +1495,23 @@ mod win_wasapi {
                             .map(|t| Instant::now() >= t)
                             .unwrap_or(true);
                         if ready {
-                            let chosen_mic = rt
-                                .snapshot
-                                .blocking_lock()
-                                .tts_settings
-                                .input_device_id
-                                .trim()
-                                .to_string();
-                            match lane.reopen_in_place(&enumerator, &chosen_mic) {
+                            let (chosen_mic, meeting_loopback) = {
+                                let tts = &rt.snapshot.blocking_lock().tts_settings;
+                                let mic = tts.input_device_id.trim().to_string();
+                                let lb = if tts.routing_mode == "meeting"
+                                    && !tts.meeting_loopback_device_id.trim().is_empty()
+                                {
+                                    Some(tts.meeting_loopback_device_id.trim().to_string())
+                                } else {
+                                    None
+                                };
+                                (mic, lb)
+                            };
+                            match lane.reopen_in_place(
+                                &enumerator,
+                                &chosen_mic,
+                                meeting_loopback.as_deref(),
+                            ) {
                                 Ok(()) => {
                                     logger::info(format!(
                                         "[audio] 热重连成功: channel={:?} sr={} ch={}",

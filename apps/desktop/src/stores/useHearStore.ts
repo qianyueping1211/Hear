@@ -129,6 +129,7 @@ const DEFAULT_TTS: TtsOutputSettings = {
   outputDeviceId: "default",
   inputDeviceId: "default",
   meetingMicOutputDeviceId: "",
+  meetingLoopbackDeviceId: "",
   muteMicWhileSpeaking: false,
   autoSpeakMyMic: false,
   autoSpeakOther: false,

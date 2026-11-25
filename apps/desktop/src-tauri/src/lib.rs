@@ -1128,7 +1128,8 @@ async fn play_cloned_segment_to_device(
             || (is_meeting && target == "auto" && seg_ch == Some(AudioChannel::Mic) && !tts.meeting_mic_output_device_id.trim().is_empty());
         let mute_sys = !routed_to_virtual_mic;
         let hard_mute = !routed_to_virtual_mic && tts.mute_mic_while_speaking;
-        let duck = if !routed_to_virtual_mic && tts.duck_original_audio {
+        // 仅在会议同传模式下压低其他应用原声；非同传（面对面）模式不干预系统其他软件音量
+        let duck = if is_meeting && !routed_to_virtual_mic && tts.duck_original_audio {
             Some(tts.duck_ratio.clamp(0.0, 1.0))
         } else {
             None
@@ -1874,7 +1875,10 @@ async fn speak_text_sapi(
     let lang_tag = lang.unwrap_or_default().trim().to_string();
     let (duck_ratio_opt, is_recording) = {
         let snap = rt.snapshot.lock().await;
-        let duck = if snap.tts_settings.duck_original_audio {
+        // 仅在会议同传模式下压低会议原声；非同传模式不干预系统音量
+        let duck = if snap.tts_settings.routing_mode == "meeting"
+            && snap.tts_settings.duck_original_audio
+        {
             Some(snap.tts_settings.duck_ratio.clamp(0.0, 1.0))
         } else {
             None
@@ -1933,26 +1937,30 @@ $s.Speak($env:HEAR_SPEAK_TEXT)
     Ok(())
 }
 
-/// 一键快捷安装 VB-Cable 虚拟声卡（优先通过 winget 安装，无 winget 时自动打开官网下载页）
+/// 一键快捷安装 VB-Cable 虚拟声卡（写临时 .ps1 避免 cmd /C 换行截断；优先 winget 安装，失败则自动打开官网下载页）
 #[tauri::command]
 async fn install_vb_cable() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let script = r#"
-Write-Host '=== 正在安装 VB-Cable 虚拟声卡（会议同传专用）===' -ForegroundColor Cyan
-if (Get-Command winget -ErrorAction SilentlyContinue) {
-    winget install --id VB-Audio.Cable --accept-package-agreements --accept-source-agreements
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host '安装完成！请回到 Hear 点击「安装后刷新设备」，然后选择 CABLE Input。' -ForegroundColor Green
-    } else {
-        Write-Host 'winget 安装未完成，正在为您打开 VB-Cable 官方下载页...' -ForegroundColor Yellow
-        Start-Process 'https://vb-audio.com/Cable/'
-    }
-} else {
-    Write-Host '当前系统未检测到 winget，正在为您打开 VB-Cable 官方下载页...' -ForegroundColor Yellow
-    Start-Process 'https://vb-audio.com/Cable/'
-}
-"#;
+        let script = "\u{FEFF}Write-Host '=== 正在安装 VB-Cable 虚拟声卡（会议同传专用）===' -ForegroundColor Cyan\r\n\
+Write-Host '提示：安装驱动时会弹出系统管理员授权与 Install Driver 窗口，请点击确认。' -ForegroundColor Gray\r\n\
+if (Get-Command winget -ErrorAction SilentlyContinue) {\r\n\
+    winget install --id VB-Audio.Cable --accept-package-agreements --accept-source-agreements\r\n\
+    if ($LASTEXITCODE -eq 0) {\r\n\
+        Write-Host ''\r\n\
+        Write-Host 'VB-Cable 安装完成！请回到 Hear 点击「安装后刷新设备」，即可看到 CABLE Input。' -ForegroundColor Green\r\n\
+    } else {\r\n\
+        Write-Host 'winget 未能自动完成安装，正在为您打开 VB-Cable 官方下载页...' -ForegroundColor Yellow\r\n\
+        Start-Process 'https://vb-audio.com/Cable/'\r\n\
+    }\r\n\
+} else {\r\n\
+    Write-Host '当前系统未检测到 winget，正在为您打开 VB-Cable 官方下载页...' -ForegroundColor Yellow\r\n\
+    Start-Process 'https://vb-audio.com/Cable/'\r\n\
+}\r\n";
+        let ps1_path = std::env::temp_dir().join("hear_install_vbcable.ps1");
+        std::fs::write(&ps1_path, script.as_bytes())
+            .map_err(|e| format!("写入安装脚本失败：{}", e))?;
+        let ps1_str = ps1_path.to_string_lossy().to_string();
         std::process::Command::new("cmd")
             .args([
                 "/C",
@@ -1961,8 +1969,10 @@ if (Get-Command winget -ErrorAction SilentlyContinue) {
                 "powershell",
                 "-NoExit",
                 "-NoProfile",
-                "-Command",
-                script,
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &ps1_str,
             ])
             .spawn()
             .map_err(|e| format!("无法启动安装窗口：{}", e))?;

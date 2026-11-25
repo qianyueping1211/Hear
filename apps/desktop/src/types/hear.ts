@@ -95,6 +95,7 @@ export interface TtsOutputSettings {
   outputDeviceId: string;
   inputDeviceId: string;
   meetingMicOutputDeviceId: string;
+  meetingLoopbackDeviceId: string;
   muteMicWhileSpeaking: boolean;
   autoSpeakMyMic: boolean;
   autoSpeakOther: boolean;
