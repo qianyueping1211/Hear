@@ -708,7 +708,7 @@ pub fn synthesize_winrt_onecore_wav(text: &str, lang: &str, gender: &str) -> Opt
         return None;
     }
     let input = stream.GetInputStreamAt(0).ok()?;
-    let reader = DataReader::CreateInputStreamReader(&input).ok()?;
+    let reader = DataReader::CreateDataReader(&input).ok()?;
     let _ = reader.LoadAsync(size).ok()?.get().ok()?;
     let mut buf = vec![0u8; size as usize];
     reader.ReadBytes(&mut buf).ok()?;
