@@ -2457,7 +2457,8 @@ if (-not $needsAction) {{\r\n\
     foreach ($flowName in @('Render','Capture')) {{\r\n\
         Get-ChildItem \"HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\$flowName\" -ErrorAction SilentlyContinue | ForEach-Object {{\r\n\
             $st = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DeviceState\r\n\
-            if ($st -ne 1 -and $st -ne 2) {{ return }}\r\n\
+            # Windows SetEndpointVisibility(0) 在注册表写入 0x10000001 (268435457)，同时兼容标准 2 (DISABLED)\r\n\
+            if ($st -ne 1 -and $st -ne 2 -and $st -ne 268435457) {{ return }}\r\n\
             $p = Join-Path $_.PSPath 'Properties'\r\n\
             if (-not (Test-Path $p)) {{ return }}\r\n\
             $props = Get-ItemProperty $p -ErrorAction SilentlyContinue\r\n\
