@@ -274,6 +274,13 @@ export function SettingsModal() {
     }
   };
 
+  // 打开设置弹窗时立即后台检测一次虚拟声卡，这样切到「朗读与音频」时直接看到最新结果
+  useEffect(() => {
+    if (settingsOpen) {
+      void refreshVirtualCableStatus();
+    }
+  }, [settingsOpen]);
+
   useEffect(() => {
     if (settingsOpen && activeSettingsTab === "audio") {
       void refreshVirtualCableStatus();
