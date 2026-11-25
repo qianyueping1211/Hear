@@ -726,9 +726,15 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   },
 
   startRecording: async (fresh = false) => {
+    if (get().mode === "recording") {
+      set({ viewMode: "workspace" });
+      return;
+    }
+    const isMeeting = get().ttsSettings.routingMode === "meeting";
     set({
+      mode: "recording",
       sessionError: null,
-      sessionNotice: null,
+      sessionNotice: isMeeting ? "正在启用会议虚拟声卡并开始录制…" : null,
       viewMode: "workspace",
       summaryOpen: true,
     });
@@ -736,22 +742,27 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
       await get().clearRecording();
     }
     if (!isTauriRuntime()) {
-      set({ mode: "recording", viewMode: "workspace" });
+      set({ mode: "recording", viewMode: "workspace", sessionNotice: null });
       return;
     }
     try {
       // 仅在「会议同传 + 正在录音」时启用系统虚拟声卡；开始录音前先拉起虚拟声卡并绑定两路通道
       if (get().ttsSettings.routingMode === "meeting") {
         await tauriInvoke("set_virtual_cables_os_enabled", { enabled: true }).catch(() => {});
-        await new Promise((r) => window.setTimeout(r, 450));
+        await new Promise((r) => window.setTimeout(r, 350));
         await get().refreshOutputDevices();
         await get().activateMeetingMode();
       }
       const mode = await tauriInvoke<SessionMode>("start_recording");
-      if (mode) set({ mode, viewMode: "workspace" });
+      set({
+        mode: mode || "recording",
+        viewMode: "workspace",
+        sessionNotice: null,
+      });
     } catch (err) {
       set({
         mode: "idle",
+        sessionNotice: null,
         sessionError: err instanceof Error ? err.message : String(err),
       });
     }
