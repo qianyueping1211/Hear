@@ -259,6 +259,8 @@ interface HearStoreState extends AppSnapshot {
   downloadAndInstallUpdate: () => Promise<void>;
   openGithubUrl: (url: string) => Promise<void>;
   updateTtsSettings: (patch: Partial<TtsOutputSettings>) => void;
+  activateMeetingMode: () => Promise<void>;
+  deactivateMeetingVirtualCables: (switchToFaceToFace?: boolean) => Promise<void>;
   setGlossary: (text: string) => void;
 
   editSegmentSource: (id: string, newSource: string) => Promise<void>;
@@ -781,6 +783,12 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         mode: "idle",
         sessionError: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      // 关闭录音后自动禁用两个虚拟声卡（保留上次选择，下次点击会议同传时重新启用）
+      const tts = get().ttsSettings;
+      if (tts.meetingLoopbackDeviceId || tts.meetingMicOutputDeviceId) {
+        await get().deactivateMeetingVirtualCables(false);
+      }
     }
   },
 
@@ -1538,11 +1546,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         const standardVirtuals = devices.filter(
           (d) => d.isVirtual && !d.name.toLowerCase().includes("16ch")
         );
-        const virtualPool =
-          standardVirtuals.length > 0
-            ? standardVirtuals
-            : devices.filter((d) => d.isVirtual);
-        // 若之前误存了 16ch 且存在标准 CABLE Input，自动迁移到标准设备
+        // 若之前误存了 16ch 且存在标准 CABLE Input，自动迁移到标准设备（面对面模式绝不自动启用虚拟声卡）
         let patched = { ...tts };
         let changed = false;
         if (
@@ -1565,13 +1569,6 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
           patched.meetingLoopbackDeviceId = candidate ? candidate.id : "";
           changed = true;
         }
-        if (!patched.meetingMicOutputDeviceId && !patched.meetingLoopbackDeviceId) {
-          const virt = virtualPool[0];
-          if (virt) {
-            patched.meetingMicOutputDeviceId = virt.id;
-            changed = true;
-          }
-        }
         if (changed) {
           set({ ttsSettings: patched });
           void tauriInvoke("set_tts_settings", { settings: patched });
@@ -1580,6 +1577,73 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     } catch {
       // ignore
     }
+  },
+
+  activateMeetingMode: async () => {
+    if (get().outputDevices.length === 0) {
+      await get().refreshOutputDevices();
+    }
+    const devices = get().outputDevices;
+    const standardVirtuals = devices.filter(
+      (d) => d.isVirtual && !d.name.toLowerCase().includes("16ch")
+    );
+    const virtuals =
+      standardVirtuals.length > 0
+        ? standardVirtuals
+        : devices.filter((d) => d.isVirtual);
+
+    let savedLoopback = "";
+    let savedMic = "";
+    try {
+      savedLoopback = localStorage.getItem("hear_saved_meeting_loopback") || "";
+      savedMic = localStorage.getItem("hear_saved_meeting_mic") || "";
+    } catch {
+      // ignore
+    }
+    const validIds = new Set(virtuals.map((v) => v.id));
+    let loopbackId = validIds.has(savedLoopback) ? savedLoopback : "";
+    let micId = validIds.has(savedMic) && savedMic !== loopbackId ? savedMic : "";
+
+    if (virtuals.length >= 2) {
+      if (!loopbackId) {
+        loopbackId = virtuals.find((v) => v.id !== micId)?.id || virtuals[0].id;
+      }
+      if (!micId) {
+        micId = virtuals.find((v) => v.id !== loopbackId)?.id || "";
+      }
+    } else if (virtuals.length === 1) {
+      if (!loopbackId && !micId) {
+        micId = virtuals[0].id;
+      }
+    }
+
+    const tts = get().ttsSettings;
+    await get().updateTtsSettings({
+      routingMode: "meeting",
+      enabled: true,
+      ...(tts.autoSpeakOther || tts.autoSpeakMyMic ? {} : { autoSpeakOther: true }),
+      meetingLoopbackDeviceId: loopbackId,
+      meetingMicOutputDeviceId: micId,
+    });
+  },
+
+  deactivateMeetingVirtualCables: async (switchToFaceToFace = false) => {
+    const tts = get().ttsSettings;
+    try {
+      if (tts.meetingLoopbackDeviceId) {
+        localStorage.setItem("hear_saved_meeting_loopback", tts.meetingLoopbackDeviceId);
+      }
+      if (tts.meetingMicOutputDeviceId) {
+        localStorage.setItem("hear_saved_meeting_mic", tts.meetingMicOutputDeviceId);
+      }
+    } catch {
+      // ignore
+    }
+    await get().updateTtsSettings({
+      meetingLoopbackDeviceId: "",
+      meetingMicOutputDeviceId: "",
+      ...(switchToFaceToFace ? { routingMode: "face_to_face" } : {}),
+    });
   },
 
   saveMyVoiceSample: async (segmentId) => {

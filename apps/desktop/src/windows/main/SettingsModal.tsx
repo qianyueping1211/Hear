@@ -1092,7 +1092,9 @@ export function SettingsModal() {
                 <div className="grid grid-cols-2 gap-3 text-xs">
                   <button
                     type="button"
-                    onClick={() => updateTtsSettings({ routingMode: "face_to_face" })}
+                    onClick={() =>
+                      void useHearStore.getState().deactivateMeetingVirtualCables(true)
+                    }
                     className={`p-3 rounded-lg border text-left space-y-1 transition ${
                       ttsSettings.routingMode !== "meeting"
                         ? "bg-brand-500/20 border-brand-400/60 text-white"
@@ -1106,15 +1108,7 @@ export function SettingsModal() {
                   </button>
                   <button
                     type="button"
-                    onClick={() =>
-                      updateTtsSettings({
-                        routingMode: "meeting",
-                        enabled: true,
-                        ...(ttsSettings.autoSpeakOther || ttsSettings.autoSpeakMyMic
-                          ? {}
-                          : { autoSpeakOther: true }),
-                      })
-                    }
+                    onClick={() => void useHearStore.getState().activateMeetingMode()}
                     className={`p-3 rounded-lg border text-left space-y-1 transition ${
                       ttsSettings.routingMode === "meeting"
                         ? "bg-emerald-500/20 border-emerald-400/60 text-white"

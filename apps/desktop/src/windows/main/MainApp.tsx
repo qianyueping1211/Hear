@@ -456,69 +456,56 @@ export function MainApp() {
         <span>自动朗读译文</span>
       </button>
 
-      {/* 语言转换前面的「声音克隆」快捷开关（开/关 + 面对面/会议同传模式切换） */}
-      <div className="h-9 inline-flex items-center rounded-lg border border-white/10 bg-surface-800 overflow-hidden text-xs">
-        <button
-          type="button"
-          onClick={() =>
-            void updateTtsSettings({
-              useVoiceClone: !ttsSettings.useVoiceClone,
-            })
-          }
-          title={
-            ttsSettings.useVoiceClone
-              ? "声音克隆已开启（点击关闭）"
-              : "声音克隆已关闭（点击开启）"
-          }
-          className={`h-full px-2.5 inline-flex items-center gap-1.5 transition ${
-            ttsSettings.useVoiceClone
-              ? "bg-brand-500/25 text-brand-300 hover:bg-brand-500/35"
-              : "text-slate-400 hover:text-white hover:bg-white/5"
-          }`}
-        >
-          <Volume2 className="w-3.5 h-3.5" />
-          <span>声音克隆</span>
-        </button>
-        {ttsSettings.useVoiceClone && (
-          <button
-            type="button"
-            onClick={() => {
-              const nextMode =
-                ttsSettings.routingMode === "meeting" ? "face_to_face" : "meeting";
-              // 切换到会议同传时，若尚未开启自动朗读，自动打开「总开关 + 朗读对方译文」，避免开了同传却听不到译文声音
-              const patch =
-                nextMode === "meeting"
-                  ? {
-                      routingMode: nextMode as "meeting",
-                      enabled: true,
-                      ...(ttsSettings.autoSpeakOther || ttsSettings.autoSpeakMyMic
-                        ? {}
-                        : { autoSpeakOther: true }),
-                    }
-                  : { routingMode: nextMode as "face_to_face" };
-              void updateTtsSettings(patch);
-              if (
-                nextMode === "meeting" &&
-                !ttsSettings.meetingMicOutputDeviceId
-              ) {
-                setSettingsOpen(true, "audio");
-              }
-            }}
-            title={
-              ttsSettings.routingMode === "meeting"
-                ? "当前：会议同传模式（我的克隆译文送到虚拟麦克风，对方译文送到耳机；点击切回面对面）"
-                : "当前：面对面模式（播报克隆译文给身边人听并自动静音麦防回声；点击切换到会议同传）"
+      {/* 独立的「声音克隆」开关（与面对面/会议同传解耦，关闭克隆也可自由切换模式） */}
+      <button
+        type="button"
+        onClick={() =>
+          void updateTtsSettings({
+            useVoiceClone: !ttsSettings.useVoiceClone,
+          })
+        }
+        title={
+          ttsSettings.useVoiceClone
+            ? "声音克隆已开启（点击关闭，关闭后改用系统语音朗读）"
+            : "声音克隆已关闭（点击开启原声克隆）"
+        }
+        className={`h-9 px-2.5 rounded-lg border text-xs inline-flex items-center gap-1.5 transition ${
+          ttsSettings.useVoiceClone
+            ? "bg-brand-500/25 border-brand-400/40 text-brand-300 hover:bg-brand-500/35"
+            : "bg-surface-800 border-white/10 text-slate-400 hover:text-white hover:bg-white/5"
+        }`}
+      >
+        <Volume2 className="w-3.5 h-3.5" />
+        <span>声音克隆</span>
+      </button>
+
+      {/* 独立的「面对面 / 会议同传」模式开关：点会议同传自动启用两路虚拟声卡，切面对面或停录自动禁用 */}
+      <button
+        type="button"
+        onClick={async () => {
+          if (ttsSettings.routingMode === "meeting") {
+            await useHearStore.getState().deactivateMeetingVirtualCables(true);
+          } else {
+            await useHearStore.getState().activateMeetingMode();
+            const after = useHearStore.getState().ttsSettings;
+            if (!after.meetingMicOutputDeviceId && !after.meetingLoopbackDeviceId) {
+              setSettingsOpen(true, "audio");
             }
-            className={`h-full px-2 border-l border-white/10 text-[11px] font-medium transition ${
-              ttsSettings.routingMode === "meeting"
-                ? "bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30"
-                : "text-slate-300 hover:text-white hover:bg-white/5"
-            }`}
-          >
-            {ttsSettings.routingMode === "meeting" ? "会议同传" : "面对面"}
-          </button>
-        )}
-      </div>
+          }
+        }}
+        title={
+          ttsSettings.routingMode === "meeting"
+            ? "当前：会议同传模式（点击切回面对面并禁用虚拟声卡）"
+            : "当前：面对面模式（点击切换到会议同传并启用虚拟声卡）"
+        }
+        className={`h-9 px-2.5 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 transition ${
+          ttsSettings.routingMode === "meeting"
+            ? "bg-emerald-500/20 border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30"
+            : "bg-surface-800 border-white/10 text-slate-300 hover:text-white hover:bg-white/5"
+        }`}
+      >
+        <span>{ttsSettings.routingMode === "meeting" ? "会议同传" : "面对面"}</span>
+      </button>
 
       <div className="h-9 flex items-center gap-1 rounded-lg bg-surface-800 border border-white/10 px-2.5 text-xs">
         <select
