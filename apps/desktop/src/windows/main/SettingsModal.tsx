@@ -24,8 +24,8 @@ import {
   Volume2,
   X,
 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
 import { useHearStore } from "../../stores/useHearStore";
-import { tauriInvoke } from "../../lib/tauri";
 import { VoiceSampleRecorderModal } from "./VoiceSampleRecorderModal";
 import type {
   EngineSource,
@@ -1220,7 +1220,7 @@ export function SettingsModal() {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  void tauriInvoke("install_vb_cable").catch(() => {});
+                                  void invoke("install_vb_cable").catch(() => {});
                                 }}
                                 className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/35 border border-amber-400/50 text-amber-100 font-medium transition"
                               >
@@ -1229,7 +1229,7 @@ export function SettingsModal() {
                               <button
                                 type="button"
                                 onClick={() => {
-                                  void tauriInvoke("open_github_url", {
+                                  void invoke("open_github_url", {
                                     url: "https://vb-audio.com/Cable/",
                                   }).catch(() => {});
                                 }}
