@@ -373,10 +373,10 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>iPhone / iPad 客户端</dt><dd>iOS / iPadOS 18+ · 0.4.119</dd></div>
-        <div><dt>Windows 客户端</dt><dd>x64 · 0.1.55</dd></div>
+        <div><dt>iPhone / iPad 客户端</dt><dd>iOS / iPadOS 18+ · 0.4.120</dd></div>
+        <div><dt>Windows 客户端</dt><dd>x64 · 0.1.62</dd></div>
         <div><dt>独立模型服务端</dt><dd>Win-Server 1.0.3 · Apple-Server 1.0.4</dd></div>
-        <div><dt>核心模型</dt><dd>SenseVoice · Whisper · Hy-MT2 · Qwen3-TTS</dd></div>
+        <div><dt>核心模型</dt><dd>阿里 SenseVoice / CAM++ / Qwen3-TTS · OpenAI Whisper · 腾讯 Hy-MT2</dd></div>
         <div><dt>后续平台</dt><dd>Android · 鸿蒙 · macOS 客户端尚未发布</dd></div>
       </dl>
 
@@ -476,7 +476,7 @@ section.band{scroll-margin-top:62px}
     </div>
     <div class="fgroups">
       <div class="fgroup">
-        <h3>iPhone / iPad 客户端 <em>iOS / iPadOS 18+ · 0.4.119</em></h3>
+        <h3>iPhone / iPad 客户端 <em>iOS / iPadOS 18+ · 0.4.120</em></h3>
         <ul>
           <li>支持本机离线识别（SenseVoice 统一 CPU/AMX 加速，2~3 秒就绪）与 Hy-MT2 翻译，或按需切换云端服务。</li>
           <li><b>iPad 专属工作台</b>：大屏双栏布局、面对面 180° 桌面分屏（<code>⌘1</code>）、高对比全屏字幕看板（<code>⌘2</code>）及快捷操作。</li>
@@ -485,7 +485,7 @@ section.band{scroll-margin-top:62px}
         </ul>
       </div>
       <div class="fgroup">
-        <h3>Windows 客户端 <em>x64 · 0.1.55</em></h3>
+        <h3>Windows 客户端 <em>x64 · 0.1.62</em></h3>
         <ul>
           <li>Tauri + Rust + React 实时翻译与会议同传工作台，支持双路采集（系统内录 + 麦克风）、悬浮字幕、15 阶抗混叠重采样与 NLMS AEC 防回声。</li>
           <li><b>会议同传虚拟声卡</b>：内置 <code>VB-Cable</code> 与 <code>Hi-Fi Cable</code> 一键安装与 PnP 独立检测；仅在「会议同传 + 录音中」自动在系统层启用，非录音自动禁用，并支持 CoreAudio 原声自动压低（DuckGuard）。</li>
@@ -668,6 +668,73 @@ section.band{scroll-margin-top:62px}
           客户端使用 Swift 和 SwiftUI。本机识别和说话人区分通过 FluidAudio，翻译通过 llama.cpp，声音克隆通过 sherpa-onnx。云端调用由 CloudClient 管理。
         </p>
       </div>
+    </div>
+
+    <h3 class="subhead" id="models">核心模型清单 <small>研发公司 / 机构 · 参数规模 · 文件大小</small></h3>
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>能力</th><th>模型名称</th><th>研发公司 / 机构</th><th>参数规模</th><th>文件大小（格式 / 量化）</th><th>运行端</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>实时语音识别</td>
+            <td class="mono">SenseVoice Small</td>
+            <td>阿里巴巴（通义实验室 / FunASR）</td>
+            <td class="mono">~234M（0.23B）</td>
+            <td>约 <strong>240 MB</strong>（iOS Core ML）<span class="sub">约 230 MB（服务端 ONNX INT8）</span></td>
+            <td>iPhone / iPad 本机、服务端</td>
+          </tr>
+          <tr>
+            <td>高精度识别 / 校正</td>
+            <td class="mono">Whisper<span class="sub">faster-whisper</span></td>
+            <td>OpenAI</td>
+            <td class="mono">base 74M / small 244M<span class="sub">medium 769M / large-v3 1.55B</span></td>
+            <td>base ~145 MB / <strong>small ~480 MB</strong>（默认）<span class="sub">medium ~1.5 GB / large-v3 ~3.0 GB（INT8）</span></td>
+            <td>服务端（Win / Mac）</td>
+          </tr>
+          <tr>
+            <td>文本翻译</td>
+            <td class="mono">Hy-MT2<span class="sub">混元翻译 2.0</span></td>
+            <td>腾讯（混元团队）</td>
+            <td class="mono">1.8B / 7B / 30B-A3B<span class="sub">30B-A3B 为 MoE，单次激活 3B</span></td>
+            <td><strong>1.8B</strong>：约 1.1 GB（Q4_K_M）~ 2.0 GB（Q8_0）<span class="sub">7B：约 4.4 GB；30B-A3B：约 18 GB（GGUF）</span></td>
+            <td>iPhone / iPad 本机（1.8B）、服务端</td>
+          </tr>
+          <tr>
+            <td>声音克隆</td>
+            <td class="mono">Qwen3-TTS</td>
+            <td>阿里巴巴（通义千问团队）</td>
+            <td class="mono">0.6B / 1.7B</td>
+            <td>0.6B：约 0.9 GB<span class="sub"><strong>1.7B</strong>（默认推荐）：约 1.7 GB（GGUF + 语音 Tokenizer）</span></td>
+            <td>服务端（Win / Mac）</td>
+          </tr>
+          <tr>
+            <td>说话人区分（声纹）</td>
+            <td class="mono">CAM++<span class="sub">3D-Speaker</span></td>
+            <td>阿里巴巴（通义实验室 / ModelScope）</td>
+            <td class="mono">~7.2M</td>
+            <td>约 <strong>28 MB</strong>（Core ML / ONNX）</td>
+            <td>iPhone / iPad 本机、服务端</td>
+          </tr>
+          <tr>
+            <td>人声检测（VAD）</td>
+            <td class="mono">Silero VAD</td>
+            <td>Silero Team（开源社区）</td>
+            <td class="mono">~0.3M</td>
+            <td>约 <strong>2 MB</strong>（ONNX，已内置于安装包）</td>
+            <td>iPhone / iPad 本机</td>
+          </tr>
+          <tr>
+            <td>系统语音 / 听写</td>
+            <td class="mono">Apple Speech / WinRT OneCore</td>
+            <td>Apple / Microsoft</td>
+            <td class="mono">系统内置</td>
+            <td>随系统语音包按需下载，不占 App 额外模型空间</td>
+            <td>iPhone / iPad / Windows 本机</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <h3 class="subhead">技术栈 <small>依赖与用途</small></h3>
@@ -1274,7 +1341,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone / iPad 与 Windows 实时语音翻译<br>iOS / iPadOS 0.4.119 · Windows 0.1.55 · Win-Server 1.0.3 · Apple-Server 1.0.4</p>
+      <p>听见 Hear · iPhone / iPad 与 Windows 实时语音翻译<br>iOS / iPadOS 0.4.120 · Windows 0.1.62 · Win-Server 1.0.3 · Apple-Server 1.0.4</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>
