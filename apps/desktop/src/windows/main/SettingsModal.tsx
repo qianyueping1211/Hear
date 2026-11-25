@@ -1186,101 +1186,129 @@ export function SettingsModal() {
                         ))}
                       </select>
                     </label>
-
-                    {ttsSettings.routingMode === "meeting" && (
-                      <div className="space-y-3">
-                        <label className="space-y-1 block">
-                          <span className="text-sky-300 font-medium">
-                            采集「对方会议声音」的监听设备（选虚拟声卡可 100% 屏蔽对方原声）
-                          </span>
-                          <select
-                            value={ttsSettings.meetingLoopbackDeviceId || ""}
-                            onChange={(e) =>
-                              updateTtsSettings({
-                                meetingLoopbackDeviceId: e.target.value,
-                              })
-                            }
-                            className="w-full rounded-lg bg-surface-900 border border-sky-500/30 px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-400"
-                          >
-                            <option value="">默认（系统当前扬声器/耳机 · 播报译文时自动压低原声）</option>
-                            {outputDevices.map((d) => (
-                              <option key={d.id} value={d.id}>
-                                {d.name}
-                                {d.isVirtual ? " ★ 虚拟声卡（彻底屏蔽原声）" : ""}
-                              </option>
-                            ))}
-                          </select>
-                          <div className="text-[11px] text-slate-400 leading-relaxed">
-                            想耳朵里 100% 只听翻译声、听不到对方原声：把会议软件的「扬声器」设为虚拟声卡（如 <span className="font-mono">CABLE Input</span>），此处也选同一虚拟声卡，上方「收听译文的输出设备」选你的物理耳机（重新开始收音生效）。
-                          </div>
-                        </label>
-
-                        <label className="space-y-1 block">
-                          <span className="text-emerald-300 font-medium">
-                            把「克隆我的译文」送给会议对方的虚拟麦克风设备（如 VB-Cable Input）
-                          </span>
-                          <select
-                            value={ttsSettings.meetingMicOutputDeviceId || ""}
-                            onChange={(e) =>
-                              updateTtsSettings({
-                                meetingMicOutputDeviceId: e.target.value,
-                              })
-                            }
-                            className="w-full rounded-lg bg-surface-900 border border-emerald-500/30 px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-400"
-                          >
-                            <option value="">（未选择：暂退回默认设备）</option>
-                            {outputDevices.map((d) => (
-                              <option key={d.id} value={d.id}>
-                                {d.name}
-                                {d.isVirtual ? " ★ 推荐虚拟声卡" : ""}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        {!outputDevices.some((d) => d.isVirtual) ? (
-                          <div className="rounded-lg bg-amber-500/10 border border-amber-400/30 p-2.5 text-[11px] text-amber-200 leading-relaxed space-y-2">
-                            <div>
-                              未检测到虚拟声卡（如 VB-Cable）。要让腾讯会议 / Teams / 微信只听到你克隆后的译文而不听到原声，请先安装免费的 VB-Cable 虚拟声卡，然后在此处选择 <span className="font-mono">CABLE Input</span>，并在会议软件里把麦克风设为 <span className="font-mono">CABLE Output</span>。
-                            </div>
-                            <div className="flex flex-wrap items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  void invoke("install_vb_cable").catch(() => {});
-                                }}
-                                className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/35 border border-amber-400/50 text-amber-100 font-medium transition"
-                              >
-                                一键安装 VB-Cable 虚拟声卡
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  void invoke("open_github_url", {
-                                    url: "https://vb-audio.com/Cable/",
-                                  }).catch(() => {});
-                                }}
-                                className="px-2.5 py-1 rounded-md bg-surface-900/80 hover:bg-surface-800 border border-white/15 text-slate-200 transition"
-                              >
-                                官网手动下载
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void refreshOutputDevices()}
-                                className="px-2.5 py-1 rounded-md bg-surface-900/80 hover:bg-surface-800 border border-white/15 text-slate-200 transition"
-                              >
-                                安装后刷新设备
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200 leading-relaxed">
-                            已检测到虚拟声卡！请在腾讯会议 / Teams / 微信的「麦克风」中选择对应的 <span className="font-mono">CABLE Output</span>，对方即可只听到用你声音克隆出的译文。
-                          </div>
-                        )}
-                      </div>
-                    )}
                   </div>
                 </div>
+
+                {/* 虚拟声卡独立区域（仅会议同传模式显示，使用横线与上方输出设备路由区分） */}
+                {ttsSettings.routingMode === "meeting" && (
+                  <div className="pt-3 space-y-3 border-t border-white/10">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium text-slate-200">
+                          虚拟声卡（会议同传专用）
+                        </span>
+                        {outputDevices.some((d) => d.isVirtual) ? (
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-medium">
+                            已检测到
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-medium">
+                            未检测到
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void refreshOutputDevices()}
+                        className="px-2.5 py-1 rounded bg-surface-900 border border-white/10 hover:bg-surface-700 text-[11px] text-slate-300"
+                      >
+                        刷新虚拟声卡
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 text-xs">
+                      <label className="space-y-1 block">
+                        <span className="text-sky-300 font-medium">
+                          采集「对方会议声音」的监听设备（选虚拟声卡可 100% 屏蔽对方原声）
+                        </span>
+                        <select
+                          value={ttsSettings.meetingLoopbackDeviceId || ""}
+                          onChange={(e) =>
+                            updateTtsSettings({
+                              meetingLoopbackDeviceId: e.target.value,
+                            })
+                          }
+                          className="w-full rounded-lg bg-surface-900 border border-sky-500/30 px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-400"
+                        >
+                          <option value="">默认（系统当前扬声器/耳机 · 播报译文时自动压低原声）</option>
+                          {outputDevices.map((d) => (
+                            <option key={d.id} value={d.id}>
+                              {d.name}
+                              {d.isVirtual ? " ★ 虚拟声卡（彻底屏蔽原声）" : ""}
+                            </option>
+                          ))}
+                        </select>
+                        <div className="text-[11px] text-slate-400 leading-relaxed">
+                          想耳朵里 100% 只听翻译声、听不到对方原声：把会议软件的「扬声器」设为虚拟声卡（如 <span className="font-mono">CABLE Input</span>），此处也选同一虚拟声卡，上方「收听译文的输出设备」选你的物理耳机（重新开始收音生效）。
+                        </div>
+                      </label>
+
+                      <label className="space-y-1 block">
+                        <span className="text-emerald-300 font-medium">
+                          把「克隆我的译文」送给会议对方的虚拟麦克风设备（如 VB-Cable Input）
+                        </span>
+                        <select
+                          value={ttsSettings.meetingMicOutputDeviceId || ""}
+                          onChange={(e) =>
+                            updateTtsSettings({
+                              meetingMicOutputDeviceId: e.target.value,
+                            })
+                          }
+                          className="w-full rounded-lg bg-surface-900 border border-emerald-500/30 px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-400"
+                        >
+                          <option value="">（未选择：暂退回默认设备）</option>
+                          {outputDevices.map((d) => (
+                            <option key={d.id} value={d.id}>
+                              {d.name}
+                              {d.isVirtual ? " ★ 推荐虚拟声卡" : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      {!outputDevices.some((d) => d.isVirtual) ? (
+                        <div className="rounded-lg bg-amber-500/10 border border-amber-400/30 p-2.5 text-[11px] text-amber-200 leading-relaxed space-y-2">
+                          <div>
+                            未检测到虚拟声卡（如 VB-Cable）。要让腾讯会议 / Teams / 微信只听到你克隆后的译文而不听到原声，请先安装免费的 VB-Cable 虚拟声卡，然后在此处选择 <span className="font-mono">CABLE Input</span>，并在会议软件里把麦克风设为 <span className="font-mono">CABLE Output</span>。
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void invoke("install_vb_cable").catch(() => {});
+                              }}
+                              className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/35 border border-amber-400/50 text-amber-100 font-medium transition"
+                            >
+                              一键安装 VB-Cable 虚拟声卡
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void invoke("open_github_url", {
+                                  url: "https://vb-audio.com/Cable/",
+                                }).catch(() => {});
+                              }}
+                              className="px-2.5 py-1 rounded-md bg-surface-900/80 hover:bg-surface-800 border border-white/15 text-slate-200 transition"
+                            >
+                              官网手动下载
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void refreshOutputDevices()}
+                              className="px-2.5 py-1 rounded-md bg-surface-900/80 hover:bg-surface-800 border border-white/15 text-slate-200 transition"
+                            >
+                              安装后刷新设备
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200 leading-relaxed">
+                          已检测到虚拟声卡！请在腾讯会议 / Teams / 微信的「麦克风」中选择对应的 <span className="font-mono">CABLE Output</span>，对方即可只听到用你声音克隆出的译文。
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* 声音克隆与自动播报开关 */}
