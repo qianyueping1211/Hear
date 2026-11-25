@@ -2163,6 +2163,7 @@ public static class HearAudioNorm {
         var policy = (IPolicyConfig)new PolicyConfigClient();
         var pkeyDesc = new PROPERTYKEY { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 2 };
         var pkeyIf = new PROPERTYKEY { fmtid = new Guid("b3f8fa53-0004-438e-9003-51a46e139bfc"), pid = 6 };
+        var pkeyForm = new PROPERTYKEY { fmtid = new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), pid = 0 };
         // dwStateMask = 3 (DEVICE_STATE_ACTIVE | DEVICE_STATE_DISABLED)
         for (int flow = 0; flow <= 1; flow++) {
             IMMDeviceCollection col;
@@ -2176,18 +2177,22 @@ public static class HearAudioNorm {
                 dev.GetId(out devId);
                 IPropertyStore store;
                 if (dev.OpenPropertyStore(2, out store) != 0) continue;
-                PROPVARIANT pvIf, pvDesc;
+                PROPVARIANT pvIf, pvDesc, pvForm;
                 store.GetValue(ref pkeyIf, out pvIf);
                 store.GetValue(ref pkeyDesc, out pvDesc);
+                store.GetValue(ref pkeyForm, out pvForm);
                 string ifName = pvIf.vt == 31 ? Marshal.PtrToStringUni(pvIf.p) : "";
                 string descName = pvDesc.vt == 31 ? Marshal.PtrToStringUni(pvDesc.p) : "";
+                uint formFactor = (pvForm.vt == 19 || pvForm.vt == 23) ? (uint)pvForm.p.ToInt64() : 0;
                 PropVariantClear(ref pvIf);
                 PropVariantClear(ref pvDesc);
+                PropVariantClear(ref pvForm);
                 bool isVb = ifName.IndexOf("VB-Audio Virtual Cable", StringComparison.OrdinalIgnoreCase) >= 0;
                 bool isHiFi = ifName.IndexOf("VB-Audio Hi-Fi Cable", StringComparison.OrdinalIgnoreCase) >= 0;
                 if (!isVb && !isHiFi) continue;
 
-                bool is16ch = descName.IndexOf("16ch", StringComparison.OrdinalIgnoreCase) >= 0;
+                // 16ch 端点的 FormFactor 为 LineLevel(2)，标准 2ch CABLE Input 为 Speakers(1)
+                bool is16ch = descName.IndexOf("16ch", StringComparison.OrdinalIgnoreCase) >= 0 || (flow == 0 && isVb && formFactor == 2);
                 // 永远禁止启用 16ch 端点与 Hi-Fi Cable 麦克风端点
                 if ((flow == 0 && isVb && is16ch) || (flow == 1 && isHiFi)) {
                     policy.SetEndpointVisibility(devId, 0);
@@ -2464,10 +2469,11 @@ if (-not $needsAction) {{\r\n\
             $props = Get-ItemProperty $p -ErrorAction SilentlyContinue\r\n\
             $desc = [string]$props.'{{b3f8fa53-0004-438e-9003-51a46e139bfc}},6'\r\n\
             $curName = [string]$props.'{{a45c254e-df1c-4efd-8020-67d146a850e0}},2'\r\n\
+            $formFactor = $props.'{{1da5d803-d492-4edd-8c23-e0c0ffee7f0e}},0'\r\n\
             $isVb = $desc -match 'VB-Audio Virtual Cable'\r\n\
             $isHiFi = $desc -match 'VB-Audio Hi-Fi Cable'\r\n\
             if (-not $isVb -and -not $isHiFi) {{ return }}\r\n\
-            $is16ch = $curName -match '16ch'\r\n\
+            $is16ch = ($curName -match '16ch') -or ($flowName -eq 'Render' -and $isVb -and $formFactor -eq 2)\r\n\
             if ($enableFlag -eq '0') {{\r\n\
                 if ($st -eq 1) {{ $needsAction = $true }}\r\n\
             }} else {{\r\n\
