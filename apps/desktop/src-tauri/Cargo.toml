@@ -1,6 +1,6 @@
 [package]
 name = "hear-desktop"
-version = "0.1.61"
+version = "0.1.62"
 description = "听见 (Hear) 跨平台桌面实时翻译与悬浮字幕客户端"
 authors = ["Hear"]
 edition = "2021"

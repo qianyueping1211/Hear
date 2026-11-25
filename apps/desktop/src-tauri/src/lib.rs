@@ -2095,13 +2095,14 @@ $s.Speak($env:HEAR_SPEAK_TEXT)
 }
 
 /// Windows 系统层面规范化两路 VB-Audio 虚拟声卡端点：
-/// 1. 自动禁用多余的 `CABLE In 16ch (VB-Audio Virtual Cable)` 端点，避免干扰系统声音列表与会议软件；
-/// 2. 固定命名播放端点，使 Windows 声音设置与腾讯会议等软件统一显示：
+/// 1. 自动禁用多余的 `CABLE In 16ch` 播放端点，避免干扰系统声音列表与会议软件；
+/// 2. 自动禁用 `VB-Audio Hi-Fi Cable` 的录制/麦克风端点（`Hi-Fi Cable Output`），因为「听对方」走的是播放端 WASAPI 回环，会议软件麦克风列表不再显示多余项；
+/// 3. 固定命名播放端点，使 Windows 声音设置与腾讯会议等软件统一显示：
 ///    - `CABLE Input (VB-Audio Virtual Cable)`
 ///    - `CABLE Output (VB-Audio Hi-Fi Cable)`
 #[cfg(target_os = "windows")]
 const NORMALIZE_VB_AUDIO_ENDPOINTS_PS: &str = "\
-Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -match '16ch' -and $_.FriendlyName -match 'VB-Audio|CABLE' -and $_.Status -eq 'OK' } | ForEach-Object { Disable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }\r\n\
+Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'OK' -and (($_.FriendlyName -match '16ch' -and $_.FriendlyName -match 'VB-Audio|CABLE') -or ($_.InstanceId -match '\\{0\\.0\\.1\\.' -and $_.FriendlyName -match 'VB-Audio Hi-Fi Cable')) } | ForEach-Object { Disable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }\r\n\
 Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render' -ErrorAction SilentlyContinue | ForEach-Object {\r\n\
     $p = Join-Path $_.PSPath 'Properties'\r\n\
     if (-not (Test-Path $p)) { return }\r\n\
@@ -2115,6 +2116,16 @@ Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\A
         Set-ItemProperty -Path $p -Name '{a45c254e-df1c-4efd-8020-67d146a850e0},2' -Value 'CABLE Input' -ErrorAction SilentlyContinue\r\n\
     } elseif ($desc -match 'VB-Audio Hi-Fi Cable' -and $curName -ne 'CABLE Output') {\r\n\
         Set-ItemProperty -Path $p -Name '{a45c254e-df1c-4efd-8020-67d146a850e0},2' -Value 'CABLE Output' -ErrorAction SilentlyContinue\r\n\
+    }\r\n\
+}\r\n\
+Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture' -ErrorAction SilentlyContinue | ForEach-Object {\r\n\
+    $p = Join-Path $_.PSPath 'Properties'\r\n\
+    if (-not (Test-Path $p)) { return }\r\n\
+    $props = Get-ItemProperty $p -ErrorAction SilentlyContinue\r\n\
+    $desc = [string]$props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},6'\r\n\
+    if ($desc -match 'VB-Audio Hi-Fi Cable') {\r\n\
+        $st = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DeviceState\r\n\
+        if ($st -eq 1) { Set-ItemProperty -Path $_.PSPath -Name 'DeviceState' -Value 2 -Type DWord -ErrorAction SilentlyContinue }\r\n\
     }\r\n\
 }\r\n";
 
@@ -2343,8 +2354,8 @@ $targets = if ($action -eq 'enable') {{\r\n\
 }}\r\n\
 $needsNorm = $false\r\n\
 if ($action -eq 'enable') {{\r\n\
-    $has16ch = @(Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Where-Object {{ $_.FriendlyName -match 'CABLE In 16ch' -and $_.Status -eq 'OK' }}).Count -gt 0\r\n\
-    if ($has16ch) {{ $needsNorm = $true }}\r\n\
+    $hasExtra = @(Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Where-Object {{ $_.Status -eq 'OK' -and (($_.FriendlyName -match '16ch' -and $_.FriendlyName -match 'VB-Audio|CABLE') -or ($_.InstanceId -match '\\{{0\\.0\\.1\\.' -and $_.FriendlyName -match 'VB-Audio Hi-Fi Cable')) }}).Count -gt 0\r\n\
+    if ($hasExtra) {{ $needsNorm = $true }}\r\n\
     if (-not $needsNorm) {{\r\n\
         Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render' -ErrorAction SilentlyContinue | ForEach-Object {{\r\n\
             $st = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DeviceState\r\n\
