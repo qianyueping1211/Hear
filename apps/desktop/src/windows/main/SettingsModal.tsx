@@ -1191,6 +1191,16 @@ export function SettingsModal() {
                     standardVirtuals.length > 0
                       ? standardVirtuals
                       : outputDevices.filter((d) => d.isVirtual);
+                  const hasHiFiCable = virtualDevices.some((d) =>
+                    d.name.toLowerCase().includes("hi-fi")
+                  );
+                  const hasVbCable = virtualDevices.some((d) => {
+                    const lower = d.name.toLowerCase();
+                    return (
+                      lower.includes("vb-audio virtual cable") ||
+                      (lower.includes("cable input") && !lower.includes("hi-fi"))
+                    );
+                  });
                   return (
                   <div className="pt-3 space-y-3 border-t border-white/10">
                     <div className="flex items-center justify-between">
@@ -1278,10 +1288,10 @@ export function SettingsModal() {
                         </div>
                       </label>
 
-                      {virtualDevices.length === 0 ? (
+                      {!hasVbCable && !hasHiFiCable ? (
                         <div className="rounded-lg bg-amber-500/10 border border-amber-400/30 p-2.5 text-[11px] text-amber-200 flex flex-wrap items-center justify-between gap-2">
-                          <span>尚未安装虚拟声卡，安装后可屏蔽原声或向会议发送译文。</span>
-                          <div className="flex items-center gap-2">
+                          <span>未检测到虚拟声卡（VB-Cable / Hi-Fi Cable），可按需分别安装。</span>
+                          <div className="flex flex-wrap items-center gap-2">
                             <button
                               type="button"
                               onClick={() => {
@@ -1289,7 +1299,16 @@ export function SettingsModal() {
                               }}
                               className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/35 border border-amber-400/50 text-amber-100 font-medium transition"
                             >
-                              一键安装 VB-Cable
+                              安装 VB-Cable
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void invoke("install_hifi_cable").catch(() => {});
+                              }}
+                              className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/35 border border-amber-400/50 text-amber-100 font-medium transition"
+                            >
+                              安装 Hi-Fi Cable
                             </button>
                             <button
                               type="button"
@@ -1304,22 +1323,29 @@ export function SettingsModal() {
                             </button>
                           </div>
                         </div>
-                      ) : virtualDevices.length === 1 ? (
+                      ) : !hasVbCable || !hasHiFiCable ? (
                         <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200 flex flex-wrap items-center justify-between gap-2">
-                          <span>已有 1 路声卡；如需「听」和「说」同时屏蔽原声，请再装第 2 路。</span>
+                          <span>
+                            {hasVbCable
+                              ? "已有 VB-Cable，缺少 Hi-Fi Cable（双路可同时屏蔽双方原声）。"
+                              : "已有 Hi-Fi Cable，缺少 VB-Cable（双路可同时屏蔽双方原声）。"}
+                          </span>
                           <button
                             type="button"
                             onClick={() => {
-                              void invoke("install_hifi_cable").catch(() => {});
+                              const cmd = hasVbCable
+                                ? "install_hifi_cable"
+                                : "install_vb_cable";
+                              void invoke(cmd).catch(() => {});
                             }}
                             className="px-2.5 py-1 rounded-md bg-emerald-500/25 hover:bg-emerald-500/35 border border-emerald-400/50 text-emerald-100 font-medium transition"
                           >
-                            安装第 2 路（Hi-Fi Cable）
+                            {hasVbCable ? "安装缺少的 Hi-Fi Cable" : "安装缺少的 VB-Cable"}
                           </button>
                         </div>
                       ) : (
                         <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200">
-                          已就绪 {virtualDevices.length} 路独立声卡，上下分别选不同声卡即可双向只听译文。
+                          已就绪 2 路独立虚拟声卡（VB-Cable + Hi-Fi Cable），上下分别选择即可双向只听译文。
                         </div>
                       )}
                     </div>
