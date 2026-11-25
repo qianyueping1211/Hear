@@ -281,11 +281,35 @@ export function SettingsModal() {
     }
   }, [settingsOpen]);
 
+  // 停留在「朗读与音频」页面时：切回窗口立即自动刷新，且在未装齐 2 路声卡时每 3 秒自动轮询一次，安装完无需手动点刷新
   useEffect(() => {
-    if (settingsOpen && activeSettingsTab === "audio") {
-      void refreshVirtualCableStatus();
-    }
-  }, [settingsOpen, activeSettingsTab]);
+    if (!settingsOpen || activeSettingsTab !== "audio") return;
+    let busy = false;
+    const runRefresh = () => {
+      if (busy) return;
+      busy = true;
+      void refreshVirtualCableStatus().finally(() => {
+        busy = false;
+      });
+    };
+    runRefresh();
+    const onFocus = () => runRefresh();
+    window.addEventListener("focus", onFocus);
+    const needPoll =
+      ttsSettings.routingMode === "meeting" &&
+      !(vcStatus?.hasVbCable && vcStatus?.hasHifiCable);
+    const timer = needPoll ? window.setInterval(runRefresh, 3000) : null;
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      if (timer !== null) window.clearInterval(timer);
+    };
+  }, [
+    settingsOpen,
+    activeSettingsTab,
+    ttsSettings.routingMode,
+    vcStatus?.hasVbCable,
+    vcStatus?.hasHifiCable,
+  ]);
 
   if (!settingsOpen) return null;
 
