@@ -255,9 +255,10 @@ final class LiveSession: ObservableObject {
         }
     }
     @Published private(set) var cloneLoading = false
+    @Published private(set) var cloneLoadingSeconds = 0
     /// 正在加载的东西（界面上显示进度用）
     var loadingHint: String? {
-        if cloneLoading { return "正在加载声音克隆模型…" }
+        if cloneLoading { return "正在准备语音克隆模型 · \(cloneLoadingSeconds) 秒" }
         if isLoadingPhase { return loadingText }
         return nil
     }
@@ -1329,6 +1330,9 @@ final class LiveSession: ObservableObject {
     @Published private var modelLoadCount = 0
     /// 每次加载的编号：只有最新那次的结果算数，旧的不要覆盖状态
     private var loadGen = 0
+    /// 当前正在加载的模型名称与阶段起始时间（用于精确显示“正在准备识别/翻译/语音克隆模型 · N 秒”）
+    private var loadingStageName = "模型"
+    private var loadingStageStart = Date()
 
     /// 当前选择需要的本地识别、翻译和声音克隆是否还有未完成加载。
     var isAnyModelLoading: Bool {
@@ -1415,37 +1419,56 @@ final class LiveSession: ObservableObject {
             cloneHasModel = await cloner.isLoaded
             if cloneHasModel { await cloner.unload() }
         }
-        // 每秒刷新一次已用时间，让用户知道没有卡死
-        let ticker = Task { @MainActor in
-            var warned = false
+        // 当前正在加载的模型名称与该阶段起始时间，用于精确提示“正在准备识别/翻译/语音克隆模型 · N 秒”
+        loadingStageName = needSV ? "识别模型" : "翻译模型"
+        loadingStageStart = start
+        // 每秒刷新一次已用时间，让用户一眼看出是哪个模型在加载、用了多久
+        let ticker = Task { @MainActor [weak self] in
+            var warnedStage: String?
             while !Task.isCancelled {
-                let secs = Int(Date().timeIntervalSince(start))
-                if secs > 120 && !warned {
-                    warned = true
-                    hearLog("模型加载已超过 2 分钟", .warning)
+                guard let self else { break }
+                let stage = self.loadingStageName
+                let stageSecs = max(0, Int(Date().timeIntervalSince(self.loadingStageStart)))
+                let totalSecs = max(0, Int(Date().timeIntervalSince(start)))
+                if stageSecs > 120 && warnedStage != stage {
+                    warnedStage = stage
+                    hearLog("\(stage)加载已超过 2 分钟（总耗时 \(totalSecs) 秒）", .warning)
                 }
-                let msg = "正在准备模型 · \(secs) 秒"
+                let msg = "正在准备\(stage) · \(stageSecs) 秒"
                 // 旧的加载任务别去改状态（新一轮加载已经在跑了）
-                if gen == loadGen, case .loading = phase { phase = .loading(msg) }
+                if gen == self.loadGen, case .loading = self.phase { self.phase = .loading(msg) }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
         defer { ticker.cancel() }
-        if gen == loadGen { phase = .loading("正在准备模型…") }
+        if gen == loadGen { phase = .loading("正在准备\(loadingStageName) · 0 秒") }
         do {
             // 一个一个加载：同时加载几个大模型，内存峰值太高会被系统强制退出
             guard gen == loadGen, !Task.isCancelled else { return }
             if needSV, let sf {
+                loadingStageName = "识别模型"
+                loadingStageStart = Date()
+                if gen == loadGen { phase = .loading("正在准备识别模型 · 0 秒") }
                 if mtLoaded { await translator.unload() }
                 guard gen == loadGen, !Task.isCancelled else { return }
                 try await sense.load(folder: sf)
                 guard gen == loadGen, !Task.isCancelled else { return }
+            }
+            if needMT {
+                loadingStageName = "翻译模型"
+                loadingStageStart = Date()
+                if gen == loadGen { phase = .loading("正在准备翻译模型 · 0 秒") }
             }
             try await loadMTIfNeeded(needMT, path: mtPath ?? "")
             // 又来了新的加载任务：这次的结果作废，交给新的那次去设状态
             guard gen == loadGen else {
                 hearLog("有新的模型加载任务，忽略这次的结果", .warning)
                 return
+            }
+            if needsLocalVoiceClone, !(await cloner.isLoaded) {
+                loadingStageName = "语音克隆模型"
+                loadingStageStart = Date()
+                if gen == loadGen { phase = .loading("正在准备语音克隆模型 · 0 秒") }
             }
             await finishModelLoading(start: start, gen: gen)
         } catch {
@@ -4124,8 +4147,24 @@ final class LiveSession: ObservableObject {
               cloneInstalled, !cloneLoading else { return }
         if isLoadingPhase, !allowDuringModelLoading { return }
         cloneLoading = true
+        cloneLoadingSeconds = 0
+        let cloneStart = Date()
+        let cloneTicker = Task { @MainActor [weak self] in
+            var warned = false
+            while !Task.isCancelled {
+                let secs = max(0, Int(Date().timeIntervalSince(cloneStart)))
+                self?.cloneLoadingSeconds = secs
+                if secs > 120 && !warned {
+                    warned = true
+                    hearLog("语音克隆模型加载已超过 2 分钟", .warning)
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
         defer {
+            cloneTicker.cancel()
             cloneLoading = false
+            cloneLoadingSeconds = 0
             modelsRevision += 1
         }
         if await cloner.isLoaded { return }

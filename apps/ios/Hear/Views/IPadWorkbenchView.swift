@@ -82,15 +82,15 @@ struct IPadWorkbenchView: View {
         // 仅在总结/模板/同步变化或切换对话时读盘，实时转写期间每 250ms 保存不触发磁盘读取
         .onChange(of: store.summaryRevision) { _, _ in reloadLiveConversation() }
         .onChange(of: session.conversationID) { _, _ in reloadLiveConversation() }
-        // 全局外接键盘快捷键（侧栏收起或查看历史详情时同样生效）
+        // 全局外接键盘快捷键（侧栏收起时同样生效；按钮保留明确标题，避免按住 ⌘ 快捷键列表显示空白项）
         .background {
             Group {
-                Button("") { newTapped() }
+                Button("新建对话") { newTapped() }
                     .keyboardShortcut("n", modifiers: .command)
-                Button("") { showSettings = true }
+                Button("设置") { showSettings = true }
                     .keyboardShortcut(",", modifiers: .command)
-                Button("") {
-                    selectedConversationID = nil
+                Button("切换会议纪要栏") {
+                    guard selectedConversationID == nil else { return }
                     inspectorUserToggled = true
                     withAnimation(.easeInOut(duration: 0.2)) {
                         showSummaryInspector.toggle()
