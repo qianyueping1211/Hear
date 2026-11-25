@@ -2094,40 +2094,116 @@ $s.Speak($env:HEAR_SPEAK_TEXT)
     Ok(())
 }
 
-/// Windows 系统层面规范化两路 VB-Audio 虚拟声卡端点：
-/// 1. 自动禁用多余的 `CABLE In 16ch` 播放端点，避免干扰系统声音列表与会议软件；
-/// 2. 自动禁用 `VB-Audio Hi-Fi Cable` 的录制/麦克风端点（`Hi-Fi Cable Output`），因为「听对方」走的是播放端 WASAPI 回环，会议软件麦克风列表不再显示多余项；
-/// 3. 固定命名播放端点，使 Windows 声音设置与腾讯会议等软件统一显示：
-///    - `CABLE Input (VB-Audio Virtual Cable)`
+/// Windows 系统层面规范化两路 VB-Audio 虚拟声卡端点（通过官方 CoreAudio COM：IPropertyStore + IPolicyConfig）：
+/// 1. 彻底禁用 `CABLE In 16ch` 播放端点（`SetEndpointVisibility(id, 0)`）；
+/// 2. 彻底禁用 `VB-Audio Hi-Fi Cable` 录制/麦克风端点（`SetEndpointVisibility(id, 0)`）；
+/// 3. 正式改名播放端点（`IPropertyStore::SetValue(PKEY_Device_DeviceDesc)` + `Commit`），使 Windows 声音设置、腾讯会议与 Hear 立即统一显示：
 ///    - `CABLE Output (VB-Audio Hi-Fi Cable)`
+///    - `CABLE Input (VB-Audio Virtual Cable)`
 #[cfg(target_os = "windows")]
-const NORMALIZE_VB_AUDIO_ENDPOINTS_PS: &str = "\
-Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'OK' -and (($_.FriendlyName -match '16ch' -and $_.FriendlyName -match 'VB-Audio|CABLE') -or ($_.InstanceId -match '\\{0\\.0\\.1\\.' -and $_.FriendlyName -match 'VB-Audio Hi-Fi Cable')) } | ForEach-Object { Disable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }\r\n\
-Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render' -ErrorAction SilentlyContinue | ForEach-Object {\r\n\
-    $p = Join-Path $_.PSPath 'Properties'\r\n\
-    if (-not (Test-Path $p)) { return }\r\n\
-    $props = Get-ItemProperty $p -ErrorAction SilentlyContinue\r\n\
-    $desc = [string]$props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},6'\r\n\
-    $curName = [string]$props.'{a45c254e-df1c-4efd-8020-67d146a850e0},2'\r\n\
-    if ($desc -match 'VB-Audio Virtual Cable' -and $curName -match '16ch') {\r\n\
-        $st = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DeviceState\r\n\
-        if ($st -eq 1) { Set-ItemProperty -Path $_.PSPath -Name 'DeviceState' -Value 2 -Type DWord -ErrorAction SilentlyContinue }\r\n\
-    } elseif ($desc -match 'VB-Audio Virtual Cable' -and $curName -ne 'CABLE Input') {\r\n\
-        Set-ItemProperty -Path $p -Name '{a45c254e-df1c-4efd-8020-67d146a850e0},2' -Value 'CABLE Input' -ErrorAction SilentlyContinue\r\n\
-    } elseif ($desc -match 'VB-Audio Hi-Fi Cable' -and $curName -ne 'CABLE Output') {\r\n\
-        Set-ItemProperty -Path $p -Name '{a45c254e-df1c-4efd-8020-67d146a850e0},2' -Value 'CABLE Output' -ErrorAction SilentlyContinue\r\n\
-    }\r\n\
-}\r\n\
-Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture' -ErrorAction SilentlyContinue | ForEach-Object {\r\n\
-    $p = Join-Path $_.PSPath 'Properties'\r\n\
-    if (-not (Test-Path $p)) { return }\r\n\
-    $props = Get-ItemProperty $p -ErrorAction SilentlyContinue\r\n\
-    $desc = [string]$props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},6'\r\n\
-    if ($desc -match 'VB-Audio Hi-Fi Cable') {\r\n\
-        $st = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DeviceState\r\n\
-        if ($st -eq 1) { Set-ItemProperty -Path $_.PSPath -Name 'DeviceState' -Value 2 -Type DWord -ErrorAction SilentlyContinue }\r\n\
-    }\r\n\
-}\r\n";
+const NORMALIZE_VB_AUDIO_ENDPOINTS_PS: &str = r#"$code = @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class HearAudioNorm {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROPERTYKEY { public Guid fmtid; public uint pid; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROPVARIANT { public ushort vt; public ushort r1, r2, r3; public IntPtr p; public IntPtr p2; }
+
+    [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+    class MMDeviceEnumerator {}
+    [ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
+    class PolicyConfigClient {}
+
+    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceEnumerator {
+        int EnumAudioEndpoints(int dataFlow, int dwStateMask, out IMMDeviceCollection ppDevices);
+    }
+    [Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceCollection {
+        int GetCount(out uint pcDevices);
+        int Item(uint nDevice, out IMMDevice ppDevice);
+    }
+    [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDevice {
+        int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
+        int OpenPropertyStore(int stgmAccess, out IPropertyStore ppProperties);
+        int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
+    }
+    [Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPropertyStore {
+        int GetCount(out uint cProps);
+        int GetAt(uint iProp, out PROPERTYKEY pkey);
+        int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+        int SetValue(ref PROPERTYKEY key, ref PROPVARIANT pv);
+        int Commit();
+    }
+    [Guid("f8679f50-850a-41cf-9c72-430f290290c8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPolicyConfig {
+        int GetMixFormat(string id, out IntPtr p);
+        int GetDeviceFormat(string id, int b, out IntPtr p);
+        int ResetDeviceFormat(string id);
+        int SetDeviceFormat(string id, IntPtr a, IntPtr b);
+        int GetProcessingPeriod(string id, int b, out long a, out long c);
+        int SetProcessingPeriod(string id, long a);
+        int GetShareMode(string id, out IntPtr p);
+        int SetShareMode(string id, IntPtr p);
+        int GetPropertyValue(string id, int b, ref PROPERTYKEY k, out PROPVARIANT v);
+        int SetPropertyValue(string id, int b, ref PROPERTYKEY k, ref PROPVARIANT v);
+        int SetDefaultEndpoint(string id, int role);
+        int SetEndpointVisibility(string id, int bVisible);
+    }
+    [DllImport("ole32.dll")]
+    static extern int PropVariantClear(ref PROPVARIANT pvar);
+
+    public static void Run() {
+        var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+        var policy = (IPolicyConfig)new PolicyConfigClient();
+        var pkeyDesc = new PROPERTYKEY { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 2 };
+        var pkeyIf = new PROPERTYKEY { fmtid = new Guid("b3f8fa53-0004-438e-9003-51a46e139bfc"), pid = 6 };
+        for (int flow = 0; flow <= 1; flow++) {
+            IMMDeviceCollection col;
+            if (enumerator.EnumAudioEndpoints(flow, 1, out col) != 0) continue;
+            uint count;
+            col.GetCount(out count);
+            for (uint i = 0; i < count; i++) {
+                IMMDevice dev;
+                if (col.Item(i, out dev) != 0) continue;
+                string devId;
+                dev.GetId(out devId);
+                IPropertyStore store;
+                if (dev.OpenPropertyStore(2, out store) != 0) continue;
+                PROPVARIANT pvIf, pvDesc;
+                store.GetValue(ref pkeyIf, out pvIf);
+                store.GetValue(ref pkeyDesc, out pvDesc);
+                string ifName = pvIf.vt == 31 ? Marshal.PtrToStringUni(pvIf.p) : "";
+                string descName = pvDesc.vt == 31 ? Marshal.PtrToStringUni(pvDesc.p) : "";
+                PropVariantClear(ref pvIf);
+                PropVariantClear(ref pvDesc);
+                if (flow == 0 && ifName.IndexOf("VB-Audio Virtual Cable", StringComparison.OrdinalIgnoreCase) >= 0 && descName.IndexOf("16ch", StringComparison.OrdinalIgnoreCase) >= 0) {
+                    policy.SetEndpointVisibility(devId, 0);
+                } else if (flow == 1 && ifName.IndexOf("VB-Audio Hi-Fi Cable", StringComparison.OrdinalIgnoreCase) >= 0) {
+                    policy.SetEndpointVisibility(devId, 0);
+                } else if (flow == 0 && ifName.IndexOf("VB-Audio Hi-Fi Cable", StringComparison.OrdinalIgnoreCase) >= 0 && descName != "CABLE Output") {
+                    var pvNew = new PROPVARIANT { vt = 31, p = Marshal.StringToCoTaskMemUni("CABLE Output") };
+                    store.SetValue(ref pkeyDesc, ref pvNew);
+                    store.Commit();
+                    PropVariantClear(ref pvNew);
+                } else if (flow == 0 && ifName.IndexOf("VB-Audio Virtual Cable", StringComparison.OrdinalIgnoreCase) >= 0 && descName.IndexOf("16ch", StringComparison.OrdinalIgnoreCase) < 0 && descName != "CABLE Input") {
+                    var pvNew = new PROPVARIANT { vt = 31, p = Marshal.StringToCoTaskMemUni("CABLE Input") };
+                    store.SetValue(ref pkeyDesc, ref pvNew);
+                    store.Commit();
+                    PropVariantClear(ref pvNew);
+                }
+            }
+        }
+    }
+}
+"@
+Add-Type -TypeDefinition $code -ErrorAction SilentlyContinue
+try { [HearAudioNorm]::Run() } catch {}
+"#;
 
 /// 一键快捷安装 VB-Cable 虚拟声卡：
 /// 自动下载官方驱动包 zip → 解压到临时目录 → 以管理员身份直接拉起 VBCABLE_Setup_x64.exe，
@@ -2163,7 +2239,7 @@ try {{\r\n\
     Write-Host '3/3 正在以管理员身份启动安装程序...' -ForegroundColor Green\r\n\
     Write-Host '请在弹出的 VB-Cable 窗口中点击 [Install Driver]，完成后会自动规范化名称并隐藏 16ch 端口。' -ForegroundColor Yellow\r\n\
     Start-Process -FilePath $setup.FullName -Verb RunAs -Wait\r\n\
-    Start-Sleep -Seconds 1\r\n\
+    Start-Sleep -Seconds 2\r\n\
     Write-Host '正在自动禁用多余的 CABLE In 16ch 并固定命名为 CABLE Input...' -ForegroundColor Cyan\r\n\
     Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
     Write-Host '安装与规范化已完成，窗口将在 3 秒后自动关闭...' -ForegroundColor Green\r\n\
@@ -2230,7 +2306,7 @@ try {{\r\n\
     Write-Host '3/3 正在以管理员身份启动 Hi-Fi Cable 安装程序...' -ForegroundColor Green\r\n\
     Write-Host '请在弹出窗口点击 [Install]，完成后会自动将名称固定为 CABLE Output。' -ForegroundColor Yellow\r\n\
     Start-Process -FilePath $setup.FullName -Verb RunAs -Wait\r\n\
-    Start-Sleep -Seconds 1\r\n\
+    Start-Sleep -Seconds 2\r\n\
     Write-Host '正在自动将 Hi-Fi Cable 端点命名为 CABLE Output...' -ForegroundColor Cyan\r\n\
     Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
     Write-Host '安装与规范化已完成，窗口将在 3 秒后自动关闭...' -ForegroundColor Green\r\n\
