@@ -2001,6 +2001,68 @@ try {\r\n\
     }
 }
 
+/// 一键快捷安装第 2 路免费虚拟声卡（VB-Audio Hi-Fi Cable）：
+/// 与 VB-Cable（CABLE Input）名称完全不同（Hi-Fi Cable Input），方便区分「听（采集对方）」与「说（送给对方）」两路独立通道。
+#[tauri::command]
+async fn install_hifi_cable() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let script = "\u{FEFF}$ErrorActionPreference = 'Stop'\r\n\
+Write-Host '=== 正在准备第 2 路虚拟声卡：VB-Audio Hi-Fi Cable ===' -ForegroundColor Cyan\r\n\
+$workDir = Join-Path $env:TEMP 'Hear-HiFiCable'\r\n\
+$zipPath = Join-Path $workDir 'HiFiCableAsioBridgeSetup.zip'\r\n\
+$extractDir = Join-Path $workDir 'extracted'\r\n\
+New-Item -ItemType Directory -Force -Path $workDir | Out-Null\r\n\
+$downloadUrl = 'https://download.vb-audio.com/Download_CABLE/HiFiCableAsioBridgeSetup_v1007.zip'\r\n\
+try {\r\n\
+    $page = Invoke-WebRequest -Uri 'https://vb-audio.com/Cable/HiFiCable.htm' -UseBasicParsing -TimeoutSec 10\r\n\
+    $m = [regex]::Match($page.Content, 'https://download\\.vb-audio\\.com/Download_CABLE/HiFiCable[^\"''\\s]+\\.zip')\r\n\
+    if ($m.Success) { $downloadUrl = $m.Value }\r\n\
+} catch {}\r\n\
+try {\r\n\
+    Write-Host \"1/3 正在下载官方驱动包：$downloadUrl\" -ForegroundColor White\r\n\
+    Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing\r\n\
+    Write-Host '2/3 正在解压驱动包...' -ForegroundColor White\r\n\
+    if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }\r\n\
+    Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force\r\n\
+    $setup = Get-ChildItem -Path $extractDir -Recurse -Filter '*Setup*.exe' | Select-Object -First 1\r\n\
+    if (-not $setup) { throw '压缩包内未找到安装程序' }\r\n\
+    Write-Host '3/3 正在以管理员身份启动 Hi-Fi Cable 安装程序...' -ForegroundColor Green\r\n\
+    Write-Host '请在弹出窗口点击 [Install]，安装完成后回到 Hear 点击「刷新虚拟声卡」，即可看到 Hi-Fi Cable Input。' -ForegroundColor Yellow\r\n\
+    Start-Process -FilePath $setup.FullName -Verb RunAs -Wait\r\n\
+    Write-Host '安装窗口已关闭。请回到 Hear 点击「刷新虚拟声卡」。' -ForegroundColor Green\r\n\
+} catch {\r\n\
+    Write-Host \"自动下载或启动安装失败：$($_.Exception.Message)\" -ForegroundColor Red\r\n\
+    Write-Host '正在为您打开 Hi-Fi Cable 官网...' -ForegroundColor Yellow\r\n\
+    Start-Process 'https://vb-audio.com/Cable/HiFiCable.htm'\r\n\
+}\r\n";
+        let ps1_path = std::env::temp_dir().join("hear_install_hificable.ps1");
+        std::fs::write(&ps1_path, script.as_bytes())
+            .map_err(|e| format!("写入安装脚本失败：{}", e))?;
+        let ps1_str = ps1_path.to_string_lossy().to_string();
+        std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "start",
+                "Hi-Fi Cable 虚拟声卡安装",
+                "powershell",
+                "-NoExit",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &ps1_str,
+            ])
+            .spawn()
+            .map_err(|e| format!("无法启动安装窗口：{}", e))?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        updater::open_github_url("https://vb-audio.com/Cable/HiFiCable.htm")
+    }
+}
+
 fn format_mm_ss(ms: u64) -> String {
     let total_secs = ms / 1000;
     format!("{:02}:{:02}", total_secs / 60, total_secs % 60)
@@ -2854,6 +2916,7 @@ pub fn run() {
             update_segment_speaker,
             speak_text_sapi,
             install_vb_cable,
+            install_hifi_cable,
             generate_summary,
             save_summary_markdown,
             export_text_file,

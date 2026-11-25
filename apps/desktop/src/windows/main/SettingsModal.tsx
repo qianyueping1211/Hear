@@ -1323,9 +1323,33 @@ export function SettingsModal() {
                             </button>
                           </div>
                         </div>
+                      ) : virtualDevices.length === 1 ? (
+                        <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200 leading-relaxed space-y-2">
+                          <div>
+                            已检测到 1 路虚拟声卡（<span className="font-mono">{virtualDevices[0].name}</span>）。如需同时实现「听（屏蔽对方原声）」与「说（送克隆译文给对方）」两路独立区分，可再安装第 2 路免费的 <span className="font-mono">Hi-Fi Cable</span> 虚拟声卡（设备名不同，互不冲突）。
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void invoke("install_hifi_cable").catch(() => {});
+                              }}
+                              className="px-2.5 py-1 rounded-md bg-emerald-500/25 hover:bg-emerald-500/35 border border-emerald-400/50 text-emerald-100 font-medium transition"
+                            >
+                              一键安装第 2 路虚拟声卡（Hi-Fi Cable）
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void refreshOutputDevices()}
+                              className="px-2.5 py-1 rounded-md bg-surface-900/80 hover:bg-surface-800 border border-white/15 text-slate-200 transition"
+                            >
+                              安装后刷新虚拟声卡
+                            </button>
+                          </div>
+                        </div>
                       ) : (
                         <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200 leading-relaxed">
-                          已检测到标准虚拟声卡（已自动过滤 16ch 专业多声道端）。注意：单条 VB-Cable 同时只能用于「屏蔽对方原声」或「送译文给对方」其中一路，已自动互斥防止回环串音。
+                          已检测到 {virtualDevices.length} 路独立虚拟声卡！可在上方分别指定不同虚拟声卡用于「听（屏蔽对方原声）」与「说（送克隆译文给对方）」，实现双向 100% 隔离同传。
                         </div>
                       )}
                     </div>
