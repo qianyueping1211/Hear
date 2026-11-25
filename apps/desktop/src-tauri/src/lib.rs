@@ -2185,6 +2185,11 @@ public static class HearAudioNorm {
                     policy.SetEndpointVisibility(devId, 0);
                 } else if (flow == 1 && ifName.IndexOf("VB-Audio Hi-Fi Cable", StringComparison.OrdinalIgnoreCase) >= 0) {
                     policy.SetEndpointVisibility(devId, 0);
+                } else if (flow == 1 && ifName.IndexOf("VB-Audio Virtual Cable", StringComparison.OrdinalIgnoreCase) >= 0 && descName != "CABLE Input") {
+                    var pvNew = new PROPVARIANT { vt = 31, p = Marshal.StringToCoTaskMemUni("CABLE Input") };
+                    store.SetValue(ref pkeyDesc, ref pvNew);
+                    store.Commit();
+                    PropVariantClear(ref pvNew);
                 } else if (flow == 0 && ifName.IndexOf("VB-Audio Hi-Fi Cable", StringComparison.OrdinalIgnoreCase) >= 0 && descName != "CABLE Output") {
                     var pvNew = new PROPVARIANT { vt = 31, p = Marshal.StringToCoTaskMemUni("CABLE Output") };
                     store.SetValue(ref pkeyDesc, ref pvNew);
@@ -2445,6 +2450,19 @@ if ($action -eq 'enable') {{\r\n\
             $curName = [string]$props.'{{a45c254e-df1c-4efd-8020-67d146a850e0}},2'\r\n\
             if ($desc -match 'VB-Audio Virtual Cable' -and $curName -notmatch '16ch' -and $curName -ne 'CABLE Input') {{ $needsNorm = $true }}\r\n\
             if ($desc -match 'VB-Audio Hi-Fi Cable' -and $curName -ne 'CABLE Output') {{ $needsNorm = $true }}\r\n\
+        }}\r\n\
+    }}\r\n\
+    if (-not $needsNorm) {{\r\n\
+        Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture' -ErrorAction SilentlyContinue | ForEach-Object {{\r\n\
+            $st = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DeviceState\r\n\
+            if ($st -ne 1) {{ return }}\r\n\
+            $p = Join-Path $_.PSPath 'Properties'\r\n\
+            if (-not (Test-Path $p)) {{ return }}\r\n\
+            $props = Get-ItemProperty $p -ErrorAction SilentlyContinue\r\n\
+            $desc = [string]$props.'{{b3f8fa53-0004-438e-9003-51a46e139bfc}},6'\r\n\
+            $curName = [string]$props.'{{a45c254e-df1c-4efd-8020-67d146a850e0}},2'\r\n\
+            if ($desc -match 'VB-Audio Virtual Cable' -and $curName -ne 'CABLE Input') {{ $needsNorm = $true }}\r\n\
+            if ($desc -match 'VB-Audio Hi-Fi Cable') {{ $needsNorm = $true }}\r\n\
         }}\r\n\
     }}\r\n\
 }}\r\n\
