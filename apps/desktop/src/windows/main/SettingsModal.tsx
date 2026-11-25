@@ -1137,15 +1137,13 @@ export function SettingsModal() {
                       onClick={() => void refreshOutputDevices()}
                       className="px-2.5 py-1 rounded bg-surface-900 border border-white/10 hover:bg-surface-700 text-[11px] text-slate-300"
                     >
-                      刷新设备列表
+                      刷新设备
                     </button>
                   </div>
 
                   <div className="grid grid-cols-1 gap-2.5 text-xs">
                     <label className="space-y-1">
-                      <span className="text-slate-300">
-                        麦克风输入设备（佩戴蓝牙/USB 耳机时可在此直接指定耳机麦）
-                      </span>
+                      <span className="text-slate-300">我的麦克风</span>
                       <select
                         value={ttsSettings.inputDeviceId || "default"}
                         onChange={(e) =>
@@ -1153,7 +1151,7 @@ export function SettingsModal() {
                         }
                         className="w-full rounded-lg bg-surface-900 border border-white/10 px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500"
                       >
-                        <option value="default">自动（优先蓝牙/耳机默认通信麦克风）</option>
+                        <option value="default">自动（优先耳机麦克风）</option>
                         {inputDevices.map((d) => (
                           <option key={d.id} value={d.id}>
                             {d.name}
@@ -1166,7 +1164,7 @@ export function SettingsModal() {
                     <label className="space-y-1">
                       <span className="text-slate-300">
                         {ttsSettings.routingMode === "meeting"
-                          ? "我收听对方译文的设备（物理耳机/扬声器）"
+                          ? "我听译文的耳机 / 扬声器"
                           : "译文播报输出设备"}
                       </span>
                       <select
@@ -1176,7 +1174,7 @@ export function SettingsModal() {
                         }
                         className="w-full rounded-lg bg-surface-900 border border-white/10 px-3 py-2 text-xs text-white focus:outline-none focus:border-brand-500"
                       >
-                        <option value="default">系统默认扬声器 / 耳机</option>
+                        <option value="default">系统默认耳机 / 扬声器</option>
                         {outputDevices
                           .filter((d) => !d.isVirtual)
                           .map((d) => (
@@ -1204,7 +1202,7 @@ export function SettingsModal() {
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-medium text-slate-200">
-                          虚拟声卡（会议同传专用）
+                          虚拟声卡（会议同传）
                         </span>
                         {virtualDevices.length > 0 ? (
                           <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-medium">
@@ -1212,7 +1210,7 @@ export function SettingsModal() {
                           </span>
                         ) : (
                           <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-medium">
-                            未检测到
+                            未安装
                           </span>
                         )}
                       </div>
@@ -1227,14 +1225,11 @@ export function SettingsModal() {
 
                     <div className="grid grid-cols-1 gap-3 text-xs">
                       <label className="space-y-1 block">
-                        <span className="text-sky-300 font-medium">
-                          采集「对方会议声音」的虚拟声卡（选后可 100% 屏蔽对方原声）
-                        </span>
+                        <span className="text-sky-300 font-medium">听对方（屏蔽原声）</span>
                         <select
                           value={ttsSettings.meetingLoopbackDeviceId || ""}
                           onChange={(e) => {
                             const val = e.target.value;
-                            // 单条虚拟声卡不可同时用于采集与输出，避免自回环串音：自动解除另一路占用
                             const clearMic =
                               val && val === ttsSettings.meetingMicOutputDeviceId;
                             void updateTtsSettings({
@@ -1244,25 +1239,23 @@ export function SettingsModal() {
                           }}
                           className="w-full rounded-lg bg-surface-900 border border-sky-500/30 px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-400"
                         >
-                          <option value="">关闭（采集系统默认扬声器/耳机 · 播报译文时自动压低原声）</option>
+                          <option value="">不使用（保留原声，朗读译文时自动调小）</option>
                           {virtualDevices.map((d) => (
                             <option key={d.id} value={d.id}>
                               {d.name}
                               {d.id === ttsSettings.meetingMicOutputDeviceId
-                                ? "（当前用于送给对方，选此项将自动切换用途）"
-                                : " ★ 虚拟声卡"}
+                                ? "（已用于「给对方听」，选中将切换）"
+                                : ""}
                             </option>
                           ))}
                         </select>
-                        <div className="text-[11px] text-slate-400 leading-relaxed">
-                          想耳朵里 100% 只听翻译声、听不到对方原声：把会议软件的「扬声器」设为 <span className="font-mono">CABLE Input</span>，此处也选 <span className="font-mono">CABLE Input</span>，上方输出设备选物理耳机（重新开始收音生效）。
+                        <div className="text-[11px] text-slate-400">
+                          会议软件「扬声器」也选此项，耳机里就只听译文（重启收音生效）。
                         </div>
                       </label>
 
                       <label className="space-y-1 block">
-                        <span className="text-emerald-300 font-medium">
-                          把「克隆我的译文」送给会议对方的虚拟声卡（会议软件麦克风选 CABLE Output）
-                        </span>
+                        <span className="text-emerald-300 font-medium">给对方听（发送我的译文）</span>
                         <select
                           value={ttsSettings.meetingMicOutputDeviceId || ""}
                           onChange={(e) => {
@@ -1276,24 +1269,25 @@ export function SettingsModal() {
                           }}
                           className="w-full rounded-lg bg-surface-900 border border-emerald-500/30 px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-400"
                         >
-                          <option value="">关闭（暂不向会议虚拟麦输出译文）</option>
+                          <option value="">不使用</option>
                           {virtualDevices.map((d) => (
                             <option key={d.id} value={d.id}>
                               {d.name}
                               {d.id === ttsSettings.meetingLoopbackDeviceId
-                                ? "（当前用于屏蔽原声，选此项将自动切换用途）"
-                                : " ★ 虚拟声卡"}
+                                ? "（已用于「听对方」，选中将切换）"
+                                : ""}
                             </option>
                           ))}
                         </select>
+                        <div className="text-[11px] text-slate-400">
+                          会议软件「麦克风」选对应的 Output，对方就只听你的译文。
+                        </div>
                       </label>
 
                       {virtualDevices.length === 0 ? (
-                        <div className="rounded-lg bg-amber-500/10 border border-amber-400/30 p-2.5 text-[11px] text-amber-200 leading-relaxed space-y-2">
-                          <div>
-                            未检测到虚拟声卡（如 VB-Cable）。安装后即可用于「100% 屏蔽对方原声」或「把克隆译文送给会议对方」。
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2">
+                        <div className="rounded-lg bg-amber-500/10 border border-amber-400/30 p-2.5 text-[11px] text-amber-200 flex flex-wrap items-center justify-between gap-2">
+                          <span>尚未安装虚拟声卡，安装后可屏蔽原声或向会议发送译文。</span>
+                          <div className="flex items-center gap-2">
                             <button
                               type="button"
                               onClick={() => {
@@ -1301,7 +1295,7 @@ export function SettingsModal() {
                               }}
                               className="px-2.5 py-1 rounded-md bg-amber-500/25 hover:bg-amber-500/35 border border-amber-400/50 text-amber-100 font-medium transition"
                             >
-                              一键安装 VB-Cable 虚拟声卡
+                              一键安装 VB-Cable
                             </button>
                             <button
                               type="button"
@@ -1312,44 +1306,26 @@ export function SettingsModal() {
                               }}
                               className="px-2.5 py-1 rounded-md bg-surface-900/80 hover:bg-surface-800 border border-white/15 text-slate-200 transition"
                             >
-                              官网手动下载
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void refreshOutputDevices()}
-                              className="px-2.5 py-1 rounded-md bg-surface-900/80 hover:bg-surface-800 border border-white/15 text-slate-200 transition"
-                            >
-                              安装后刷新设备
+                              官网下载
                             </button>
                           </div>
                         </div>
                       ) : virtualDevices.length === 1 ? (
-                        <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200 leading-relaxed space-y-2">
-                          <div>
-                            已检测到 1 路虚拟声卡（<span className="font-mono">{virtualDevices[0].name}</span>）。如需同时实现「听（屏蔽对方原声）」与「说（送克隆译文给对方）」两路独立区分，可再安装第 2 路免费的 <span className="font-mono">Hi-Fi Cable</span> 虚拟声卡（设备名不同，互不冲突）。
-                          </div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                void invoke("install_hifi_cable").catch(() => {});
-                              }}
-                              className="px-2.5 py-1 rounded-md bg-emerald-500/25 hover:bg-emerald-500/35 border border-emerald-400/50 text-emerald-100 font-medium transition"
-                            >
-                              一键安装第 2 路虚拟声卡（Hi-Fi Cable）
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => void refreshOutputDevices()}
-                              className="px-2.5 py-1 rounded-md bg-surface-900/80 hover:bg-surface-800 border border-white/15 text-slate-200 transition"
-                            >
-                              安装后刷新虚拟声卡
-                            </button>
-                          </div>
+                        <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200 flex flex-wrap items-center justify-between gap-2">
+                          <span>已有 1 路声卡；如需「听」和「说」同时屏蔽原声，请再装第 2 路。</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void invoke("install_hifi_cable").catch(() => {});
+                            }}
+                            className="px-2.5 py-1 rounded-md bg-emerald-500/25 hover:bg-emerald-500/35 border border-emerald-400/50 text-emerald-100 font-medium transition"
+                          >
+                            安装第 2 路（Hi-Fi Cable）
+                          </button>
                         </div>
                       ) : (
-                        <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200 leading-relaxed">
-                          已检测到 {virtualDevices.length} 路独立虚拟声卡！可在上方分别指定不同虚拟声卡用于「听（屏蔽对方原声）」与「说（送克隆译文给对方）」，实现双向 100% 隔离同传。
+                        <div className="rounded-lg bg-emerald-500/10 border border-emerald-400/30 p-2.5 text-[11px] text-emerald-200">
+                          已就绪 {virtualDevices.length} 路独立声卡，上下分别选不同声卡即可双向只听译文。
                         </div>
                       )}
                     </div>
