@@ -2094,43 +2094,68 @@ $s.Speak($env:HEAR_SPEAK_TEXT)
     Ok(())
 }
 
+/// Windows 系统层面规范化两路 VB-Audio 虚拟声卡端点：
+/// 1. 自动禁用多余的 `CABLE In 16ch (VB-Audio Virtual Cable)` 端点，避免干扰系统声音列表与会议软件；
+/// 2. 固定命名播放端点，使 Windows 声音设置与腾讯会议等软件统一显示：
+///    - `CABLE Input (VB-Audio Virtual Cable)`
+///    - `CABLE Output (VB-Audio Hi-Fi Cable)`
+#[cfg(target_os = "windows")]
+const NORMALIZE_VB_AUDIO_ENDPOINTS_PS: &str = "\
+Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -match 'CABLE In 16ch' -and $_.Status -eq 'OK' } | ForEach-Object { Disable-PnpDevice -InstanceId $_.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }\r\n\
+Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render' -ErrorAction SilentlyContinue | ForEach-Object {\r\n\
+    $p = Join-Path $_.PSPath 'Properties'\r\n\
+    if (-not (Test-Path $p)) { return }\r\n\
+    $props = Get-ItemProperty $p -ErrorAction SilentlyContinue\r\n\
+    $desc = [string]$props.'{b3f8fa53-0004-438e-9003-51a46e139bfc},6'\r\n\
+    $curName = [string]$props.'{a45c254e-df1c-4efd-8020-67d146a850e0},2'\r\n\
+    if ($desc -match 'VB-Audio Virtual Cable' -and $curName -notmatch '16ch' -and $curName -ne 'CABLE Input') {\r\n\
+        Set-ItemProperty -Path $p -Name '{a45c254e-df1c-4efd-8020-67d146a850e0},2' -Value 'CABLE Input' -ErrorAction SilentlyContinue\r\n\
+    } elseif ($desc -match 'VB-Audio Hi-Fi Cable' -and $curName -ne 'CABLE Output') {\r\n\
+        Set-ItemProperty -Path $p -Name '{a45c254e-df1c-4efd-8020-67d146a850e0},2' -Value 'CABLE Output' -ErrorAction SilentlyContinue\r\n\
+    }\r\n\
+}\r\n";
+
 /// 一键快捷安装 VB-Cable 虚拟声卡：
 /// 自动下载官方驱动包 zip → 解压到临时目录 → 以管理员身份直接拉起 VBCABLE_Setup_x64.exe，
-/// 用户只需在弹出窗口点一次「Install Driver」即可完成安装。
+/// 安装完成后自动禁用多余的 16ch 端点并将名称固定为 CABLE Input。
 #[tauri::command]
 async fn install_vb_cable() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let script = "\u{FEFF}$ErrorActionPreference = 'Stop'\r\n\
+        let norm_ps1 = std::env::temp_dir().join("hear_norm_vbaudio.ps1");
+        let _ = std::fs::write(&norm_ps1, format!("\u{FEFF}{}", NORMALIZE_VB_AUDIO_ENDPOINTS_PS).as_bytes());
+        let norm_str = norm_ps1.to_string_lossy().replace('\'', "''");
+        let script = format!("\u{FEFF}$ErrorActionPreference = 'Stop'\r\n\
 Write-Host '=== 正在准备 VB-Cable 虚拟声卡安装程序（会议同传专用）===' -ForegroundColor Cyan\r\n\
 $workDir = Join-Path $env:TEMP 'Hear-VBCable'\r\n\
 $zipPath = Join-Path $workDir 'VBCABLE_Driver_Pack.zip'\r\n\
 $extractDir = Join-Path $workDir 'extracted'\r\n\
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null\r\n\
 $downloadUrl = 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip'\r\n\
-try {\r\n\
+try {{\r\n\
     $page = Invoke-WebRequest -Uri 'https://vb-audio.com/Cable/' -UseBasicParsing -TimeoutSec 10\r\n\
     $m = [regex]::Match($page.Content, 'https://download\\.vb-audio\\.com/Download_CABLE/VBCABLE_Driver_Pack\\d+\\.zip')\r\n\
-    if ($m.Success) { $downloadUrl = $m.Value }\r\n\
-} catch {}\r\n\
-try {\r\n\
+    if ($m.Success) {{ $downloadUrl = $m.Value }}\r\n\
+}} catch {{}}\r\n\
+try {{\r\n\
     Write-Host \"1/3 正在下载官方驱动包：$downloadUrl\" -ForegroundColor White\r\n\
     Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing\r\n\
     Write-Host '2/3 正在解压驱动包...' -ForegroundColor White\r\n\
-    if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }\r\n\
+    if (Test-Path $extractDir) {{ Remove-Item -Recurse -Force $extractDir }}\r\n\
     Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force\r\n\
     $setup = Get-ChildItem -Path $extractDir -Recurse -Filter 'VBCABLE_Setup_x64.exe' | Select-Object -First 1\r\n\
-    if (-not $setup) { $setup = Get-ChildItem -Path $extractDir -Recurse -Filter 'VBCABLE_Setup.exe' | Select-Object -First 1 }\r\n\
-    if (-not $setup) { throw '压缩包内未找到 VBCABLE_Setup_x64.exe' }\r\n\
+    if (-not $setup) {{ $setup = Get-ChildItem -Path $extractDir -Recurse -Filter 'VBCABLE_Setup.exe' | Select-Object -First 1 }}\r\n\
+    if (-not $setup) {{ throw '压缩包内未找到 VBCABLE_Setup_x64.exe' }}\r\n\
     Write-Host '3/3 正在以管理员身份启动安装程序...' -ForegroundColor Green\r\n\
-    Write-Host '请在弹出的 VB-Cable 窗口中点击 [Install Driver]，完成后回到 Hear 点击「刷新虚拟声卡」。' -ForegroundColor Yellow\r\n\
+    Write-Host '请在弹出的 VB-Cable 窗口中点击 [Install Driver]，完成后会自动规范化名称并隐藏 16ch 端口。' -ForegroundColor Yellow\r\n\
     Start-Process -FilePath $setup.FullName -Verb RunAs -Wait\r\n\
-    Write-Host '安装窗口已关闭。请回到 Hear 点击「刷新虚拟声卡」查看 CABLE Input。' -ForegroundColor Green\r\n\
-} catch {\r\n\
+    Start-Sleep -Seconds 1\r\n\
+    Write-Host '正在自动禁用多余的 CABLE In 16ch 并固定命名为 CABLE Input...' -ForegroundColor Cyan\r\n\
+    Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
+    Write-Host '安装与规范化已完成。请回到 Hear 点击「刷新虚拟声卡」。' -ForegroundColor Green\r\n\
+}} catch {{\r\n\
     Write-Host \"自动下载或启动安装失败：$($_.Exception.Message)\" -ForegroundColor Red\r\n\
-    Write-Host '正在为您打开 VB-Cable 官网，可手动下载压缩包后解压运行 VBCABLE_Setup_x64.exe。' -ForegroundColor Yellow\r\n\
-    Start-Process 'https://vb-audio.com/Cable/'\r\n\
-}\r\n";
+}}\r\n", norm_str);
         let ps1_path = std::env::temp_dir().join("hear_install_vbcable.ps1");
         std::fs::write(&ps1_path, script.as_bytes())
             .map_err(|e| format!("写入安装脚本失败：{}", e))?;
@@ -2164,35 +2189,39 @@ try {\r\n\
 async fn install_hifi_cable() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let script = "\u{FEFF}$ErrorActionPreference = 'Stop'\r\n\
+        let norm_ps1 = std::env::temp_dir().join("hear_norm_vbaudio.ps1");
+        let _ = std::fs::write(&norm_ps1, format!("\u{FEFF}{}", NORMALIZE_VB_AUDIO_ENDPOINTS_PS).as_bytes());
+        let norm_str = norm_ps1.to_string_lossy().replace('\'', "''");
+        let script = format!("\u{FEFF}$ErrorActionPreference = 'Stop'\r\n\
 Write-Host '=== 正在准备第 2 路虚拟声卡：VB-Audio Hi-Fi Cable ===' -ForegroundColor Cyan\r\n\
 $workDir = Join-Path $env:TEMP 'Hear-HiFiCable'\r\n\
 $zipPath = Join-Path $workDir 'HiFiCableAsioBridgeSetup.zip'\r\n\
 $extractDir = Join-Path $workDir 'extracted'\r\n\
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null\r\n\
 $downloadUrl = 'https://download.vb-audio.com/Download_CABLE/HiFiCableAsioBridgeSetup_v1007.zip'\r\n\
-try {\r\n\
+try {{\r\n\
     $page = Invoke-WebRequest -Uri 'https://vb-audio.com/Cable/HiFiCable.htm' -UseBasicParsing -TimeoutSec 10\r\n\
     $m = [regex]::Match($page.Content, 'https://download\\.vb-audio\\.com/Download_CABLE/HiFiCable[^\"''\\s]+\\.zip')\r\n\
-    if ($m.Success) { $downloadUrl = $m.Value }\r\n\
-} catch {}\r\n\
-try {\r\n\
+    if ($m.Success) {{ $downloadUrl = $m.Value }}\r\n\
+}} catch {{}}\r\n\
+try {{\r\n\
     Write-Host \"1/3 正在下载官方驱动包：$downloadUrl\" -ForegroundColor White\r\n\
     Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath -UseBasicParsing\r\n\
     Write-Host '2/3 正在解压驱动包...' -ForegroundColor White\r\n\
-    if (Test-Path $extractDir) { Remove-Item -Recurse -Force $extractDir }\r\n\
+    if (Test-Path $extractDir) {{ Remove-Item -Recurse -Force $extractDir }}\r\n\
     Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force\r\n\
     $setup = Get-ChildItem -Path $extractDir -Recurse -Filter '*Setup*.exe' | Select-Object -First 1\r\n\
-    if (-not $setup) { throw '压缩包内未找到安装程序' }\r\n\
+    if (-not $setup) {{ throw '压缩包内未找到安装程序' }}\r\n\
     Write-Host '3/3 正在以管理员身份启动 Hi-Fi Cable 安装程序...' -ForegroundColor Green\r\n\
-    Write-Host '请在弹出窗口点击 [Install]，安装完成后回到 Hear 点击「刷新虚拟声卡」，即可看到 Hi-Fi Cable Input。' -ForegroundColor Yellow\r\n\
+    Write-Host '请在弹出窗口点击 [Install]，完成后会自动将名称固定为 CABLE Output。' -ForegroundColor Yellow\r\n\
     Start-Process -FilePath $setup.FullName -Verb RunAs -Wait\r\n\
-    Write-Host '安装窗口已关闭。请回到 Hear 点击「刷新虚拟声卡」。' -ForegroundColor Green\r\n\
-} catch {\r\n\
+    Start-Sleep -Seconds 1\r\n\
+    Write-Host '正在自动将 Hi-Fi Cable 端点命名为 CABLE Output...' -ForegroundColor Cyan\r\n\
+    Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
+    Write-Host '安装与规范化已完成。请回到 Hear 点击「刷新虚拟声卡」。' -ForegroundColor Green\r\n\
+}} catch {{\r\n\
     Write-Host \"自动下载或启动安装失败：$($_.Exception.Message)\" -ForegroundColor Red\r\n\
-    Write-Host '正在为您打开 Hi-Fi Cable 官网...' -ForegroundColor Yellow\r\n\
-    Start-Process 'https://vb-audio.com/Cable/HiFiCable.htm'\r\n\
-}\r\n";
+}}\r\n", norm_str);
         let ps1_path = std::env::temp_dir().join("hear_install_hificable.ps1");
         std::fs::write(&ps1_path, script.as_bytes())
             .map_err(|e| format!("写入安装脚本失败：{}", e))?;
@@ -2297,6 +2326,9 @@ async fn set_virtual_cables_os_enabled(enabled: bool) -> Result<(), String> {
             let ps1_path = std::env::temp_dir().join("hear_toggle_vbcable_os.ps1");
             let elevated_ps1 = std::env::temp_dir().join("hear_toggle_vbcable_run.ps1");
             let elevated_str = elevated_ps1.to_string_lossy().replace('\'', "''");
+            let norm_ps1 = std::env::temp_dir().join("hear_norm_vbaudio.ps1");
+            let _ = std::fs::write(&norm_ps1, format!("\u{FEFF}{}", NORMALIZE_VB_AUDIO_ENDPOINTS_PS).as_bytes());
+            let norm_str = norm_ps1.to_string_lossy().replace('\'', "''");
             let script = format!(
                 "\u{FEFF}$action = '{}'\r\n\
 $devs = @(Get-PnpDevice -Class MEDIA -ErrorAction SilentlyContinue | Where-Object {{ $_.FriendlyName -match 'VB-Audio' }})\r\n\
@@ -2306,20 +2338,43 @@ $targets = if ($action -eq 'enable') {{\r\n\
 }} else {{\r\n\
     @($devs | Where-Object {{ $_.Status -eq 'OK' }})\r\n\
 }}\r\n\
-if ($targets.Count -eq 0) {{ exit 0 }}\r\n\
+$needsNorm = $false\r\n\
+if ($action -eq 'enable') {{\r\n\
+    $has16ch = @(Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Where-Object {{ $_.FriendlyName -match 'CABLE In 16ch' -and $_.Status -eq 'OK' }}).Count -gt 0\r\n\
+    if ($has16ch) {{ $needsNorm = $true }}\r\n\
+    if (-not $needsNorm) {{\r\n\
+        Get-ChildItem 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render' -ErrorAction SilentlyContinue | ForEach-Object {{\r\n\
+            $st = (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).DeviceState\r\n\
+            if ($st -ne 1) {{ return }}\r\n\
+            $p = Join-Path $_.PSPath 'Properties'\r\n\
+            if (-not (Test-Path $p)) {{ return }}\r\n\
+            $props = Get-ItemProperty $p -ErrorAction SilentlyContinue\r\n\
+            $desc = [string]$props.'{{b3f8fa53-0004-438e-9003-51a46e139bfc}},6'\r\n\
+            $curName = [string]$props.'{{a45c254e-df1c-4efd-8020-67d146a850e0}},2'\r\n\
+            if ($desc -match 'VB-Audio Virtual Cable' -and $curName -notmatch '16ch' -and $curName -ne 'CABLE Input') {{ $needsNorm = $true }}\r\n\
+            if ($desc -match 'VB-Audio Hi-Fi Cable' -and $curName -ne 'CABLE Output') {{ $needsNorm = $true }}\r\n\
+        }}\r\n\
+    }}\r\n\
+}}\r\n\
+if ($targets.Count -eq 0 -and -not $needsNorm) {{ exit 0 }}\r\n\
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)\r\n\
 if ($isAdmin) {{\r\n\
     foreach ($d in $targets) {{\r\n\
         if ($action -eq 'enable') {{ Enable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }}\r\n\
         else {{ Disable-PnpDevice -InstanceId $d.InstanceId -Confirm:$false -ErrorAction SilentlyContinue }}\r\n\
     }}\r\n\
+    if ($action -eq 'enable') {{ Start-Sleep -Milliseconds 600; & '{}' }}\r\n\
 }} else {{\r\n\
     $verbCmd = if ($action -eq 'enable') {{ 'Enable-PnpDevice' }} else {{ 'Disable-PnpDevice' }}\r\n\
-    $lines = $targets | ForEach-Object {{ \"$verbCmd -InstanceId '$($_.InstanceId)' -Confirm:`$false -ErrorAction SilentlyContinue\" }}\r\n\
+    $lines = @($targets | ForEach-Object {{ \"$verbCmd -InstanceId '$($_.InstanceId)' -Confirm:`$false -ErrorAction SilentlyContinue\" }})\r\n\
+    if ($action -eq 'enable') {{\r\n\
+        if ($targets.Count -gt 0) {{ $lines += 'Start-Sleep -Milliseconds 600' }}\r\n\
+        $lines += \"& '{}'\"\r\n\
+    }}\r\n\
     Set-Content -Path '{}' -Value ($lines -join \"`r`n\") -Encoding UTF8\r\n\
     Start-Process powershell -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')\r\n\
 }}\r\n",
-                action, elevated_str, elevated_str
+                action, norm_str, norm_str, elevated_str, elevated_str
             );
             if std::fs::write(&ps1_path, script.as_bytes()).is_ok() {
                 let _ = std::process::Command::new("powershell")

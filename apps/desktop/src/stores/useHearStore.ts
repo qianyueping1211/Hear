@@ -1653,7 +1653,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
         : "";
     const micId =
       hasHiFiCable && wantMic
-        ? liveHiFi?.id || "Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)"
+        ? liveHiFi?.id || "CABLE Output (VB-Audio Hi-Fi Cable)"
         : "";
 
     const tts = get().ttsSettings;

@@ -1228,9 +1228,9 @@ export function SettingsModal() {
                   const hasVbCable = Boolean(vcStatus?.hasVbCable) || Boolean(liveVb);
                   const hasHiFiCable = Boolean(vcStatus?.hasHifiCable) || Boolean(liveHiFi);
                   const lockedVbId = liveVb?.id || "CABLE Input (VB-Audio Virtual Cable)";
-                  const lockedHiFiId = liveHiFi?.id || "Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)";
-                  const displayVbName = "CABLE Input (VB-Audio Virtual Cable)";
-                  const displayHiFiName = "CABLE Output (VB-Audio Hi-Fi Cable)";
+                  const lockedHiFiId = liveHiFi?.id || "CABLE Output (VB-Audio Hi-Fi Cable)";
+                  const displayVbName = lockedVbId;
+                  const displayHiFiName = lockedHiFiId;
                   const loopbackEnabled = Boolean(ttsSettings.meetingLoopbackDeviceId);
                   const micEnabled = Boolean(ttsSettings.meetingMicOutputDeviceId);
                   const installedCount = (hasVbCable ? 1 : 0) + (hasHiFiCable ? 1 : 0);
