@@ -199,6 +199,13 @@ pub struct TtsOutputSettings {
     pub auto_speak_other: bool,
     pub duck_original_audio: bool,
     pub duck_ratio: f32,
+    /// 系统朗读声音偏好："auto"（自动识别说话人性别）| "female"（女声）| "male"（男声）
+    #[serde(default = "default_system_voice_preference")]
+    pub system_voice_preference: String,
+}
+
+fn default_system_voice_preference() -> String {
+    "auto".to_string()
 }
 
 impl Default for TtsOutputSettings {
@@ -216,6 +223,7 @@ impl Default for TtsOutputSettings {
             auto_speak_other: false,
             duck_original_audio: true,
             duck_ratio: 0.25,
+            system_voice_preference: "auto".to_string(),
         }
     }
 }

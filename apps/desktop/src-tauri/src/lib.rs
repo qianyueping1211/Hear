@@ -1862,18 +1862,68 @@ async fn update_segment_speaker(
     Ok(())
 }
 
+/// 从 16kHz 16-bit mono WAV 估算说话人中位基频（Hz），用于系统朗读自动区分男声 / 女声（与 iOS VoiceAnalyzer 一致）
+fn estimate_gender_from_wav_16k(wav: &[u8]) -> Option<&'static str> {
+    if wav.len() <= 44 + 3200 {
+        return None;
+    }
+    let pcm = &wav[44..];
+    let max_samples = (pcm.len() / 2).min(48_000); // 最多取前 3 秒
+    let mut x = Vec::with_capacity(max_samples);
+    for i in 0..max_samples {
+        let s = i16::from_le_bytes([pcm[i * 2], pcm[i * 2 + 1]]) as f32 / 32768.0;
+        x.push(s);
+    }
+    let frame = 640usize; // 40ms @ 16kHz
+    let min_lag = 40usize; // 400Hz
+    let max_lag = 228usize; // ~70Hz
+    let mut f0s: Vec<f32> = Vec::new();
+    let mut i = 0usize;
+    while i + frame + max_lag < x.len() && f0s.len() < 120 {
+        let mut energy = 0.0f32;
+        for k in 0..frame {
+            energy += x[i + k] * x[i + k];
+        }
+        if energy / (frame as f32) > 1e-4 {
+            let mut best = 0.0f32;
+            let mut best_lag = 0usize;
+            for lag in min_lag..=max_lag {
+                let mut s = 0.0f32;
+                for k in 0..frame {
+                    s += x[i + k] * x[i + k + lag];
+                }
+                if s > best {
+                    best = s;
+                    best_lag = lag;
+                }
+            }
+            if best_lag > 0 && best / energy > 0.5 {
+                f0s.push(16_000.0 / (best_lag as f32));
+            }
+        }
+        i += frame;
+    }
+    if f0s.len() < 5 {
+        return None;
+    }
+    f0s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = f0s[f0s.len() / 2];
+    Some(if median < 165.0 { "Male" } else { "Female" })
+}
+
 #[tauri::command]
 async fn speak_text_sapi(
     rt: State<'_, Arc<AppRuntime>>,
     text: String,
     lang: Option<String>,
+    segment_id: Option<String>,
 ) -> Result<(), String> {
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
         return Ok(());
     }
     let lang_tag = lang.unwrap_or_default().trim().to_string();
-    let (duck_ratio_opt, is_recording) = {
+    let (duck_ratio_opt, is_recording, voice_pref) = {
         let snap = rt.snapshot.lock().await;
         // 仅在会议同传模式下压低会议原声；非同传模式不干预系统音量
         let duck = if snap.tts_settings.routing_mode == "meeting"
@@ -1883,7 +1933,28 @@ async fn speak_text_sapi(
         } else {
             None
         };
-        (duck, snap.mode == SessionMode::Recording)
+        (
+            duck,
+            snap.mode == SessionMode::Recording,
+            snap.tts_settings.system_voice_preference.clone(),
+        )
+    };
+    let gender_tag = match voice_pref.as_str() {
+        "male" => "Male".to_string(),
+        "female" => "Female".to_string(),
+        _ => {
+            // "auto"：从该句原始录音片段估算基频区分男/女声
+            if let Some(ref sid) = segment_id {
+                let wav_opt = rt.segment_wavs.lock().await.get(sid).cloned();
+                wav_opt
+                    .as_deref()
+                    .and_then(estimate_gender_from_wav_16k)
+                    .unwrap_or("")
+                    .to_string()
+            } else {
+                String::new()
+            }
+        }
     };
     // 朗读新句前立即打断可能残留的旧 SAPI 子进程，避免两句系统语音叠声
     rt.kill_active_sapi();
@@ -1899,23 +1970,36 @@ async fn speak_text_sapi(
 Add-Type -AssemblyName System.Speech
 $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
 $lang = $env:HEAR_SPEAK_LANG
+$gender = $env:HEAR_SPEAK_GENDER
+$voices = $s.GetInstalledVoices() | Where-Object { $_.Enabled }
+$pool = $voices
 if ($lang) {
-    $voices = $s.GetInstalledVoices() | Where-Object { $_.Enabled }
-    $v = $voices | Where-Object { $_.VoiceInfo.Culture.Name.StartsWith($lang, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
-    if (-not $v) {
+    $exact = $voices | Where-Object { $_.VoiceInfo.Culture.Name.StartsWith($lang, [System.StringComparison]::OrdinalIgnoreCase) }
+    if ($exact) {
+        $pool = $exact
+    } else {
         $base = ($lang -split '-')[0]
         if ($base) {
-            $v = $voices | Where-Object { $_.VoiceInfo.Culture.Name.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+            $byBase = $voices | Where-Object { $_.VoiceInfo.Culture.Name.StartsWith($base, [System.StringComparison]::OrdinalIgnoreCase) }
+            if ($byBase) { $pool = $byBase }
         }
     }
-    if ($v) { $s.SelectVoice($v.VoiceInfo.Name) }
 }
+$v = $null
+if ($gender) {
+    $v = $pool | Where-Object { $_.VoiceInfo.Gender.ToString().Equals($gender, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
+}
+if (-not $v) {
+    $v = $pool | Select-Object -First 1
+}
+if ($v) { $s.SelectVoice($v.VoiceInfo.Name) }
 $s.Speak($env:HEAR_SPEAK_TEXT)
 "#;
             let mut cmd = std::process::Command::new("powershell");
             cmd.args(["-NoProfile", "-Command", script])
                 .env("HEAR_SPEAK_TEXT", trimmed)
                 .env("HEAR_SPEAK_LANG", lang_tag)
+                .env("HEAR_SPEAK_GENDER", gender_tag)
                 .creation_flags(0x0800_0000);
             if let Ok(mut child) = cmd.spawn() {
                 let pid = child.id();

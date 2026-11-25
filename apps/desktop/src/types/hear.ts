@@ -101,6 +101,7 @@ export interface TtsOutputSettings {
   autoSpeakOther: boolean;
   duckOriginalAudio: boolean;
   duckRatio: number;
+  systemVoicePreference?: "auto" | "female" | "male";
 }
 
 export interface RecordingPlaybackState {

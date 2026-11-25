@@ -1352,13 +1352,35 @@ export function SettingsModal() {
                 </label>
 
                 <label className="flex items-center justify-between">
-                  <span>优先使用 Qwen3-TTS 声音克隆（不可用时自动退回系统语音）</span>
+                  <span>优先使用 Qwen3-TTS 声音克隆（关闭后直接使用系统语音朗读）</span>
                   <input
                     type="checkbox"
                     checked={ttsSettings.useVoiceClone}
                     onChange={(e) => updateTtsSettings({ useVoiceClone: e.target.checked })}
                     className="w-4 h-4 accent-brand-500"
                   />
+                </label>
+
+                <label className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="text-slate-200">系统朗读声音</div>
+                    <div className="text-[11px] text-slate-400">
+                      关闭声音克隆或克隆降级时，按所选性别使用 Windows 系统语音朗读。
+                    </div>
+                  </div>
+                  <select
+                    value={ttsSettings.systemVoicePreference || "auto"}
+                    onChange={(e) =>
+                      updateTtsSettings({
+                        systemVoicePreference: e.target.value as "auto" | "female" | "male",
+                      })
+                    }
+                    className="rounded-lg bg-surface-900 border border-white/10 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-500"
+                  >
+                    <option value="auto">自动识别</option>
+                    <option value="female">女声</option>
+                    <option value="male">男声</option>
+                  </select>
                 </label>
 
                 <label className="flex items-center justify-between">

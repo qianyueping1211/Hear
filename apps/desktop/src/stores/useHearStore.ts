@@ -135,6 +135,7 @@ const DEFAULT_TTS: TtsOutputSettings = {
   autoSpeakOther: false,
   duckOriginalAudio: true,
   duckRatio: 0.25,
+  systemVoicePreference: "auto",
 };
 
 const DEFAULT_PLAYBACK: RecordingPlaybackState = {
@@ -1470,7 +1471,11 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     }
     try {
       startSystemGuard();
-      await tauriInvoke("speak_text_sapi", { text: trimmed, lang: targetBcp });
+      await tauriInvoke("speak_text_sapi", {
+        text: trimmed,
+        lang: targetBcp,
+        segmentId: id,
+      });
     } finally {
       endSystemGuard();
       if (get().speakingSegmentId === id) {
