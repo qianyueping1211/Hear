@@ -66,19 +66,30 @@ async function tauriInvoke<T>(
 
 export const SUMMARY_TEMPLATES: SummaryTemplateOption[] = [
   {
-    id: "meeting",
-    title: "会议纪要（带时间锚点）",
-    description: "提炼核心议题、关键结论与行动项，附带可点击 [mm:ss] 时间戳",
+    id: "drucker",
+    title: "高效会议纪要（德鲁克有效会议）",
+    description:
+      "源自彼得·德鲁克《卓有成效的管理者》，以贡献为导向，明确目的并锁定结论、行动承诺与风险（附 [mm:ss] 时间锚点）",
+  },
+  {
+    id: "brief",
+    title: "简明摘要",
+    description: "用三五句话说清楚本次对话讲了什么，再列出 5 条以内最重要要点，适合快速回顾",
+  },
+  {
+    id: "actions",
+    title: "行动项清单",
+    description: "专注提取待办事项、负责人、截止时间与原话依据表格，方便跟进落实",
   },
   {
     id: "bilingual",
-    title: "双语核心要点",
-    description: "按主题整理中英对照摘要，适合外语讲座与技术分享复盘",
+    title: "双语要点对照",
+    description: "整理双语对照核心要点表格，并提炼值得学习复盘的关键表达",
   },
   {
-    id: "qa",
-    title: "问答与待办清单",
-    description: "抽取提问、回答与负责人/截止日期",
+    id: "interview",
+    title: "沟通 / 访谈记录",
+    description: "按问答顺序客观整理双方发言与立场，保留原意和语气，适合存档",
   },
 ];
 
@@ -346,7 +357,7 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
   seekTargetMs: 0,
   searchQuery: "",
   summaryOpen: true,
-  summaryTemplateId: "meeting",
+  summaryTemplateId: "drucker",
   summaryMarkdown: "",
   summaryGenerating: false,
   viewMode: "home",
