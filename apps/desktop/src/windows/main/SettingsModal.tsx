@@ -1724,6 +1724,31 @@ export function SettingsModal() {
                 </div>
               </div>
 
+              {/* 隐私与日志记录设置 */}
+              <div className="rounded-xl bg-surface-800/70 border border-white/10 p-4">
+                <label className="flex items-center justify-between gap-4 cursor-pointer">
+                  <div>
+                    <div className="font-semibold text-white text-sm">
+                      记录本地运行与后端对话日志（含原文 / 译文）
+                    </div>
+                    <p className="text-xs text-slate-400 mt-1">
+                      默认关闭。关闭后本地不写入日志文件，且所有后端请求携带隐私头，服务端不记录你的原文与译文内容。
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(serviceConfig.logContentEnabled)}
+                    onChange={(e) =>
+                      void saveServiceConfig({
+                        ...serviceConfig,
+                        logContentEnabled: e.target.checked,
+                      })
+                    }
+                    className="w-4 h-4 accent-brand-500 shrink-0"
+                  />
+                </label>
+              </div>
+
               {/* GitHub Token 与自动检测设置 */}
               <div className="rounded-xl bg-surface-800/70 border border-white/10 p-4 space-y-3">
                 <div className="font-semibold text-white">更新源与 GitHub Token</div>

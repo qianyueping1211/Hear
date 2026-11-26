@@ -539,11 +539,10 @@ actor CloudClient {
            Self.cleanURL(address) == Self.cleanURL(sharedAddress) {
             req.setValue(token, forHTTPHeaderField: "X-Hear-Token")
         }
-        // 用户在 App 设置里明确开启“记录对话内容”时，允许当前云端服务
-        // 也记录这次请求的原文 / 译文。关闭时服务端继续保持内容隐藏。
-        if AppLog.logEnabledNow && UserDefaults.standard.bool(forKey: "logContentEnabled") {
-            req.setValue("1", forHTTPHeaderField: "X-Hear-Log-Content")
-        }
+        // 用户在 App 设置里明确开启“记录日志 + 记录对话内容”时才传 1；
+        // 关闭时显式传 0，确保后端日志也不记录原文和译文。
+        let allowContentLog = AppLog.logEnabledNow && UserDefaults.standard.bool(forKey: "logContentEnabled")
+        req.setValue(allowContentLog ? "1" : "0", forHTTPHeaderField: "X-Hear-Log-Content")
         return req
     }
 

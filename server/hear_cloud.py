@@ -144,10 +144,10 @@ _whisper_state = {"status": "未加载", "detail": ""}
 
 
 # 日志里要不要记用户说的话（识别出来的原文、译文）。
-# 内测期间默认记录，便于从这里直接排查识别和翻译问题。
-# 正式环境默认关闭。HEAR_LOG_CONTENT 仍可显式覆盖该默认值。
+# 默认关闭，保护用户隐私；仅当客户端显式开启“记录对话内容”并发送 X-Hear-Log-Content: 1，
+# 或服务端显式设置环境变量 HEAR_LOG_CONTENT=1 时才记录正文。
 DEPLOYMENT = os.environ.get("HEAR_DEPLOYMENT", "internal").strip().lower()
-LOG_CONTENT = os.environ.get("HEAR_LOG_CONTENT", "0" if DEPLOYMENT == "production" else "1").strip().lower() in ("1", "true", "yes", "on")
+LOG_CONTENT = os.environ.get("HEAR_LOG_CONTENT", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
 # 访问口令：开了以后，客户端必须带上 X-Hear-Token 才能用推理接口。
@@ -280,14 +280,18 @@ def console_without_quick_edit():
 
 
 def request_logs_content(headers):
-    """App 明确打开“记录对话内容”时，本次请求允许记录文字。"""
-    # 正式环境默认禁止，运维明确设置 0 时也不允许客户端覆盖。
+    """客户端明确开启“记录对话内容”时，本次请求才允许记录原文/译文。"""
+    # 正式环境默认禁止，运维明确设置 HEAR_LOG_CONTENT 时以环境变量为准。
     if DEPLOYMENT == "production" and not LOG_CONTENT:
         return False
     if "HEAR_LOG_CONTENT" in os.environ:
         return LOG_CONTENT
     value = (headers.get("X-Hear-Log-Content") or "").strip().lower()
-    return LOG_CONTENT or value in ("1", "true", "yes", "on")
+    if value in ("0", "false", "no", "off"):
+        return False
+    if value in ("1", "true", "yes", "on"):
+        return True
+    return LOG_CONTENT
 
 
 def log_text(prefix, content, enabled=False):
@@ -295,7 +299,7 @@ def log_text(prefix, content, enabled=False):
     if enabled:
         log("%s%s" % (prefix, content))
     else:
-        log("%s（内容没记：在 App 的“日志”里打开“记录对话内容”才记）" % prefix)
+        log("%s（内容已隐藏：开启客户端日志记录后才显示）" % prefix)
 
 
 def primary_ip():

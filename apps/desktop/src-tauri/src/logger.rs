@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
@@ -9,6 +10,11 @@ const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
 
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static LOG_LOCK: Mutex<()> = Mutex::new(());
+static LOG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_enabled(enabled: bool) {
+    LOG_ENABLED.store(enabled, Ordering::Relaxed);
+}
 
 pub fn init(app: &AppHandle) {
     let dir = app
@@ -53,6 +59,9 @@ pub fn error(msg: impl AsRef<str>) {
 }
 
 fn write_line(level: &str, msg: &str) {
+    if !LOG_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     let Some(path) = LOG_PATH.get() else {
         return;
     };

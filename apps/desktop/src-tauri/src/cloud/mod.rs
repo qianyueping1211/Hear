@@ -101,6 +101,8 @@ pub struct HearCloudClient {
     ref_id_cache: std::sync::Mutex<std::collections::HashMap<(String, u64), (String, Instant)>>,
     /// 术语表提取并经百分号编码的 ASR 热词头（X-ASR-Hotwords），供服务端 Whisper 精修提高专有名词识别率
     asr_hotwords_header: std::sync::Mutex<Option<String>>,
+    /// 是否允许后端日志记录本次请求的原文/译文（默认 false，显式携带 X-Hear-Log-Content: 0）
+    log_content_enabled: std::sync::atomic::AtomicBool,
 }
 
 fn percent_encode_utf8(input: &str) -> String {
@@ -191,6 +193,7 @@ impl HearCloudClient {
             device_id: format!("desktop-{}", &uuid::Uuid::new_v4().to_string()[..8]),
             ref_id_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             asr_hotwords_header: std::sync::Mutex::new(None),
+            log_content_enabled: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -198,6 +201,11 @@ impl HearCloudClient {
         if let Ok(mut guard) = self.asr_hotwords_header.lock() {
             *guard = extract_glossary_hotwords_header(glossary);
         }
+    }
+
+    pub fn set_log_content_enabled(&self, enabled: bool) {
+        self.log_content_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn client_for_url(&self, url: &str) -> &Client {
@@ -209,9 +217,18 @@ impl HearCloudClient {
     }
 
     fn apply_headers(&self, mut req: RequestBuilder, token: Option<&str>) -> RequestBuilder {
+        let log_content = if self
+            .log_content_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            "1"
+        } else {
+            "0"
+        };
         req = req
             .header("X-Hear-Client", concat!("hear-desktop/", env!("CARGO_PKG_VERSION")))
-            .header("X-Hear-Device-Id", &self.device_id);
+            .header("X-Hear-Device-Id", &self.device_id)
+            .header("X-Hear-Log-Content", log_content);
         if let Some(tok) = token.map(str::trim).filter(|s| !s.is_empty()) {
             req = req.header("X-Hear-Token", tok);
         }

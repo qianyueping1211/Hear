@@ -59,6 +59,7 @@ export interface ServiceConfig {
   asrSource: EngineSource;
   mtSource: EngineSource;
   cloneSource: EngineSource;
+  logContentEnabled?: boolean;
 }
 
 export interface ServiceProbeResult {

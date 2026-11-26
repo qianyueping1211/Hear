@@ -117,6 +117,9 @@ pub struct ServiceConfig {
     pub asr_source: EngineSource,
     pub mt_source: EngineSource,
     pub clone_source: EngineSource,
+    /// 是否记录本地运行日志并允许后端日志打印原文/译文（默认 false，保护隐私）
+    #[serde(default)]
+    pub log_content_enabled: bool,
 }
 
 impl Default for ServiceConfig {
@@ -129,6 +132,7 @@ impl Default for ServiceConfig {
             asr_source: EngineSource::Local,
             mt_source: EngineSource::Local,
             clone_source: EngineSource::Local,
+            log_content_enabled: false,
         }
     }
 }

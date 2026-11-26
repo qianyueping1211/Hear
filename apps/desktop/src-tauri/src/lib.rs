@@ -1514,6 +1514,8 @@ async fn save_service_config(
     rt: State<'_, Arc<AppRuntime>>,
     config: ServiceConfig,
 ) -> Result<ServiceConfig, String> {
+    rt.cloud.set_log_content_enabled(config.log_content_enabled);
+    logger::set_enabled(config.log_content_enabled);
     {
         let mut snap = rt.snapshot.lock().await;
         snap.service_config = config.clone();
@@ -3266,6 +3268,10 @@ pub fn run() {
             let initial_conversations = history_store::list_metas(app.handle());
             {
                 let mut snap = runtime_setup.snapshot.blocking_lock();
+                runtime_setup
+                    .cloud
+                    .set_log_content_enabled(loaded.service_config.log_content_enabled);
+                logger::set_enabled(loaded.service_config.log_content_enabled);
                 snap.service_config = loaded.service_config;
                 snap.subtitle_style = loaded.subtitle_style;
                 snap.tts_settings = loaded.tts_settings;
