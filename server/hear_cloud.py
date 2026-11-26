@@ -1249,7 +1249,7 @@ a{color:#007aff;text-decoration:none}
             else:
                 out["asr_ready"] = whisper_ready
         out["mt_ready"] = (mt_state == "就绪")
-        out["clone_ready"] = (clone_state == "就绪" and clone_model_valid) or edge_tts_available()
+        out["clone_ready"] = (clone_state == "就绪" and clone_model_valid)
         out["edge_tts_ready"] = edge_tts_available()
         out["clone_engines"] = ["qwen3", "edge_tts"]
         # 桌面端与多端共享能力元信息（向后兼容旧版 iOS）
