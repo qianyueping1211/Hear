@@ -549,9 +549,13 @@ def _mp3_bytes_to_wav(mp3_bytes, target_sr=24000):
         chunks = []
         for frame in container.decode(audio=0):
             for out_frame in resampler.resample(frame):
-                chunks.append(bytes(out_frame.planes[0]))
+                nbytes = out_frame.samples * 2
+                if nbytes > 0:
+                    chunks.append(bytes(out_frame.planes[0])[:nbytes])
         for out_frame in resampler.resample(None):
-            chunks.append(bytes(out_frame.planes[0]))
+            nbytes = out_frame.samples * 2
+            if nbytes > 0:
+                chunks.append(bytes(out_frame.planes[0])[:nbytes])
         container.close()
         pcm = b"".join(chunks)
         if not pcm:
