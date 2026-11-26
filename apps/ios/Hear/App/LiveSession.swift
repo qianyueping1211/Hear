@@ -492,6 +492,7 @@ final class LiveSession: ObservableObject {
     private let clonePipeline = SessionClonePipeline()
     private let cloudRecovery = SessionCloudRecovery()
     private var appleEngines: [LiveTextEngine] = []   // 苹果自带模式：每种语言一个系统听写
+    private var appleStopTask: Task<Void, Never>?     // 串行等待上一批系统听写彻底释放，避免触发 SFSpeechErrorDomain Code=16
     private var lastApplePieceRange: (langID: String, start: Double, end: Double)?
     private let languageDetector = SpokenLanguageDetector() // 独立的 sherpa-onnx Whisper-Tiny 语种裁判（不依赖 SenseVoice）
 
@@ -2162,10 +2163,6 @@ final class LiveSession: ObservableObject {
                 items[index].applyTranslation("（翻译失败：没有可用原文）", done: true)
                 continue
             }
-            if item.source.id == item.target.id {
-                items[index].applyTranslation("", done: true)
-                continue
-            }
             items[index].beginTranslationRevision()
             let token = UUID()
             jobTokens[item.id] = token
@@ -2628,12 +2625,7 @@ final class LiveSession: ObservableObject {
             let merged = clipped ? SessionPreviewPipeline.merge(stable, r.1) : r.1
             previews.textBySegment[id] = merged      // 记下稳定下来的那段（下次好接）
             partial = (clipped ? "…" : "") + merged
-            if src.id == tgt.id {
-                partialTranslation = ""
-                partialTranslationTarget = nil
-            } else {
-                requestPreviewTranslation(id: id, text: partial, src: src, tgt: tgt)
-            }
+            requestPreviewTranslation(id: id, text: partial, src: src, tgt: tgt)
         }
     }
 
@@ -2753,7 +2745,10 @@ final class LiveSession: ObservableObject {
         let out = try await translateAttempt(source, from: src, to: tgt, stage: stage, onPartial: onPartial)
         try Task.checkCancellation()
         let result = out.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !result.isEmpty else { throw TranslationResultError.empty }
+        if result.isEmpty {
+            if src.id == tgt.id { return text }
+            throw TranslationResultError.empty
+        }
         return result
     }
 
@@ -2877,6 +2872,7 @@ final class LiveSession: ObservableObject {
     private func startAppleASR() {
         stopAppleASR()
         guard appleAvailable else { return }
+        let pendingStop = appleStopTask
         // 后台准备 sherpa-onnx Whisper-Tiny 语种裁判（不阻塞苹果流式听写启动；仅双语自动模式需要）
         if forcedLang == nil {
             let detector = languageDetector
@@ -2904,13 +2900,29 @@ final class LiveSession: ObservableObject {
             }
             engines.append(e)
             Task {
+                // 必须等上一批 SpeechAnalyzer 彻底 cancelAndFinishNow 释放名额，否则 iOS 会报 Code=16 "Maximum number of recognizers reached"
+                if let pendingStop { await pendingStop.value }
+                guard isRunning || finishingInput, gen == runGen, dualLive else { return }
                 do {
-                    try await e.start(languageID: lang.id, locale: lang.tts)
+                    do {
+                        try await e.start(languageID: lang.id, locale: lang.tts)
+                    } catch {
+                        let ns = error as NSError
+                        if ns.domain == "SFSpeechErrorDomain" && ns.code == 16 {
+                            hearLog("系统听写（\(lang.name)）识别器名额暂满，等待 250ms 后重试一次", .warning)
+                            try? await Task.sleep(nanoseconds: 250_000_000)
+                            guard isRunning || finishingInput, gen == runGen, dualLive else { return }
+                            try await e.start(languageID: lang.id, locale: lang.tts)
+                        } else {
+                            throw error
+                        }
+                    }
                     guard isRunning || finishingInput, gen == runGen, dualLive else { await e.stop(); return }
                     if currentSeg > finishedSeg { e.markSegmentStart(currentSeg, frame: currentSegStartFrame) }
                 } catch {
                     hearLog("系统听写不支持 \(lang.name)：\(error.localizedDescription)", .warning)
                     activity = "系统听写暂不支持 \(lang.name)"
+                    await e.stop()
                     // 起不来的听写要从列表里去掉：
                     // 不然"有没有可用的听写"会被误判成有，
                     // Whisper 的实时预览也就不做了，屏幕上一直是省略号
@@ -2938,7 +2950,11 @@ final class LiveSession: ObservableObject {
         capture.onSamples = nil
         let list = appleEngines
         appleEngines = []
-        Task { for e in list { await e.stop() } }
+        let prev = appleStopTask
+        appleStopTask = Task {
+            await prev?.value
+            for e in list { await e.stop() }
+        }
     }
 
     /// 第 id 句：两个听写里置信度更高的结果。
@@ -3035,13 +3051,7 @@ final class LiveSession: ObservableObject {
         partialSource = b.lang
         partial = displayText
         let targetLang = !talkMode ? meetingTargetLang : (b.lang == langA ? langB : langA)
-        if b.lang.id == targetLang.id {
-            cancelMTPreview()
-            partialTranslation = ""
-            partialTranslationTarget = nil
-        } else {
-            requestPreviewTranslation(id: currentSeg, text: displayText, src: b.lang, tgt: targetLang)
-        }
+        requestPreviewTranslation(id: currentSeg, text: displayText, src: b.lang, tgt: targetLang)
     }
 
     /// 等系统听写把这一段定稿（最多等这么久）。
@@ -3217,18 +3227,10 @@ final class LiveSession: ObservableObject {
         items[idx].updateTranscript(spoken, source: src, target: tgt,
                                     side: leading ? .left : .right, recognizedLanguage: src.id)
         rememberReference(itemID, samples: samples, text: spoken)
-        if meetingMode, src.id == tgt.id {
-            items[idx].applyTranslation("", done: true)
-            jobTokens[itemID] = nil
-            persist()
-            activity = isRunning ? "正在聆听" : ""
-            kickReader()
-        } else {
-            // 翻译排到另一条队列（跟识别分开）
-            enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: spoken,
-                                      src: src, tgt: tgt, samples: samples,
-                                      isApple: true))
-        }
+        // 翻译排到另一条队列（跟识别分开）；即使聆听模式下源语种与目标语种一致（如中英混说），也正常送翻译处理混杂外语
+        enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: spoken,
+                                  src: src, tgt: tgt, samples: samples,
+                                  isApple: true))
     }
 
     /// 听写没给出结果时：用本地的识别再认一遍这段声音。
@@ -3542,22 +3544,12 @@ final class LiveSession: ObservableObject {
         let id = itemID
         rememberReference(id, samples: samples, text: text)
 
-        // 实时翻译（会议）模式下：若说话人说的就是目标语种（例如目标是中文且对方说的就是中文），
-        // 直接保留原文完成记录，不再多此一举做“中译中”；外语则自动翻译为目标语种。
-        if meetingMode, src.id == tgt.id {
-            items[idx2].applyTranslation("", done: true)
-            jobTokens[itemID] = nil
-            persist()
-            activity = isRunning ? "正在聆听" : ""
-            kickReader()
-        } else {
-            // 原文已经显示出来了，翻译排到另一条队列：
-            // 上一句翻得慢也不挡着下一句的原文。
-            persist()
-            enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: text,
-                                      src: src, tgt: tgt, samples: samples,
-                                      isApple: false, correctionAddress: correctionAddress))
-        }
+        // 原文已经显示出来了，翻译排到另一条队列：
+        // 上一句翻得慢也不挡着下一句的原文；即使聆听模式下源语种与目标语种相同（如中英混说），也正常送翻译处理外语部分。
+        persist()
+        enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: text,
+                                  src: src, tgt: tgt, samples: samples,
+                                  isApple: false, correctionAddress: correctionAddress))
         if shouldIdentify {
             if let speakerAddress {
                 enqueueSpeaker(samples, for: itemID, source: .cloud(speakerAddress))
@@ -3988,11 +3980,6 @@ final class LiveSession: ObservableObject {
         jobTokens[id] = nil
         translations.finished(id)
         items[i].done = true
-        if src.id == tgt.id {
-            items[i].applyTranslation("", done: true)
-            persist()
-            return
-        }
         items[i].beginTranslationRevision()
         // 版本号 +1：前一次翻译回来的时候版本对不上，就不要了
         itemVersions[id] = (itemVersions[id] ?? 0) + 1

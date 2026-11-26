@@ -126,12 +126,29 @@ actor SystemTranslator {
     func translate(_ text: String, from src: Language, to tgt: Language) async throws -> String {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
-            let key = src.id + ">" + tgt.id
+            // 聆听模式下源语种与目标语种相同时（例如目标中文、原句中文中穿插英文）：
+            // 苹果 TranslationSession 不支持同语种直译，若句中含混杂外语则以该外语为源翻译，纯同语种则直接保留原文。
+            let effectiveSrc: Language
+            if src.id == tgt.id {
+                let nonLatinTargets: Set<String> = ["zh", "ja", "ko", "ar", "ru", "th"]
+                let hasASCII = text.unicodeScalars.contains { ($0.value >= 65 && $0.value <= 90) || ($0.value >= 97 && $0.value <= 122) }
+                let hasCJK = text.unicodeScalars.contains { $0.value >= 0x4E00 && $0.value <= 0x9FFF }
+                if nonLatinTargets.contains(tgt.id), hasASCII {
+                    effectiveSrc = Language.find("en")
+                } else if !nonLatinTargets.contains(tgt.id), hasCJK {
+                    effectiveSrc = Language.find("zh")
+                } else {
+                    return text
+                }
+            } else {
+                effectiveSrc = src
+            }
+            let key = effectiveSrc.id + ">" + tgt.id
             let session: TranslationSession
             if let s = sessions[key] as? TranslationSession {
                 session = s
             } else {
-                let s = await canonical(src)
+                let s = await canonical(effectiveSrc)
                 let t = await canonical(tgt)
                 // 这个初始化要求语言包“已经装好”，没装的话翻译的时候会报错
                 // （unsupportedSourceLanguage）。装语言包靠 .translationTask。

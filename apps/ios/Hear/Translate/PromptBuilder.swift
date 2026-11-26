@@ -13,6 +13,16 @@ enum PromptBuilder {
             guard let match = term.aliases.first(where: { matches($0, in: text) }) else { return nil }
             return (match, term.translation)
         }
+        if src.id == tgt.id {
+            if tgt.id == "zh" {
+                let hints = terms.isEmpty ? "" : "参考下面的翻译：\n" +
+                    terms.map { "\($0.0) 翻译成 \($0.1)" }.joined(separator: "\n") + "\n\n"
+                return hints + "将以下文本中穿插的外语翻译为\(tgt.zhName)，已是\(tgt.zhName)的部分保留不变，只输出完整的\(tgt.zhName)结果，不要额外解释：\n\n\(text)"
+            }
+            let hints = terms.isEmpty ? "" : "Refer to the following translations:\n" +
+                terms.map { "\($0.0) translates to \($0.1)" }.joined(separator: "\n") + "\n\n"
+            return hints + "Translate any foreign parts of the following segment into \(tgt.enName) while keeping text already in \(tgt.enName) intact, outputting only the final result without additional explanation.\n\n\(text)"
+        }
         if src.id == "zh" || tgt.id == "zh" {
             let hints = terms.isEmpty ? "" : "参考下面的翻译：\n" +
                 terms.map { "\($0.0) 翻译成 \($0.1)" }.joined(separator: "\n") + "\n\n"
