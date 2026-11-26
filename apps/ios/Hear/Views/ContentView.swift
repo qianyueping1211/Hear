@@ -409,6 +409,10 @@ struct ModelStatusPill: View {
             Group {
                 if isLoading {
                     ProgressView().controlSize(.small)
+                } else if text.contains("请调整设置") {
+                    Image(systemName: "info.circle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
                 } else {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.footnote)
@@ -1324,23 +1328,28 @@ struct PhoneFaceToFaceView: View {
             halfPane(lang: $session.langB, targetLang: session.langA, isOpponent: true)
                 .rotationEffect(.degrees(180))
 
-            // 中间横线 + 中心翻转/互换语种按钮
+            // 中间横线 + 中心翻转/互换语种按钮（若有横线状态/语种提醒则叠加显示在横线上）
             ZStack {
                 Divider()
                     .padding(.horizontal, 16)
-                Button {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    session.swapLanguages()
-                } label: {
-                    Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 40, height: 40)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .overlay(Circle().stroke(Color.primary.opacity(0.12), lineWidth: 1))
+                if let hint = session.loadingHint ?? session.modelReadyHint {
+                    ModelStatusPill(text: hint, isLoading: session.loadingHint != nil)
+                        .allowsHitTesting(false)
+                } else {
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        session.swapLanguages()
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 40, height: 40)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .overlay(Circle().stroke(Color.primary.opacity(0.12), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("互换双方语言")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("互换双方语言")
             }
             .frame(height: 44)
 

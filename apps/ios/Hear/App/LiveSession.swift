@@ -505,6 +505,16 @@ final class LiveSession: ObservableObject {
     private var appleStopTask: Task<Void, Never>?     // 串行等待上一批系统听写彻底释放，避免触发 SFSpeechErrorDomain Code=16
     private var lastApplePieceRange: (langID: String, start: Double, end: Double)?
     private let languageDetector = SpokenLanguageDetector() // 独立的 sherpa-onnx Whisper-Tiny 语种裁判（不依赖 SenseVoice）
+    /// 对话模式下连续检测到非选定两种语言的次数（连续 ≥ 2 次时在横线上提醒）
+    private var outOfPairStreak = 0
+
+    private func noteOutOfPairLanguage(_ detectedCode: String) {
+        outOfPairStreak += 1
+        hearLog("对话模式忽略非选定语种（\(detectedCode)），连续第 \(outOfPairStreak) 次", .info)
+        if outOfPairStreak >= 2 {
+            showToast("识别其他语言请调整设置", seconds: 4.0, placement: .modelStatus)
+        }
+    }
 
     /// 排队等着处理的句子。
     /// token 是这一句"当前有效任务"的身份：
@@ -618,6 +628,7 @@ final class LiveSession: ObservableObject {
         }
         switchingMode = false
         conversationInputLanguage = nil
+        outOfPairStreak = 0
         if !keepContent && (!items.isEmpty || !partial.isEmpty) {
             newConversation(summarize: false, resumeListening: false)
         } else {
@@ -2109,6 +2120,7 @@ final class LiveSession: ObservableObject {
         startToken = UUID()
         finishingInput = true
         isRunning = false
+        outOfPairStreak = 0
         endLiveActivity()
         meter.level = 0
         UIApplication.shared.isIdleTimerDisabled = false
@@ -2153,6 +2165,7 @@ final class LiveSession: ObservableObject {
         muteGeneration += 1
         capture.muted = false
         isRunning = false
+        outOfPairStreak = 0
         endLiveActivity()
         meter.level = 0
         activity = ""
@@ -2681,8 +2694,14 @@ final class LiveSession: ObservableObject {
                         String(r.1.prefix(30)))
             guard isRunning, id == currentSeg, id > finishedSeg, partialSeg == id,
                   SpeechTextFilter.isMeaningful(r.text),
-                  !(outputMode == .speaker && isLikelySpokenEcho(r.text)),
-                  let language = forced?.id ?? SpeechTextFilter.resolveLanguage(r.text, detected: r.lang,
+                  !(outputMode == .speaker && isLikelySpokenEcho(r.text))
+            else { continue }
+            if !meetingMode, let rawObs = r.observedLanguage, !cands.contains(rawObs),
+               SpeechTextFilter.matchesLanguage(r.text, rawObs),
+               !cands.contains(where: { SpeechTextFilter.matchesLanguage(r.text, $0) }) {
+                continue
+            }
+            guard let language = forced?.id ?? SpeechTextFilter.resolveLanguage(r.text, detected: r.lang,
                                                                                  candidates: cands, fallback: fallback)
             else { continue }
             let src = meetingMode ? Language.find(language) : (language == b.id ? b : a)
@@ -3163,14 +3182,32 @@ final class LiveSession: ObservableObject {
         // 识别完成后由 job.forced 锁定归属方并强制翻译成另一侧语言。
         let lidCandidates = languages.map(\.id)
         let detector = languageDetector
-        let lidTask: Task<String?, Never> = Task.detached(priority: .userInitiated) {
-            await detector.detectLanguage(samples: samples, candidates: lidCandidates)
+        let lidTask: Task<(matched: String?, raw: String?), Never> = Task.detached(priority: .userInitiated) {
+            await detector.detectLanguageResult(samples: samples, candidates: lidCandidates)
         }
         await waitAppleFinal(segID)
-        let detectedLID: String? = await lidTask.value
+        let lidRes = await lidTask.value
+        let detectedLID = lidRes.matched
+        let rawLID = lidRes.raw
         guard !Task.isCancelled, gen == runGen else { return }
         // 这一句已经被放弃/顶掉了：结果不要了
         guard isCurrentJob(itemID, token: token) else { return }
+        // 对话的三种模式下只识别选定的两种语言：若语种裁判明确检测到第三语种且双方听写均无高置信度匹配，则忽略不译并累计提醒
+        if talkMode, let rawLID, !lidCandidates.contains(rawLID) {
+            let hasStrongInPair = appleEngines.contains { e in
+                guard let lid = e.languageID, lidCandidates.contains(lid) else { return false }
+                let r = e.segmentText(segID)
+                return !r.text.isEmpty && r.confidence >= 0.72 && SpeechTextFilter.matchesLanguage(r.text, lid)
+            }
+            if !hasStrongInPair {
+                removeItem(itemID)
+                jobTokens[itemID] = nil
+                noteOutOfPairLanguage(rawLID)
+                activity = isRunning ? "正在聆听" : ""
+                return
+            }
+        }
+        outOfPairStreak = 0
         // 诊断日志：逐路打印各语种系统听写引擎的定稿状态、置信度、得分、字数及语种裁判结论
         let diag = appleEngines.map { e -> String in
             let lid = e.languageID ?? "?"
@@ -3559,6 +3596,24 @@ final class LiveSession: ObservableObject {
             activity = isRunning ? "正在聆听" : ""
             return
         }
+        // 对话的三种模式中只识别选定的两种语言，其他语种忽略不译；连续检测到其他语种时在横线上提醒
+        if !meetingMode {
+            let rawLang = (observedLanguage?.isEmpty == false ? observedLanguage : nil)
+                ?? (detected.isEmpty ? nil : detected)
+            if let rawLang, !cands.contains(rawLang) {
+                let matchesForeign = SpeechTextFilter.matchesLanguage(text, rawLang)
+                    && !cands.contains(where: { SpeechTextFilter.matchesLanguage(text, $0) })
+                let explicitNonPair = (observedLanguage == rawLang) && rawLang != "zh" && rawLang != "en"
+                if matchesForeign || explicitNonPair {
+                    removeItem(itemID)
+                    jobTokens[itemID] = nil
+                    noteOutOfPairLanguage(rawLang)
+                    activity = isRunning ? "正在聆听" : ""
+                    return
+                }
+            }
+        }
+        outOfPairStreak = 0
         // 语种与预览用同一规则，识别失败时已有译文仍可读。
         guard SpeechTextFilter.isMeaningful(text),
               let language = forced?.id ?? SpeechTextFilter.resolveLanguage(text, detected: detected,

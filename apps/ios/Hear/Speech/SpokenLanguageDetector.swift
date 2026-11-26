@@ -144,16 +144,20 @@ actor SpokenLanguageDetector {
         hearLog("语种裁判：Whisper-Tiny LID 加载完成，用时 \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
     }
 
-    /// 识别一段 16kHz 单声道音频的语种代码（如 "zh"、"en"、"ar"）；仅返回命中 `candidates` 的语种。
-    func detectLanguage(samples: [Float], candidates: [String]) -> String? {
-        guard let wrapper else { return nil }
-        guard samples.count >= 4_800 else { return nil } // 至少 0.3 秒
+    /// 识别一段 16kHz 单声道音频的语种代码：同时返回「命中 candidates 的语种」与「原始识别出的语种」。
+    func detectLanguageResult(samples: [Float], candidates: [String]) -> (matched: String?, raw: String?) {
+        guard let wrapper else { return (nil, nil) }
+        guard samples.count >= 4_800 else { return (nil, nil) } // 至少 0.3 秒
         let audio = samples.count > 96_000 ? Array(samples.prefix(96_000)) : samples
         let result = wrapper.decode(samples: audio, sampleRate: 16_000)
         var code = result.lang.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if code == "yue" { code = "zh" }
-        guard !code.isEmpty else { return nil }
-        if candidates.contains(code) { return code }
-        return nil
+        guard !code.isEmpty else { return (nil, nil) }
+        return (candidates.contains(code) ? code : nil, code)
+    }
+
+    /// 识别一段 16kHz 单声道音频的语种代码（如 "zh"、"en"、"ar"）；仅返回命中 `candidates` 的语种。
+    func detectLanguage(samples: [Float], candidates: [String]) -> String? {
+        detectLanguageResult(samples: samples, candidates: candidates).matched
     }
 }
