@@ -7,3 +7,5 @@ numpy>=1.24
 sherpa-onnx>=1.10.0
 # 生成自签证书用（给服务开 https；不装也能跑，只是只有 http）
 cryptography>=42.0.0
+# 微软 Edge 神经语音（0 本机 CPU 占用，约 0.3~0.6 秒出声，支持中英日韩法德西男女声）
+edge-tts>=6.1.12

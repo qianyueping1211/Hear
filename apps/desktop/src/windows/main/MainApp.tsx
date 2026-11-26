@@ -348,6 +348,10 @@ export function MainApp() {
   }, [segments, playback.hasAudio, playback.positionMs]);
 
   const activeSegmentId = activeIdx >= 0 ? segments[activeIdx]?.id : null;
+  const lastSeg = segments[segments.length - 1];
+  const lastSegContentKey = lastSeg
+    ? `${lastSeg.id}|${lastSeg.sourceText}|${lastSeg.translatedText}|${lastSeg.status}`
+    : "";
 
   useEffect(() => {
     if (!autoFollow) return;
@@ -356,14 +360,20 @@ export function MainApp() {
         behavior: "smooth",
         block: "center",
       });
-    } else if (mode === "recording" && listRef.current) {
-      listRef.current.scrollTop = listRef.current.scrollHeight;
+    } else if ((mode === "recording" || mode === "paused") && listRef.current) {
+      const el = listRef.current;
+      const raf = window.requestAnimationFrame(() => {
+        el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      });
+      return () => window.cancelAnimationFrame(raf);
     }
   }, [
     activeSegmentId,
     playback.isPlaying,
     mode,
     segments.length,
+    lastSegContentKey,
+    livePartialSource,
     livePartialTranslation,
     autoFollow,
   ]);
@@ -458,7 +468,7 @@ export function MainApp() {
         <span>自动朗读译文</span>
       </button>
 
-      {/* 独立的「声音克隆」开关 + 快捷模型切换（Qwen3 原声克隆 / Kokoro 极速神经语音） */}
+      {/* 独立的「声音克隆」开关 + 快捷模型切换（Qwen3 原声克隆 / Edge-TTS 微软神经语音） */}
       <div className="inline-flex items-center">
         <button
           type="button"
@@ -469,7 +479,7 @@ export function MainApp() {
           }
           title={
             ttsSettings.useVoiceClone
-              ? `已开启（当前：${ttsSettings.cloneEngine === "kokoro" ? "Kokoro-82M 极速神经语音" : "Qwen3-TTS 原声克隆"}；点击关闭改用系统语音）`
+              ? `已开启（当前：${ttsSettings.cloneEngine === "edge_tts" ? "Edge-TTS 微软神经语音" : "Qwen3-TTS 原声克隆"}；点击关闭改用系统语音）`
               : "声音克隆 / 神经语音已关闭（点击开启）"
           }
           className={`h-9 px-2.5 border text-xs inline-flex items-center gap-1.5 transition ${
@@ -480,8 +490,8 @@ export function MainApp() {
         >
           <AudioLines className="w-3.5 h-3.5" />
           <span>
-            {ttsSettings.useVoiceClone && ttsSettings.cloneEngine === "kokoro"
-              ? "极速语音"
+            {ttsSettings.useVoiceClone && ttsSettings.cloneEngine === "edge_tts"
+              ? "神经语音"
               : "声音克隆"}
           </span>
         </button>
@@ -491,13 +501,13 @@ export function MainApp() {
             onClick={() =>
               void updateTtsSettings({
                 cloneEngine:
-                  ttsSettings.cloneEngine === "kokoro" ? "qwen3" : "kokoro",
+                  ttsSettings.cloneEngine === "edge_tts" ? "qwen3" : "edge_tts",
               })
             }
-            title="点击切换声音合成模型：Qwen3-TTS（原声克隆）⇄ Kokoro-82M（纯 CPU 0.2 秒极速神经语音）"
+            title="点击切换声音合成模型：Qwen3-TTS（原声克隆）⇄ Edge-TTS（微软拟真神经语音，0.3~0.6s）"
             className="h-9 px-2 rounded-r-lg border-y border-r border-emerald-400/40 bg-emerald-500/10 hover:bg-emerald-500/25 text-[11px] font-medium text-emerald-200 transition"
           >
-            {ttsSettings.cloneEngine === "kokoro" ? "Kokoro" : "Qwen3"}
+            {ttsSettings.cloneEngine === "edge_tts" ? "Edge" : "Qwen3"}
           </button>
         )}
       </div>
@@ -1171,10 +1181,20 @@ export function MainApp() {
 
           <div
             ref={listRef}
-            onWheel={() => {
-              if (autoFollow) setAutoFollow(false);
+            onWheel={(e) => {
+              if (e.deltaY < 0 && autoFollow) {
+                setAutoFollow(false);
+              }
             }}
-            className="flex-1 overflow-y-auto px-5 py-4 space-y-2.5 select-text"
+            onScroll={() => {
+              const el = listRef.current;
+              if (!el) return;
+              const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+              if (!autoFollow && distFromBottom <= 48) {
+                setAutoFollow(true);
+              }
+            }}
+            className="flex-1 overflow-y-auto px-5 pt-4 pb-36 space-y-2.5 select-text"
           >
             {filteredSegments.length === 0 && !livePartialSource ? (
               <div className="h-full flex flex-col items-center justify-center text-center text-slate-500 space-y-2">
@@ -1618,7 +1638,13 @@ export function MainApp() {
 
           {!autoFollow && (
             <button
-              onClick={() => setAutoFollow(true)}
+              onClick={() => {
+                setAutoFollow(true);
+                const el = listRef.current;
+                if (el) {
+                  el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                }
+              }}
               className="absolute bottom-4 right-5 px-3 py-1.5 rounded-full bg-brand-500 hover:bg-brand-600 text-white text-xs shadow-lg flex items-center gap-1.5"
             >
               <ArrowDownCircle className="w-3.5 h-3.5" />

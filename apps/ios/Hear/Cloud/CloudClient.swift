@@ -1279,18 +1279,19 @@ actor CloudClient {
     /// 好几个大响应一起在内存里，内存紧张时 App 会被系统直接杀掉。
     func clone(text: String, lang: String, reference: [Float], referenceText: String,
                engine: String = "qwen3", gender: String = "") async throws -> CloneAudio {
-        let isKokoro = engine.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "kokoro"
+        let normalizedEngine = engine.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let isEdgeTTS = normalizedEngine == "edge_tts" || normalizedEngine == "edge-tts"
         let timeLimit = CloudInferencePolicy.cloneBudget(forCharacters: text.count)
         let now = ContinuousClock.now
         let deadline = now.advanced(by: .seconds(timeLimit))
         try await acquireCloneSlot(until: now.advanced(by: .seconds(15)))
         defer { releaseCloneSlot() }
-        if !isKokoro {
+        if !isEdgeTTS {
             guard !reference.isEmpty else { throw CloudError.badResponse("没有参考音频") }
         }
 
-        let refWav = isKokoro ? Data() : Wav.encode(samples: reference, sampleRate: 16_000)
-        let fingerprint = isKokoro ? Data() : Data(SHA256.hash(data: refWav))
+        let refWav = isEdgeTTS ? Data() : Wav.encode(samples: reference, sampleRate: 16_000)
+        let fingerprint = isEdgeTTS ? Data() : Data(SHA256.hash(data: refWav))
         let addresses = candidateAddresses(cloneAddress)
         var lastError = CloudError.notConfigured
         for (index, address) in addresses.enumerated() {
@@ -1300,8 +1301,8 @@ actor CloudClient {
             let isLlama = await kind(of: address, timeout: 4, deadline: deadline) == .llamaServer
             let key = Self.cleanURL(address)
             do {
-                if isKokoro {
-                    var body: [String: Any] = ["text": text, "lang": lang, "engine": "kokoro"]
+                if isEdgeTTS {
+                    var body: [String: Any] = ["text": text, "lang": lang, "engine": "edge_tts"]
                     if !gender.isEmpty { body["gender"] = gender }
                     let remaining = max(0, ContinuousClock.now.duration(to: deadline).components.seconds)
                     let data = try await rawData("/v1/clone", address: address, method: "POST",

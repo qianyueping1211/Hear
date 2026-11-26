@@ -487,7 +487,7 @@ struct SettingsView: View {
     private var voiceCloneEngineRow: some View {
         Picker("声音克隆", selection: voiceCloneEngineBinding) {
             Text("云端：Qwen3-TTS（原声克隆）").tag("qwen3")
-            Text("云端：Kokoro-82M（极速神经语音）").tag("kokoro")
+            Text("云端：Edge-TTS（微软神经语音）").tag("edge_tts")
         }
     }
 
@@ -502,7 +502,7 @@ struct SettingsView: View {
     }
 
     private var voiceCloneEngineBinding: Binding<String> {
-        Binding(get: { session.cloudCloneModel == "kokoro" ? "kokoro" : "qwen3" },
+        Binding(get: { session.cloudCloneModel == "edge_tts" ? "edge_tts" : "qwen3" },
                 set: { applyVoiceCloneEngineSelection($0) })
     }
 
@@ -534,7 +534,7 @@ struct SettingsView: View {
         if !session.voiceCloneCloud {
             session.voiceCloneCloud = true
         }
-        let target = (engine == "kokoro") ? "kokoro" : "qwen3"
+        let target = (engine == "edge_tts") ? "edge_tts" : "qwen3"
         if session.cloudCloneModel != target {
             session.cloudCloneModel = target
         }

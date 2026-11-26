@@ -868,8 +868,10 @@ async fn synthesize_cloned_segment_wav(
     let (clone_engine, voice_pref) = {
         let snap = rt.snapshot.lock().await;
         (
-            if snap.tts_settings.clone_engine.trim().eq_ignore_ascii_case("kokoro") {
-                "kokoro".to_string()
+            if snap.tts_settings.clone_engine.trim().eq_ignore_ascii_case("edge_tts")
+                || snap.tts_settings.clone_engine.trim().eq_ignore_ascii_case("edge-tts")
+            {
+                "edge_tts".to_string()
             } else {
                 "qwen3".to_string()
             },
@@ -904,7 +906,7 @@ async fn synthesize_cloned_segment_wav(
             primary_target,
             &trimmed,
             lang,
-            if clone_engine == "kokoro" { None } else { ref_wav.clone() },
+            if clone_engine == "edge_tts" { None } else { ref_wav.clone() },
             &ref_text,
             primary_token,
             &clone_engine,
@@ -950,7 +952,7 @@ async fn synthesize_cloned_segment_wav(
                         &fallback_url,
                         &trimmed,
                         lang,
-                        if clone_engine == "kokoro" { None } else { ref_wav },
+                        if clone_engine == "edge_tts" { None } else { ref_wav },
                         &ref_text,
                         f_tok_opt,
                         &clone_engine,
@@ -1089,8 +1091,10 @@ async fn play_cloned_segment_to_device(
         let snap = rt.snapshot.lock().await;
         (
             snap.active_conversation_id.clone(),
-            if snap.tts_settings.clone_engine.trim().eq_ignore_ascii_case("kokoro") {
-                "kokoro".to_string()
+            if snap.tts_settings.clone_engine.trim().eq_ignore_ascii_case("edge_tts")
+                || snap.tts_settings.clone_engine.trim().eq_ignore_ascii_case("edge-tts")
+            {
+                "edge_tts".to_string()
             } else {
                 "qwen3".to_string()
             },

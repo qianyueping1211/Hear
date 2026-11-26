@@ -458,146 +458,150 @@ def sensevoice_available():
     return os.path.isfile(model) and os.path.isfile(tokens)
 
 
-# ── Kokoro-82M 极速神经语音（sherpa-onnx ONNX INT8，纯 CPU ~0.2s 出声，支持中英男女声） ──
-KOKORO_DIR = os.environ.get(
-    "HEAR_KOKORO_DIR",
-    os.path.join(os.path.dirname(SENSEVOICE_DIR), "kokoro-int8-multi-lang-v1_1"),
-)
-KOKORO_URLS = [
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
-    "https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
-]
-_kokoro = None
-_kokoro_lock = threading.Lock()
+# ── Edge-TTS 微软神经语音（0 本机 CPU 占用，~0.3-0.6s 出声，支持多语种拟真男女声） ──
+_edge_tts_lock = threading.Lock()
+_edge_tts_install_attempted = False
 
 
-def _kokoro_model_path():
-    for name in ("model.int8.onnx", "model.onnx"):
-        p = os.path.join(KOKORO_DIR, name)
-        if os.path.isfile(p):
-            return p
-    return ""
-
-
-def kokoro_ready():
-    return bool(
-        _kokoro_model_path()
-        and os.path.isfile(os.path.join(KOKORO_DIR, "voices.bin"))
-        and os.path.isfile(os.path.join(KOKORO_DIR, "tokens.txt"))
-    )
-
-
-def _ensure_kokoro_downloaded():
-    if kokoro_ready():
+def edge_tts_available():
+    try:
+        import edge_tts  # noqa: F401
         return True
-    import tarfile
-    models_root = os.path.dirname(KOKORO_DIR)
-    os.makedirs(models_root, exist_ok=True)
-    archive = os.path.join(models_root, "kokoro-int8-multi-lang-v1_1.tar.bz2")
-    last_err = None
-    for url in KOKORO_URLS:
-        try:
-            log("正在自动下载 Kokoro-82M 极速语音模型（约 114 MB）：%s" % url)
-            req = urllib.request.Request(url, headers={"User-Agent": "Hear-Server/1.0"})
-            with urllib.request.urlopen(req, timeout=180) as resp, open(archive, "wb") as out_f:
-                while True:
-                    chunk = resp.read(256 * 1024)
-                    if not chunk:
-                        break
-                    out_f.write(chunk)
-            log("Kokoro-82M 下载完成，正在解压…")
-            with tarfile.open(archive, "r:bz2") as tf:
-                tf.extractall(models_root)
-            try:
-                os.remove(archive)
-            except OSError:
-                pass
-            if kokoro_ready():
-                log("Kokoro-82M 模型已就绪：%s" % KOKORO_DIR)
-                return True
-        except Exception as e:
-            last_err = e
-            log("Kokoro-82M 下载尝试失败（%s）：%s" % (url, e))
-    if last_err:
-        raise RuntimeError("Kokoro-82M 模型自动下载失败：%s" % last_err)
-    return False
+    except Exception:
+        return False
 
 
-def get_kokoro():
-    global _kokoro
-    if _kokoro is not None:
-        return _kokoro
-    with _kokoro_lock:
-        if _kokoro is not None:
-            return _kokoro
+def _ensure_edge_tts():
+    global _edge_tts_install_attempted
+    try:
+        import edge_tts
+        return edge_tts
+    except ImportError:
+        pass
+    with _edge_tts_lock:
         try:
-            import sherpa_onnx
-        except Exception as e:
-            raise RuntimeError("服务端未安装 sherpa-onnx，无法运行 Kokoro-82M：%s" % e)
-        _ensure_kokoro_downloaded()
-        model_path = _kokoro_model_path()
-        voices_path = os.path.join(KOKORO_DIR, "voices.bin")
-        tokens_path = os.path.join(KOKORO_DIR, "tokens.txt")
-        data_dir = os.path.join(KOKORO_DIR, "espeak-ng-data")
-        dict_dir = os.path.join(KOKORO_DIR, "dict")
-        lexicons = [
-            os.path.join(KOKORO_DIR, fn)
-            for fn in ("lexicon-zh.txt", "lexicon-us-en.txt")
-            if os.path.isfile(os.path.join(KOKORO_DIR, fn))
-        ]
-        log("正在加载 Kokoro-82M 极速神经语音…")
-        kokoro_cfg = sherpa_onnx.OfflineTtsKokoroModelConfig(
-            model=model_path,
-            voices=voices_path,
-            tokens=tokens_path,
-            data_dir=data_dir if os.path.isdir(data_dir) else "",
-            dict_dir=dict_dir if os.path.isdir(dict_dir) else "",
-            lexicon=",".join(lexicons),
-        )
-        tts_cfg = sherpa_onnx.OfflineTtsConfig(
-            model=sherpa_onnx.OfflineTtsModelConfig(
-                kokoro=kokoro_cfg,
-                num_threads=max(2, min(4, os.cpu_count() or 2)),
-                provider="cpu",
+            import edge_tts
+            return edge_tts
+        except ImportError:
+            pass
+        if not _edge_tts_install_attempted:
+            _edge_tts_install_attempted = True
+            log("正在自动安装 edge-tts（微软神经语音组件，无需下载本地模型）…")
+            import subprocess
+            res = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", "edge-tts"],
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
-        )
-        _kokoro = sherpa_onnx.OfflineTts(tts_cfg)
-        log("Kokoro-82M 加载完成")
-        return _kokoro
+            if res.returncode != 0:
+                detail = (res.stderr or res.stdout or "").strip()[:200]
+                raise RuntimeError("自动安装 edge-tts 失败：%s（可手动运行 pip install edge-tts）" % detail)
+            log("edge-tts 安装完成")
+        import edge_tts
+        return edge_tts
 
 
-def kokoro_synthesize_wav(text, lang="", gender=""):
-    tts = get_kokoro()
+def preload_edge_tts():
+    """后台确保 edge-tts 已安装，避免首次调用时才安装。"""
+    try:
+        _ensure_edge_tts()
+    except Exception as e:
+        log("后台准备 edge-tts 未完成：%s" % e)
+
+
+def _pick_edge_tts_voice(text, lang="", gender=""):
     ll = (lang or "").strip().lower()
     gl = (gender or "").strip().lower()
-    is_zh = ll.startswith("zh") or "chinese" in ll
-    # kokoro-int8-multi-lang-v1_1 音色表：0-1 美式女声, 3-57 中文女声, 58-102 中文/双语男声
-    if gl == "male":
-        sid = 58
-    elif is_zh:
-        sid = 3
-    else:
-        sid = 0
-    audio = tts.generate(text, sid=sid, speed=1.0)
-    samples = audio.samples
-    sr = int(audio.sample_rate or 24000)
-    import struct
-    pcm = bytearray(len(samples) * 2)
-    for idx, s in enumerate(samples):
-        if s > 1.0:
-            s = 1.0
-        elif s < -1.0:
-            s = -1.0
-        val = int(s * 32767.0)
-        struct.pack_into("<h", pcm, idx * 2, val)
-    data_len = len(pcm)
-    header = struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF", 36 + data_len, b"WAVE",
-        b"fmt ", 16, 1, 1, sr, sr * 2, 2, 16,
-        b"data", data_len,
-    )
-    return bytes(header) + bytes(pcm), sr
+    is_male = gl == "male"
+    if ll.startswith("zh") or "chinese" in ll:
+        return "zh-CN-YunxiNeural" if is_male else "zh-CN-XiaoxiaoNeural"
+    if ll.startswith("en") or "english" in ll:
+        return "en-US-GuyNeural" if is_male else "en-US-JennyNeural"
+    if ll.startswith("ja") or "japanese" in ll:
+        return "ja-JP-KeitaNeural" if is_male else "ja-JP-NanamiNeural"
+    if ll.startswith("ko") or "korean" in ll:
+        return "ko-KR-InJoonNeural" if is_male else "ko-KR-SunHiNeural"
+    if ll.startswith("fr") or "french" in ll:
+        return "fr-FR-HenriNeural" if is_male else "fr-FR-DeniseNeural"
+    if ll.startswith("de") or "german" in ll:
+        return "de-DE-ConradNeural" if is_male else "de-DE-KatjaNeural"
+    if ll.startswith("es") or "spanish" in ll:
+        return "es-ES-AlvaroNeural" if is_male else "es-ES-ElviraNeural"
+    has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in (text or ""))
+    if has_cjk:
+        return "zh-CN-YunxiNeural" if is_male else "zh-CN-XiaoxiaoNeural"
+    return "en-US-GuyNeural" if is_male else "en-US-JennyNeural"
+
+
+def _mp3_bytes_to_wav(mp3_bytes, target_sr=24000):
+    """将 Edge-TTS 返回的 MP3 字节在内存中快速解码为 16-bit 单声道 PCM WAV。"""
+    if not mp3_bytes:
+        raise RuntimeError("Edge-TTS 未返回音频数据")
+    try:
+        import av
+        container = av.open(io.BytesIO(mp3_bytes), format="mp3")
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=target_sr)
+        chunks = []
+        for frame in container.decode(audio=0):
+            for out_frame in resampler.resample(frame):
+                chunks.append(bytes(out_frame.planes[0]))
+        for out_frame in resampler.resample(None):
+            chunks.append(bytes(out_frame.planes[0]))
+        container.close()
+        pcm = b"".join(chunks)
+        if not pcm:
+            raise RuntimeError("MP3 解码结果为空")
+        data_len = len(pcm)
+        header = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF", 36 + data_len, b"WAVE",
+            b"fmt ", 16, 1, 1, target_sr, target_sr * 2, 2, 16,
+            b"data", data_len,
+        )
+        return header + pcm, target_sr
+    except ImportError:
+        import subprocess
+        ffmpeg_bin = "ffmpeg"
+        try:
+            import imageio_ffmpeg
+            ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            pass
+        proc = subprocess.run(
+            [
+                ffmpeg_bin, "-hide_banner", "-loglevel", "error",
+                "-f", "mp3", "-i", "pipe:0",
+                "-ac", "1", "-ar", str(target_sr), "-f", "wav", "pipe:1",
+            ],
+            input=mp3_bytes,
+            capture_output=True,
+            timeout=15,
+        )
+        if proc.returncode != 0 or len(proc.stdout) <= 44:
+            raise RuntimeError("MP3 转 WAV 失败：%s" % (proc.stderr.decode("utf-8", "ignore")[:160]))
+        return proc.stdout, target_sr
+
+
+def edge_tts_synthesize_wav(text, lang="", gender=""):
+    edge_tts = _ensure_edge_tts()
+    clean_text = (text or "").strip()
+    if not clean_text:
+        raise ValueError("待合成文本为空")
+    voice = _pick_edge_tts_voice(clean_text, lang, gender)
+    import asyncio
+
+    async def _run():
+        comm = edge_tts.Communicate(clean_text, voice=voice)
+        buf = bytearray()
+        async for chunk in comm.stream():
+            if chunk.get("type") == "audio":
+                buf.extend(chunk.get("data") or b"")
+        return bytes(buf)
+
+    mp3_bytes = asyncio.run(_run())
+    wav_bytes, sr = _mp3_bytes_to_wav(mp3_bytes, target_sr=24000)
+    return wav_bytes, sr, voice
 
 
 def whisper_available():
@@ -1245,9 +1249,9 @@ a{color:#007aff;text-decoration:none}
             else:
                 out["asr_ready"] = whisper_ready
         out["mt_ready"] = (mt_state == "就绪")
-        out["clone_ready"] = (clone_state == "就绪" and clone_model_valid) or kokoro_ready()
-        out["kokoro_ready"] = kokoro_ready()
-        out["clone_engines"] = ["qwen3", "kokoro"]
+        out["clone_ready"] = (clone_state == "就绪" and clone_model_valid) or edge_tts_available()
+        out["edge_tts_ready"] = edge_tts_available()
+        out["clone_engines"] = ["qwen3", "edge_tts"]
         # 桌面端与多端共享能力元信息（向后兼容旧版 iOS）
         out["bind_host"] = HOST
         out["lan_shared"] = HOST not in ("127.0.0.1", "::1", "localhost")
@@ -1577,16 +1581,16 @@ a{color:#007aff;text-decoration:none}
         if not isinstance(text_in, str) or not isinstance(lang_in, str) or not isinstance(ref_text_in, str):
             self._error("text / lang / reference_text 必须是字符串", 400)
             return
-        if engine_in == "kokoro":
+        if engine_in in ("edge_tts", "edge-tts", "edge"):
             t0 = time.time()
             try:
-                wav, rate = kokoro_synthesize_wav(text_in, lang_in, gender_in)
+                wav, rate, voice = edge_tts_synthesize_wav(text_in, lang_in, gender_in)
             except Exception as e:
-                log("Kokoro-82M 合成失败：%s" % e)
-                self._error("Kokoro-82M 合成失败：%s" % e, 503)
+                log("Edge-TTS 合成失败：%s" % e)
+                self._error("Edge-TTS 合成失败：%s" % e, 503)
                 return
-            log("Kokoro-82M 合成结束 %.2fs：%d 字，%d 字节，%d Hz"
-                % (time.time() - t0, len(text_in), len(wav), rate))
+            log("Edge-TTS 合成结束 %.2fs（%s）：%d 字，%d 字节，%d Hz"
+                % (time.time() - t0, voice, len(text_in), len(wav), rate))
             if (self.headers.get("X-Hear-Audio") or "").strip().lower() == "wav":
                 self._send_wav(wav)
                 return
@@ -2081,6 +2085,7 @@ def main():
     # 这些都在后台做，不要挡住服务接收请求
     if not ASR_URL and ASR_SCHEME != "sensevoice":
         threading.Thread(target=preload_whisper, daemon=True).start()
+    threading.Thread(target=preload_edge_tts, daemon=True).start()
     threading.Thread(target=warm_backends, daemon=True).start()
     threading.Thread(target=self_check, daemon=True).start()
     def _handle_sigterm(signum, frame):

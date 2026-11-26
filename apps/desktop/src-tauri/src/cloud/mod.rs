@@ -494,7 +494,7 @@ impl HearCloudClient {
         ))
     }
 
-    /// 声音克隆 / 神经语音合成（engine="kokoro" 直接走 Kokoro-82M 极速合成；engine="qwen3" 先上传参考音频到 /v1/clone/reference 再调用 /v1/clone）
+    /// 声音克隆 / 神经语音合成（engine="edge_tts" 直接走微软 Edge-TTS 神经语音；engine="qwen3" 先上传参考音频到 /v1/clone/reference 再调用 /v1/clone）
     pub async fn clone_voice(
         &self,
         raw_address: &str,
@@ -507,8 +507,10 @@ impl HearCloudClient {
         gender: &str,
     ) -> Result<Vec<u8>, String> {
         let base_url = normalize_service_url(raw_address)?;
-        let engine_norm = if engine.trim().eq_ignore_ascii_case("kokoro") {
-            "kokoro"
+        let engine_norm = if engine.trim().eq_ignore_ascii_case("edge_tts")
+            || engine.trim().eq_ignore_ascii_case("edge-tts")
+        {
+            "edge_tts"
         } else {
             "qwen3"
         };
@@ -529,7 +531,7 @@ impl HearCloudClient {
 
         let mut ref_id: Option<String> = None;
         let mut ref_from_cache = false;
-        let effective_ref_wav = if engine_norm == "kokoro" {
+        let effective_ref_wav = if engine_norm == "edge_tts" {
             None
         } else {
             reference_wav

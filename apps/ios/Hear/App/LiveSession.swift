@@ -200,12 +200,12 @@ final class LiveSession: ObservableObject {
             }
         }
     }
-    /// 云端声音合成模型："qwen3"（Qwen3-TTS 原声克隆）| "kokoro"（Kokoro-82M 极速神经语音）
+    /// 云端声音合成模型："qwen3"（Qwen3-TTS 原声克隆）| "edge_tts"（微软 Edge-TTS 神经语音）
     @Published var cloudCloneModel: String {
         didSet {
             save("cloudCloneModel", cloudCloneModel)
             guard cloudCloneModel != oldValue else { return }
-            hearLog("云端声音模型改为：\(cloudCloneModel == "kokoro" ? "Kokoro-82M" : "Qwen3-TTS")")
+            hearLog("云端声音模型改为：\(cloudCloneModel == "edge_tts" ? "Edge-TTS" : "Qwen3-TTS")")
             clearCloneTasks()
         }
     }
@@ -572,7 +572,7 @@ final class LiveSession: ObservableObject {
             d.set(true, forKey: "voiceCloneCloud")
         }
         let savedCloudCloneModel = d.string(forKey: "cloudCloneModel") ?? "qwen3"
-        cloudCloneModel = (savedCloudCloneModel == "kokoro") ? "kokoro" : "qwen3"
+        cloudCloneModel = (savedCloudCloneModel == "edge_tts") ? "edge_tts" : "qwen3"
         // init 里属性还没初始化完，只能用局部变量，不能直接读 self.cloudAddress
         let cloudAddr = d.string(forKey: "cloudAddress") ?? ""
         cloudAddress = cloudAddr
@@ -4343,7 +4343,7 @@ final class LiveSession: ObservableObject {
         // 不降噪的话环境音就跟着念出来，听着是"有杂的声音"
         let refSamples = usingCloudClone ? CloudVoiceReference.denoise(ref.samples) : ref.samples
         if !usingCloudClone, (!ZipVoiceModel.supports(lang) || !ZipVoiceModel.supports(item.source.id)) { return nil }
-        let cloudModel = (cloudCloneModel == "kokoro") ? "kokoro" : "qwen3"
+        let cloudModel = (cloudCloneModel == "edge_tts") ? "edge_tts" : "qwen3"
         let genderHint: String = {
             if systemVoicePreference == "male" { return "male" }
             if systemVoicePreference == "female" { return "female" }

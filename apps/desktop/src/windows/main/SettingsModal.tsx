@@ -1448,28 +1448,28 @@ export function SettingsModal() {
                   <div>
                     <div className="text-slate-200">声音合成模型</div>
                     <div className="text-[11px] text-slate-400">
-                      Qwen3-TTS 还原原声但耗时较长；Kokoro-82M 为极速神经语音（纯 CPU 约 0.2 秒，首次自动下载 ~114 MB）。
+                      Qwen3-TTS 克隆原声但耗时较长；Edge-TTS 为微软拟真神经语音（0 本机 CPU 占用、约 0.3~0.6 秒出声、无需下载模型，需联网）。
                     </div>
                   </div>
                   <select
-                    value={ttsSettings.cloneEngine || "qwen3"}
+                    value={ttsSettings.cloneEngine === "edge_tts" ? "edge_tts" : "qwen3"}
                     onChange={(e) =>
                       updateTtsSettings({
-                        cloneEngine: e.target.value as "qwen3" | "kokoro",
+                        cloneEngine: e.target.value as "qwen3" | "edge_tts",
                       })
                     }
                     className="rounded-lg bg-surface-900 border border-white/10 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-500 shrink-0"
                   >
                     <option value="qwen3">Qwen3-TTS（原声克隆）</option>
-                    <option value="kokoro">Kokoro-82M（极速神经语音）</option>
+                    <option value="edge_tts">Edge-TTS（微软拟真神经语音）</option>
                   </select>
                 </label>
 
                 <label className="flex items-center justify-between gap-4">
                   <div>
-                    <div className="text-slate-200">朗读声音性别（Kokoro / 系统语音）</div>
+                    <div className="text-slate-200">朗读声音性别（Edge-TTS / 系统语音）</div>
                     <div className="text-[11px] text-slate-400">
-                      使用 Kokoro-82M 极速神经语音或 Windows 系统语音时，按所选性别匹配男女声。
+                      使用 Edge-TTS 神经语音或 Windows 系统语音时，按所选性别自动匹配男女声。
                     </div>
                   </div>
                   <select

@@ -202,7 +202,7 @@ pub struct TtsOutputSettings {
     /// 系统朗读声音偏好："auto"（自动识别说话人性别）| "female"（女声）| "male"（男声）
     #[serde(default = "default_system_voice_preference")]
     pub system_voice_preference: String,
-    /// 声音克隆 / 神经语音引擎："qwen3"（Qwen3-TTS 原声克隆）| "kokoro"（Kokoro-82M 极速神经语音）
+    /// 声音克隆 / 神经语音引擎："qwen3"（Qwen3-TTS 原声克隆）| "edge_tts"（微软 Edge-TTS 神经语音）
     #[serde(default = "default_clone_engine")]
     pub clone_engine: String,
 }

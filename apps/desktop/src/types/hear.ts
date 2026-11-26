@@ -102,7 +102,7 @@ export interface TtsOutputSettings {
   duckOriginalAudio: boolean;
   duckRatio: number;
   systemVoicePreference?: "auto" | "female" | "male";
-  cloneEngine?: "qwen3" | "kokoro";
+  cloneEngine?: "qwen3" | "edge_tts";
 }
 
 export interface RecordingPlaybackState {
