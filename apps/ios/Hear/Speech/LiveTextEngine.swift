@@ -129,7 +129,7 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         }
         let transcriber = SpeechTranscriber(locale: loc,
                                             transcriptionOptions: [],
-                                            reportingOptions: [.volatileResults],
+                                            reportingOptions: [.volatileResults, .fastResults],
                                             attributeOptions: [.transcriptionConfidence])
         // 第一次用这种语言：下载系统语言包（之后系统会一直保留）
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {

@@ -290,6 +290,15 @@ struct TopBar: View {
     @EnvironmentObject var session: LiveSession
     var onMore: () -> Void
 
+    private var shortModeName: String {
+        switch session.currentTranslationMode {
+        case .listening: return "聆听"
+        case .singleAuto: return "单侧"
+        case .sideBySide: return "并排"
+        case .faceToFace: return "面对面"
+        }
+    }
+
     var body: some View {
         HStack {
             Button { session.clearPage() } label: {
@@ -309,9 +318,17 @@ struct TopBar: View {
                 .accessibilityLabel("更多")
         }
         .overlay {
-            Text("Hear 听见")
-                .font(.headline)
-                .allowsHitTesting(false)
+            HStack(spacing: 4) {
+                Text("Hear 听见")
+                    .font(.headline)
+                Text("·")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                Text(shortModeName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .allowsHitTesting(false)
         }
         .padding(.horizontal)
         .padding(.top, 6)
