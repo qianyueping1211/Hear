@@ -1334,26 +1334,71 @@ a{color:#007aff;text-decoration:none}
                 self._error("音频格式不对：%s（要 16 位 wav）" % e, 400)
                 return
             language = langs[0] if len(langs) == 1 else None
-            # SenseVoice 仅支持中/英/日/韩/粤；请求包含阿拉伯语等其他语种时，自动跳过 SenseVoice 直走 Whisper（beam_size=5）
+            # SenseVoice 仅支持中/英/日/韩/粤：
+            # - 纯小语种（如锁定阿语或阿⇄法）：跳过 SenseVoice，直走 Whisper（beam_size=5）
+            # - 混合语种（如中⇄阿）：先跑 50ms SenseVoice；若确实是中文（语种命中请求里的 SV 语种），
+            #   保留 SenseVoice 快速初稿/预览；若判成不在请求里的语种（如阿语被误听成 en/ko/ja）或空，
+            #   则压掉乱码预览，终稿直接走 Whisper（beam_size=5）且不回退 SenseVoice 乱码。
             _sv_langs = {"zh", "en", "ja", "ko", "yue"}
-            has_non_sv_lang = any(
-                (x.split("-")[0].strip().lower() not in _sv_langs) for x in langs
-            )
+            norm_langs = [x.split("-")[0].strip().lower() for x in langs if x.strip()]
+            requested_sv_langs = {x for x in norm_langs if x in _sv_langs}
+            has_non_sv_lang = any(x not in _sv_langs for x in norm_langs)
             # 预览只要快：组合方案下只用 SenseVoice，不跑 Whisper 修正
             preview = (self.headers.get("X-ASR-Preview") or "").strip() == "1"
             stage = self.headers.get("X-ASR-Stage", "")
             hotwords = parse_asr_hotwords(self.headers.get("X-ASR-Hotwords", ""))
+
+            def _whisper_accurate():
+                try:
+                    return whisper_transcribe(
+                        samples, rate, language, fallback, beam_size=5, hotwords=hotwords
+                    )
+                except TypeError:
+                    return whisper_transcribe(samples, rate, language, fallback)
+
+            def _sv_matches_requested(sv_lang, sv_text):
+                if not sv_text or sv_lang not in requested_sv_langs:
+                    return False
+                if sv_lang == "zh":
+                    return any("\u4e00" <= ch <= "\u9fff" for ch in sv_text)
+                if sv_lang == "ja":
+                    return any(("\u3040" <= ch <= "\u30ff") or ("\u4e00" <= ch <= "\u9fff") for ch in sv_text)
+                if sv_lang == "ko":
+                    return any("\uac00" <= ch <= "\ud7af" for ch in sv_text)
+                return True
+
             if has_non_sv_lang and scheme == "sensevoice+whisper" and whisper_available():
-                if preview:
-                    text, lang = "", fallback
+                if stage == "correct":
+                    text, lang = deferred_whisper(samples, rate, language, fallback, hotwords=hotwords)
+                elif not requested_sv_langs:
+                    if preview:
+                        text, lang = "", fallback
+                    else:
+                        text, lang = _whisper_accurate()
+                        can_correct = False
                 else:
-                    try:
-                        text, lang = whisper_transcribe(
-                            samples, rate, language, fallback, beam_size=5, hotwords=hotwords
-                        )
-                    except TypeError:
-                        text, lang = whisper_transcribe(samples, rate, language, fallback)
-                    can_correct = False
+                    sv_lang, sv_text = sensevoice_transcribe(samples, rate)
+                    if _sv_matches_requested(sv_lang, sv_text):
+                        if preview:
+                            text, lang = sv_text, sv_lang or fallback
+                        elif stage == "first":
+                            text, lang = sv_text, sv_lang or fallback
+                            can_correct = True
+                        else:
+                            try:
+                                slow_text, slow_lang = run_with_timeout(_whisper_accurate, CORRECT_TIMEOUT)
+                            except Exception:
+                                slow_text, slow_lang = "", ""
+                            if slow_text:
+                                text, lang = slow_text, slow_lang or sv_lang or fallback
+                            else:
+                                text, lang = sv_text, sv_lang or fallback
+                    else:
+                        if preview:
+                            text, lang = "", fallback
+                        else:
+                            text, lang = _whisper_accurate()
+                            can_correct = False
             elif not preview and scheme == "sensevoice+whisper" and stage == "correct":
                 text, lang = deferred_whisper(samples, rate, language, fallback, hotwords=hotwords)
             elif not preview and scheme == "sensevoice+whisper" and stage == "first":
