@@ -1677,6 +1677,7 @@ private struct FloatingModeSwitcherBar: View {
     @Namespace private var pillNS
     @State private var draggingMode: AppTranslationMode?
     @State private var isPressing = false
+    @State private var showPreview = false
 
     private struct ModeItem: Identifiable {
         let mode: AppTranslationMode
@@ -1783,9 +1784,9 @@ private struct FloatingModeSwitcherBar: View {
                     )
             )
             .shadow(color: .black.opacity(colorScheme == .dark ? 0.42 : 0.14), radius: 16, y: 6)
-            // 按住或滑动浏览模式时，在当前对应按钮正上方浮动出该模式的线框效果图
+            // 按住、滑动或点击选中模式后，在对应按钮正上方持续浮动展示该模式的线框效果图（随底部栏 2 秒后一同自动退出）
             .overlay(alignment: .bottom) {
-                if isPressing {
+                if showPreview {
                     let preview = highlightedItem
                     VStack(spacing: 8) {
                         ModePreviewDiagram(mode: preview.mode)
@@ -1820,7 +1821,7 @@ private struct FloatingModeSwitcherBar: View {
                     .transition(.scale(scale: 0.86, anchor: .bottom).combined(with: .opacity))
                 }
             }
-            .animation(.spring(response: 0.28, dampingFraction: 0.80), value: isPressing)
+            .animation(.spring(response: 0.28, dampingFraction: 0.80), value: showPreview)
             .animation(.spring(response: 0.26, dampingFraction: 0.80), value: highlightedMode)
             .contentShape(Capsule())
             .gesture(
@@ -1830,6 +1831,7 @@ private struct FloatingModeSwitcherBar: View {
                         if !isPressing {
                             withAnimation(.spring(response: 0.26, dampingFraction: 0.78)) {
                                 isPressing = true
+                                showPreview = true
                             }
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         } else if draggingMode != target {
@@ -1849,6 +1851,7 @@ private struct FloatingModeSwitcherBar: View {
                             session.switchTranslationMode(to: target)
                             draggingMode = nil
                             isPressing = false
+                            showPreview = true
                         }
                         if changed {
                             UISelectionFeedbackGenerator().selectionChanged()
@@ -1861,6 +1864,7 @@ private struct FloatingModeSwitcherBar: View {
         .onDisappear {
             draggingMode = nil
             isPressing = false
+            showPreview = false
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("快捷模式切换栏")
