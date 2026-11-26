@@ -179,6 +179,14 @@ struct ContentView: View {
                             .zIndex(1)
                         ControlBar()
                     }
+                    .overlay {
+                        if showQuickModeBar {
+                            Color.black.opacity(0.001)
+                                .ignoresSafeArea()
+                                .onTapGesture { dismissQuickModeBar() }
+                                .zIndex(4)
+                        }
+                    }
                     .overlay(alignment: .bottom) {
                         if showQuickModeBar {
                             FloatingModeSwitcherBar(
