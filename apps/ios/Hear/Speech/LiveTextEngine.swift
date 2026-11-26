@@ -94,6 +94,8 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
     private var format: AVAudioFormat?
     private var converter: AVAudioConverter?
     private var inputEndFrame: Int64?
+    private var baseFrame: Int64?
+    private var deliveredBlocks = 0
     private var analyzerEnd: CMTime?
     private var finals: [Piece] = []
     private var volatilePiece: Piece?
@@ -151,6 +153,8 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
             format = fmt
             converter = nil
             inputEndFrame = nil
+            baseFrame = nil
+            deliveredBlocks = 0
             analyzerEnd = nil
             finals.removeAll()
             volatilePiece = nil
@@ -208,6 +212,8 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         analyzer = nil; input = nil; resultsTask = nil; _languageID = nil
         generation += 1
         inputEndFrame = nil
+        baseFrame = nil
+        deliveredBlocks = 0
         analyzerEnd = nil
         if a != nil {
             pendingFeed.removeAll()
@@ -266,8 +272,9 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         if text.isEmpty, let segEnd = seg.end {
             let lf = finals.last.map { String(format: "%.2f..%.2f(%d字)", $0.start, $0.end, $0.text.count) } ?? "nil"
             let vp = volatilePiece.map { String(format: "%.2f..%.2f(%d字)", $0.start, $0.end, $0.text.count) } ?? "nil"
-            hearLog(String(format: "系统听写空结果(%@)：seg=%.2f..%.2f finals=%d lastFinal=%@ volatile=%@ gaps=%d",
-                           _languageID ?? "?", seg.start, segEnd, finals.count, lf, vp, gaps.count), .warning)
+            hearLog(String(format: "系统听写空结果(%@)：seg=%.2f..%.2f base=%.2f delivered=%d finals=%d lastFinal=%@ volatile=%@ gaps=%d",
+                           _languageID ?? "?", seg.start, segEnd, baseFrame.map { Double($0) / 16_000 } ?? -1,
+                           deliveredBlocks, finals.count, lf, vp, gaps.count), .warning)
         }
         var sum = 0.0, weight = 0.0
         for p in pieces {
@@ -349,7 +356,9 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         }
         let conv = converter
         let generation = self.generation
-        let start = CMTime(value: block.startFrame, timescale: 16_000)
+        if baseFrame == nil { baseFrame = block.startFrame }
+        let relFrame = max(0, block.startFrame - (baseFrame ?? block.startFrame))
+        let start = CMTime(value: relFrame, timescale: 16_000)
         let timestamp = analyzerEnd.map { CMTimeMaximum($0, start) } ?? start
         lock.unlock()
 
@@ -368,7 +377,10 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
                                   timescale: Int32(buffer.format.sampleRate))
             if case .enqueued = cont.yield(AnalyzerInput(buffer: buffer, bufferStartTime: timestamp)) {
                 lock.lock()
-                if generation == self.generation { analyzerEnd = CMTimeAdd(timestamp, duration) }
+                if generation == self.generation {
+                    analyzerEnd = CMTimeAdd(timestamp, duration)
+                    deliveredBlocks += 1
+                }
                 lock.unlock()
                 delivered = true
             }
@@ -401,12 +413,16 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
     private func ingest(_ piece: Piece, isFinal: Bool, gen: Int) {
         lock.lock()
         guard gen == generation else { lock.unlock(); return }
+        let offset = baseFrame.map { Double($0) / 16_000 } ?? 0
+        var shifted = piece
+        shifted.start += offset
+        shifted.end += offset
         if isFinal {
-            finals.append(piece)
+            finals.append(shifted)
             if finals.count > 120 { finals.removeFirst(finals.count - 120) }
             volatilePiece = nil
         } else {
-            volatilePiece = piece.text.isEmpty ? nil : piece
+            volatilePiece = shifted.text.isEmpty ? nil : shifted
         }
         let cb = onUpdate
         lock.unlock()
