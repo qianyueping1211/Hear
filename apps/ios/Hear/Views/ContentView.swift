@@ -182,7 +182,13 @@ struct ContentView: View {
                     .overlay(alignment: .bottom) {
                         if showQuickModeBar {
                             FloatingModeSwitcherBar(
-                                onSelect: { scheduleQuickModeDismiss(after: 2.0) },
+                                onSelect: { enteredFaceToFace in
+                                    if enteredFaceToFace {
+                                        dismissQuickModeBar()
+                                    } else {
+                                        scheduleQuickModeDismiss(after: 2.0)
+                                    }
+                                },
                                 onInteract: { scheduleQuickModeDismiss(after: 3.0) }
                             )
                             .padding(.horizontal, 16)
@@ -197,15 +203,24 @@ struct ContentView: View {
                             dismissQuickModeBar()
                         }
                     }
+                    .onChange(of: session.conversationInputLanguage) { _, lang in
+                        if lang != nil && showQuickModeBar {
+                            dismissQuickModeBar()
+                        }
+                    }
+                    .onDisappear {
+                        dismissQuickModeBar()
+                    }
                 }
             }
             // 弹出键盘时底部的实时翻译区域固定不动
             .ignoresSafeArea(.keyboard, edges: .bottom)
             .toolbar(.hidden, for: .navigationBar)
-            // 右上角 ⋯ 菜单：自己画的面板，不跟着页面实时刷新，所以不会闪
-            .overlay(alignment: .topTrailing) {
+            // ⋯ 菜单：面对面模式从左下角 ⋯ 上方弹出，其他模式从右上角弹出
+            .overlay(alignment: isPhoneFaceToFace ? .bottomLeading : .topTrailing) {
                 if showMenu {
-                    ZStack(alignment: .topTrailing) {
+                    let faceToFace = isPhoneFaceToFace
+                    ZStack(alignment: faceToFace ? .bottomLeading : .topTrailing) {
                         Color.black.opacity(0.001)
                             .ignoresSafeArea()
                             .onTapGesture { showMenu = false }
@@ -217,14 +232,23 @@ struct ContentView: View {
                             onGlossary: { showMenu = false; showGlossary = true },
                             onSettings: { showMenu = false; showSettings = true }
                         )
-                        .padding(.top, 54)
-                        .padding(.trailing, 16)
-                        .transition(.scale(scale: 0.6, anchor: .topTrailing).combined(with: .opacity))
+                        .padding(.top, faceToFace ? 0 : 54)
+                        .padding(.trailing, faceToFace ? 0 : 16)
+                        .padding(.bottom, faceToFace ? 66 : 0)
+                        .padding(.leading, faceToFace ? 16 : 0)
+                        .transition(
+                            .scale(scale: 0.6, anchor: faceToFace ? .bottomLeading : .topTrailing)
+                                .combined(with: .opacity)
+                        )
                     }
                 }
             }
             .animation(.spring(duration: 0.28), value: showMenu)
         }
+    }
+
+    private var isPhoneFaceToFace: Bool {
+        session.talkMode && session.conversationStyle == .faceToFace && (session.phase == .ready || session.isLoadingPhase)
     }
 
     private var currentModeTitle: String {
@@ -632,15 +656,25 @@ struct EmptyHint: View {
                     .foregroundStyle(.secondary)
             } else {
                 VStack(spacing: 8) {
-                    Text(session.talkMode ? "点击语言圆圈开始" : "点击麦克风开始")
+                    Text(session.usesDualConversationButtons ? "点击语言圆圈开始" : "点击麦克风开始")
                         .font(.title3.weight(.semibold))
-                    Text(session.talkMode ? "再点同一个圆圈停止" : "自动识别上方选定的两种语言")
+                    Text(emptySubtitle)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
             }
         }
         .multilineTextAlignment(.center)
+    }
+
+    private var emptySubtitle: String {
+        if !session.talkMode {
+            return "自动识别多国语种，统一译为\(session.meetingTargetLang.name)"
+        }
+        if session.usesDualConversationButtons {
+            return "再点同一个圆圈停止"
+        }
+        return "自动识别双方语言并互译"
     }
 }
 
@@ -1022,7 +1056,9 @@ struct ControlBar: View {
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
-        .accessibilityLabel(session.isRunning ? "停止实时翻译" : "开始实时翻译")
+        .accessibilityLabel(session.isRunning
+            ? (session.talkMode ? "停止对话翻译" : "停止实时翻译")
+            : (session.talkMode ? "开始对话翻译" : "开始实时翻译"))
         .opacity(enabled || session.isLoadingPhase ? 1 : 0.4)
     }
 
@@ -1388,7 +1424,7 @@ struct PhoneFaceToFaceView: View {
             // 下半屏：正向面向自己（langA），底部左右带 ⋯ 菜单与 × 退出面对面
             ZStack(alignment: .bottom) {
                 halfPane(lang: $session.langA, targetLang: session.langB, isOpponent: false)
-                HStack {
+                HStack(spacing: 12) {
                     Button(action: onOpenMenu) {
                         Image(systemName: "ellipsis")
                             .font(.system(size: 18, weight: .medium))
@@ -1398,6 +1434,19 @@ struct PhoneFaceToFaceView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("展示方式与更多")
+
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        session.speakOutput.toggle()
+                    } label: {
+                        Image(systemName: session.speakOutput ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(session.speakOutput ? Color.accentColor : Color.secondary)
+                            .frame(width: 44, height: 44)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(session.speakOutput ? "关闭自动播报" : "开启自动播报")
 
                     Spacer()
 
@@ -1466,7 +1515,7 @@ struct PhoneFaceToFaceView: View {
                             if isOpponent { Spacer(minLength: 0) }
                         }
 
-                        ForEach(session.items.suffix(8)) { item in
+                        ForEach(session.items.suffix(20)) { item in
                             let isMine = item.source.id == myLang.id
                             let primaryText = isMine
                                 ? item.displayedSource(using: displayLang)
@@ -1824,7 +1873,7 @@ private struct QuickPillPressStyle: ButtonStyle {
 private struct FloatingModeSwitcherBar: View {
     @EnvironmentObject var session: LiveSession
     @Environment(\.colorScheme) private var colorScheme
-    var onSelect: () -> Void
+    var onSelect: (_ enteredFaceToFace: Bool) -> Void
     var onInteract: () -> Void
 
     @Namespace private var pillNS
@@ -1970,11 +2019,15 @@ private struct FloatingModeSwitcherBar: View {
                         if changed {
                             UISelectionFeedbackGenerator().selectionChanged()
                         }
-                        onSelect()
+                        onSelect(target == .faceToFace)
                     }
             )
         }
         .frame(height: 62)
+        .onDisappear {
+            draggingMode = nil
+            isPressing = false
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("快捷模式切换栏")
     }

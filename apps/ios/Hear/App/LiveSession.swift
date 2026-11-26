@@ -2129,10 +2129,10 @@ final class LiveSession: ObservableObject {
         var text = partial.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.hasPrefix("…") { text = String(text.dropFirst()).trimmingCharacters(in: .whitespaces) }
         guard !text.isEmpty, text != "…", SpeechTextFilter.isMeaningful(text) else { return }
-        let src = partialSource ?? (lastLangID == langB.id ? langB : langA)
-        let tgt = src == langA ? langB : langA
+        let src = partialSource ?? (!talkMode ? meetingTargetLang : (lastLangID == langB.id ? langB : langA))
+        let tgt = !talkMode ? meetingTargetLang : (src == langA ? langB : langA)
         var item = TranslationItem(source: src, target: tgt, sourceText: text,
-                                   sourceSide: src == langA ? .left : .right)
+                                   sourceSide: (!talkMode || src == langA) ? .left : .right)
         if let range = fullRecorder.timeRangeToCurrent(startFrame: currentSegStartFrame) {
             item.audioStartSec = range.start
             item.audioEndSec = range.end
@@ -2160,6 +2160,10 @@ final class LiveSession: ObservableObject {
             guard Self.hasRealText(item.sourceText) else {
                 items[index].sourceText = "（这段识别未完成）"
                 items[index].applyTranslation("（翻译失败：没有可用原文）", done: true)
+                continue
+            }
+            if item.source.id == item.target.id {
+                items[index].applyTranslation("", done: true)
                 continue
             }
             items[index].beginTranslationRevision()
@@ -2466,9 +2470,10 @@ final class LiveSession: ObservableObject {
             // 先把这句（实时预览的文字）放进对话，整句识别完再替换，屏幕上不会空一下
             let mine = partialSeg == id
             let forced = forcedLang
+            let meetingMode = !talkMode
             let src = forced ?? (mine ? partialSource : nil)
-                ?? ((lastLangID == langB.id) ? langB : langA)
-            let tgt = src == langA ? langB : langA
+                ?? (meetingMode ? meetingTargetLang : ((lastLangID == langB.id) ? langB : langA))
+            let tgt = meetingMode ? meetingTargetLang : (src == langA ? langB : langA)
             // 已经停下来了：这一句不会再走整句识别，
             // 但这段声音要留下来（声音克隆的样本），译文等下接着补。
             // 收尾中的最后一句仍需完成识别。
@@ -2499,7 +2504,7 @@ final class LiveSession: ObservableObject {
             }
             var item = TranslationItem(source: src, target: tgt,
                                        sourceText: mine && !partial.isEmpty ? partial : "…",
-                                       sourceSide: src == langA ? .left : .right)
+                                       sourceSide: (meetingMode || src == langA) ? .left : .right)
             if let audioRange {
                 item.audioStartSec = audioRange.start
                 item.audioEndSec = audioRange.end
@@ -2850,6 +2855,24 @@ final class LiveSession: ObservableObject {
 
     // MARK: - 苹果自带模式（系统听写 + 系统翻译）
 
+    /// 解析苹果系统听写当前应并行监听的候选语种列表（保证 startAppleASR / bestApple / appleUpdated / processApple 完全一致）
+    private func appleASRLanguages(left: Language, right: Language, forced: Language?) -> [Language] {
+        if let forced { return [forced] }
+        if !talkMode {
+            let target = meetingTargetLang
+            let other: Language
+            if right.id != target.id {
+                other = right
+            } else if left.id != target.id {
+                other = left
+            } else {
+                other = Language.find(target.id == "en" ? "zh" : "en")
+            }
+            return [target, other]
+        }
+        return [left, right]
+    }
+
     /// 两种语言各开一个系统听写，同时听；每句话取更有把握的那个
     private func startAppleASR() {
         stopAppleASR()
@@ -2862,16 +2885,7 @@ final class LiveSession: ObservableObject {
         var engines: [LiveTextEngine] = []
         let gen = runGen
         // 对话翻译只听用户当前选择的语言；实时翻译（会议）模式优先听目标语种与常用外语
-        let langs: [Language]
-        if let forced = forcedLang {
-            langs = [forced]
-        } else if !talkMode {
-            let target = meetingTargetLang
-            let other = (langB.id != target.id) ? langB : Language.find(target.id == "en" ? "zh" : "en")
-            langs = [target, other]
-        } else {
-            langs = [langA, langB]
-        }
+        let langs = appleASRLanguages(left: langA, right: langB, forced: forcedLang)
         for lang in langs {
             guard let e = LiveTextEngineFactory.make() else { continue }
             e.onAudioLoss = { [weak capture] in capture?.noteSpeechInputLoss() }
@@ -2933,7 +2947,7 @@ final class LiveSession: ObservableObject {
     private func bestApple(_ id: Int, requireFinal: Bool = false,
                            languages: [Language]? = nil,
                            preferredLangID: String? = nil) -> (text: String, lang: Language, range: (start: Double, end: Double)?)? {
-        let candidates = languages ?? [langA, langB]
+        let candidates = languages ?? appleASRLanguages(left: langA, right: langB, forced: forcedLang)
         var best: (text: String, lang: Language, conf: Double, range: (start: Double, end: Double)?)?
         for e in appleEngines {
             let isFinal = e.hasFinalText(id)
@@ -3020,7 +3034,14 @@ final class LiveSession: ObservableObject {
         }
         partialSource = b.lang
         partial = displayText
-        requestPreviewTranslation(id: currentSeg, text: displayText, src: b.lang, tgt: b.lang == langA ? langB : langA)
+        let targetLang = !talkMode ? meetingTargetLang : (b.lang == langA ? langB : langA)
+        if b.lang.id == targetLang.id {
+            cancelMTPreview()
+            partialTranslation = ""
+            partialTranslationTarget = nil
+        } else {
+            requestPreviewTranslation(id: currentSeg, text: displayText, src: b.lang, tgt: targetLang)
+        }
     }
 
     /// 等系统听写把这一段定稿（最多等这么久）。
@@ -3057,7 +3078,7 @@ final class LiveSession: ObservableObject {
 
     private func processApple(_ job: ASRJob) async {
         let (samples, itemID, segID, gen, token) = (job.samples, job.itemID, job.segID, job.generation, job.token)
-        let languages = [job.left, job.right]
+        let languages = appleASRLanguages(left: job.left, right: job.right, forced: job.forced)
         activity = "识别中…"
         let started = PerformanceLog.isEnabled ? ContinuousClock.now : nil
         // 并发跑两个任务（零额外延迟）：
@@ -3967,6 +3988,11 @@ final class LiveSession: ObservableObject {
         jobTokens[id] = nil
         translations.finished(id)
         items[i].done = true
+        if src.id == tgt.id {
+            items[i].applyTranslation("", done: true)
+            persist()
+            return
+        }
         items[i].beginTranslationRevision()
         // 版本号 +1：前一次翻译回来的时候版本对不上，就不要了
         itemVersions[id] = (itemVersions[id] ?? 0) + 1
