@@ -526,15 +526,30 @@ def _pick_edge_tts_voice(text, lang="", gender=""):
         return "ja-JP-KeitaNeural" if is_male else "ja-JP-NanamiNeural"
     if ll.startswith("ko") or "korean" in ll:
         return "ko-KR-InJoonNeural" if is_male else "ko-KR-SunHiNeural"
+    if ll.startswith("ar") or "arabic" in ll:
+        return "ar-AE-HamdanNeural" if is_male else "ar-AE-FatimaNeural"
     if ll.startswith("fr") or "french" in ll:
         return "fr-FR-HenriNeural" if is_male else "fr-FR-DeniseNeural"
     if ll.startswith("de") or "german" in ll:
         return "de-DE-ConradNeural" if is_male else "de-DE-KatjaNeural"
     if ll.startswith("es") or "spanish" in ll:
         return "es-ES-AlvaroNeural" if is_male else "es-ES-ElviraNeural"
+    if ll.startswith("ru") or "russian" in ll:
+        return "ru-RU-DmitryNeural" if is_male else "ru-RU-SvetlanaNeural"
+    if ll.startswith("pt") or "portuguese" in ll:
+        return "pt-BR-AntonioNeural" if is_male else "pt-BR-FranciscaNeural"
+    if ll.startswith("it") or "italian" in ll:
+        return "it-IT-DiegoNeural" if is_male else "it-IT-ElsaNeural"
+    if ll.startswith("th") or "thai" in ll:
+        return "th-TH-NiwatNeural" if is_male else "th-TH-PremwadeeNeural"
+    if ll.startswith("vi") or "vietnamese" in ll:
+        return "vi-VN-NamMinhNeural" if is_male else "vi-VN-HoaiMyNeural"
     has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in (text or ""))
     if has_cjk:
         return "zh-CN-YunxiNeural" if is_male else "zh-CN-XiaoxiaoNeural"
+    has_ar = any("\u0600" <= ch <= "\u06ff" for ch in (text or ""))
+    if has_ar:
+        return "ar-AE-HamdanNeural" if is_male else "ar-AE-FatimaNeural"
     return "en-US-GuyNeural" if is_male else "en-US-JennyNeural"
 
 
@@ -1224,6 +1239,17 @@ a{color:#007aff;text-decoration:none}
             out["sensevoice"] = cap["sensevoice"]
             out["asr_whisper"] = cap["whisper"]
             out["asr_schemes"] = cap["schemes"]
+            # 与 iOS Language.all 一致：Whisper 支持全部 13 种语言，纯 SenseVoice 仅支持中/英/日/韩
+            if ASR_SCHEME == "sensevoice" or not whisper_available():
+                out["asr_supported_languages"] = ["zh", "en", "ja", "ko"]
+            else:
+                out["asr_supported_languages"] = [
+                    "zh", "en", "ja", "ko", "ar", "fr", "de", "es", "ru", "pt", "it", "th", "vi"
+                ]
+        else:
+            out["asr_supported_languages"] = [
+                "zh", "en", "ja", "ko", "ar", "fr", "de", "es", "ru", "pt", "it", "th", "vi"
+            ]
         if mt_state != "连不上":
             mt_model = backend_model(MT_URL)
             if mt_model:

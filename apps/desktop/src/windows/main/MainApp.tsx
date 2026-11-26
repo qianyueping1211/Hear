@@ -46,15 +46,22 @@ import { SUMMARY_TEMPLATES, useHearStore } from "../../stores/useHearStore";
 import { SettingsModal } from "./SettingsModal";
 import { WaveformPlayer } from "./WaveformPlayer";
 
-const LANGUAGES = [
-  { id: "zh", label: "中文" },
-  { id: "en", label: "English" },
-  { id: "ja", label: "日本語" },
-  { id: "ko", label: "한국어" },
-  { id: "fr", label: "Français" },
-  { id: "de", label: "Deutsch" },
-  { id: "es", label: "Español" },
+const ALL_LANGUAGES = [
+  { id: "zh", label: "中文（中国）" },
+  { id: "en", label: "English（美国）" },
+  { id: "ja", label: "日本語（日本）" },
+  { id: "ko", label: "한국어（韩国）" },
+  { id: "ar", label: "العربية（阿联酋）" },
+  { id: "fr", label: "Français（法国）" },
+  { id: "de", label: "Deutsch（德国）" },
+  { id: "es", label: "Español（西班牙）" },
+  { id: "ru", label: "Русский（俄罗斯）" },
+  { id: "pt", label: "Português（巴西）" },
+  { id: "it", label: "Italiano（意大利）" },
+  { id: "th", label: "ไทย（泰国）" },
+  { id: "vi", label: "Tiếng Việt（越南）" },
 ];
+const SENSEVOICE_ONLY_LANG_IDS = new Set(["zh", "en", "ja", "ko"]);
 
 /**
  * 与 iOS TranslationRevision.changes 保持完全一致的分词与 LCS 差异对比算法：
@@ -315,6 +322,39 @@ export function MainApp() {
     return { dotClass, statusText, tooltip, usesLocal, usesCloud, checking };
   }, [serviceConfig, localStatus, cloudStatus, testingLocal, testingCloud]);
 
+  // 对标 iOS supportedLanguages：结合当前语音识别模型实际能力动态过滤可选语种
+  const availableLanguages = useMemo(() => {
+    const asrStatus =
+      serviceConfig.asrSource === "local" ? localStatus : cloudStatus;
+    const reported = asrStatus.asrSupportedLanguages;
+    if (reported && reported.length >= 2) {
+      const allowed = new Set(reported.map((x) => x.toLowerCase()));
+      const filtered = ALL_LANGUAGES.filter((l) => allowed.has(l.id));
+      if (filtered.length >= 2) return filtered;
+    }
+    const detail = (asrStatus.asrDetail || "").toLowerCase();
+    if (detail.includes("sensevoice") && !detail.includes("whisper")) {
+      return ALL_LANGUAGES.filter((l) => SENSEVOICE_ONLY_LANG_IDS.has(l.id));
+    }
+    return ALL_LANGUAGES;
+  }, [serviceConfig.asrSource, localStatus, cloudStatus]);
+
+  // 切换识别引擎后，若原语种不再受支持，自动切回受支持的语种（对标 iOS enforceLanguages）
+  useEffect(() => {
+    const allowedIds = new Set(availableLanguages.map((l) => l.id));
+    if (allowedIds.has(sourceLang) && allowedIds.has(targetLang)) return;
+    const nextSource = allowedIds.has(sourceLang)
+      ? sourceLang
+      : availableLanguages.find((l) => l.id !== targetLang)?.id ?? availableLanguages[0].id;
+    const nextTarget =
+      allowedIds.has(targetLang) && targetLang !== nextSource
+        ? targetLang
+        : availableLanguages.find((l) => l.id !== nextSource)?.id ?? availableLanguages[0].id;
+    if (nextSource !== sourceLang || nextTarget !== targetLang) {
+      void setLanguagePair(nextSource, nextTarget, lockSourceLang);
+    }
+  }, [availableLanguages, sourceLang, targetLang, lockSourceLang, setLanguagePair]);
+
   const handleQuickRefresh = async (e: React.MouseEvent) => {
     e.stopPropagation();
     const tasks: Promise<unknown>[] = [];
@@ -543,7 +583,7 @@ export function MainApp() {
           onChange={(e) => void setLanguagePair(e.target.value, targetLang, lockSourceLang)}
           className="bg-transparent text-slate-100 focus:outline-none cursor-pointer"
         >
-          {LANGUAGES.map((l) => (
+          {availableLanguages.map((l) => (
             <option key={l.id} value={l.id} className="bg-surface-900">
               {l.label}
             </option>
@@ -555,7 +595,7 @@ export function MainApp() {
           onChange={(e) => void setLanguagePair(sourceLang, e.target.value, lockSourceLang)}
           className="bg-transparent text-slate-100 focus:outline-none cursor-pointer"
         >
-          {LANGUAGES.map((l) => (
+          {availableLanguages.map((l) => (
             <option key={l.id} value={l.id} className="bg-surface-900">
               {l.label}
             </option>

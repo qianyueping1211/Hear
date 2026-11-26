@@ -13,16 +13,22 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc as tokio_mpsc;
 
-/// 语言名称映射（与 iOS PromptBuilder 保持完全一致，适配 Hy-MT2 官方提示词）
+/// 语言名称映射（与 iOS Language.all / PromptBuilder 保持完全一致，适配 Hy-MT2 官方提示词）
 pub fn lang_zh_name(code: &str) -> &'static str {
     match code {
         "zh" => "中文",
         "en" => "英语",
         "ja" => "日语",
         "ko" => "韩语",
+        "ar" => "阿拉伯语",
         "fr" => "法语",
         "de" => "德语",
         "es" => "西班牙语",
+        "ru" => "俄语",
+        "pt" => "葡萄牙语",
+        "it" => "意大利语",
+        "th" => "泰语",
+        "vi" => "越南语",
         _ => "中文",
     }
 }
@@ -33,9 +39,15 @@ pub fn lang_en_name(code: &str) -> &'static str {
         "en" => "English",
         "ja" => "Japanese",
         "ko" => "Korean",
+        "ar" => "Arabic",
         "fr" => "French",
         "de" => "German",
         "es" => "Spanish",
+        "ru" => "Russian",
+        "pt" => "Portuguese",
+        "it" => "Italian",
+        "th" => "Thai",
+        "vi" => "Vietnamese",
         _ => "English",
     }
 }
@@ -58,6 +70,9 @@ pub fn normalize_lang_code(raw: &str) -> String {
     if s.starts_with("ko") || s == "kr" || s == "korean" {
         return "ko".to_string();
     }
+    if s.starts_with("ar") || s == "arabic" {
+        return "ar".to_string();
+    }
     if s.starts_with("fr") || s == "french" {
         return "fr".to_string();
     }
@@ -66,6 +81,21 @@ pub fn normalize_lang_code(raw: &str) -> String {
     }
     if s.starts_with("es") || s == "spanish" {
         return "es".to_string();
+    }
+    if s.starts_with("ru") || s == "russian" {
+        return "ru".to_string();
+    }
+    if s.starts_with("pt") || s == "portuguese" {
+        return "pt".to_string();
+    }
+    if s.starts_with("it") || s == "italian" {
+        return "it".to_string();
+    }
+    if s.starts_with("th") || s == "thai" {
+        return "th".to_string();
+    }
+    if s.starts_with("vi") || s == "vietnamese" {
+        return "vi".to_string();
     }
     s
 }

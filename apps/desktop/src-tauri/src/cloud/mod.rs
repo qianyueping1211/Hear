@@ -14,6 +14,9 @@ pub struct HealthResponse {
     pub clone_ready: Option<bool>,
     pub mt_model: Option<String>,
     pub asr_model: Option<String>,
+    pub asr_scheme: Option<String>,
+    pub asr_schemes: Option<String>,
+    pub asr_supported_languages: Option<Vec<String>>,
     pub auth_mode: Option<String>,
     pub auth_ready: Option<bool>,
     pub transport_ready: Option<bool>,
@@ -378,6 +381,29 @@ impl HearCloudClient {
                 .unwrap_or_else(|| format!("服务可达（{} ms），但鉴权未通过", latency_ms))
         };
 
+        let asr_supported_languages: Vec<String> = match health.asr_supported_languages {
+            Some(list) if list.len() >= 2 => list,
+            _ => {
+                let scheme = health.asr_scheme.as_deref().unwrap_or("").to_ascii_lowercase();
+                let schemes = health.asr_schemes.as_deref().unwrap_or("").to_ascii_lowercase();
+                let detail_low = asr_detail.to_ascii_lowercase();
+                let sensevoice_only = scheme == "sensevoice"
+                    || schemes == "sensevoice"
+                    || (detail_low.contains("sensevoice") && !detail_low.contains("whisper"));
+                if sensevoice_only {
+                    ["zh", "en", "ja", "ko"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect()
+                } else {
+                    ["zh", "en", "ja", "ko", "ar", "fr", "de", "es", "ru", "pt", "it", "th", "vi"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect()
+                }
+            }
+        };
+
         ServiceProbeResult {
             ok: overall_ok,
             address: base_url,
@@ -396,6 +422,7 @@ impl HearCloudClient {
                 .capabilities
                 .and_then(|c| c.streaming_mt)
                 .unwrap_or(false),
+            asr_supported_languages,
             error: None,
         }
     }
@@ -537,12 +564,15 @@ impl HearCloudClient {
             "en" | "en-us" | "en-gb" => "english",
             "ja" | "ja-jp" => "japanese",
             "ko" | "ko-kr" => "korean",
+            "ar" | "ar-ae" | "ar-sa" => "arabic",
             "de" | "de-de" => "german",
             "fr" | "fr-fr" => "french",
             "es" | "es-es" => "spanish",
             "ru" | "ru-ru" => "russian",
             "pt" | "pt-br" => "portuguese",
             "it" | "it-it" => "italian",
+            "th" | "th-th" => "thai",
+            "vi" | "vi-vn" => "vietnamese",
             other => other,
         };
 

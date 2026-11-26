@@ -154,6 +154,8 @@ pub struct ServiceProbeResult {
     pub auth_ok: Option<bool>,
     pub auth_detail: Option<String>,
     pub streaming_mt: bool,
+    #[serde(default)]
+    pub asr_supported_languages: Vec<String>,
     pub error: Option<String>,
 }
 
@@ -174,6 +176,7 @@ impl Default for ServiceProbeResult {
             auth_ok: None,
             auth_detail: None,
             streaming_mt: false,
+            asr_supported_languages: Vec::new(),
             error: None,
         }
     }

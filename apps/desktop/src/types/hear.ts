@@ -77,6 +77,7 @@ export interface ServiceProbeResult {
   authOk?: boolean;
   authDetail?: string;
   streamingMt: boolean;
+  asrSupportedLanguages?: string[];
   error?: string;
 }
 
