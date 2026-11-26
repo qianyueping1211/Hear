@@ -4,6 +4,7 @@ import Translation
 struct ContentView: View {
     @EnvironmentObject var session: LiveSession
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var llm = LLMSettings.shared
     @State private var showSettings = false
     @State private var showHistory = false
@@ -17,6 +18,8 @@ struct ContentView: View {
     @State private var showMenu = false          // 右上角 ⋯ 菜单
     @State private var showQuickModeBar = false  // 底部苹果原生悬浮四模式切换胶囊
     @State private var quickModeDismissTask: Task<Void, Never>?
+    @State private var didShowInitialQuickMode = false
+    @State private var wasBackgrounded = false
     @State private var ipadSelectedConversationID: UUID?  // iPad 宽窄屏切换时保留当前选中的历史对话
 
     private var useIPadWorkbench: Bool {
@@ -172,6 +175,18 @@ struct ContentView: View {
                             }
                             .zIndex(1)
                         ControlBar()
+                            .blur(radius: showQuickModeBar ? 10 : 0)
+                            .opacity(showQuickModeBar ? 0.35 : 1)
+                            .overlay {
+                                if showQuickModeBar {
+                                    Rectangle()
+                                        .fill(.ultraThinMaterial)
+                                        .ignoresSafeArea(edges: .bottom)
+                                        .transition(.opacity)
+                                }
+                            }
+                            .allowsHitTesting(!showQuickModeBar)
+                            .animation(.easeInOut(duration: 0.24), value: showQuickModeBar)
                     }
                     .overlay {
                         if showQuickModeBar {
@@ -200,6 +215,25 @@ struct ContentView: View {
                         }
                     }
                     .animation(.spring(response: 0.32, dampingFraction: 0.82), value: showQuickModeBar)
+                    .onAppear {
+                        if !didShowInitialQuickMode {
+                            didShowInitialQuickMode = true
+                            showQuickModeBarBrieflyOnOpen()
+                        }
+                    }
+                    .onChange(of: scenePhase) { _, phase in
+                        switch phase {
+                        case .background:
+                            wasBackgrounded = true
+                        case .active:
+                            if wasBackgrounded {
+                                wasBackgrounded = false
+                                showQuickModeBarBrieflyOnOpen()
+                            }
+                        default:
+                            break
+                        }
+                    }
                     .onChange(of: session.isRunning) { _, running in
                         if running && showQuickModeBar {
                             dismissQuickModeBar()
@@ -249,6 +283,12 @@ struct ContentView: View {
 
     private var isPhoneFaceToFace: Bool {
         session.talkMode && session.conversationStyle == .faceToFace && (session.phase == .ready || session.isLoadingPhase)
+    }
+
+    private func showQuickModeBarBrieflyOnOpen() {
+        guard !isPhoneFaceToFace, !session.isRunning, session.conversationInputLanguage == nil else { return }
+        showQuickModeBar = true
+        scheduleQuickModeDismiss(after: 3.0)
     }
 
     private func toggleQuickModeBar() {
