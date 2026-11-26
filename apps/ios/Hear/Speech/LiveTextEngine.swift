@@ -233,12 +233,12 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         lock.unlock()
     }
 
-    // A transcript that crosses the actual boundary is assigned to neither
-    // finished segment when it cannot be separated reliably.
+    // 放宽首尾边界容差（0.45s），避免系统听写把词时间戳稍微落在 VAD 预卷/尾音外时把整句丢弃。
     private func belongs(_ piece: Piece, to segment: (start: Double, end: Double?)) -> Bool {
         let middle = (piece.start + piece.end) / 2
-        return middle >= segment.start && middle < (segment.end ?? .infinity)
-            && piece.start >= segment.start - 0.12 && piece.end <= (segment.end ?? .infinity) + 0.12
+        let end = segment.end ?? .infinity
+        return middle >= segment.start - 0.05 && middle < end + 0.05
+            && piece.start >= segment.start - 0.45 && piece.end <= end + 0.45
     }
 
     private func hasGap(_ segment: (start: Double, end: Double?)) -> Bool {
@@ -296,11 +296,12 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         let samples = block.samples
         guard !samples.isEmpty else { return }
         lock.lock()
-        let expected = inputEndFrame
-        if block.startFrame > (expected ?? 0) {
-            recordGap((expected ?? 0)..<block.startFrame)
+        // 仅在已经收到过前一帧且中间发生跳跃时才记为断帧；
+        // 新建引擎首次接入非零时间轴（例如停止后重开或切换语言）不应误记 0..<startFrame 为缺口。
+        if let expected = inputEndFrame, block.startFrame > expected {
+            recordGap(expected..<block.startFrame)
             converter = nil
-        } else if let expected, block.startFrame < expected {
+        } else if let expected = inputEndFrame, block.startFrame < expected {
             // A previous capture's queued buffer arrived after a new generation.
             lock.unlock()
             return

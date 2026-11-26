@@ -383,12 +383,14 @@ struct TranscriptView: View {
                     if !session.partial.isEmpty {
                         LiveBubble().id("partial")
                     }
-                    Color.clear.frame(height: 1).id("bottom")
+                    // 底部保留约 120pt 缓冲区域，确保最新原文和译文始终处于视口中下部、不被底部操作栏或状态胶囊遮挡
+                    Color.clear.frame(height: 120).id("bottom")
                 }
-                .padding()
+                .padding(.horizontal)
+                .padding(.top)
             }
             .onScrollGeometryChange(for: Bool.self) { geometry in
-                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 48
+                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 140
             } action: { _, atBottom in
                 followsLatest = atBottom
             }
@@ -415,6 +417,9 @@ struct TranscriptView: View {
             }
             .onChange(of: session.items.last?.id) { _, _ in
                 if followsLatest { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
+            }
+            .onChange(of: session.items.last?.sourceText) { _, _ in
+                if followsLatest { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: session.items.last?.translated) { _, _ in
                 if followsLatest { proxy.scrollTo("bottom", anchor: .bottom) }

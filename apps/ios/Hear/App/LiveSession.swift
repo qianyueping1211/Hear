@@ -2892,8 +2892,9 @@ final class LiveSession: ObservableObject {
         guard !Task.isCancelled, gen == runGen else { return }
         // 这一句已经被放弃/顶掉了：结果不要了
         guard isCurrentJob(itemID, token: token) else { return }
-        // 听写这一段有没有出字
+        // 听写这一段有没有出字：优先取已定稿文本；若超时未定稿，直接回退到当前已识别文本，避免误丢整句
         let dict = bestApple(segID, requireFinal: true, languages: languages)
+            ?? bestApple(segID, requireFinal: false, languages: languages)
         var spoken = dict?.text ?? ""
         var src = job.forced ?? dict?.lang ?? job.fallback
         if !SpeechTextFilter.isMeaningful(spoken) {
@@ -3530,10 +3531,11 @@ final class LiveSession: ObservableObject {
             if mute {
                 let expectedMuteGen = myMuteGen
                 Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    // 缩短残响静音尾窗至 150ms（原 400ms 容易切掉用户下一句开头），
+                    // 且仅核对 muteGeneration，避免 playbackToken 变化导致麦克风卡在静音状态。
+                    try? await Task.sleep(nanoseconds: 150_000_000)
                     guard let self,
-                          self.muteGeneration == expectedMuteGen,
-                          self.playbackToken == token else { return }
+                          self.muteGeneration == expectedMuteGen else { return }
                     self.capture.muted = false
                 }
             }
