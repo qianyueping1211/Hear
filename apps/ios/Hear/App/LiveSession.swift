@@ -3775,6 +3775,12 @@ final class LiveSession: ObservableObject {
             hearLog("Whisper 校正 \(secs)s：没把握，保留 SenseVoice 结果")
             return
         }
+        // 日语防中文谐音幻听保护：例如 SenseVoice 已正确识别出带假名的「こんにちは」，
+        // 若 Whisper 校正结果不含任何假名（如纯汉字谐音「靠你去蛙」），直接拒绝覆盖！
+        if src.id == "ja", SpeechTextFilter.containsKana(oldText), !SpeechTextFilter.containsKana(text) {
+            hearLog("Whisper 校正 \(secs)s：原句含日语假名但校正结果无假名（疑似中文谐音），保留原识别结果", .info)
+            return
+        }
         guard Self.clearlyDifferent(oldText, text) else {
             hearLog("Whisper 校正 \(secs)s：基本一致")
             return

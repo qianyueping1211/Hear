@@ -75,6 +75,10 @@ enum SpeechTextFilter {
         (0xC0...0x24F).contains(v) || (0x1E00...0x1EFF).contains(v)
     }
 
+    static func containsKana(_ text: String) -> Bool {
+        text.unicodeScalars.contains { isKana($0.value) }
+    }
+
     private static func isKana(_ v: UInt32) -> Bool {
         (0x3040...0x30FF).contains(v)
     }
