@@ -128,7 +128,7 @@ struct ContentView: View {
                     )
                 } else {
                     VStack(spacing: 0) {
-                        TopBar(onModeTap: { showModePicker = true }, onMore: { showMenu = true })
+                        TopBar(onMore: { showMenu = true })
                         LanguageBar()
                         Divider()
                         Group {
@@ -297,17 +297,7 @@ struct ContentView: View {
 
 struct TopBar: View {
     @EnvironmentObject var session: LiveSession
-    var onModeTap: () -> Void = {}
     var onMore: () -> Void
-
-    private var modeTitle: String {
-        if !session.talkMode { return "聆听翻译模式" }
-        switch session.conversationStyle {
-        case .single: return "单侧自动模式"
-        case .sideBySide: return "并排双键模式"
-        case .faceToFace: return "面对面模式"
-        }
-    }
 
     var body: some View {
         HStack {
@@ -328,19 +318,9 @@ struct TopBar: View {
                 .accessibilityLabel("更多")
         }
         .overlay {
-            Button(action: onModeTap) {
-                HStack(spacing: 4) {
-                    Text(modeTitle).font(.headline)
-                    Image(systemName: "chevron.down")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial, in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("切换翻译模式")
+            Text("Hear 听见")
+                .font(.headline)
+                .allowsHitTesting(false)
         }
         .padding(.horizontal)
         .padding(.top, 6)
