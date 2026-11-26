@@ -16,6 +16,8 @@ struct ContentView: View {
     @State private var editingSpeaker: TranslationItem?
     @State private var showMenu = false          // 右上角 ⋯ 菜单
     @State private var showModePicker = false    // 2×2 田字格「翻译模式」选择器
+    @State private var showQuickModeBar = false  // 底部苹果原生悬浮四模式切换胶囊
+    @State private var quickModeDismissTask: Task<Void, Never>?
     @State private var ipadSelectedConversationID: UUID?  // iPad 宽窄屏切换时保留当前选中的历史对话
 
     private var useIPadWorkbench: Bool {
@@ -153,10 +155,47 @@ struct ContentView: View {
                                     ModelStatusPill(text: hint, isLoading: loading != nil)
                                         .fixedSize(horizontal: false, vertical: true)
                                         .allowsHitTesting(false)
+                                } else if !session.isRunning && session.conversationInputLanguage == nil {
+                                    Button {
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                        toggleQuickModeBar()
+                                    } label: {
+                                        HStack(spacing: 5) {
+                                            Image(systemName: "arrow.left.arrow.right")
+                                                .font(.caption2.weight(.semibold))
+                                            Text("切换模式")
+                                                .font(.footnote.weight(.medium))
+                                        }
+                                        .foregroundStyle(.secondary)
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 7)
+                                        .background(.ultraThinMaterial, in: Capsule())
+                                        .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+                                    }
+                                    .buttonStyle(QuickPillPressStyle())
+                                    .accessibilityLabel("切换翻译模式")
                                 }
                             }
                             .zIndex(1)
                         ControlBar()
+                    }
+                    .overlay(alignment: .bottom) {
+                        if showQuickModeBar {
+                            FloatingModeSwitcherBar(
+                                onSelect: { scheduleQuickModeDismiss(after: 2.0) },
+                                onInteract: { scheduleQuickModeDismiss(after: 3.0) }
+                            )
+                            .padding(.horizontal, 16)
+                            .padding(.bottom, 12)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .zIndex(5)
+                        }
+                    }
+                    .animation(.spring(response: 0.32, dampingFraction: 0.82), value: showQuickModeBar)
+                    .onChange(of: session.isRunning) { _, running in
+                        if running && showQuickModeBar {
+                            dismissQuickModeBar()
+                        }
                     }
                 }
             }
@@ -195,6 +234,30 @@ struct ContentView: View {
         case .sideBySide: return "并排双键模式"
         case .faceToFace: return "面对面模式"
         }
+    }
+
+    private func toggleQuickModeBar() {
+        if showQuickModeBar {
+            dismissQuickModeBar()
+        } else {
+            showQuickModeBar = true
+            scheduleQuickModeDismiss(after: 3.0)
+        }
+    }
+
+    private func scheduleQuickModeDismiss(after seconds: Double) {
+        quickModeDismissTask?.cancel()
+        quickModeDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            showQuickModeBar = false
+        }
+    }
+
+    private func dismissQuickModeBar() {
+        quickModeDismissTask?.cancel()
+        quickModeDismissTask = nil
+        showQuickModeBar = false
     }
 
     private func newTapped() {
@@ -1744,5 +1807,175 @@ struct TranslationModePickerSheet: View {
             }
             .padding(.vertical, 8)
         }
+    }
+}
+
+// MARK: - 底部快捷模式切换栏（仿 Apple 原生悬浮胶囊 + 滑动手势 + 触感反馈）
+
+private struct QuickPillPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.93 : 1.0)
+            .opacity(configuration.isPressed ? 0.82 : 1.0)
+            .animation(.spring(response: 0.22, dampingFraction: 0.72), value: configuration.isPressed)
+    }
+}
+
+private struct FloatingModeSwitcherBar: View {
+    @EnvironmentObject var session: LiveSession
+    @Environment(\.colorScheme) private var colorScheme
+    var onSelect: () -> Void
+    var onInteract: () -> Void
+
+    @Namespace private var pillNS
+    @State private var draggingMode: ModeChoice?
+    @State private var isPressing = false
+
+    private enum ModeChoice: Hashable {
+        case listening, singleAuto, sideBySide, faceToFace
+    }
+
+    private struct ModeItem: Identifiable {
+        let mode: ModeChoice
+        let title: String
+        let icon: String
+        var id: ModeChoice { mode }
+    }
+
+    private let items: [ModeItem] = [
+        ModeItem(mode: .listening, title: "聆听", icon: "waveform"),
+        ModeItem(mode: .singleAuto, title: "单侧", icon: "mic.fill"),
+        ModeItem(mode: .sideBySide, title: "并排", icon: "person.2.fill"),
+        ModeItem(mode: .faceToFace, title: "面对面", icon: "rectangle.split.1x2.fill"),
+    ]
+
+    private var committedMode: ModeChoice {
+        if !session.talkMode { return .listening }
+        switch session.conversationStyle {
+        case .single: return .singleAuto
+        case .sideBySide: return .sideBySide
+        case .faceToFace: return .faceToFace
+        }
+    }
+
+    private var highlightedMode: ModeChoice {
+        draggingMode ?? committedMode
+    }
+
+    private func apply(_ mode: ModeChoice) {
+        switch mode {
+        case .listening:
+            session.talkMode = false
+        case .singleAuto:
+            session.talkMode = true
+            session.conversationStyle = .single
+        case .sideBySide:
+            session.talkMode = true
+            session.conversationStyle = .sideBySide
+        case .faceToFace:
+            session.talkMode = true
+            session.conversationStyle = .faceToFace
+        }
+    }
+
+    private func mode(at x: CGFloat, totalWidth: CGFloat) -> ModeChoice {
+        guard totalWidth > 0 else { return committedMode }
+        let ratio = min(max(x / totalWidth, 0), 0.9999)
+        let idx = min(max(Int(ratio * CGFloat(items.count)), 0), items.count - 1)
+        return items[idx].mode
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let innerWidth = max(geo.size.width - 8, 1)
+            HStack(spacing: 0) {
+                ForEach(items) { item in
+                    let isSelected = highlightedMode == item.mode
+                    let isPressedItem = isPressing && isSelected
+                    VStack(spacing: 3) {
+                        Image(systemName: item.icon)
+                            .font(.system(size: 19, weight: .semibold))
+                            .symbolRenderingMode(.hierarchical)
+                            .frame(height: 22)
+                        Text(item.title)
+                            .font(.system(size: 10.5, weight: isSelected ? .semibold : .medium))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary.opacity(0.82))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background {
+                        if isSelected {
+                            Capsule()
+                                .fill(
+                                    colorScheme == .dark
+                                        ? Color.black.opacity(0.46)
+                                        : Color(.systemBackground).opacity(0.92)
+                                )
+                                .overlay(
+                                    Capsule()
+                                        .stroke(
+                                            Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.06),
+                                            lineWidth: 0.5
+                                        )
+                                )
+                                .shadow(
+                                    color: .black.opacity(colorScheme == .dark ? 0.25 : 0.08),
+                                    radius: 4, y: 1
+                                )
+                                .matchedGeometryEffect(id: "floatingModeActivePill", in: pillNS)
+                        }
+                    }
+                    .scaleEffect(isPressedItem ? 0.94 : 1.0)
+                    .animation(.spring(response: 0.24, dampingFraction: 0.76), value: isPressedItem)
+                    .contentShape(Capsule())
+                }
+            }
+            .padding(4)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(
+                        Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.10),
+                        lineWidth: 0.6
+                    )
+            )
+            .shadow(color: .black.opacity(colorScheme == .dark ? 0.42 : 0.14), radius: 16, y: 6)
+            .contentShape(Capsule())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                    .onChanged { value in
+                        let target = mode(at: value.location.x - 4, totalWidth: innerWidth)
+                        if !isPressing {
+                            isPressing = true
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        } else if draggingMode != target {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        }
+                        if draggingMode != target {
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                                draggingMode = target
+                            }
+                        }
+                        onInteract()
+                    }
+                    .onEnded { value in
+                        let target = mode(at: value.location.x - 4, totalWidth: innerWidth)
+                        let changed = target != committedMode
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.80)) {
+                            apply(target)
+                            draggingMode = nil
+                            isPressing = false
+                        }
+                        if changed {
+                            UISelectionFeedbackGenerator().selectionChanged()
+                        }
+                        onSelect()
+                    }
+            )
+        }
+        .frame(height: 62)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("快捷模式切换栏")
     }
 }
