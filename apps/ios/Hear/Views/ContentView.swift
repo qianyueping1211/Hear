@@ -112,38 +112,47 @@ struct ContentView: View {
 
     private var compactPhoneBody: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                TopBar(onMore: { showMenu = true })
-                LanguageBar()
-                Divider()
-                Group {
-                    if session.phase == .ready || session.isLoadingPhase {
-                        // 加载模型时也显示对话页。
-                        TranscriptView(
-                            onEdit: beginEditingSource,
-                            onSpeaker: { editingSpeaker = $0 }
-                        )
-                            .overlay(alignment: .top) {
-                                if session.usingAppleTranslation, let note = session.appleNote {
-                                    NotePill(text: note).padding(.top, 8)
+            Group {
+                if session.talkMode && session.conversationStyle == .faceToFace && (session.phase == .ready || session.isLoadingPhase) {
+                    PhoneFaceToFaceView(
+                        onOpenMenu: { showMenu = true },
+                        onExit: { session.conversationStyle = .sideBySide }
+                    )
+                } else {
+                    VStack(spacing: 0) {
+                        TopBar(onMore: { showMenu = true })
+                        LanguageBar()
+                        Divider()
+                        Group {
+                            if session.phase == .ready || session.isLoadingPhase {
+                                // 加载模型时也显示对话页。
+                                TranscriptView(
+                                    onEdit: beginEditingSource,
+                                    onSpeaker: { editingSpeaker = $0 }
+                                )
+                                    .overlay(alignment: .top) {
+                                        if session.usingAppleTranslation, let note = session.appleNote {
+                                            NotePill(text: note).padding(.top, 8)
+                                        }
+                                    }
+                            } else {
+                                SetupView()
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        Divider()
+                            .overlay {
+                                let loading = session.loadingHint
+                                if let hint = loading ?? session.modelReadyHint {
+                                    ModelStatusPill(text: hint, isLoading: loading != nil)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .allowsHitTesting(false)
                                 }
                             }
-                    } else {
-                        SetupView()
+                            .zIndex(1)
+                        ControlBar()
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                Divider()
-                    .overlay {
-                        let loading = session.loadingHint
-                        if let hint = loading ?? session.modelReadyHint {
-                            ModelStatusPill(text: hint, isLoading: loading != nil)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .allowsHitTesting(false)
-                        }
-                    }
-                    .zIndex(1)
-                ControlBar()
             }
             // 弹出键盘时底部的实时翻译区域固定不动
             .ignoresSafeArea(.keyboard, edges: .bottom)
@@ -156,6 +165,12 @@ struct ContentView: View {
                             .ignoresSafeArea()
                             .onTapGesture { showMenu = false }
                         MoreMenuPanel(
+                            showConversationStyles: session.talkMode,
+                            selectedStyle: session.conversationStyle,
+                            onSelectStyle: { style in
+                                session.conversationStyle = style
+                                showMenu = false
+                            },
                             onNew: { showMenu = false; newTapped() },
                             onHistory: { showMenu = false; showHistory = true },
                             onGlossary: { showMenu = false; showGlossary = true },
@@ -214,22 +229,93 @@ struct TopBar: View {
     }
 }
 
-/// 右上角弹出的菜单：窄面板，每行图标 + 文字横向居中，行与行之间不加分隔线
+/// 右上角弹出的菜单：对话模式下顶部增加「展示方式」展开切换（自由对话 / 并排对话 / 面对面）
 struct MoreMenuPanel: View {
+    var showConversationStyles: Bool = false
+    var selectedStyle: ConversationDisplayStyle = .sideBySide
+    var onSelectStyle: (ConversationDisplayStyle) -> Void = { _ in }
     var onNew: () -> Void
     var onHistory: () -> Void
     var onGlossary: () -> Void
     var onSettings: () -> Void
+    @State private var stylesExpanded = false
 
     var body: some View {
         VStack(spacing: 0) {
+            if showConversationStyles {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { stylesExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: selectedStyle.icon)
+                            .font(.system(size: 18))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: 24)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("展示方式").font(.system(size: 16, weight: .medium))
+                            Text(selectedStyle.title).font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: stylesExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if stylesExpanded {
+                    VStack(spacing: 2) {
+                        ForEach(ConversationDisplayStyle.allCases) { style in
+                            Button {
+                                onSelectStyle(style)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: style.icon)
+                                        .font(.system(size: 15))
+                                        .foregroundStyle(style == selectedStyle ? Color.accentColor : .secondary)
+                                        .frame(width: 20)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(style.title)
+                                            .font(.subheadline.weight(style == selectedStyle ? .semibold : .regular))
+                                        Text(style.subtitle)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    if style == selectedStyle {
+                                        Image(systemName: "checkmark")
+                                            .font(.caption.weight(.bold))
+                                            .foregroundStyle(Color.accentColor)
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                .background(
+                                    style == selectedStyle ? Color.accentColor.opacity(0.12) : Color.clear,
+                                    in: RoundedRectangle(cornerRadius: 10)
+                                )
+                                .padding(.horizontal, 6)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.bottom, 6)
+                }
+
+                Divider().padding(.horizontal, 12)
+            }
+
             row("新建对话", "square.and.pencil", onNew)
             row("历史记录", "clock.arrow.circlepath", onHistory)
             row("术语配置", "text.book.closed", onGlossary)
             row("功能设置", "gearshape", onSettings)
         }
         .padding(.vertical, 4)
-        .frame(width: 198)
+        .frame(width: showConversationStyles ? 232 : 198)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
@@ -304,23 +390,65 @@ struct ModelStatusPill: View {
     }
 }
 
-// MARK: - 顶部：选择两种语言
+// MARK: - 顶部：实时翻译模式仅选「译为目标语种」；对话翻译模式选双方语言
 
 struct LanguageBar: View {
     @EnvironmentObject var session: LiveSession
 
     var body: some View {
-        HStack(spacing: 12) {
-            LanguageMenu(selection: $session.langA)
-            Button { session.swapLanguages() } label: {
-                Image(systemName: "arrow.left.arrow.right")
-                    .font(.headline)
-                    .frame(width: 44, height: 44)
+        if !session.talkMode {
+            // 实时翻译（会议）模式：自动识别多国语种，只需选择「译为」哪种目标语言（默认中文）
+            HStack(spacing: 10) {
+                HStack(spacing: 6) {
+                    Image(systemName: "globe")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.accentColor)
+                    Text("自动识别多国语种")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Image(systemName: "arrow.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Menu {
+                    ForEach(Language.all) { lang in
+                        Button { session.meetingTargetLang = lang } label: {
+                            if lang == session.meetingTargetLang {
+                                Label("\(lang.flag) \(lang.displayName)", systemImage: "checkmark")
+                            } else {
+                                Text("\(lang.flag) \(lang.displayName)")
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("译为").font(.subheadline).foregroundStyle(.secondary)
+                        Text(session.meetingTargetLang.flag)
+                        Text(session.meetingTargetLang.name).fontWeight(.semibold).lineLimit(1)
+                        Image(systemName: "chevron.down").font(.caption)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+                }
+                .foregroundStyle(.primary)
             }
-            LanguageMenu(selection: $session.langB)
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+        } else {
+            HStack(spacing: 12) {
+                LanguageMenu(selection: $session.langA)
+                Button { session.swapLanguages() } label: {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.headline)
+                        .frame(width: 44, height: 44)
+                }
+                LanguageMenu(selection: $session.langB)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
         }
-        .padding(.horizontal)
-        .padding(.vertical, 10)
     }
 }
 
@@ -367,7 +495,9 @@ struct TranscriptView: View {
             ScrollView {
                 LazyVStack(spacing: 12) {
                     ForEach(session.items) { item in
-                        BubbleView(item: item, leading: item.isLeading(left: session.langA, right: session.langB),
+                        BubbleView(item: item,
+                                   leading: !session.talkMode ? true : item.isLeading(left: session.langA, right: session.langB),
+                                   fullWidth: !session.talkMode,
                                    displayLanguage: session.chineseDisplayLanguage,
                                    reading: session.readingID == item.id,
                                    playing: session.speakingID == item.id,
@@ -375,7 +505,7 @@ struct TranscriptView: View {
                                    showIdleReadingIcon: session.showReadingIcon,
                                    onEdit: { if item.done { onEdit(item) } },
                                    onRetry: item.canRetryTranslation ? { session.retryTranslation(item.id) } : nil,
-                                   onSpeaker: item.speakerLabel == nil ? nil : { onSpeaker(item) }) {
+                                   onSpeaker: (item.speakerLabel == nil && session.talkMode) ? nil : { onSpeaker(item) }) {
                             session.tapRead(item)
                         }
                         .id(item.id)
@@ -493,6 +623,8 @@ struct HalfCircleSpinner: View {
 struct BubbleView: View {
     let item: TranslationItem
     let leading: Bool
+    /// 实时翻译（会议）模式下通栏左对齐卡片展示，不区分左右气泡
+    var fullWidth: Bool = false
     let displayLanguage: ChineseDisplayLanguage
     var reading: Bool = false
     /// 历史完整录音回放时，当前正在播到这一句（高亮框图）
@@ -554,9 +686,9 @@ struct BubbleView: View {
 
     var body: some View {
         HStack {
-            if !leading { Spacer(minLength: 40) }
-            VStack(alignment: leading ? .leading : .trailing, spacing: 6) {
-                if let speaker = item.speakerLabel {
+            if !fullWidth && !leading { Spacer(minLength: 40) }
+            VStack(alignment: (fullWidth || leading) ? .leading : .trailing, spacing: 6) {
+                if let speaker = item.speakerLabel ?? (fullWidth ? "发言人" : nil) {
                     if let onSpeaker {
                         Button(action: onSpeaker) {
                             Label {
@@ -609,12 +741,13 @@ struct BubbleView: View {
                     }
                 }
             }
-            .multilineTextAlignment(leading ? .leading : .trailing)
+            .multilineTextAlignment((fullWidth || leading) ? .leading : .trailing)
+            .frame(maxWidth: fullWidth ? .infinity : nil, alignment: .leading)
             .padding(12)
             .background(
                 audioHighlighted
                     ? Color.accentColor.opacity(0.22)
-                    : (leading ? Color(.secondarySystemBackground) : Color.accentColor.opacity(0.15)),
+                    : ((fullWidth || leading) ? Color(.secondarySystemBackground) : Color.accentColor.opacity(0.15)),
                 in: RoundedRectangle(cornerRadius: 16)
             )
             .overlay(
@@ -634,7 +767,7 @@ struct BubbleView: View {
             }
             .modifier(BubbleLongPress(item: item, displayLanguage: displayLanguage,
                                       useContextMenu: useContextMenu, onEdit: onEdit, onSpeak: onSpeak))
-            if leading { Spacer(minLength: 40) }
+            if !fullWidth && leading { Spacer(minLength: 40) }
         }
     }
 }
@@ -770,7 +903,7 @@ struct ControlBar: View {
                 .foregroundStyle(.secondary)
 
             ZStack {
-                if session.talkMode {
+                if session.usesDualConversationButtons {
                     talkControls
                         .transition(.move(edge: .trailing).combined(with: .opacity))
                 } else {
@@ -780,7 +913,7 @@ struct ControlBar: View {
             }
             .frame(height: 140)
             .clipped()
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: session.talkMode)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: session.usesDualConversationButtons)
 
             ModeDots()
                 .padding(.bottom, 6)
@@ -1144,9 +1277,10 @@ struct LiveBubble: View {
     @EnvironmentObject var session: LiveSession
 
     var body: some View {
-        let leading = session.partialSource.map { $0 == session.langA } ?? true
+        let fullWidth = !session.talkMode
+        let leading = fullWidth ? true : (session.partialSource.map { $0 == session.langA } ?? true)
         HStack {
-            if !leading { Spacer(minLength: 40) }
+            if !fullWidth && !leading { Spacer(minLength: 40) }
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 6) {
                     Image(systemName: "waveform").symbolEffect(.variableColor.iterative)
@@ -1160,12 +1294,221 @@ struct LiveBubble: View {
                         .foregroundStyle(Color.primary.opacity(0.75))
                 }
             }
+            .frame(maxWidth: fullWidth ? .infinity : nil, alignment: .leading)
             .padding(12)
             .background(
                 RoundedRectangle(cornerRadius: 16)
                     .strokeBorder(Color.accentColor.opacity(0.5), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
             )
-            if leading { Spacer(minLength: 40) }
+            if !fullWidth && leading { Spacer(minLength: 40) }
         }
+    }
+}
+
+// MARK: - iPhone 对话翻译「面对面」上下分屏视图（对标苹果翻译面对面效果）
+
+struct PhoneFaceToFaceView: View {
+    @EnvironmentObject var session: LiveSession
+    var onOpenMenu: () -> Void
+    var onExit: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // 上半屏：整体旋转 180° 面向桌子对面的对方（langB）
+            halfPane(lang: $session.langB, targetLang: session.langA, isOpponent: true)
+                .rotationEffect(.degrees(180))
+
+            // 中间横线 + 中心翻转/互换语种按钮
+            ZStack {
+                Divider()
+                    .padding(.horizontal, 16)
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    session.swapLanguages()
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 40, height: 40)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .overlay(Circle().stroke(Color.primary.opacity(0.12), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("互换双方语言")
+            }
+            .frame(height: 44)
+
+            // 下半屏：正向面向自己（langA），底部左右带 ⋯ 菜单与 × 退出面对面
+            ZStack(alignment: .bottom) {
+                halfPane(lang: $session.langA, targetLang: session.langB, isOpponent: false)
+                HStack {
+                    Button(action: onOpenMenu) {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(.primary)
+                            .frame(width: 44, height: 44)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("展示方式与更多")
+
+                    Spacer()
+
+                    Button(action: onExit) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 44, height: 44)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("退出面对面")
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 10)
+            }
+        }
+        .background(Color(.systemBackground))
+    }
+
+    private func halfPane(lang: Binding<Language>, targetLang: Language, isOpponent: Bool) -> some View {
+        let myLang = lang.wrappedValue
+        let selected = session.conversationInputLanguage == myLang
+        let active = session.isRunning && selected
+        let enabled = selected || session.phase == .ready
+        let displayLang = session.chineseDisplayLanguage
+
+        return VStack(spacing: 10) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        // 语种选择胶囊 + 轻点说话引导
+                        HStack {
+                            if !isOpponent { Spacer(minLength: 0) }
+                            VStack(alignment: isOpponent ? .leading : .trailing, spacing: 6) {
+                                Menu {
+                                    ForEach(session.supportedLanguages) { option in
+                                        Button { lang.wrappedValue = option } label: {
+                                            if option == myLang {
+                                                Label("\(option.flag) \(option.displayName)", systemImage: "checkmark")
+                                            } else {
+                                                Text("\(option.flag) \(option.displayName)")
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Text("\(myLang.flag) \(myLang.displayName)")
+                                            .font(.caption.weight(.semibold))
+                                        Image(systemName: "chevron.up.chevron.down")
+                                            .font(.caption2)
+                                    }
+                                    .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+
+                                if session.items.isEmpty && session.partial.isEmpty {
+                                    Text(myLang.id == "zh" ? "轻点麦克风来说话" : "Tap mic to speak")
+                                        .font(.title3.weight(.medium))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+                            if isOpponent { Spacer(minLength: 0) }
+                        }
+
+                        ForEach(session.items.suffix(8)) { item in
+                            let isMine = item.source.id == myLang.id
+                            let primaryText = isMine
+                                ? item.displayedSource(using: displayLang)
+                                : item.displayedTranslation(using: displayLang)
+                            let secondaryText = isMine
+                                ? item.displayedTranslation(using: displayLang)
+                                : item.displayedSource(using: displayLang)
+                            VStack(alignment: .leading, spacing: 4) {
+                                if !primaryText.isEmpty {
+                                    Text(primaryText)
+                                        .font(.title3.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                }
+                                if !secondaryText.isEmpty {
+                                    Text(secondaryText)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                            .background(
+                                isMine ? Color.accentColor.opacity(0.16) : Color(.secondarySystemBackground),
+                                in: RoundedRectangle(cornerRadius: 14)
+                            )
+                            .onTapGesture {
+                                if item.canReadAloud { session.tapRead(item) }
+                            }
+                            .id(item.id)
+                        }
+
+                        if !session.partial.isEmpty {
+                            let isMine = session.partialSource?.id == myLang.id
+                            let liveText = isMine ? session.displayedPartial : (session.partialTranslation.isEmpty ? session.displayedPartial : session.displayedPartialTranslation)
+                            Text(liveText)
+                                .font(.title3.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 14)
+                                        .strokeBorder(Color.accentColor.opacity(0.45), style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                                )
+                                .id("face-partial")
+                        }
+
+                        Color.clear.frame(height: 16).id("face-bottom")
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                }
+                .onChange(of: session.items.last?.id) { _, _ in
+                    withAnimation { proxy.scrollTo("face-bottom", anchor: .bottom) }
+                }
+                .onChange(of: session.items.last?.translated) { _, _ in
+                    proxy.scrollTo("face-bottom", anchor: .bottom)
+                }
+                .onChange(of: session.partial) { _, _ in
+                    proxy.scrollTo("face-bottom", anchor: .bottom)
+                }
+            }
+
+            // 本侧独立圆形麦克风按钮（对标苹果青蓝圆钮）
+            Button {
+                Task { await session.toggleConversationInput(myLang) }
+            } label: {
+                ZStack {
+                    if active {
+                        Circle()
+                            .fill(Color.accentColor.opacity(0.24))
+                            .frame(width: 78, height: 78)
+                    }
+                    Circle()
+                        .fill(active ? Color.red : Color.accentColor)
+                        .frame(width: 62, height: 62)
+                        .overlay {
+                            Image(systemName: selected ? "stop.fill" : "mic.fill")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                }
+                .frame(width: 80, height: 74)
+            }
+            .buttonStyle(.plain)
+            .disabled(!enabled)
+            .opacity(enabled ? 1 : 0.4)
+            .padding(.bottom, isOpponent ? 6 : 8)
+            .accessibilityLabel(selected ? "停止收听\(myLang.name)" : "开始收听\(myLang.name)")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

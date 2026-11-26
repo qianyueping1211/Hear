@@ -6,6 +6,39 @@ import Security
 import CryptoKit
 import os
 
+/// 对话翻译模式的三种展示方式（在对话模式右上角 ⋯ 菜单内切换）
+enum ConversationDisplayStyle: String, CaseIterable, Identifiable {
+    case single      // 自由对话（单按钮 · 自动双向识别）
+    case sideBySide  // 并排对话（左右双按钮 · 同向看屏）
+    case faceToFace  // 面对面（上下分屏 · 各有按钮）
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .single: return "自由对话"
+        case .sideBySide: return "并排对话"
+        case .faceToFace: return "面对面"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .single: return "单按钮 · 自动双向识别"
+        case .sideBySide: return "左右双按钮 · 同向看屏"
+        case .faceToFace: return "上下分屏 · 各有按钮"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .single: return "mic.circle"
+        case .sideBySide: return "rectangle.split.2x1"
+        case .faceToFace: return "rectangle.split.1x2"
+        }
+    }
+}
+
 /// 等克隆任务出结果用的盒子（后台任务写，主线程读）
 final class CloneOutcome: @unchecked Sendable {
     private let lock = NSLock()
@@ -511,7 +544,7 @@ final class LiveSession: ObservableObject {
     /// 本地网络权限没开：界面上弹提示
     @Published var localNetworkHelp = false
 
-    // 对话翻译模式：点语言圆圈开始，再点同一个圆圈暂停。
+    // 对话翻译模式：支持 自由对话（单按钮）/ 并排对话（左右双按钮）/ 面对面（上下分屏双按钮）
     @Published var talkMode: Bool {
         didSet {
             guard talkMode != oldValue else { return }
@@ -524,6 +557,30 @@ final class LiveSession: ObservableObject {
             else if microphoneStartToken != nil { capture.stop() }
         }
     }
+    /// 对话翻译模式的展示方式：自由对话 / 并排对话 / 面对面
+    @Published var conversationStyle: ConversationDisplayStyle {
+        didSet {
+            guard conversationStyle != oldValue else { return }
+            save("conversationStyle", conversationStyle.rawValue)
+            pushConfig()
+            startToken = UUID()
+            conversationInputLanguage = nil
+            if talkMode {
+                if isRunning { Task { await finishRecording(readAfter: false) } }
+                else if microphoneStartToken != nil { capture.stop() }
+            }
+        }
+    }
+    /// 实时翻译（会议）模式的目标翻译语言（默认中文）：自动识别任意多国语言并统一翻译为该语言
+    @Published var meetingTargetLang: Language {
+        didSet {
+            guard meetingTargetLang != oldValue else { return }
+            save("meetingTargetLang", meetingTargetLang.id)
+            if !talkMode, isRunning, dualLive { startAppleASR() }
+        }
+    }
+    /// 当前是否处于「左右/上下双按钮」按语种点按收听状态
+    var usesDualConversationButtons: Bool { talkMode && conversationStyle != .single }
     @Published private(set) var conversationInputLanguage: Language?
     private var talkLang: Language?
     private var conversationFlush: Task<Void, Never>?
@@ -639,7 +696,11 @@ final class LiveSession: ObservableObject {
         } else {
             talkMode = d.bool(forKey: "hearLastMode")
         }
-        hearLog("启动：\(talkMode ? "对话翻译模式" : "实时翻译模式")")
+        let savedStyle = d.string(forKey: "conversationStyle") ?? ConversationDisplayStyle.sideBySide.rawValue
+        conversationStyle = ConversationDisplayStyle(rawValue: savedStyle) ?? .sideBySide
+        let savedMeetingTarget = d.string(forKey: "meetingTargetLang") ?? "zh"
+        meetingTargetLang = Language.find(savedMeetingTarget)
+        hearLog("启动：\(talkMode ? "对话翻译模式（\(conversationStyle.title)）" : "实时翻译模式（译为\(meetingTargetLang.name)）")")
         speaker.onAudioActivityChanged = { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
@@ -1592,7 +1653,7 @@ final class LiveSession: ObservableObject {
     // MARK: - 开始 / 停止
 
     func toggle() async {
-        guard !talkMode else { return }
+        guard !usesDualConversationButtons else { return }
         dismissToast()
         if isRunning { await finishRecording(); return }
         if microphoneStartToken == startToken {
@@ -1605,7 +1666,7 @@ final class LiveSession: ObservableObject {
     }
 
     func toggleConversationInput(_ lang: Language) async {
-        guard talkMode, inputFinishToken == nil, !switchingConversation else { return }
+        guard usesDualConversationButtons, inputFinishToken == nil, !switchingConversation else { return }
         dismissToast()
         let sameLanguage = conversationInputLanguage == lang
         if conversationInputLanguage != nil || isRunning { endConversationInput() }
@@ -2515,8 +2576,10 @@ final class LiveSession: ObservableObject {
             let gen = runGen
             let a = langA, b = langB
             let forced = forcedLang
-            let fallback = forced?.id ?? ((lastLangID == b.id) ? b.id : a.id)
-            let cands = forced.map { [$0.id] } ?? [a.id, b.id]
+            let meetingMode = !talkMode
+            let meetingTarget = meetingTargetLang
+            let fallback = forced?.id ?? (meetingMode ? meetingTarget.id : ((lastLangID == b.id) ? b.id : a.id))
+            let cands = forced.map { [$0.id] } ?? (meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id])
             // 只识别最近 10 秒，长句也跟得上
             let maxN = 16_000 * 10
             let clipped = job.samples.count > maxN
@@ -2549,7 +2612,8 @@ final class LiveSession: ObservableObject {
                   let language = forced?.id ?? SpeechTextFilter.resolveLanguage(r.text, detected: r.lang,
                                                                                  candidates: cands, fallback: fallback)
             else { continue }
-            let src = language == b.id ? b : a
+            let src = meetingMode ? Language.find(language) : (language == b.id ? b : a)
+            let tgt = meetingMode ? meetingTarget : (src == a ? b : a)
             partialSource = src
             // 长句：预览窗口只留最近 10 秒，开头会被切掉。
             // 已经认出来的开头别让它消失：
@@ -2559,7 +2623,12 @@ final class LiveSession: ObservableObject {
             let merged = clipped ? SessionPreviewPipeline.merge(stable, r.1) : r.1
             previews.textBySegment[id] = merged      // 记下稳定下来的那段（下次好接）
             partial = (clipped ? "…" : "") + merged
-            requestPreviewTranslation(id: id, text: partial, src: src, tgt: src == a ? b : a)
+            if src.id == tgt.id {
+                partialTranslation = ""
+                partialTranslationTarget = nil
+            } else {
+                requestPreviewTranslation(id: id, text: partial, src: src, tgt: tgt)
+            }
         }
     }
 
@@ -2792,8 +2861,17 @@ final class LiveSession: ObservableObject {
         }
         var engines: [LiveTextEngine] = []
         let gen = runGen
-        // 对话翻译只听用户当前选择的语言。
-        let langs = forcedLang.map { [$0] } ?? [langA, langB]
+        // 对话翻译只听用户当前选择的语言；实时翻译（会议）模式优先听目标语种与常用外语
+        let langs: [Language]
+        if let forced = forcedLang {
+            langs = [forced]
+        } else if !talkMode {
+            let target = meetingTargetLang
+            let other = (langB.id != target.id) ? langB : Language.find(target.id == "en" ? "zh" : "en")
+            langs = [target, other]
+        } else {
+            langs = [langA, langB]
+        }
         for lang in langs {
             guard let e = LiveTextEngineFactory.make() else { continue }
             e.onAudioLoss = { [weak capture] in capture?.noteSpeechInputLoss() }
@@ -3054,9 +3132,10 @@ final class LiveSession: ObservableObject {
                 return
             }
         }
-        let leading = src == job.left
-        let tgt = leading ? job.right : job.left
-        if job.left == langA && job.right == langB { lastLangID = src.id }
+        let meetingMode = !talkMode
+        let leading = meetingMode ? true : (src == job.left)
+        let tgt = meetingMode ? meetingTargetLang : (leading ? job.right : job.left)
+        if !meetingMode, job.left == langA && job.right == langB { lastLangID = src.id }
         PerformanceLog.record("整句识别", engine: "Apple 听写", since: started)
         hearLogText("系统听写（\(src.name)）：", String(spoken.prefix(40)))
 
@@ -3117,10 +3196,18 @@ final class LiveSession: ObservableObject {
         items[idx].updateTranscript(spoken, source: src, target: tgt,
                                     side: leading ? .left : .right, recognizedLanguage: src.id)
         rememberReference(itemID, samples: samples, text: spoken)
-        // 翻译排到另一条队列（跟识别分开）
-        enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: spoken,
-                                  src: src, tgt: tgt, samples: samples,
-                                  isApple: true))
+        if meetingMode, src.id == tgt.id {
+            items[idx].applyTranslation("", done: true)
+            jobTokens[itemID] = nil
+            persist()
+            activity = isRunning ? "正在聆听" : ""
+            kickReader()
+        } else {
+            // 翻译排到另一条队列（跟识别分开）
+            enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: spoken,
+                                      src: src, tgt: tgt, samples: samples,
+                                      isApple: true))
+        }
     }
 
     /// 听写没给出结果时：用本地的识别再认一遍这段声音。
@@ -3244,7 +3331,7 @@ final class LiveSession: ObservableObject {
     }
 
     /// 采集结束前保留原来的语言，确保尾句按录制时的语言处理。
-    private var forcedLang: Language? { talkMode || finishingInput ? talkLang : nil }
+    private var forcedLang: Language? { usesDualConversationButtons || finishingInput ? talkLang : nil }
 
     var isLoadingPhase: Bool { if case .loading = phase { return true }; return false }
     var loadingText: String? { if case .loading(let m) = phase { return m }; return nil }
@@ -3325,10 +3412,12 @@ final class LiveSession: ObservableObject {
             return
         }
         let a = job.left, b = job.right
+        let meetingMode = !talkMode
+        let meetingTarget = meetingTargetLang
         activity = usingCloudASR ? "云端识别中…" : "SenseVoice 识别中…"
         let forced = job.forced
-        let fallback = forced?.id ?? job.fallback.id
-        let cands = forced.map { [$0.id] } ?? [a.id, b.id]
+        let fallback = forced?.id ?? (meetingMode ? meetingTarget.id : job.fallback.id)
+        let cands = forced.map { [$0.id] } ?? (meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id])
         let correctionAddress: String?
         let speakerAddress: String?
         let detected: String
@@ -3406,9 +3495,9 @@ final class LiveSession: ObservableObject {
             return
         }
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
-        let src = language == b.id ? b : a
-        let tgt = src == a ? b : a
-        if a == langA && b == langB { lastLangID = src.id }
+        let src = meetingMode ? Language.find(language) : (language == b.id ? b : a)
+        let tgt = meetingMode ? meetingTarget : (src == a ? b : a)
+        if !meetingMode, a == langA && b == langB { lastLangID = src.id }
         // 保存可验证的第三方语种，方便之后切换语言时把历史气泡移到正确的一侧。
         let recognizedLanguage = observedLanguage.flatMap { observed -> String? in
             guard !cands.contains(observed), Language.all.contains(where: { $0.id == observed }),
@@ -3416,7 +3505,7 @@ final class LiveSession: ObservableObject {
             return observed
         } ?? src.id
         var item = items[idx]
-        item.updateTranscript(text, source: src, target: tgt, side: src == a ? .left : .right,
+        item.updateTranscript(text, source: src, target: tgt, side: meetingMode ? .left : (src == a ? .left : .right),
                               recognizedLanguage: recognizedLanguage)
         let localSpeakerFolder: URL? = {
             guard speakerTrackingEnabled, !usingCloudASR, !localOptionalWorkPaused,
@@ -3432,12 +3521,22 @@ final class LiveSession: ObservableObject {
         let id = itemID
         rememberReference(id, samples: samples, text: text)
 
-        // 原文已经显示出来了，翻译排到另一条队列：
-        // 上一句翻得慢也不挡着下一句的原文。
-        persist()
-        enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: text,
-                                  src: src, tgt: tgt, samples: samples,
-                                  isApple: false, correctionAddress: correctionAddress))
+        // 实时翻译（会议）模式下：若说话人说的就是目标语种（例如目标是中文且对方说的就是中文），
+        // 直接保留原文完成记录，不再多此一举做“中译中”；外语则自动翻译为目标语种。
+        if meetingMode, src.id == tgt.id {
+            items[idx2].applyTranslation("", done: true)
+            jobTokens[itemID] = nil
+            persist()
+            activity = isRunning ? "正在聆听" : ""
+            kickReader()
+        } else {
+            // 原文已经显示出来了，翻译排到另一条队列：
+            // 上一句翻得慢也不挡着下一句的原文。
+            persist()
+            enqueueTranslation(MTJob(itemID: itemID, token: token, gen: gen, text: text,
+                                      src: src, tgt: tgt, samples: samples,
+                                      isApple: false, correctionAddress: correctionAddress))
+        }
         if shouldIdentify {
             if let speakerAddress {
                 enqueueSpeaker(samples, for: itemID, source: .cloud(speakerAddress))
@@ -4670,8 +4769,8 @@ final class LiveSession: ObservableObject {
         c.silenceMs = Int(silenceMs)
         // 对话翻译模式需要识别“好”“是”之类的短回答，
         // 门槛比实时翻译低（400ms → 200ms）
-        c.minSpeechMs = talkMode ? 200 : 400
-        c.holdMode = talkMode
+        c.minSpeechMs = usesDualConversationButtons ? 200 : 400
+        c.holdMode = usesDualConversationButtons
         return c
     }
 
