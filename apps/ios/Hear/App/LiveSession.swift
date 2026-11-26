@@ -2841,18 +2841,23 @@ final class LiveSession: ObservableObject {
         Task { for e in list { await e.stop() } }
     }
 
-    /// 第 id 句：两个听写里置信度更高的结果
+    /// 第 id 句：两个听写里置信度更高的结果。
+    /// 不再用 requireFinal 硬淘汰另一路——否则英文听写把中文胡乱听成低置信度 "We to the shoot" 且恰好先定稿时，
+    /// 会把中文听写高置信度但尚未定稿的正确结果直接覆盖掉；改为仅给已定稿加小幅加分（+0.12），仍以置信度与字形匹配为主。
     private func bestApple(_ id: Int, requireFinal: Bool = false,
                            languages: [Language]? = nil) -> (text: String, lang: Language)? {
         let candidates = languages ?? [langA, langB]
         var best: (text: String, lang: Language, conf: Double)?
         for e in appleEngines {
-            if requireFinal, !e.hasFinalText(id) { continue }
+            let isFinal = e.hasFinalText(id)
+            if requireFinal, !isFinal { continue }
             let r = e.segmentText(id)
             guard !r.text.isEmpty, let lid = e.languageID,
                   let lang = candidates.first(where: { $0.id == lid }) else { continue }
             // 例如中文听写把英文也写成了英文字母：文字和语言对不上就降分，避免说英文却当成中文
-            let score = r.confidence + (SpeechTextFilter.matchesLanguage(r.text, lang.id) ? 1 : 0)
+            let score = r.confidence
+                + (SpeechTextFilter.matchesLanguage(r.text, lang.id) ? 1.0 : 0.0)
+                + (isFinal ? 0.12 : 0.0)
             if best == nil || score > best!.conf { best = (r.text, lang, score) }
         }
         guard let best else { return nil }
@@ -2892,9 +2897,19 @@ final class LiveSession: ObservableObject {
         guard !Task.isCancelled, gen == runGen else { return }
         // 这一句已经被放弃/顶掉了：结果不要了
         guard isCurrentJob(itemID, token: token) else { return }
-        // 听写这一段有没有出字：优先取已定稿文本；若超时未定稿，直接回退到当前已识别文本，避免误丢整句
-        let dict = bestApple(segID, requireFinal: true, languages: languages)
-            ?? bestApple(segID, requireFinal: false, languages: languages)
+        // 诊断日志：逐路打印各语种系统听写引擎的定稿状态、置信度、得分与字数，便于直接定位误选或空结果
+        let diag = appleEngines.map { e -> String in
+            let lid = e.languageID ?? "?"
+            let fin = e.hasFinalText(segID)
+            let r = e.segmentText(segID)
+            let match = SpeechTextFilter.matchesLanguage(r.text, lid)
+            let sc = r.confidence + (match ? 1.0 : 0.0) + (fin ? 0.12 : 0.0)
+            return String(format: "%@[final=%@ conf=%.2f match=%@ score=%.2f %d字]",
+                          lid, fin ? "T" : "F", r.confidence, match ? "T" : "F", sc, r.text.count)
+        }.joined(separator: " | ")
+        hearLog("系统听写评分(第\(segID)句)：\(diag.isEmpty ? "无活跃引擎" : diag)")
+        // 听写这一段有没有出字：综合比较所有语种引擎（定稿仅小幅加分，避免另一路低置信度乱码先定稿反超正确语种）
+        let dict = bestApple(segID, requireFinal: false, languages: languages)
         var spoken = dict?.text ?? ""
         var src = job.forced ?? dict?.lang ?? job.fallback
         if !SpeechTextFilter.isMeaningful(spoken) {
