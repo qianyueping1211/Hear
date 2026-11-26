@@ -1349,14 +1349,32 @@ final class LiveSession: ObservableObject {
     /// 所以这里要说清楚可以怎么办，而不只是说"不支持"。
     private func appleTranslationFailed(_ error: Error? = nil) {
         guard usingAppleTranslation else { return }
-        let a = langA, b = langB
+        let a = langA
+        let b = !talkMode ? meetingTargetLang : langB
         var msg = "苹果翻译暂时用不了（\(a.name) → \(b.name)）"
         if let error { msg += "：\(Self.appleErrorText(error))" }
-        msg += "。多半是苹果翻译的语言包没装好：系统弹窗里点“下载”装一次就行；也可以在设置里改用云端或本地翻译。"
+        msg += "，请到苹果翻译应用中下载对应的语言；也可以在设置里改用云端或本地翻译。"
         appleNote = msg
         hearLog(msg, .warning)
         // 再要一次语言包：系统会重新弹一次下载窗（只弹一次，别反复烦人）
         askAppleDownloadAgain()
+    }
+
+    /// 气泡上显示的翻译失败文案：使用苹果翻译引擎且缺少语言包/不支持目标语种时，补充引导到苹果「翻译」App 下载对应语言
+    private func translationFailureMessage(for error: Error) -> String {
+        let base = error.localizedDescription
+        guard usingAppleTranslation else { return "（翻译失败：\(base)）" }
+        let desc = String(describing: error)
+        let isMissingAppleModel = desc.contains("unsupportedSourceLanguage")
+            || desc.contains("unsupportedTargetLanguage")
+            || desc.contains("unsupportedLanguagePairing")
+            || desc.contains("notInstalled")
+            || desc.contains("TranslationError")
+            || (error as? LiveTextError) == .unsupportedLanguage
+        if isMissingAppleModel {
+            return "（翻译失败：\(base)，请到苹果翻译应用中下载对应的语言）"
+        }
+        return "（翻译失败：\(base)）"
     }
 
     /// 再要一次苹果翻译的语言包（系统会重新弹下载窗）
@@ -3363,7 +3381,7 @@ final class LiveSession: ObservableObject {
             guard !Task.isCancelled, isCurrentJob(id, token: token) else { return }
             PerformanceLog.record("整句翻译", engine: engine, since: started, outcome: "失败")
             hearLog("翻译失败：\(error)", .error)
-            completeTranslation(job, "（翻译失败：\(error.localizedDescription)）", conversation: conversation)
+            completeTranslation(job, translationFailureMessage(for: error), conversation: conversation)
             if job.isApple, conversation == conversationID {
                 if usingAppleTranslation { appleTranslationFailed() } else { prepareAppleTranslation() }
             }
@@ -4005,7 +4023,7 @@ final class LiveSession: ObservableObject {
                 ConversationStore.shared.commitTranslation(
                     conversationID: targetConversationID, itemID: itemID,
                     expectedSource: text,
-                    translation: "（翻译失败：\(error.localizedDescription)）", done: true
+                    translation: translationFailureMessage(for: error), done: true
                 )
             }
         }
@@ -4049,7 +4067,7 @@ final class LiveSession: ObservableObject {
             } catch {
                 guard itemVersions[id] == version else { return }
                 hearLog("重新翻译失败：\(error)", .error)
-                applyTranslation(id, "（翻译失败：\(error.localizedDescription)）", done: true,
+                applyTranslation(id, translationFailureMessage(for: error), done: true,
                                  conversation: convID, expectedSource: text)
             }
             persist()
