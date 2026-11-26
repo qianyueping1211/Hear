@@ -1435,7 +1435,7 @@ export function SettingsModal() {
                 </label>
 
                 <label className="flex items-center justify-between">
-                  <span>优先使用 Qwen3-TTS 声音克隆（关闭后直接使用系统语音朗读）</span>
+                  <span>优先使用声音克隆 / 神经语音（关闭后使用 Windows 系统语音朗读）</span>
                   <input
                     type="checkbox"
                     checked={ttsSettings.useVoiceClone}
@@ -1446,9 +1446,30 @@ export function SettingsModal() {
 
                 <label className="flex items-center justify-between gap-4">
                   <div>
-                    <div className="text-slate-200">系统朗读声音</div>
+                    <div className="text-slate-200">声音合成模型</div>
                     <div className="text-[11px] text-slate-400">
-                      关闭声音克隆或克隆降级时，按所选性别使用 Windows 系统语音朗读。
+                      Qwen3-TTS 还原原声但耗时较长；Kokoro-82M 为极速神经语音（纯 CPU 约 0.2 秒，首次自动下载 ~114 MB）。
+                    </div>
+                  </div>
+                  <select
+                    value={ttsSettings.cloneEngine || "qwen3"}
+                    onChange={(e) =>
+                      updateTtsSettings({
+                        cloneEngine: e.target.value as "qwen3" | "kokoro",
+                      })
+                    }
+                    className="rounded-lg bg-surface-900 border border-white/10 px-3 py-1.5 text-xs text-white focus:outline-none focus:border-brand-500 shrink-0"
+                  >
+                    <option value="qwen3">Qwen3-TTS（原声克隆）</option>
+                    <option value="kokoro">Kokoro-82M（极速神经语音）</option>
+                  </select>
+                </label>
+
+                <label className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="text-slate-200">朗读声音性别（Kokoro / 系统语音）</div>
+                    <div className="text-[11px] text-slate-400">
+                      使用 Kokoro-82M 极速神经语音或 Windows 系统语音时，按所选性别匹配男女声。
                     </div>
                   </div>
                   <select

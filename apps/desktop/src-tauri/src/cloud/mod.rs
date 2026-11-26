@@ -494,7 +494,7 @@ impl HearCloudClient {
         ))
     }
 
-    /// 声音克隆语音合成（先上传参考音频到 /v1/clone/reference 获取 id，再调用 /v1/clone 返回 WAV 音频字节）
+    /// 声音克隆 / 神经语音合成（engine="kokoro" 直接走 Kokoro-82M 极速合成；engine="qwen3" 先上传参考音频到 /v1/clone/reference 再调用 /v1/clone）
     pub async fn clone_voice(
         &self,
         raw_address: &str,
@@ -503,8 +503,15 @@ impl HearCloudClient {
         reference_wav: Option<Vec<u8>>,
         reference_text: &str,
         token: Option<&str>,
+        engine: &str,
+        gender: &str,
     ) -> Result<Vec<u8>, String> {
         let base_url = normalize_service_url(raw_address)?;
+        let engine_norm = if engine.trim().eq_ignore_ascii_case("kokoro") {
+            "kokoro"
+        } else {
+            "qwen3"
+        };
         let lower_lang = lang.trim().to_ascii_lowercase();
         let cloud_lang = match lower_lang.as_str() {
             "zh" | "zh-cn" | "zh-tw" => "chinese",
@@ -522,8 +529,13 @@ impl HearCloudClient {
 
         let mut ref_id: Option<String> = None;
         let mut ref_from_cache = false;
-        let ref_len = reference_wav.as_ref().map(|w| w.len()).unwrap_or(0);
-        let ref_cache_key = reference_wav
+        let effective_ref_wav = if engine_norm == "kokoro" {
+            None
+        } else {
+            reference_wav
+        };
+        let ref_len = effective_ref_wav.as_ref().map(|w| w.len()).unwrap_or(0);
+        let ref_cache_key = effective_ref_wav
             .as_ref()
             .filter(|w| !w.is_empty())
             .map(|w| (base_url.clone(), fnv1a_64(w)));
@@ -540,7 +552,7 @@ impl HearCloudClient {
         }
 
         if ref_id.is_none() {
-            if let Some(ref wav) = reference_wav {
+            if let Some(ref wav) = effective_ref_wav {
                 if !wav.is_empty() {
                     let ref_url = format!("{}/v1/clone/reference", base_url);
                     let req = self.apply_headers(
@@ -595,7 +607,11 @@ impl HearCloudClient {
         let mut payload = serde_json::json!({
             "text": text,
             "lang": cloud_lang,
+            "engine": engine_norm,
         });
+        if !gender.trim().is_empty() {
+            payload["gender"] = serde_json::Value::String(gender.trim().to_ascii_lowercase());
+        }
         if let Some(rid) = ref_id {
             payload["reference_id"] = serde_json::Value::String(rid);
             if !reference_text.trim().is_empty() {
@@ -647,7 +663,7 @@ impl HearCloudClient {
                         cache.remove(key);
                     }
                 }
-                if let Some(ref wav) = reference_wav {
+                if let Some(ref wav) = effective_ref_wav {
                     if !wav.is_empty() {
                         let ref_url = format!("{}/v1/clone/reference", base_url);
                         let req = self.apply_headers(

@@ -865,10 +865,34 @@ async fn synthesize_cloned_segment_wav(
             }
         }
     }
+    let (clone_engine, voice_pref) = {
+        let snap = rt.snapshot.lock().await;
+        (
+            if snap.tts_settings.clone_engine.trim().eq_ignore_ascii_case("kokoro") {
+                "kokoro".to_string()
+            } else {
+                "qwen3".to_string()
+            },
+            snap.tts_settings.system_voice_preference.clone(),
+        )
+    };
+    let cache_text_key = format!("{}|{}", clone_engine, trimmed);
+    let gender_tag = match voice_pref.as_str() {
+        "male" => "male".to_string(),
+        "female" => "female".to_string(),
+        _ => rt
+            .segment_wavs
+            .lock()
+            .await
+            .get(id)
+            .and_then(|w| estimate_gender_from_wav_16k(w))
+            .map(|g| g.to_ascii_lowercase())
+            .unwrap_or_default(),
+    };
     {
         let cache = rt.cloned_tts_cache.lock().await;
         if let Some((cached_text, cached_wav)) = cache.get(id) {
-            if cached_text == &trimmed && cached_wav.len() > 44 {
+            if cached_text == &cache_text_key && cached_wav.len() > 44 {
                 return Ok(cached_wav.clone());
             }
         }
@@ -880,9 +904,11 @@ async fn synthesize_cloned_segment_wav(
             primary_target,
             &trimmed,
             lang,
-            ref_wav.clone(),
+            if clone_engine == "kokoro" { None } else { ref_wav.clone() },
             &ref_text,
             primary_token,
+            &clone_engine,
+            &gender_tag,
         )
         .await
     {
@@ -920,7 +946,16 @@ async fn synthesize_cloned_segment_wav(
                 };
                 if let Ok(wav_bytes) = rt
                     .cloud
-                    .clone_voice(&fallback_url, &trimmed, lang, ref_wav, &ref_text, f_tok_opt)
+                    .clone_voice(
+                        &fallback_url,
+                        &trimmed,
+                        lang,
+                        if clone_engine == "kokoro" { None } else { ref_wav },
+                        &ref_text,
+                        f_tok_opt,
+                        &clone_engine,
+                        &gender_tag,
+                    )
                     .await
                 {
                     rt.clone_consecutive_failures.store(0, Ordering::Relaxed);
@@ -936,12 +971,12 @@ async fn synthesize_cloned_segment_wav(
     };
     if let Ok(ref wav_bytes) = synthesized {
         if wav_bytes.len() > 44 {
-            save_cloned_wav_to_disk(app, &active_conv_id, id, &trimmed, wav_bytes);
+            save_cloned_wav_to_disk(app, &active_conv_id, id, &cache_text_key, wav_bytes);
             let mut cache = rt.cloned_tts_cache.lock().await;
             if cache.len() >= 64 {
                 cache.clear();
             }
-            cache.insert(id.to_string(), (trimmed.clone(), wav_bytes.clone()));
+            cache.insert(id.to_string(), (cache_text_key, wav_bytes.clone()));
         }
     }
     synthesized
@@ -1050,15 +1085,26 @@ async fn play_cloned_segment_to_device(
 
     // 先查内存 + 按会话落盘 WAV 缓存：已克隆好的句子跳过 "cloning" 状态，0ms 直接播放
     let trimmed = text.trim().to_string();
-    let active_conv_id = rt.snapshot.lock().await.active_conversation_id.clone();
+    let (active_conv_id, active_clone_engine) = {
+        let snap = rt.snapshot.lock().await;
+        (
+            snap.active_conversation_id.clone(),
+            if snap.tts_settings.clone_engine.trim().eq_ignore_ascii_case("kokoro") {
+                "kokoro".to_string()
+            } else {
+                "qwen3".to_string()
+            },
+        )
+    };
+    let cache_text_key = format!("{}|{}", active_clone_engine, trimmed);
     let cached_wav = {
         let cache = rt.cloned_tts_cache.lock().await;
         cache
             .get(&id)
-            .filter(|(t, w)| t == &trimmed && w.len() > 44)
+            .filter(|(t, w)| t == &cache_text_key && w.len() > 44)
             .map(|(_, w)| w.clone())
     }
-    .or_else(|| load_cloned_wav_from_disk(&app, &active_conv_id, &id, &trimmed));
+    .or_else(|| load_cloned_wav_from_disk(&app, &active_conv_id, &id, &cache_text_key));
     let wav_bytes = if let Some(b) = cached_wav {
         b
     } else {

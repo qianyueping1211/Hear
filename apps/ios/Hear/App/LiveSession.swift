@@ -200,6 +200,15 @@ final class LiveSession: ObservableObject {
             }
         }
     }
+    /// 云端声音合成模型："qwen3"（Qwen3-TTS 原声克隆）| "kokoro"（Kokoro-82M 极速神经语音）
+    @Published var cloudCloneModel: String {
+        didSet {
+            save("cloudCloneModel", cloudCloneModel)
+            guard cloudCloneModel != oldValue else { return }
+            hearLog("云端声音模型改为：\(cloudCloneModel == "kokoro" ? "Kokoro-82M" : "Qwen3-TTS")")
+            clearCloneTasks()
+        }
+    }
     /// 语音识别走云端
     var usingCloudASR: Bool { asrEngine == "cloud" }
     /// 文本翻译走云端
@@ -562,6 +571,8 @@ final class LiveSession: ObservableObject {
         if d.object(forKey: "voiceCloneCloud") as? Bool == false {
             d.set(true, forKey: "voiceCloneCloud")
         }
+        let savedCloudCloneModel = d.string(forKey: "cloudCloneModel") ?? "qwen3"
+        cloudCloneModel = (savedCloudCloneModel == "kokoro") ? "kokoro" : "qwen3"
         // init 里属性还没初始化完，只能用局部变量，不能直接读 self.cloudAddress
         let cloudAddr = d.string(forKey: "cloudAddress") ?? ""
         cloudAddress = cloudAddr
@@ -4332,9 +4343,18 @@ final class LiveSession: ObservableObject {
         // 不降噪的话环境音就跟着念出来，听着是"有杂的声音"
         let refSamples = usingCloudClone ? CloudVoiceReference.denoise(ref.samples) : ref.samples
         if !usingCloudClone, (!ZipVoiceModel.supports(lang) || !ZipVoiceModel.supports(item.source.id)) { return nil }
-        let backend = usingCloudClone ? "cloud" : "zipvoice"
+        let cloudModel = (cloudCloneModel == "kokoro") ? "kokoro" : "qwen3"
+        let genderHint: String = {
+            if systemVoicePreference == "male" { return "male" }
+            if systemVoicePreference == "female" { return "female" }
+            if let f0 = VoiceAnalyzer.estimateF0(ref.samples) {
+                return f0 < 165 ? "male" : "female"
+            }
+            return ""
+        }()
+        let backend = usingCloudClone ? "cloud-\(cloudModel)" : "zipvoice"
         let key = backend + "-" + cloneCacheKey(lang: lang, text: text + "\n" + refText, ref: ref.samples)
-        let itemKey = itemCloneCacheKey(id: id, lang: lang, text: text)
+        let itemKey = backend + "-" + itemCloneCacheKey(id: id, lang: lang, text: text)
         let cloner = self.cloner
         let cloud = self.cloud
         let useCloud = usingCloudClone
@@ -4355,13 +4375,14 @@ final class LiveSession: ObservableObject {
                     if useCloud {
                         // 把可用内存一起记上：万一又被系统杀掉，日志里能看出来
                         let memMB = await MainActor.run { Self.freeMB() }
-                        hearLogNow("声音克隆（云端）：开始生成（可用内存 \(memMB) MB）")
+                        hearLogNow("声音克隆（云端 \(cloudModel)）：开始生成（可用内存 \(memMB) MB）")
                         // 语言名要用模型认的那种写法（english/chinese），和本地跑的时候一样
                         let cloudLang = CloudVoiceReference.languageNames[lang] ?? lang
                         let out: CloneAudio
                         do {
                             out = try await cloud.clone(text: text, lang: cloudLang,
-                                                        reference: refSamples, referenceText: refText)
+                                                        reference: refSamples, referenceText: refText,
+                                                        engine: cloudModel, gender: genderHint)
                         } catch {
                             let cloudError = error as? CloudClient.CloudError
                             if cloudError?.isInferenceTimeout == true, !Task.isCancelled {

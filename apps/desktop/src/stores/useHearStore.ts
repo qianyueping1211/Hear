@@ -147,6 +147,7 @@ const DEFAULT_TTS: TtsOutputSettings = {
   duckOriginalAudio: true,
   duckRatio: 0.25,
   systemVoicePreference: "auto",
+  cloneEngine: "qwen3",
 };
 
 const DEFAULT_PLAYBACK: RecordingPlaybackState = {

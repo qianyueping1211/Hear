@@ -1277,16 +1277,20 @@ actor CloudClient {
     /// 一次只发一个克隆请求：
     /// 每句话都会在后台预生成声音，同时来好几句的话，
     /// 好几个大响应一起在内存里，内存紧张时 App 会被系统直接杀掉。
-    func clone(text: String, lang: String, reference: [Float], referenceText: String) async throws -> CloneAudio {
+    func clone(text: String, lang: String, reference: [Float], referenceText: String,
+               engine: String = "qwen3", gender: String = "") async throws -> CloneAudio {
+        let isKokoro = engine.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "kokoro"
         let timeLimit = CloudInferencePolicy.cloneBudget(forCharacters: text.count)
         let now = ContinuousClock.now
         let deadline = now.advanced(by: .seconds(timeLimit))
         try await acquireCloneSlot(until: now.advanced(by: .seconds(15)))
         defer { releaseCloneSlot() }
-        guard !reference.isEmpty else { throw CloudError.badResponse("没有参考音频") }
+        if !isKokoro {
+            guard !reference.isEmpty else { throw CloudError.badResponse("没有参考音频") }
+        }
 
-        let refWav = Wav.encode(samples: reference, sampleRate: 16_000)
-        let fingerprint = Data(SHA256.hash(data: refWav))
+        let refWav = isKokoro ? Data() : Wav.encode(samples: reference, sampleRate: 16_000)
+        let fingerprint = isKokoro ? Data() : Data(SHA256.hash(data: refWav))
         let addresses = candidateAddresses(cloneAddress)
         var lastError = CloudError.notConfigured
         for (index, address) in addresses.enumerated() {
@@ -1296,6 +1300,18 @@ actor CloudClient {
             let isLlama = await kind(of: address, timeout: 4, deadline: deadline) == .llamaServer
             let key = Self.cleanURL(address)
             do {
+                if isKokoro {
+                    var body: [String: Any] = ["text": text, "lang": lang, "engine": "kokoro"]
+                    if !gender.isEmpty { body["gender"] = gender }
+                    let remaining = max(0, ContinuousClock.now.duration(to: deadline).components.seconds)
+                    let data = try await rawData("/v1/clone", address: address, method: "POST",
+                                                 body: try JSONSerialization.data(withJSONObject: body),
+                                                 headers: ["X-Hear-Audio": "wav",
+                                                           "X-Hear-Clone-Timeout": String(remaining)],
+                                                 timeout: timeLimit, inferenceDeadline: deadline,
+                                                 retryConnection: retryConnection)
+                    return try Self.decodeClone(data)
+                }
                 if isLlama {
                     let body = ["input": text, "text": text, "lang": lang,
                                 "speaker_ref_b64": refWav.base64EncodedString(),

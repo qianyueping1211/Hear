@@ -458,28 +458,49 @@ export function MainApp() {
         <span>自动朗读译文</span>
       </button>
 
-      {/* 独立的「声音克隆」开关（选中颜色与其他开关统一为绿色） */}
-      <button
-        type="button"
-        onClick={() =>
-          void updateTtsSettings({
-            useVoiceClone: !ttsSettings.useVoiceClone,
-          })
-        }
-        title={
-          ttsSettings.useVoiceClone
-            ? "声音克隆已开启（点击关闭，关闭后改用系统语音朗读）"
-            : "声音克隆已关闭（点击开启原声克隆）"
-        }
-        className={`h-9 px-2.5 rounded-lg border text-xs inline-flex items-center gap-1.5 transition ${
-          ttsSettings.useVoiceClone
-            ? "bg-emerald-500/20 border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30"
-            : "bg-surface-800 border-white/10 text-slate-400 hover:text-white hover:bg-white/5"
-        }`}
-      >
-        <AudioLines className="w-3.5 h-3.5" />
-        <span>声音克隆</span>
-      </button>
+      {/* 独立的「声音克隆」开关 + 快捷模型切换（Qwen3 原声克隆 / Kokoro 极速神经语音） */}
+      <div className="inline-flex items-center">
+        <button
+          type="button"
+          onClick={() =>
+            void updateTtsSettings({
+              useVoiceClone: !ttsSettings.useVoiceClone,
+            })
+          }
+          title={
+            ttsSettings.useVoiceClone
+              ? `已开启（当前：${ttsSettings.cloneEngine === "kokoro" ? "Kokoro-82M 极速神经语音" : "Qwen3-TTS 原声克隆"}；点击关闭改用系统语音）`
+              : "声音克隆 / 神经语音已关闭（点击开启）"
+          }
+          className={`h-9 px-2.5 border text-xs inline-flex items-center gap-1.5 transition ${
+            ttsSettings.useVoiceClone
+              ? "rounded-l-lg bg-emerald-500/20 border-emerald-400/40 text-emerald-300 hover:bg-emerald-500/30"
+              : "rounded-lg bg-surface-800 border-white/10 text-slate-400 hover:text-white hover:bg-white/5"
+          }`}
+        >
+          <AudioLines className="w-3.5 h-3.5" />
+          <span>
+            {ttsSettings.useVoiceClone && ttsSettings.cloneEngine === "kokoro"
+              ? "极速语音"
+              : "声音克隆"}
+          </span>
+        </button>
+        {ttsSettings.useVoiceClone && (
+          <button
+            type="button"
+            onClick={() =>
+              void updateTtsSettings({
+                cloneEngine:
+                  ttsSettings.cloneEngine === "kokoro" ? "qwen3" : "kokoro",
+              })
+            }
+            title="点击切换声音合成模型：Qwen3-TTS（原声克隆）⇄ Kokoro-82M（纯 CPU 0.2 秒极速神经语音）"
+            className="h-9 px-2 rounded-r-lg border-y border-r border-emerald-400/40 bg-emerald-500/10 hover:bg-emerald-500/25 text-[11px] font-medium text-emerald-200 transition"
+          >
+            {ttsSettings.cloneEngine === "kokoro" ? "Kokoro" : "Qwen3"}
+          </button>
+        )}
+      </div>
 
       {/* 独立的「会议同传」开关：选中=会议同传模式，未选中=面对面模式；仅在会议同传+录音开启中启用虚拟声卡 */}
       <button

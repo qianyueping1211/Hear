@@ -458,6 +458,148 @@ def sensevoice_available():
     return os.path.isfile(model) and os.path.isfile(tokens)
 
 
+# ── Kokoro-82M 极速神经语音（sherpa-onnx ONNX INT8，纯 CPU ~0.2s 出声，支持中英男女声） ──
+KOKORO_DIR = os.environ.get(
+    "HEAR_KOKORO_DIR",
+    os.path.join(os.path.dirname(SENSEVOICE_DIR), "kokoro-int8-multi-lang-v1_1"),
+)
+KOKORO_URLS = [
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
+    "https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
+]
+_kokoro = None
+_kokoro_lock = threading.Lock()
+
+
+def _kokoro_model_path():
+    for name in ("model.int8.onnx", "model.onnx"):
+        p = os.path.join(KOKORO_DIR, name)
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
+def kokoro_ready():
+    return bool(
+        _kokoro_model_path()
+        and os.path.isfile(os.path.join(KOKORO_DIR, "voices.bin"))
+        and os.path.isfile(os.path.join(KOKORO_DIR, "tokens.txt"))
+    )
+
+
+def _ensure_kokoro_downloaded():
+    if kokoro_ready():
+        return True
+    import tarfile
+    models_root = os.path.dirname(KOKORO_DIR)
+    os.makedirs(models_root, exist_ok=True)
+    archive = os.path.join(models_root, "kokoro-int8-multi-lang-v1_1.tar.bz2")
+    last_err = None
+    for url in KOKORO_URLS:
+        try:
+            log("正在自动下载 Kokoro-82M 极速语音模型（约 114 MB）：%s" % url)
+            req = urllib.request.Request(url, headers={"User-Agent": "Hear-Server/1.0"})
+            with urllib.request.urlopen(req, timeout=180) as resp, open(archive, "wb") as out_f:
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    out_f.write(chunk)
+            log("Kokoro-82M 下载完成，正在解压…")
+            with tarfile.open(archive, "r:bz2") as tf:
+                tf.extractall(models_root)
+            try:
+                os.remove(archive)
+            except OSError:
+                pass
+            if kokoro_ready():
+                log("Kokoro-82M 模型已就绪：%s" % KOKORO_DIR)
+                return True
+        except Exception as e:
+            last_err = e
+            log("Kokoro-82M 下载尝试失败（%s）：%s" % (url, e))
+    if last_err:
+        raise RuntimeError("Kokoro-82M 模型自动下载失败：%s" % last_err)
+    return False
+
+
+def get_kokoro():
+    global _kokoro
+    if _kokoro is not None:
+        return _kokoro
+    with _kokoro_lock:
+        if _kokoro is not None:
+            return _kokoro
+        try:
+            import sherpa_onnx
+        except Exception as e:
+            raise RuntimeError("服务端未安装 sherpa-onnx，无法运行 Kokoro-82M：%s" % e)
+        _ensure_kokoro_downloaded()
+        model_path = _kokoro_model_path()
+        voices_path = os.path.join(KOKORO_DIR, "voices.bin")
+        tokens_path = os.path.join(KOKORO_DIR, "tokens.txt")
+        data_dir = os.path.join(KOKORO_DIR, "espeak-ng-data")
+        dict_dir = os.path.join(KOKORO_DIR, "dict")
+        lexicons = [
+            os.path.join(KOKORO_DIR, fn)
+            for fn in ("lexicon-zh.txt", "lexicon-us-en.txt")
+            if os.path.isfile(os.path.join(KOKORO_DIR, fn))
+        ]
+        log("正在加载 Kokoro-82M 极速神经语音…")
+        kokoro_cfg = sherpa_onnx.OfflineTtsKokoroModelConfig(
+            model=model_path,
+            voices=voices_path,
+            tokens=tokens_path,
+            data_dir=data_dir if os.path.isdir(data_dir) else "",
+            dict_dir=dict_dir if os.path.isdir(dict_dir) else "",
+            lexicon=",".join(lexicons),
+        )
+        tts_cfg = sherpa_onnx.OfflineTtsConfig(
+            model=sherpa_onnx.OfflineTtsModelConfig(
+                kokoro=kokoro_cfg,
+                num_threads=max(2, min(4, os.cpu_count() or 2)),
+                provider="cpu",
+            )
+        )
+        _kokoro = sherpa_onnx.OfflineTts(tts_cfg)
+        log("Kokoro-82M 加载完成")
+        return _kokoro
+
+
+def kokoro_synthesize_wav(text, lang="", gender=""):
+    tts = get_kokoro()
+    ll = (lang or "").strip().lower()
+    gl = (gender or "").strip().lower()
+    is_zh = ll.startswith("zh") or "chinese" in ll
+    # kokoro-int8-multi-lang-v1_1 音色表：0-1 美式女声, 3-57 中文女声, 58-102 中文/双语男声
+    if gl == "male":
+        sid = 58
+    elif is_zh:
+        sid = 3
+    else:
+        sid = 0
+    audio = tts.generate(text, sid=sid, speed=1.0)
+    samples = audio.samples
+    sr = int(audio.sample_rate or 24000)
+    import struct
+    pcm = bytearray(len(samples) * 2)
+    for idx, s in enumerate(samples):
+        if s > 1.0:
+            s = 1.0
+        elif s < -1.0:
+            s = -1.0
+        val = int(s * 32767.0)
+        struct.pack_into("<h", pcm, idx * 2, val)
+    data_len = len(pcm)
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF", 36 + data_len, b"WAVE",
+        b"fmt ", 16, 1, 1, sr, sr * 2, 2, 16,
+        b"data", data_len,
+    )
+    return bytes(header) + bytes(pcm), sr
+
+
 def whisper_available():
     """faster-whisper 装没装（装了 Whisper 方案就能用）"""
     try:
@@ -1103,7 +1245,9 @@ a{color:#007aff;text-decoration:none}
             else:
                 out["asr_ready"] = whisper_ready
         out["mt_ready"] = (mt_state == "就绪")
-        out["clone_ready"] = clone_state == "就绪" and clone_model_valid
+        out["clone_ready"] = (clone_state == "就绪" and clone_model_valid) or kokoro_ready()
+        out["kokoro_ready"] = kokoro_ready()
+        out["clone_engines"] = ["qwen3", "kokoro"]
         # 桌面端与多端共享能力元信息（向后兼容旧版 iOS）
         out["bind_host"] = HOST
         out["lan_shared"] = HOST not in ("127.0.0.1", "::1", "localhost")
@@ -1428,8 +1572,28 @@ a{color:#007aff;text-decoration:none}
         text_in = req.get("text", "")
         lang_in = req.get("lang", "")
         ref_text_in = req.get("reference_text", "")
+        engine_in = (req.get("engine") or "qwen3").strip().lower()
+        gender_in = (req.get("gender") or "").strip().lower()
         if not isinstance(text_in, str) or not isinstance(lang_in, str) or not isinstance(ref_text_in, str):
             self._error("text / lang / reference_text 必须是字符串", 400)
+            return
+        if engine_in == "kokoro":
+            t0 = time.time()
+            try:
+                wav, rate = kokoro_synthesize_wav(text_in, lang_in, gender_in)
+            except Exception as e:
+                log("Kokoro-82M 合成失败：%s" % e)
+                self._error("Kokoro-82M 合成失败：%s" % e, 503)
+                return
+            log("Kokoro-82M 合成结束 %.2fs：%d 字，%d 字节，%d Hz"
+                % (time.time() - t0, len(text_in), len(wav), rate))
+            if (self.headers.get("X-Hear-Audio") or "").strip().lower() == "wav":
+                self._send_wav(wav)
+                return
+            self._send_json({
+                "audio": base64.b64encode(wav).decode("ascii"),
+                "sample_rate": rate,
+            })
             return
         payload = {
             "input": text_in,

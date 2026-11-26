@@ -202,10 +202,17 @@ pub struct TtsOutputSettings {
     /// 系统朗读声音偏好："auto"（自动识别说话人性别）| "female"（女声）| "male"（男声）
     #[serde(default = "default_system_voice_preference")]
     pub system_voice_preference: String,
+    /// 声音克隆 / 神经语音引擎："qwen3"（Qwen3-TTS 原声克隆）| "kokoro"（Kokoro-82M 极速神经语音）
+    #[serde(default = "default_clone_engine")]
+    pub clone_engine: String,
 }
 
 fn default_system_voice_preference() -> String {
     "auto".to_string()
+}
+
+fn default_clone_engine() -> String {
+    "qwen3".to_string()
 }
 
 impl Default for TtsOutputSettings {
@@ -224,6 +231,7 @@ impl Default for TtsOutputSettings {
             duck_original_audio: true,
             duck_ratio: 0.25,
             system_voice_preference: "auto".to_string(),
+            clone_engine: "qwen3".to_string(),
         }
     }
 }
