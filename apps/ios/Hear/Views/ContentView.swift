@@ -15,7 +15,6 @@ struct ContentView: View {
     @State private var originalDraft = ""
     @State private var editingSpeaker: TranslationItem?
     @State private var showMenu = false          // 右上角 ⋯ 菜单
-    @State private var showModePicker = false    // 2×2 田字格「翻译模式」选择器
     @State private var showQuickModeBar = false  // 底部苹果原生悬浮四模式切换胶囊
     @State private var quickModeDismissTask: Task<Void, Never>?
     @State private var ipadSelectedConversationID: UUID?  // iPad 宽窄屏切换时保留当前选中的历史对话
@@ -63,11 +62,6 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) { SettingsView() }
         .sheet(isPresented: $showHistory) { HistoryView() }
         .sheet(isPresented: $showGlossary) { GlossaryView() }
-        .sheet(isPresented: $showModePicker) {
-            TranslationModePickerSheet(onDismiss: { showModePicker = false })
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-        }
         .sheet(item: $editingSpeaker) { item in
             let conversation = session.conversationID
             SpeakerEditor(item: item, labels: session.items.speakerLabels) { change in
@@ -233,8 +227,6 @@ struct ContentView: View {
                             .ignoresSafeArea()
                             .onTapGesture { showMenu = false }
                         MoreMenuPanel(
-                            currentModeLabel: currentModeTitle,
-                            onModePicker: { showMenu = false; showModePicker = true },
                             onNew: { showMenu = false; newTapped() },
                             onHistory: { showMenu = false; showHistory = true },
                             onGlossary: { showMenu = false; showGlossary = true },
@@ -257,15 +249,6 @@ struct ContentView: View {
 
     private var isPhoneFaceToFace: Bool {
         session.talkMode && session.conversationStyle == .faceToFace && (session.phase == .ready || session.isLoadingPhase)
-    }
-
-    private var currentModeTitle: String {
-        if !session.talkMode { return "聆听翻译模式" }
-        switch session.conversationStyle {
-        case .single: return "单侧自动模式"
-        case .sideBySide: return "并排双键模式"
-        case .faceToFace: return "面对面模式"
-        }
     }
 
     private func toggleQuickModeBar() {
@@ -336,10 +319,8 @@ struct TopBar: View {
     }
 }
 
-/// 右上角弹出的菜单：顶部提供「翻译模式」入口（打开 2×2 田字格带示意图选择器）
+/// ⋯ 弹出的菜单（新建 / 历史 / 术语 / 设置）
 struct MoreMenuPanel: View {
-    var currentModeLabel: String = "聆听翻译模式"
-    var onModePicker: () -> Void = {}
     var onNew: () -> Void
     var onHistory: () -> Void
     var onGlossary: () -> Void
@@ -347,27 +328,6 @@ struct MoreMenuPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Button(action: onModePicker) {
-                HStack(spacing: 12) {
-                    Image(systemName: "square.grid.2x2")
-                        .font(.system(size: 19))
-                        .foregroundStyle(Color.accentColor)
-                        .frame(width: 26)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("翻译模式").font(.system(size: 17.5, weight: .medium))
-                        Text(currentModeLabel).font(.caption2).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 16)
-                .frame(maxWidth: .infinity, minHeight: 56)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            Divider().padding(.horizontal, 12)
             row("新建对话", "square.and.pencil", onNew)
             row("历史记录", "clock.arrow.circlepath", onHistory)
             row("术语配置", "text.book.closed", onGlossary)
@@ -1555,177 +1515,55 @@ struct PhoneFaceToFaceView: View {
     }
 }
 
-// MARK: - 2×2 田字格「翻译模式」带示意图选择器
+// MARK: - 4 种翻译模式线框示意图（滑动底部模式栏时浮动预览使用）
 
-struct TranslationModePickerSheet: View {
-    @EnvironmentObject var session: LiveSession
-    var onDismiss: () -> Void
-
-    private enum ModeOption: String, CaseIterable, Identifiable {
-        case listening
-        case singleAuto
-        case sideBySide
-        case faceToFace
-
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .listening: return "聆听翻译模式"
-            case .singleAuto: return "单侧自动模式"
-            case .sideBySide: return "并排双键模式"
-            case .faceToFace: return "面对面模式"
-            }
-        }
-
-        var subtitle: String {
-            switch self {
-            case .listening: return "会议多语种 → 译为目标语言"
-            case .singleAuto: return "单按钮自动识别双方语种"
-            case .sideBySide: return "左右双按钮，同向看屏"
-            case .faceToFace: return "上下分屏，对方画面倒置"
-            }
-        }
-    }
-
-    private var currentOption: ModeOption {
-        if !session.talkMode { return .listening }
-        switch session.conversationStyle {
-        case .single: return .singleAuto
-        case .sideBySide: return .sideBySide
-        case .faceToFace: return .faceToFace
-        }
-    }
-
-    private func select(_ option: ModeOption) {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        switch option {
-        case .listening:
-            session.switchTranslationMode(to: .listening)
-        case .singleAuto:
-            session.switchTranslationMode(to: .singleAuto)
-        case .sideBySide:
-            session.switchTranslationMode(to: .sideBySide)
-        case .faceToFace:
-            session.switchTranslationMode(to: .faceToFace)
-        }
-        onDismiss()
-    }
+private struct ModePreviewDiagram: View {
+    let mode: AppTranslationMode
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 16) {
-                LazyVGrid(
-                    columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)],
-                    spacing: 14
-                ) {
-                    ForEach(ModeOption.allCases) { option in
-                        let selected = option == currentOption
-                        Button {
-                            select(option)
-                        } label: {
-                            VStack(spacing: 10) {
-                                modeDiagram(option, selected: selected)
-                                    .frame(height: 112)
-                                    .frame(maxWidth: .infinity)
-                                    .background(
-                                        Color(.tertiarySystemGroupedBackground),
-                                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    )
-                                    .overlay(alignment: .topTrailing) {
-                                        if selected {
-                                            Image(systemName: "checkmark.circle.fill")
-                                                .font(.system(size: 18))
-                                                .foregroundStyle(Color.accentColor)
-                                                .padding(6)
-                                        }
-                                    }
-
-                                VStack(spacing: 3) {
-                                    Text(option.title)
-                                        .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(.primary)
-                                        .lineLimit(1)
-                                    Text(option.subtitle)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                        .multilineTextAlignment(.center)
-                                }
-                            }
-                            .padding(10)
-                            .background(
-                                selected ? Color.accentColor.opacity(0.12) : Color(.secondarySystemGroupedBackground),
-                                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .stroke(selected ? Color.accentColor : Color.primary.opacity(0.08),
-                                            lineWidth: selected ? 2 : 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                Spacer(minLength: 0)
-            }
-            .navigationTitle("选择翻译模式")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成", action: onDismiss)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func modeDiagram(_ option: ModeOption, selected: Bool) -> some View {
-        let accent = selected ? Color.accentColor : Color.accentColor.opacity(0.78)
-        let cardBg = Color.primary.opacity(0.10)
-        switch option {
+        let accent = Color.accentColor
+        let cardBg = Color.primary.opacity(0.11)
+        switch mode {
         case .listening:
             // 通栏说话人卡片 + 底部单个麦克风
             VStack(spacing: 6) {
                 VStack(spacing: 5) {
                     HStack(spacing: 4) {
                         Circle().fill(Color.green.opacity(0.8)).frame(width: 6, height: 6)
-                        RoundedRectangle(cornerRadius: 3).fill(cardBg).frame(height: 11)
+                        RoundedRectangle(cornerRadius: 3).fill(cardBg).frame(height: 10)
                     }
                     HStack(spacing: 4) {
                         Circle().fill(Color.orange.opacity(0.8)).frame(width: 6, height: 6)
-                        RoundedRectangle(cornerRadius: 3).fill(cardBg).frame(height: 11)
+                        RoundedRectangle(cornerRadius: 3).fill(cardBg).frame(height: 10)
                     }
                     HStack(spacing: 4) {
                         Circle().fill(Color.purple.opacity(0.8)).frame(width: 6, height: 6)
-                        RoundedRectangle(cornerRadius: 3).fill(cardBg).frame(height: 11)
+                        RoundedRectangle(cornerRadius: 3).fill(cardBg).frame(height: 10)
                     }
                 }
                 .padding(.horizontal, 14)
                 Spacer(minLength: 2)
                 Circle()
                     .fill(accent)
-                    .frame(width: 24, height: 24)
-                    .overlay(Image(systemName: "mic.fill").font(.system(size: 11)).foregroundStyle(.white))
+                    .frame(width: 22, height: 22)
+                    .overlay(Image(systemName: "mic.fill").font(.system(size: 10)).foregroundStyle(.white))
             }
-            .padding(.vertical, 10)
+            .padding(.vertical, 8)
 
         case .singleAuto:
             // 左右对话气泡 + 底部单个自动麦克风
             VStack(spacing: 6) {
-                VStack(spacing: 6) {
+                VStack(spacing: 5) {
                     HStack {
-                        RoundedRectangle(cornerRadius: 5).fill(cardBg).frame(width: 58, height: 14)
+                        RoundedRectangle(cornerRadius: 5).fill(cardBg).frame(width: 56, height: 13)
                         Spacer()
                     }
                     HStack {
                         Spacer()
-                        RoundedRectangle(cornerRadius: 5).fill(accent.opacity(0.28)).frame(width: 58, height: 14)
+                        RoundedRectangle(cornerRadius: 5).fill(accent.opacity(0.28)).frame(width: 56, height: 13)
                     }
                     HStack {
-                        RoundedRectangle(cornerRadius: 5).fill(cardBg).frame(width: 48, height: 12)
+                        RoundedRectangle(cornerRadius: 5).fill(cardBg).frame(width: 46, height: 11)
                         Spacer()
                     }
                 }
@@ -1733,22 +1571,22 @@ struct TranslationModePickerSheet: View {
                 Spacer(minLength: 2)
                 Circle()
                     .fill(accent)
-                    .frame(width: 24, height: 24)
-                    .overlay(Image(systemName: "mic.fill").font(.system(size: 11)).foregroundStyle(.white))
+                    .frame(width: 22, height: 22)
+                    .overlay(Image(systemName: "mic.fill").font(.system(size: 10)).foregroundStyle(.white))
             }
-            .padding(.vertical, 10)
+            .padding(.vertical, 8)
 
         case .sideBySide:
             // 左右对话气泡 + 底部左右两个语言麦克风
             VStack(spacing: 6) {
-                VStack(spacing: 6) {
+                VStack(spacing: 5) {
                     HStack {
-                        RoundedRectangle(cornerRadius: 5).fill(cardBg).frame(width: 58, height: 14)
+                        RoundedRectangle(cornerRadius: 5).fill(cardBg).frame(width: 56, height: 13)
                         Spacer()
                     }
                     HStack {
                         Spacer()
-                        RoundedRectangle(cornerRadius: 5).fill(accent.opacity(0.28)).frame(width: 58, height: 14)
+                        RoundedRectangle(cornerRadius: 5).fill(accent.opacity(0.28)).frame(width: 56, height: 13)
                     }
                 }
                 .padding(.horizontal, 14)
@@ -1756,26 +1594,26 @@ struct TranslationModePickerSheet: View {
                 HStack(spacing: 24) {
                     Circle()
                         .fill(accent)
-                        .frame(width: 24, height: 24)
-                        .overlay(Text("中").font(.system(size: 10, weight: .bold)).foregroundStyle(.white))
+                        .frame(width: 22, height: 22)
+                        .overlay(Text("中").font(.system(size: 9.5, weight: .bold)).foregroundStyle(.white))
                     Circle()
                         .fill(accent)
-                        .frame(width: 24, height: 24)
-                        .overlay(Text("En").font(.system(size: 9, weight: .bold)).foregroundStyle(.white))
+                        .frame(width: 22, height: 22)
+                        .overlay(Text("En").font(.system(size: 8.5, weight: .bold)).foregroundStyle(.white))
                 }
             }
-            .padding(.vertical, 10)
+            .padding(.vertical, 8)
 
         case .faceToFace:
             // 顶部倒置麦克风 + 上半区 + 中间横线与翻转钮 + 下半区 + 底部正向麦克风
             VStack(spacing: 4) {
                 Circle()
                     .fill(accent)
-                    .frame(width: 20, height: 20)
-                    .overlay(Image(systemName: "mic.fill").font(.system(size: 9)).foregroundStyle(.white))
+                    .frame(width: 19, height: 19)
+                    .overlay(Image(systemName: "mic.fill").font(.system(size: 8.5)).foregroundStyle(.white))
                     .rotationEffect(.degrees(180))
                 HStack {
-                    RoundedRectangle(cornerRadius: 4).fill(cardBg).frame(width: 56, height: 11)
+                    RoundedRectangle(cornerRadius: 4).fill(cardBg).frame(width: 54, height: 10)
                     Spacer()
                 }
                 .padding(.horizontal, 14)
@@ -1783,26 +1621,26 @@ struct TranslationModePickerSheet: View {
                     Rectangle().fill(Color.primary.opacity(0.18)).frame(height: 1)
                     Circle()
                         .fill(Color(.secondarySystemGroupedBackground))
-                        .frame(width: 16, height: 16)
-                        .overlay(Image(systemName: "arrow.up.arrow.down").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary))
+                        .frame(width: 15, height: 15)
+                        .overlay(Image(systemName: "arrow.up.arrow.down").font(.system(size: 7.5, weight: .bold)).foregroundStyle(.secondary))
                 }
                 .padding(.horizontal, 10)
                 HStack {
                     Spacer()
-                    RoundedRectangle(cornerRadius: 4).fill(accent.opacity(0.28)).frame(width: 56, height: 11)
+                    RoundedRectangle(cornerRadius: 4).fill(accent.opacity(0.28)).frame(width: 54, height: 10)
                 }
                 .padding(.horizontal, 14)
                 Circle()
                     .fill(accent)
-                    .frame(width: 20, height: 20)
-                    .overlay(Image(systemName: "mic.fill").font(.system(size: 9)).foregroundStyle(.white))
+                    .frame(width: 19, height: 19)
+                    .overlay(Image(systemName: "mic.fill").font(.system(size: 8.5)).foregroundStyle(.white))
             }
-            .padding(.vertical, 8)
+            .padding(.vertical, 6)
         }
     }
 }
 
-// MARK: - 底部快捷模式切换栏（仿 Apple 原生悬浮胶囊 + 滑动手势 + 触感反馈）
+// MARK: - 底部快捷模式切换栏（仿 Apple 原生悬浮胶囊 + 滑动手势 + 浮动效果图预览）
 
 private struct QuickPillPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
@@ -1820,54 +1658,46 @@ private struct FloatingModeSwitcherBar: View {
     var onInteract: () -> Void
 
     @Namespace private var pillNS
-    @State private var draggingMode: ModeChoice?
+    @State private var draggingMode: AppTranslationMode?
     @State private var isPressing = false
 
-    private enum ModeChoice: Hashable {
-        case listening, singleAuto, sideBySide, faceToFace
-    }
-
     private struct ModeItem: Identifiable {
-        let mode: ModeChoice
+        let mode: AppTranslationMode
         let title: String
+        let fullTitle: String
+        let subtitle: String
         let icon: String
-        var id: ModeChoice { mode }
+        var id: AppTranslationMode { mode }
     }
 
     private let items: [ModeItem] = [
-        ModeItem(mode: .listening, title: "聆听", icon: "waveform"),
-        ModeItem(mode: .singleAuto, title: "单侧", icon: "mic.fill"),
-        ModeItem(mode: .sideBySide, title: "并排", icon: "person.2.fill"),
-        ModeItem(mode: .faceToFace, title: "面对面", icon: "rectangle.split.1x2.fill"),
+        ModeItem(mode: .listening, title: "聆听", fullTitle: "聆听翻译模式",
+                 subtitle: "多语种会议 → 统一译为目标语言", icon: "waveform"),
+        ModeItem(mode: .singleAuto, title: "单侧", fullTitle: "单侧自动模式",
+                 subtitle: "单按钮自动识别双方语种", icon: "mic.fill"),
+        ModeItem(mode: .sideBySide, title: "并排", fullTitle: "并排双键模式",
+                 subtitle: "左右双按钮，同向看屏", icon: "person.2.fill"),
+        ModeItem(mode: .faceToFace, title: "面对面", fullTitle: "面对面模式",
+                 subtitle: "上下分屏，对方画面倒置", icon: "rectangle.split.1x2.fill"),
     ]
 
-    private var committedMode: ModeChoice {
-        if !session.talkMode { return .listening }
-        switch session.conversationStyle {
-        case .single: return .singleAuto
-        case .sideBySide: return .sideBySide
-        case .faceToFace: return .faceToFace
-        }
+    private var committedMode: AppTranslationMode {
+        session.currentTranslationMode
     }
 
-    private var highlightedMode: ModeChoice {
+    private var highlightedMode: AppTranslationMode {
         draggingMode ?? committedMode
     }
 
-    private func apply(_ mode: ModeChoice) {
-        switch mode {
-        case .listening:
-            session.switchTranslationMode(to: .listening)
-        case .singleAuto:
-            session.switchTranslationMode(to: .singleAuto)
-        case .sideBySide:
-            session.switchTranslationMode(to: .sideBySide)
-        case .faceToFace:
-            session.switchTranslationMode(to: .faceToFace)
-        }
+    private var highlightedItem: ModeItem {
+        items.first(where: { $0.mode == highlightedMode }) ?? items[0]
     }
 
-    private func mode(at x: CGFloat, totalWidth: CGFloat) -> ModeChoice {
+    private var highlightedIndex: Int {
+        items.firstIndex(where: { $0.mode == highlightedMode }) ?? 0
+    }
+
+    private func mode(at x: CGFloat, totalWidth: CGFloat) -> AppTranslationMode {
         guard totalWidth > 0 else { return committedMode }
         let ratio = min(max(x / totalWidth, 0), 0.9999)
         let idx = min(max(Int(ratio * CGFloat(items.count)), 0), items.count - 1)
@@ -1877,6 +1707,12 @@ private struct FloatingModeSwitcherBar: View {
     var body: some View {
         GeometryReader { geo in
             let innerWidth = max(geo.size.width - 8, 1)
+            let cardWidth: CGFloat = 176
+            let segWidth = innerWidth / CGFloat(items.count)
+            let rawCenter = 4 + segWidth * (CGFloat(highlightedIndex) + 0.5)
+            let clampedCenter = min(max(rawCenter, cardWidth / 2), max(cardWidth / 2, geo.size.width - cardWidth / 2))
+            let cardOffsetX = clampedCenter - geo.size.width / 2
+
             HStack(spacing: 0) {
                 ForEach(items) { item in
                     let isSelected = highlightedMode == item.mode
@@ -1930,13 +1766,54 @@ private struct FloatingModeSwitcherBar: View {
                     )
             )
             .shadow(color: .black.opacity(colorScheme == .dark ? 0.42 : 0.14), radius: 16, y: 6)
+            // 按住或滑动浏览模式时，在当前对应按钮正上方浮动出该模式的线框效果图
+            .overlay(alignment: .bottom) {
+                if isPressing {
+                    let preview = highlightedItem
+                    VStack(spacing: 8) {
+                        ModePreviewDiagram(mode: preview.mode)
+                            .frame(height: 98)
+                            .frame(maxWidth: .infinity)
+                            .background(
+                                Color(.tertiarySystemGroupedBackground).opacity(colorScheme == .dark ? 0.72 : 0.90),
+                                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            )
+                        VStack(spacing: 2) {
+                            Text(preview.fullTitle)
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            Text(preview.subtitle)
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
+                        }
+                    }
+                    .padding(10)
+                    .frame(width: cardWidth)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.08), lineWidth: 0.6)
+                    )
+                    .shadow(color: .black.opacity(colorScheme == .dark ? 0.45 : 0.16), radius: 18, y: 6)
+                    .offset(x: cardOffsetX, y: -74)
+                    .allowsHitTesting(false)
+                    .transition(.scale(scale: 0.86, anchor: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.spring(response: 0.28, dampingFraction: 0.80), value: isPressing)
+            .animation(.spring(response: 0.26, dampingFraction: 0.80), value: highlightedMode)
             .contentShape(Capsule())
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .local)
                     .onChanged { value in
                         let target = mode(at: value.location.x - 4, totalWidth: innerWidth)
                         if !isPressing {
-                            isPressing = true
+                            withAnimation(.spring(response: 0.26, dampingFraction: 0.78)) {
+                                isPressing = true
+                            }
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         } else if draggingMode != target {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -1952,7 +1829,7 @@ private struct FloatingModeSwitcherBar: View {
                         let target = mode(at: value.location.x - 4, totalWidth: innerWidth)
                         let changed = target != committedMode
                         withAnimation(.spring(response: 0.28, dampingFraction: 0.80)) {
-                            apply(target)
+                            session.switchTranslationMode(to: target)
                             draggingMode = nil
                             isPressing = false
                         }
