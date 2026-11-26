@@ -1126,10 +1126,18 @@ async fn play_cloned_segment_to_device(
         let routed_to_virtual_mic =
             is_meeting && target == "meeting_mic" && !tts.meeting_mic_output_device_id.trim().is_empty()
             || (is_meeting && target == "auto" && seg_ch == Some(AudioChannel::Mic) && !tts.meeting_mic_output_device_id.trim().is_empty());
-        let mute_sys = !routed_to_virtual_mic;
+        // 若会议同传已绑定独立虚拟声卡听对方（meeting_loopback_device_id 非空），播报到本地耳机绝不会串回该虚拟声卡，
+        // 无需静音 System 回环，防止对方连续发言被截断丢句！
+        let isolated_meeting_loopback =
+            is_meeting && !tts.meeting_loopback_device_id.trim().is_empty();
+        let mute_sys = !routed_to_virtual_mic && !isolated_meeting_loopback;
         let hard_mute = !routed_to_virtual_mic && tts.mute_mic_while_speaking;
-        // 仅在会议同传模式下压低其他应用原声；非同传（面对面）模式不干预系统其他软件音量
-        let duck = if is_meeting && !routed_to_virtual_mic && tts.duck_original_audio {
+        // 仅在会议同传模式且未启用独立虚拟声卡屏蔽原声时，才压低其他应用原声
+        let duck = if is_meeting
+            && !routed_to_virtual_mic
+            && !isolated_meeting_loopback
+            && tts.duck_original_audio
+        {
             Some(tts.duck_ratio.clamp(0.0, 1.0))
         } else {
             None
@@ -1923,33 +1931,40 @@ async fn speak_text_sapi(
         return Ok(());
     }
     let lang_tag = lang.unwrap_or_default().trim().to_string();
-    let (duck_ratio_opt, is_recording, voice_pref, output_dev) = {
+    let (duck_ratio_opt, is_recording, voice_pref, output_dev, routed_to_virtual_mic, mute_sys_loopback) = {
         let snap = rt.snapshot.lock().await;
-        // 仅在会议同传模式下压低会议原声；非同传模式不干预系统音量
-        let duck = if snap.tts_settings.routing_mode == "meeting"
+        let is_meeting = snap.tts_settings.routing_mode == "meeting";
+        let seg_ch = segment_id
+            .as_deref()
+            .and_then(|sid| snap.segments.iter().find(|s| s.id == sid).map(|s| s.channel));
+        let to_virtual_mic = is_meeting
+            && seg_ch == Some(AudioChannel::Mic)
+            && !snap.tts_settings.meeting_mic_output_device_id.trim().is_empty();
+        let isolated_loopback =
+            is_meeting && !snap.tts_settings.meeting_loopback_device_id.trim().is_empty();
+        // 仅在会议同传、播报到本地耳机且未用虚拟声卡隔离原声时，才压低其他应用原声
+        let duck = if is_meeting
+            && !to_virtual_mic
+            && !isolated_loopback
             && snap.tts_settings.duck_original_audio
         {
             Some(snap.tts_settings.duck_ratio.clamp(0.0, 1.0))
         } else {
             None
         };
-        let is_meeting = snap.tts_settings.routing_mode == "meeting";
-        let seg_ch = segment_id
-            .as_deref()
-            .and_then(|sid| snap.segments.iter().find(|s| s.id == sid).map(|s| s.channel));
-        let dev = if is_meeting
-            && seg_ch == Some(AudioChannel::Mic)
-            && !snap.tts_settings.meeting_mic_output_device_id.trim().is_empty()
-        {
+        let dev = if to_virtual_mic {
             snap.tts_settings.meeting_mic_output_device_id.clone()
         } else {
             snap.tts_settings.output_device_id.clone()
         };
+        let mute_sys = !to_virtual_mic && !isolated_loopback;
         (
             duck,
             snap.mode == SessionMode::Recording,
             snap.tts_settings.system_voice_preference.clone(),
             dev,
+            to_virtual_mic,
+            mute_sys,
         )
     };
     let gender_tag = match voice_pref.as_str() {
@@ -1978,8 +1993,12 @@ async fn speak_text_sapi(
             prev.store(true, Ordering::Relaxed);
         }
     }
-    if is_recording {
+    if is_recording && mute_sys_loopback {
         rt.system_tts_muted.store(true, Ordering::Relaxed);
+    }
+    // 播报到本地扬声器/耳机时登记已播译文，防止笔记本外放被自己麦克风二次拾取后误判为「我说的话」又发给对方
+    if !routed_to_virtual_mic {
+        rt.record_spoken_tts(&trimmed).await;
     }
     #[cfg(target_os = "windows")]
     {
@@ -1995,7 +2014,7 @@ async fn speak_text_sapi(
         .flatten();
 
         if let Some(wav_bytes) = one_core_wav {
-            let far_end_opt = if is_recording {
+            let far_end_opt = if is_recording && !routed_to_virtual_mic {
                 Some(rt.aec_far_end.clone())
             } else {
                 None
@@ -2010,7 +2029,10 @@ async fn speak_text_sapi(
             .await;
             match play_res {
                 Ok(Ok(())) => {
-                    if is_recording {
+                    if !routed_to_virtual_mic {
+                        rt.record_spoken_tts(&trimmed).await;
+                    }
+                    if is_recording && mute_sys_loopback {
                         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                         rt.system_tts_muted.store(false, Ordering::Relaxed);
                     }
@@ -2034,6 +2056,12 @@ async fn speak_text_sapi(
                 "[tts:winrt] OneCore 未返回音频（lang={} gender={}），回退经典 SAPI",
                 lang_tag, gender_tag
             ));
+        }
+
+        // 若目标是发给会议虚拟麦，绝不回退到经典 SAPI 默认扬声器（否则会把发给对方的译文串播到自己耳机/外放）
+        if routed_to_virtual_mic {
+            logger::warn("[tts:sapi] 目标为会议虚拟麦且 WinRT 播报失败，跳过经典 SAPI 默认扬声器回退以防串音");
+            return Ok(());
         }
 
         let sapi_pid = rt.sapi_pid.clone();
@@ -2087,7 +2115,10 @@ $s.Speak($env:HEAR_SPEAK_TEXT)
         .await
         .map_err(|e| format!("系统朗读任务异常：{}", e))?;
     }
-    if is_recording {
+    if !routed_to_virtual_mic {
+        rt.record_spoken_tts(&trimmed).await;
+    }
+    if is_recording && mute_sys_loopback {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         rt.system_tts_muted.store(false, Ordering::Relaxed);
     }

@@ -1446,7 +1446,21 @@ export const useHearStore = create<HearStoreState>((set, get) => ({
     }
 
     set({ speakingSegmentId: id });
-    const guardLoopback = isTauriRuntime() && get().mode === "recording";
+    const ttsCur = get().ttsSettings;
+    const segCur = get().segments.find((s) => s.id === id);
+    const isIsolatedMeeting =
+      ttsCur.routingMode === "meeting" &&
+      Boolean(ttsCur.meetingLoopbackDeviceId?.trim());
+    const isToVirtualMic =
+      ttsCur.routingMode === "meeting" &&
+      segCur?.channel === "mic" &&
+      Boolean(ttsCur.meetingMicOutputDeviceId?.trim());
+    // 已用独立虚拟声卡隔离对方原声，或当前是发给会议虚拟麦的译文时，不静音 System 回环，避免截断对方连续发言
+    const guardLoopback =
+      isTauriRuntime() &&
+      get().mode === "recording" &&
+      !isIsolatedMeeting &&
+      !isToVirtualMic;
     const startSystemGuard = () => {
       if (guardLoopback) {
         void tauriInvoke("set_system_tts_muted", {
