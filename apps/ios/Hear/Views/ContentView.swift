@@ -124,7 +124,7 @@ struct ContentView: View {
                 if session.talkMode && session.conversationStyle == .faceToFace && (session.phase == .ready || session.isLoadingPhase) {
                     PhoneFaceToFaceView(
                         onOpenMenu: { showMenu = true },
-                        onExit: { session.conversationStyle = .sideBySide }
+                        onExit: { session.switchTranslationMode(to: .sideBySide) }
                     )
                 } else {
                     VStack(spacing: 0) {
@@ -1601,16 +1601,13 @@ struct TranslationModePickerSheet: View {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         switch option {
         case .listening:
-            session.talkMode = false
+            session.switchTranslationMode(to: .listening)
         case .singleAuto:
-            session.talkMode = true
-            session.conversationStyle = .single
+            session.switchTranslationMode(to: .singleAuto)
         case .sideBySide:
-            session.talkMode = true
-            session.conversationStyle = .sideBySide
+            session.switchTranslationMode(to: .sideBySide)
         case .faceToFace:
-            session.talkMode = true
-            session.conversationStyle = .faceToFace
+            session.switchTranslationMode(to: .faceToFace)
         }
         onDismiss()
     }
@@ -1860,16 +1857,13 @@ private struct FloatingModeSwitcherBar: View {
     private func apply(_ mode: ModeChoice) {
         switch mode {
         case .listening:
-            session.talkMode = false
+            session.switchTranslationMode(to: .listening)
         case .singleAuto:
-            session.talkMode = true
-            session.conversationStyle = .single
+            session.switchTranslationMode(to: .singleAuto)
         case .sideBySide:
-            session.talkMode = true
-            session.conversationStyle = .sideBySide
+            session.switchTranslationMode(to: .sideBySide)
         case .faceToFace:
-            session.talkMode = true
-            session.conversationStyle = .faceToFace
+            session.switchTranslationMode(to: .faceToFace)
         }
     }
 

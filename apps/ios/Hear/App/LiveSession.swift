@@ -6,6 +6,16 @@ import Security
 import CryptoKit
 import os
 
+/// 顶层 4 种翻译模式（仅「并排双键」与「面对面」之间切换时保留当前屏幕内容，其余切换均归档并开启新对话）
+enum AppTranslationMode: String, CaseIterable, Identifiable, Hashable {
+    case listening
+    case singleAuto
+    case sideBySide
+    case faceToFace
+
+    var id: String { rawValue }
+}
+
 /// 对话翻译模式的三种展示方式（在对话模式右上角 ⋯ 菜单内切换）
 enum ConversationDisplayStyle: String, CaseIterable, Identifiable {
     case single      // 自由对话（单按钮 · 自动双向识别）
@@ -552,6 +562,7 @@ final class LiveSession: ObservableObject {
             save("talkMode", talkMode)
             save("hearLastMode", talkMode)      // 多存一份：万一主的那份丢了还能找回来
             pushConfig()                        // 门槛不一样了（短回答的门槛）
+            guard !switchingMode else { return }
             startToken = UUID()                 // 正在等待的"开始收音"作废
             conversationInputLanguage = nil
             if isRunning { Task { await finishRecording(readAfter: false) } }
@@ -564,12 +575,55 @@ final class LiveSession: ObservableObject {
             guard conversationStyle != oldValue else { return }
             save("conversationStyle", conversationStyle.rawValue)
             pushConfig()
+            guard !switchingMode else { return }
             startToken = UUID()
             conversationInputLanguage = nil
             if talkMode {
                 if isRunning { Task { await finishRecording(readAfter: false) } }
                 else if microphoneStartToken != nil { capture.stop() }
             }
+        }
+    }
+    private var switchingMode = false
+
+    /// 当前所处的 4 模式之一
+    var currentTranslationMode: AppTranslationMode {
+        if !talkMode { return .listening }
+        switch conversationStyle {
+        case .single: return .singleAuto
+        case .sideBySide: return .sideBySide
+        case .faceToFace: return .faceToFace
+        }
+    }
+
+    /// 原子切换翻译模式：仅「并排双键 ↔ 面对面」保留当前屏幕内容；其余任何模式切换均自动归档旧内容并开启空白新对话
+    func switchTranslationMode(to mode: AppTranslationMode) {
+        let oldMode = currentTranslationMode
+        guard mode != oldMode else { return }
+        let keepContent = (oldMode == .sideBySide && mode == .faceToFace)
+            || (oldMode == .faceToFace && mode == .sideBySide)
+        switchingMode = true
+        switch mode {
+        case .listening:
+            talkMode = false
+        case .singleAuto:
+            talkMode = true
+            conversationStyle = .single
+        case .sideBySide:
+            talkMode = true
+            conversationStyle = .sideBySide
+        case .faceToFace:
+            talkMode = true
+            conversationStyle = .faceToFace
+        }
+        switchingMode = false
+        conversationInputLanguage = nil
+        if !keepContent && (!items.isEmpty || !partial.isEmpty) {
+            newConversation(summarize: false, resumeListening: false)
+        } else {
+            startToken = UUID()
+            if isRunning { Task { await finishRecording(readAfter: false) } }
+            else if microphoneStartToken != nil { capture.stop() }
         }
     }
     /// 实时翻译（会议）模式的目标翻译语言（默认中文）：自动识别任意多国语言并统一翻译为该语言
@@ -2581,7 +2635,7 @@ final class LiveSession: ObservableObject {
             let meetingMode = !talkMode
             let meetingTarget = meetingTargetLang
             let fallback = forced?.id ?? (meetingMode ? meetingTarget.id : ((lastLangID == b.id) ? b.id : a.id))
-            let cands = forced.map { [$0.id] } ?? (meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id])
+            let cands = meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id]
             // 只识别最近 10 秒，长句也跟得上
             let maxN = 16_000 * 10
             let clipped = job.samples.count > maxN
@@ -2851,8 +2905,9 @@ final class LiveSession: ObservableObject {
     // MARK: - 苹果自带模式（系统听写 + 系统翻译）
 
     /// 解析苹果系统听写当前应并行监听的候选语种列表（保证 startAppleASR / bestApple / appleUpdated / processApple 完全一致）
+    /// 注意：在并排双键/面对面模式下即使按住了某一方按钮（forced != nil），仍同时开双方语种听写，
+    /// 这样无论说话人说母语、外语还是中英混说都能准确转写，翻译方向再由 forced 强行锁定为「译为对方语言」。
     private func appleASRLanguages(left: Language, right: Language, forced: Language?) -> [Language] {
-        if let forced { return [forced] }
         if !talkMode {
             let target = meetingTargetLang
             let other: Language
@@ -3048,10 +3103,12 @@ final class LiveSession: ObservableObject {
                 }
             }
         }
-        partialSource = b.lang
+        // 并排双键/面对面模式下，按了哪一侧按钮，src 就固定是该侧语种、目标就固定是另一侧语种
+        let srcLang = forcedLang ?? b.lang
+        partialSource = srcLang
         partial = displayText
-        let targetLang = !talkMode ? meetingTargetLang : (b.lang == langA ? langB : langA)
-        requestPreviewTranslation(id: currentSeg, text: displayText, src: b.lang, tgt: targetLang)
+        let targetLang = !talkMode ? meetingTargetLang : (srcLang == langA ? langB : langA)
+        requestPreviewTranslation(id: currentSeg, text: displayText, src: srcLang, tgt: targetLang)
     }
 
     /// 等系统听写把这一段定稿（最多等这么久）。
@@ -3094,20 +3151,15 @@ final class LiveSession: ObservableObject {
         // 并发跑两个任务（零额外延迟）：
         // 1) 等苹果系统听写定稿（高置信度定稿立即返回，低置信度最多多等 1.2s 等另一路定稿）
         // 2) sherpa-onnx Whisper-Tiny 语种裁判（~60ms）判定本句真实语种
+        // 并排双键/面对面模式下即使 forced != nil，也同时用双语候选给 ASR 转写（支持混说或说对方语言），
+        // 识别完成后由 job.forced 锁定归属方并强制翻译成另一侧语言。
         let lidCandidates = languages.map(\.id)
         let detector = languageDetector
-        let forcedLangID = job.forced?.id
-        let lidTask: Task<String?, Never>? = forcedLangID == nil
-            ? Task.detached(priority: .userInitiated) {
-                await detector.detectLanguage(samples: samples, candidates: lidCandidates)
-            }
-            : nil
-        await waitAppleFinal(segID)
-        let detectedLID: String? = if let forcedLangID {
-            forcedLangID
-        } else {
-            await lidTask?.value
+        let lidTask: Task<String?, Never> = Task.detached(priority: .userInitiated) {
+            await detector.detectLanguage(samples: samples, candidates: lidCandidates)
         }
+        await waitAppleFinal(segID)
+        let detectedLID: String? = await lidTask.value
         guard !Task.isCancelled, gen == runGen else { return }
         // 这一句已经被放弃/顶掉了：结果不要了
         guard isCurrentJob(itemID, token: token) else { return }
@@ -3440,7 +3492,9 @@ final class LiveSession: ObservableObject {
         activity = usingCloudASR ? "云端识别中…" : "SenseVoice 识别中…"
         let forced = job.forced
         let fallback = forced?.id ?? (meetingMode ? meetingTarget.id : job.fallback.id)
-        let cands = forced.map { [$0.id] } ?? (meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id])
+        // 并排双键/面对面模式下（forced != nil）仍传双语候选给识别引擎，确保混说或说对方语言也能准确转写，
+        // 最终翻译目标再由 forced 强制锁定为对方语言。
+        let cands = meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id]
         let correctionAddress: String?
         let speakerAddress: String?
         let detected: String
