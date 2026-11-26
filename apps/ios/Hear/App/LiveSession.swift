@@ -626,12 +626,11 @@ final class LiveSession: ObservableObject {
             else if microphoneStartToken != nil { capture.stop() }
         }
     }
-    /// 实时翻译（会议）模式的目标翻译语言（默认中文）：自动识别任意多国语言并统一翻译为该语言
+    /// 实时翻译（会议）模式的目标翻译语言（默认中文）：自动识别多国语言并统一翻译为该语言（仅影响翻译目标，不影响语音识别引擎）
     @Published var meetingTargetLang: Language {
         didSet {
             guard meetingTargetLang != oldValue else { return }
             save("meetingTargetLang", meetingTargetLang.id)
-            if !talkMode, isRunning, dualLive { startAppleASR() }
         }
     }
     /// 当前是否处于「左右/上下双按钮」按语种点按收听状态
@@ -2905,21 +2904,12 @@ final class LiveSession: ObservableObject {
     // MARK: - 苹果自带模式（系统听写 + 系统翻译）
 
     /// 解析苹果系统听写当前应并行监听的候选语种列表（保证 startAppleASR / bestApple / appleUpdated / processApple 完全一致）
-    /// 注意：在并排双键/面对面模式下即使按住了某一方按钮（forced != nil），仍同时开双方语种听写，
-    /// 这样无论说话人说母语、外语还是中英混说都能准确转写，翻译方向再由 forced 强行锁定为「译为对方语言」。
+    /// 注意：
+    /// 1) 聆听翻译模式下，`meetingTargetLang` 仅表示「译为」的目标语言（如泰语），与语音识别语种无关，
+    ///    因此仍使用当前引擎支持的主识别语种对 `[left, right]`（默认中/英），避免因目标语种不被系统听写支持导致识别失败；
+    /// 2) 并排双键/面对面模式下即使按住某一方按钮（forced != nil），仍同时开双方语种听写，
+    ///    这样无论说话人说母语、外语还是中英混说都能准确转写，翻译方向再由 forced 锁定为「译为对方语言」。
     private func appleASRLanguages(left: Language, right: Language, forced: Language?) -> [Language] {
-        if !talkMode {
-            let target = meetingTargetLang
-            let other: Language
-            if right.id != target.id {
-                other = right
-            } else if left.id != target.id {
-                other = left
-            } else {
-                other = Language.find(target.id == "en" ? "zh" : "en")
-            }
-            return [target, other]
-        }
         return [left, right]
     }
 
