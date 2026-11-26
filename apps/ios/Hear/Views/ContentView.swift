@@ -189,7 +189,7 @@ struct ContentView: View {
                                         scheduleQuickModeDismiss(after: 2.0)
                                     }
                                 },
-                                onInteract: { scheduleQuickModeDismiss(after: 3.0) }
+                                onInteract: { scheduleQuickModeDismiss(after: 5.0) }
                             )
                             .padding(.horizontal, 16)
                             .padding(.bottom, 12)
@@ -265,7 +265,7 @@ struct ContentView: View {
             dismissQuickModeBar()
         } else {
             showQuickModeBar = true
-            scheduleQuickModeDismiss(after: 3.0)
+            scheduleQuickModeDismiss(after: 5.0)
         }
     }
 
@@ -975,24 +975,9 @@ struct ControlBar: View {
             .frame(height: 140)
             .clipped()
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: session.usesDualConversationButtons)
-
-            ModeDots()
-                .padding(.bottom, 6)
         }
         .padding(.top, 6)
-        .contentShape(Rectangle())
-        // 左右滑动切换：实时翻译 ⇄ 对话翻译（按着说话时不切换）
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 30).onEnded { v in
-                let dx = v.translation.width
-                guard session.conversationInputLanguage == nil, abs(dx) > 50,
-                      abs(dx) > abs(v.translation.height) else { return }
-                let talk = dx < 0
-                guard talk != session.talkMode else { return }
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                session.talkMode = talk
-            }
-        )
+        .padding(.bottom, 10)
         // 临时提示与分隔线上常驻的模型进度分开。
         .overlay(alignment: .top) {
             if let t = session.toast {
@@ -1055,33 +1040,6 @@ struct ControlBar: View {
             ConversationInputButton(lang: session.langB)
         }
         .padding(.horizontal, 16)
-    }
-}
-
-/// 底部的两个小圆点：表示当前是哪个模式，点一下也能切换
-struct ModeDots: View {
-    @EnvironmentObject var session: LiveSession
-
-    var body: some View {
-        HStack(spacing: 6) {
-            dot(active: !session.talkMode) { session.talkMode = false }
-            dot(active: session.talkMode) { session.talkMode = true }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(session.talkMode ? "对话翻译模式" : "实时翻译模式")
-        .accessibilityHint("左右滑动切换模式")
-    }
-
-    private func dot(active: Bool, _ action: @escaping () -> Void) -> some View {
-        Capsule()
-            .fill(active ? Color.accentColor : Color.secondary.opacity(0.35))
-            .frame(width: active ? 16 : 6, height: 6)
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                guard session.conversationInputLanguage == nil, !active else { return }
-                action()
-            }
     }
 }
 
