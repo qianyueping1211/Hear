@@ -2871,12 +2871,56 @@ final class LiveSession: ObservableObject {
         return (best.text, best.lang)
     }
 
+    /// 苹果连续流式听写常把上一句和下一句合在同一个累积 Piece 里；
+    /// 逐字跳过标点空白比对：若 `text` 以 `previous` 开头，返回剥离掉已展示前缀后的新增部分。
+    private static func stripCommittedPrefix(_ text: String, previous: String) -> (remainder: String, matched: Bool) {
+        let prevChars = previous.filter { !$0.isWhitespace && !$0.isPunctuation }
+        guard !prevChars.isEmpty else { return (text, false) }
+        var pIdx = prevChars.startIndex
+        var tIdx = text.startIndex
+        while pIdx < prevChars.endIndex && tIdx < text.endIndex {
+            let tc = text[tIdx]
+            if tc.isWhitespace || tc.isPunctuation {
+                tIdx = text.index(after: tIdx)
+                continue
+            }
+            if tc.lowercased() == prevChars[pIdx].lowercased() {
+                pIdx = prevChars.index(after: pIdx)
+                tIdx = text.index(after: tIdx)
+            } else {
+                return (text, false)
+            }
+        }
+        guard pIdx == prevChars.endIndex else { return (text, false) }
+        while tIdx < text.endIndex && (text[tIdx].isWhitespace || text[tIdx].isPunctuation) {
+            tIdx = text.index(after: tIdx)
+        }
+        return (String(text[tIdx...]).trimmingCharacters(in: .whitespacesAndNewlines), true)
+    }
+
     private func appleUpdated() {
         guard !appleEngines.isEmpty, isRunning, currentSeg > finishedSeg, partialSeg == currentSeg,
               let b = bestApple(currentSeg), SpeechTextFilter.isMeaningful(b.text) else { return }
+        var displayText = b.text
+        // 连续流式听写未定稿时，volatilePiece 会带着上一句已提交气泡的前缀：实时预览里直接剥离，避免新气泡重复显示上一句
+        if let last = items.last, last.source.id == b.lang.id {
+            let stripped = Self.stripCommittedPrefix(displayText, previous: last.sourceText)
+            if stripped.matched {
+                if stripped.remainder.isEmpty || !SpeechTextFilter.isMeaningful(stripped.remainder) {
+                    return
+                }
+                displayText = stripped.remainder
+            } else {
+                let normPrev = last.sourceText.filter { !$0.isWhitespace && !$0.isPunctuation }
+                let normCurr = displayText.filter { !$0.isWhitespace && !$0.isPunctuation }
+                if !normCurr.isEmpty && normPrev.hasPrefix(normCurr) {
+                    return
+                }
+            }
+        }
         partialSource = b.lang
-        partial = b.text
-        requestPreviewTranslation(id: currentSeg, text: b.text, src: b.lang, tgt: b.lang == langA ? langB : langA)
+        partial = displayText
+        requestPreviewTranslation(id: currentSeg, text: displayText, src: b.lang, tgt: b.lang == langA ? langB : langA)
     }
 
     /// 等系统听写把这一段定稿（最多等这么久）。
@@ -2957,40 +3001,45 @@ final class LiveSession: ObservableObject {
         hearLogText("系统听写（\(src.name)）：", String(spoken.prefix(40)))
 
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
-        // 苹果 SpeechAnalyzer 在短停顿（<1s）后常把前后两段 VAD 合并为同一个完整 Piece，
-        // 导致第 N+1 句再次命中第 N 句的完整文本而出现两条重复气泡。
-        // 若上一条同语种气泡的原文与本条完全相同或为其前缀，则直接合并到上一条并移除重复气泡。
+        // 苹果 SpeechAnalyzer 在短停顿后常把前后两段 VAD 合并为同一个累积 Piece：
+        // 1) 若本句与上一条同语种气泡完全相同、或上一条已包含本句，直接丢弃重复气泡；
+        // 2) 若本句以「上一条原文」为前缀且后面有新增内容，剥离掉已展示前缀，仅保留新增那半句作为新气泡。
         if idx > 0 {
             let prev = items[idx - 1]
-            let normPrev = prev.sourceText.filter { !$0.isWhitespace && !$0.isPunctuation }
-            let normCurr = spoken.filter { !$0.isWhitespace && !$0.isPunctuation }
-            if prev.source.id == src.id, !normPrev.isEmpty, !normCurr.isEmpty,
-               (normCurr == normPrev || normCurr.hasPrefix(normPrev) || normPrev.hasPrefix(normCurr)) {
-                let mergedText = spoken.count >= prev.sourceText.count ? spoken : prev.sourceText
-                let prevID = prev.id
-                let changed = mergedText != prev.sourceText
-                if changed {
-                    items[idx - 1].updateTranscript(mergedText, source: src, target: tgt,
-                                                    side: leading ? .left : .right, recognizedLanguage: src.id)
+            if prev.source.id == src.id {
+                let normPrev = prev.sourceText.filter { !$0.isWhitespace && !$0.isPunctuation }
+                let normCurr = spoken.filter { !$0.isWhitespace && !$0.isPunctuation }
+                if !normPrev.isEmpty && !normCurr.isEmpty {
+                    let stripped = Self.stripCommittedPrefix(spoken, previous: prev.sourceText)
+                    if stripped.matched {
+                        if stripped.remainder.isEmpty || !SpeechTextFilter.isMeaningful(stripped.remainder) {
+                            if let endSec = items[idx].audioEndSec {
+                                items[idx - 1].audioEndSec = endSec
+                            }
+                            removeItem(itemID)
+                            jobTokens[itemID] = nil
+                            hearLog("系统听写：与上一句完全重复，已自动去重", .info)
+                            persist()
+                            activity = isRunning ? "正在聆听" : ""
+                            kickReader()
+                            return
+                        } else {
+                            spoken = stripped.remainder
+                            hearLog("系统听写：已剥离上一句重复前缀，保留新增内容", .info)
+                        }
+                    } else if normPrev.hasPrefix(normCurr) {
+                        if let endSec = items[idx].audioEndSec {
+                            items[idx - 1].audioEndSec = endSec
+                        }
+                        removeItem(itemID)
+                        jobTokens[itemID] = nil
+                        hearLog("系统听写：本句内容已包含在上一句中，已自动去重", .info)
+                        persist()
+                        activity = isRunning ? "正在聆听" : ""
+                        kickReader()
+                        return
+                    }
                 }
-                if let endSec = items[idx].audioEndSec {
-                    items[idx - 1].audioEndSec = endSec
-                }
-                removeItem(itemID)
-                jobTokens[itemID] = nil
-                hearLog("系统听写：检测到与上一句同一语音片段，已自动合并去重", .info)
-                persist()
-                if changed {
-                    let prevToken = UUID()
-                    jobTokens[prevID] = prevToken
-                    enqueueTranslation(MTJob(itemID: prevID, token: prevToken, gen: gen, text: mergedText,
-                                             src: src, tgt: tgt, samples: samples,
-                                             isApple: true))
-                } else {
-                    activity = isRunning ? "正在聆听" : ""
-                    kickReader()
-                }
-                return
             }
         }
         items[idx].updateTranscript(spoken, source: src, target: tgt,
