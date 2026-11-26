@@ -2065,6 +2065,7 @@ async fn speak_text_sapi(
         }
 
         let sapi_pid = rt.sapi_pid.clone();
+        let trimmed_sapi = trimmed.clone();
         tokio::task::spawn_blocking(move || {
             use std::os::windows::process::CommandExt;
             let script = r#"
@@ -2098,7 +2099,7 @@ $s.Speak($env:HEAR_SPEAK_TEXT)
 "#;
             let mut cmd = std::process::Command::new("powershell");
             cmd.args(["-NoProfile", "-Command", script])
-                .env("HEAR_SPEAK_TEXT", trimmed)
+                .env("HEAR_SPEAK_TEXT", trimmed_sapi)
                 .env("HEAR_SPEAK_LANG", lang_tag)
                 .env("HEAR_SPEAK_GENDER", gender_tag)
                 .creation_flags(0x0800_0000);
@@ -3161,6 +3162,30 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Windows 单实例互斥锁：防止同时打开多个听见客户端，重复启动时自动唤起已有窗口并退出
+    #[cfg(target_os = "windows")]
+    let _single_instance_guard = {
+        use windows::core::w;
+        use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+        use windows::Win32::System::Threading::CreateMutexW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        };
+        unsafe {
+            let mutex = CreateMutexW(None, false, w!("Local\\HearDesktopSingleInstanceMutex"));
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                if let Ok(hwnd) = FindWindowW(None, w!("听见 Hear — 桌面实时翻译工作台")) {
+                    if !hwnd.0.is_null() {
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                        let _ = SetForegroundWindow(hwnd);
+                    }
+                }
+                return;
+            }
+            mutex
+        }
+    };
+
     tracing_subscriber::fmt::init();
     let runtime = Arc::new(AppRuntime::new());
     let runtime_setup = runtime.clone();
