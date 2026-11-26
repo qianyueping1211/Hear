@@ -4,8 +4,8 @@
 
 | 平台 / 产物 | 版本 | 下载与文档 |
 | --- | --- | --- |
-| iPhone / iPad（iOS / iPadOS 18+） | `0.4.119` | [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) |
-| Windows x64 客户端 | `0.1.55` | [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) · [桌面端说明](apps/desktop/README.md) |
+| iPhone / iPad（iOS / iPadOS 18+） | `0.4.120` | [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) |
+| Windows x64 客户端 | `0.1.74` | [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) · [桌面端说明](apps/desktop/README.md) |
 | Windows x64 模型服务端 | `Win-Server 1.0.3` | [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) · [服务端说明](server/README.md) |
 | macOS (Apple Silicon) 模型服务端 | `Apple-Server 1.0.4` | [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) · [服务端说明](server/README.md) |
 

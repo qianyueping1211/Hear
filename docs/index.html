@@ -352,6 +352,7 @@ section.band{scroll-margin-top:62px}
       <a href="#top">首页</a>
       <a href="#platforms">当前平台</a>
       <a href="#features">功能架构</a>
+      <a href="#models">模型清单</a>
       <a href="#tech">技术架构</a>
       <a href="#cloud">云端模型服务</a>
       <a class="gh" href="https://github.com/qianyueping1211/Hear" target="_blank" rel="noopener">GitHub ↗</a>
@@ -374,7 +375,7 @@ section.band{scroll-margin-top:62px}
 
       <dl class="facts">
         <div><dt>iPhone / iPad 客户端</dt><dd>iOS / iPadOS 18+ · 0.4.120</dd></div>
-        <div><dt>Windows 客户端</dt><dd>x64 · 0.1.62</dd></div>
+        <div><dt>Windows 客户端</dt><dd>x64 · 0.1.74</dd></div>
         <div><dt>独立模型服务端</dt><dd>Win-Server 1.0.3 · Apple-Server 1.0.4</dd></div>
         <div><dt>核心模型</dt><dd>阿里 SenseVoice / CAM++ / Qwen3-TTS · OpenAI Whisper · 腾讯 Hy-MT2</dd></div>
         <div><dt>后续平台</dt><dd>Android · 鸿蒙 · macOS 客户端尚未发布</dd></div>
@@ -485,11 +486,11 @@ section.band{scroll-margin-top:62px}
         </ul>
       </div>
       <div class="fgroup">
-        <h3>Windows 客户端 <em>x64 · 0.1.62</em></h3>
+        <h3>Windows 客户端 <em>x64 · 0.1.74</em></h3>
         <ul>
-          <li>Tauri + Rust + React 实时翻译与会议同传工作台，支持双路采集（系统内录 + 麦克风）、悬浮字幕、15 阶抗混叠重采样与 NLMS AEC 防回声。</li>
-          <li><b>会议同传虚拟声卡</b>：内置 <code>VB-Cable</code> 与 <code>Hi-Fi Cable</code> 一键安装与 PnP 独立检测；仅在「会议同传 + 录音中」自动在系统层启用，非录音自动禁用，并支持 CoreAudio 原声自动压低（DuckGuard）。</li>
-          <li><b>原生语音与总结</b>：Rust 原生 WinRT OneCore 语音引擎（解锁中文男女声与自动性别匹配）+ 云端 Qwen3-TTS 克隆；同步 iOS 全部 5 套一键总结模板（支持 <code>[mm:ss]</code> 时间锚点跳转）。</li>
+          <li>Tauri + Rust + React 实时翻译与会议同传工作台，支持双路采集（系统内录 + 麦克风）、悬浮字幕、15 阶抗混叠重采样、NLMS AEC 防回声与 Win32 单实例防多开。</li>
+          <li><b>双路虚拟声卡固定锁定（CoreAudio COM）</b>：听对方固定 <code>CABLE Output (VB-Audio Hi-Fi Cable)</code>、给对方听固定 <code>CABLE Input (VB-Audio Virtual Cable)</code>；一键安装后自动改名、彻底屏蔽 <code>16ch</code> 与多余麦克风端并设为禁用待命，仅在会议同传录音期间按端点精准启停。</li>
+          <li><b>防串音与原生语音总结</b>：Rust 原生 WinRT OneCore 语音引擎（男女声自动匹配）+ 云端 Qwen3-TTS 克隆，配三重防回传拦截与双路隔离不断句；同步 iOS 全部 5 套一键总结模板（支持 <code>[mm:ss]</code> 时间锚点跳转）。</li>
           <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases" target="_blank" rel="noopener">Releases · 听见 Windows</a>（EXE）；<a href="https://github.com/qianyueping1211/Hear/blob/main/apps/desktop/README.md" target="_blank" rel="noopener">桌面端说明</a>。</li>
         </ul>
       </div>
@@ -626,8 +627,8 @@ section.band{scroll-margin-top:62px}
       <div class="fgroup">
         <h3><em>06</em>模型管理</h3>
         <ul>
-          <li><b>本地模型</b>　分别管理 SenseVoice、Hy-MT2 翻译模型和声音克隆（ZipVoice）。</li>
-          <li><b>下载和导入</b>　下载时可在模型页暂停并继续。Hy-MT2 选 GGUF 文件，SenseVoice 和 ZipVoice 可选正确的模型文件夹或 ZIP。</li>
+          <li><b>本地模型</b>　分别管理本机 SenseVoice 识别模型与 Hy-MT2 翻译模型（声音克隆统一走云端 Qwen3-TTS）。</li>
+          <li><b>下载和导入</b>　下载时可在模型页暂停并继续。Hy-MT2 选 GGUF 文件，SenseVoice 可选模型文件夹或 ZIP。</li>
           <li><b>云端模型</b>　填通用服务地址后可测试三个服务的就绪状态，也可为单个模型单独配置地址。</li>
           <li><b>未配置时</b>　从「引擎管理」选择未配置的引擎，会打开对应的模型配置。</li>
         </ul>
@@ -665,7 +666,7 @@ section.band{scroll-margin-top:62px}
       <div>
         <h2>技术架构与关键技术点</h2>
         <p class="lede">
-          客户端使用 Swift 和 SwiftUI。本机识别和说话人区分通过 FluidAudio，翻译通过 llama.cpp，声音克隆通过 sherpa-onnx。云端调用由 CloudClient 管理。
+          客户端使用 Swift 和 SwiftUI。本机识别和说话人区分通过 FluidAudio，翻译通过 llama.cpp，人声检测通过 sherpa-onnx（Silero VAD）。云端识别、翻译与 Qwen3-TTS 声音克隆由 CloudClient 管理。
         </p>
       </div>
     </div>
@@ -749,7 +750,7 @@ section.band{scroll-margin-top:62px}
           <tr><td>识别</td><td class="mono">FluidAudio（SPM）</td><td class="mono">0.18.3</td><td>SenseVoice Core ML 识别与 CAM++ 说话人向量，均支持 CPU</td></tr>
           <tr><td>识别</td><td class="mono">SpeechAnalyzer / SpeechTranscriber</td><td class="mono">iOS 26+</td><td>系统听写，逐字回显</td></tr>
           <tr><td>翻译</td><td class="mono">llama.xcframework</td><td class="mono">ggml-org/llama.cpp b12491</td><td>本机 Hy-MT2，前台 GPU、后台 CPU</td></tr>
-          <tr><td>人声检测 / 克隆</td><td class="mono">sherpa-onnx</td><td class="mono">1.13.8</td><td>Silero VAD 和 CPU 上的 ZipVoice + Vocos</td></tr>
+          <tr><td>人声检测</td><td class="mono">sherpa-onnx</td><td class="mono">1.13.8</td><td>本机 Silero VAD 实时人声端点检测</td></tr>
           <tr><td>灵动岛 / 锁屏</td><td class="mono">ActivityKit / WidgetKit</td><td class="mono">系统</td><td>展示最新原文、译文及暂停状态</td></tr>
           <tr><td>翻译</td><td class="mono">Translation 框架</td><td class="mono">iOS 26+</td><td>系统翻译兜底</td></tr>
           <tr><td>朗读</td><td class="mono">AVSpeechSynthesizer / AVAudioPlayerNode</td><td class="mono">系统</td><td>译文朗读与左右耳空间定位</td></tr>
@@ -867,7 +868,7 @@ section.band{scroll-margin-top:62px}
       <div class="key">
         <div class="term"><span class="tag">VC</span><h4>声音克隆</h4></div>
         <div class="detail">
-          <p>本机使用 sherpa-onnx 运行 ZipVoice-Distill INT8 和 Vocos。云端 Qwen3-TTS 通过 llama-server 使用参考音频和参考文本生成译文声音。</p>
+          <p>声音克隆统一通过云端 Qwen3-TTS（llama-server，0.6B / 1.7B）结合参考音频和参考文本生成译文音色，支持 3~10 秒「我的固定声纹」跨句复用。</p>
           <p>生成及缓存读取都会校验音频，去掉首尾长静音并在裁切位置短暂淡入淡出。句中停顿保留，近乎无声的结果会触发回退。</p>
         </div>
       </div>
@@ -883,7 +884,7 @@ section.band{scroll-margin-top:62px}
       <div class="key">
         <div class="term"><span class="tag">MODEL</span><h4>模型下载</h4></div>
         <div class="detail">
-          <p>本机 Hy-MT2 使用 GGUF。SenseVoice 与 ZipVoice 可导入目录或 ZIP，导入时检查必需文件，并在成功后替换旧模型。</p>
+          <p>本机 Hy-MT2 使用 GGUF。SenseVoice 可导入目录或 ZIP，导入时检查必需文件，并在成功后替换旧模型。</p>
           <p>下载状态可见，可暂停与继续。应用控制多个模型一起初始化的内存峰值，加载和完成提示都显示在对话页同一分隔线。</p>
         </div>
       </div>
@@ -1341,7 +1342,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone / iPad 与 Windows 实时语音翻译<br>iOS / iPadOS 0.4.120 · Windows 0.1.62 · Win-Server 1.0.3 · Apple-Server 1.0.4</p>
+      <p>听见 Hear · iPhone / iPad 与 Windows 实时语音翻译<br>iOS / iPadOS 0.4.120 · Windows 0.1.74 · Win-Server 1.0.3 · Apple-Server 1.0.4</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>
