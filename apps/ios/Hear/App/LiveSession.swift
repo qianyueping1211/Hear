@@ -2854,10 +2854,17 @@ final class LiveSession: ObservableObject {
             let r = e.segmentText(id)
             guard !r.text.isEmpty, let lid = e.languageID,
                   let lang = candidates.first(where: { $0.id == lid }) else { continue }
-            // 例如中文听写把英文也写成了英文字母：文字和语言对不上就降分，避免说英文却当成中文
+            // 例如中文听写把英文也写成了英文字母：文字和语言对不上就降分，避免说英文却当成中文；
+            // 未定稿阶段 Apple 常不带置信度（回退 0.50），同分时按语义信息量（中日韩单字≈3拉丁字母）破平局，
+            // 避免英文把整句中文误听成 3~4 字母乱码却与中文同分反超。
+            let isCJK = ["zh", "ja", "ko"].contains(lang.id)
+            let trimmedCount = r.text.filter { !$0.isWhitespace && !$0.isPunctuation }.count
+            let infoUnits = Double(trimmedCount) * (isCJK ? 3.0 : 1.0)
+            let lengthBonus = min(0.18, infoUnits * 0.006)
             let score = r.confidence
                 + (SpeechTextFilter.matchesLanguage(r.text, lang.id) ? 1.0 : 0.0)
                 + (isFinal ? 0.12 : 0.0)
+                + lengthBonus
             if best == nil || score > best!.conf { best = (r.text, lang, score) }
         }
         guard let best else { return nil }
@@ -2950,6 +2957,42 @@ final class LiveSession: ObservableObject {
         hearLogText("系统听写（\(src.name)）：", String(spoken.prefix(40)))
 
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
+        // 苹果 SpeechAnalyzer 在短停顿（<1s）后常把前后两段 VAD 合并为同一个完整 Piece，
+        // 导致第 N+1 句再次命中第 N 句的完整文本而出现两条重复气泡。
+        // 若上一条同语种气泡的原文与本条完全相同或为其前缀，则直接合并到上一条并移除重复气泡。
+        if idx > 0 {
+            let prev = items[idx - 1]
+            let normPrev = prev.sourceText.filter { !$0.isWhitespace && !$0.isPunctuation }
+            let normCurr = spoken.filter { !$0.isWhitespace && !$0.isPunctuation }
+            if prev.source.id == src.id, !normPrev.isEmpty, !normCurr.isEmpty,
+               (normCurr == normPrev || normCurr.hasPrefix(normPrev) || normPrev.hasPrefix(normCurr)) {
+                let mergedText = spoken.count >= prev.sourceText.count ? spoken : prev.sourceText
+                let prevID = prev.id
+                let changed = mergedText != prev.sourceText
+                if changed {
+                    items[idx - 1].updateTranscript(mergedText, source: src, target: tgt,
+                                                    side: leading ? .left : .right, recognizedLanguage: src.id)
+                }
+                if let endSec = items[idx].audioEndSec {
+                    items[idx - 1].audioEndSec = endSec
+                }
+                removeItem(itemID)
+                jobTokens[itemID] = nil
+                hearLog("系统听写：检测到与上一句同一语音片段，已自动合并去重", .info)
+                persist()
+                if changed {
+                    let prevToken = UUID()
+                    jobTokens[prevID] = prevToken
+                    enqueueTranslation(MTJob(itemID: prevID, token: prevToken, gen: gen, text: mergedText,
+                                             src: src, tgt: tgt, samples: samples,
+                                             isApple: true))
+                } else {
+                    activity = isRunning ? "正在聆听" : ""
+                    kickReader()
+                }
+                return
+            }
+        }
         items[idx].updateTranscript(spoken, source: src, target: tgt,
                                     side: leading ? .left : .right, recognizedLanguage: src.id)
         rememberReference(itemID, samples: samples, text: spoken)
