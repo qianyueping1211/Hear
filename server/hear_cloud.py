@@ -1334,11 +1334,27 @@ a{color:#007aff;text-decoration:none}
                 self._error("音频格式不对：%s（要 16 位 wav）" % e, 400)
                 return
             language = langs[0] if len(langs) == 1 else None
+            # SenseVoice 仅支持中/英/日/韩/粤；请求包含阿拉伯语等其他语种时，自动跳过 SenseVoice 直走 Whisper（beam_size=5）
+            _sv_langs = {"zh", "en", "ja", "ko", "yue"}
+            has_non_sv_lang = any(
+                (x.split("-")[0].strip().lower() not in _sv_langs) for x in langs
+            )
             # 预览只要快：组合方案下只用 SenseVoice，不跑 Whisper 修正
             preview = (self.headers.get("X-ASR-Preview") or "").strip() == "1"
             stage = self.headers.get("X-ASR-Stage", "")
             hotwords = parse_asr_hotwords(self.headers.get("X-ASR-Hotwords", ""))
-            if not preview and scheme == "sensevoice+whisper" and stage == "correct":
+            if has_non_sv_lang and scheme == "sensevoice+whisper" and whisper_available():
+                if preview:
+                    text, lang = "", fallback
+                else:
+                    try:
+                        text, lang = whisper_transcribe(
+                            samples, rate, language, fallback, beam_size=5, hotwords=hotwords
+                        )
+                    except TypeError:
+                        text, lang = whisper_transcribe(samples, rate, language, fallback)
+                    can_correct = False
+            elif not preview and scheme == "sensevoice+whisper" and stage == "correct":
                 text, lang = deferred_whisper(samples, rate, language, fallback, hotwords=hotwords)
             elif not preview and scheme == "sensevoice+whisper" and stage == "first":
                 lang, text = sensevoice_transcribe(samples, rate)
