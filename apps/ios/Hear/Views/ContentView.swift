@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var originalDraft = ""
     @State private var editingSpeaker: TranslationItem?
     @State private var showMenu = false          // 右上角 ⋯ 菜单
+    @State private var showModePicker = false    // 2×2 田字格「翻译模式」选择器
     @State private var ipadSelectedConversationID: UUID?  // iPad 宽窄屏切换时保留当前选中的历史对话
 
     private var useIPadWorkbench: Bool {
@@ -60,6 +61,11 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) { SettingsView() }
         .sheet(isPresented: $showHistory) { HistoryView() }
         .sheet(isPresented: $showGlossary) { GlossaryView() }
+        .sheet(isPresented: $showModePicker) {
+            TranslationModePickerSheet(onDismiss: { showModePicker = false })
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
         .sheet(item: $editingSpeaker) { item in
             let conversation = session.conversationID
             SpeakerEditor(item: item, labels: session.items.speakerLabels) { change in
@@ -120,7 +126,7 @@ struct ContentView: View {
                     )
                 } else {
                     VStack(spacing: 0) {
-                        TopBar(onMore: { showMenu = true })
+                        TopBar(onModeTap: { showModePicker = true }, onMore: { showMenu = true })
                         LanguageBar()
                         Divider()
                         Group {
@@ -165,12 +171,8 @@ struct ContentView: View {
                             .ignoresSafeArea()
                             .onTapGesture { showMenu = false }
                         MoreMenuPanel(
-                            showConversationStyles: session.talkMode,
-                            selectedStyle: session.conversationStyle,
-                            onSelectStyle: { style in
-                                session.conversationStyle = style
-                                showMenu = false
-                            },
+                            currentModeLabel: currentModeTitle,
+                            onModePicker: { showMenu = false; showModePicker = true },
                             onNew: { showMenu = false; newTapped() },
                             onHistory: { showMenu = false; showHistory = true },
                             onGlossary: { showMenu = false; showGlossary = true },
@@ -183,6 +185,15 @@ struct ContentView: View {
                 }
             }
             .animation(.spring(duration: 0.28), value: showMenu)
+        }
+    }
+
+    private var currentModeTitle: String {
+        if !session.talkMode { return "聆听翻译模式" }
+        switch session.conversationStyle {
+        case .single: return "单侧自动模式"
+        case .sideBySide: return "并排双键模式"
+        case .faceToFace: return "面对面模式"
         }
     }
 
@@ -199,7 +210,17 @@ struct ContentView: View {
 
 struct TopBar: View {
     @EnvironmentObject var session: LiveSession
+    var onModeTap: () -> Void = {}
     var onMore: () -> Void
+
+    private var modeTitle: String {
+        if !session.talkMode { return "聆听翻译模式" }
+        switch session.conversationStyle {
+        case .single: return "单侧自动模式"
+        case .sideBySide: return "并排双键模式"
+        case .faceToFace: return "面对面模式"
+        }
+    }
 
     var body: some View {
         HStack {
@@ -220,8 +241,19 @@ struct TopBar: View {
                 .accessibilityLabel("更多")
         }
         .overlay {
-            Text("听见：\(session.talkMode ? "对话翻译模式" : "实时翻译模式")")
-                .font(.headline)
+            Button(action: onModeTap) {
+                HStack(spacing: 4) {
+                    Text(modeTitle).font(.headline)
+                    Image(systemName: "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.ultraThinMaterial, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("切换翻译模式")
         }
         .padding(.horizontal)
         .padding(.top, 6)
@@ -229,93 +261,45 @@ struct TopBar: View {
     }
 }
 
-/// 右上角弹出的菜单：对话模式下顶部增加「展示方式」展开切换（自由对话 / 并排对话 / 面对面）
+/// 右上角弹出的菜单：顶部提供「翻译模式」入口（打开 2×2 田字格带示意图选择器）
 struct MoreMenuPanel: View {
-    var showConversationStyles: Bool = false
-    var selectedStyle: ConversationDisplayStyle = .sideBySide
-    var onSelectStyle: (ConversationDisplayStyle) -> Void = { _ in }
+    var currentModeLabel: String = "聆听翻译模式"
+    var onModePicker: () -> Void = {}
     var onNew: () -> Void
     var onHistory: () -> Void
     var onGlossary: () -> Void
     var onSettings: () -> Void
-    @State private var stylesExpanded = false
 
     var body: some View {
         VStack(spacing: 0) {
-            if showConversationStyles {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { stylesExpanded.toggle() }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: selectedStyle.icon)
-                            .font(.system(size: 18))
-                            .foregroundStyle(Color.accentColor)
-                            .frame(width: 24)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("展示方式").font(.system(size: 16, weight: .medium))
-                            Text(selectedStyle.title).font(.caption2).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Image(systemName: stylesExpanded ? "chevron.up" : "chevron.down")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+            Button(action: onModePicker) {
+                HStack(spacing: 12) {
+                    Image(systemName: "square.grid.2x2")
+                        .font(.system(size: 19))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 26)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("翻译模式").font(.system(size: 17.5, weight: .medium))
+                        Text(currentModeLabel).font(.caption2).foregroundStyle(.secondary)
                     }
-                    .padding(.horizontal, 16)
-                    .frame(maxWidth: .infinity, minHeight: 52)
-                    .contentShape(Rectangle())
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-
-                if stylesExpanded {
-                    VStack(spacing: 2) {
-                        ForEach(ConversationDisplayStyle.allCases) { style in
-                            Button {
-                                onSelectStyle(style)
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Image(systemName: style.icon)
-                                        .font(.system(size: 15))
-                                        .foregroundStyle(style == selectedStyle ? Color.accentColor : .secondary)
-                                        .frame(width: 20)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(style.title)
-                                            .font(.subheadline.weight(style == selectedStyle ? .semibold : .regular))
-                                        Text(style.subtitle)
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    if style == selectedStyle {
-                                        Image(systemName: "checkmark")
-                                            .font(.caption.weight(.bold))
-                                            .foregroundStyle(Color.accentColor)
-                                    }
-                                }
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
-                                .background(
-                                    style == selectedStyle ? Color.accentColor.opacity(0.12) : Color.clear,
-                                    in: RoundedRectangle(cornerRadius: 10)
-                                )
-                                .padding(.horizontal, 6)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.bottom, 6)
-                }
-
-                Divider().padding(.horizontal, 12)
+                .padding(.horizontal, 16)
+                .frame(maxWidth: .infinity, minHeight: 56)
+                .contentShape(Rectangle())
             }
-
+            .buttonStyle(.plain)
+            Divider().padding(.horizontal, 12)
             row("新建对话", "square.and.pencil", onNew)
             row("历史记录", "clock.arrow.circlepath", onHistory)
             row("术语配置", "text.book.closed", onGlossary)
             row("功能设置", "gearshape", onSettings)
         }
         .padding(.vertical, 4)
-        .frame(width: showConversationStyles ? 232 : 198)
+        .frame(width: 214)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: .black.opacity(0.25), radius: 20, y: 6)
@@ -1510,5 +1494,255 @@ struct PhoneFaceToFaceView: View {
             .accessibilityLabel(selected ? "停止收听\(myLang.name)" : "开始收听\(myLang.name)")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - 2×2 田字格「翻译模式」带示意图选择器
+
+struct TranslationModePickerSheet: View {
+    @EnvironmentObject var session: LiveSession
+    var onDismiss: () -> Void
+
+    private enum ModeOption: String, CaseIterable, Identifiable {
+        case listening
+        case singleAuto
+        case sideBySide
+        case faceToFace
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .listening: return "聆听翻译模式"
+            case .singleAuto: return "单侧自动模式"
+            case .sideBySide: return "并排双键模式"
+            case .faceToFace: return "面对面模式"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .listening: return "会议多语种 → 译为目标语言"
+            case .singleAuto: return "单按钮自动识别双方语种"
+            case .sideBySide: return "左右双按钮，同向看屏"
+            case .faceToFace: return "上下分屏，对方画面倒置"
+            }
+        }
+    }
+
+    private var currentOption: ModeOption {
+        if !session.talkMode { return .listening }
+        switch session.conversationStyle {
+        case .single: return .singleAuto
+        case .sideBySide: return .sideBySide
+        case .faceToFace: return .faceToFace
+        }
+    }
+
+    private func select(_ option: ModeOption) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        switch option {
+        case .listening:
+            session.talkMode = false
+        case .singleAuto:
+            session.talkMode = true
+            session.conversationStyle = .single
+        case .sideBySide:
+            session.talkMode = true
+            session.conversationStyle = .sideBySide
+        case .faceToFace:
+            session.talkMode = true
+            session.conversationStyle = .faceToFace
+        }
+        onDismiss()
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                LazyVGrid(
+                    columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)],
+                    spacing: 14
+                ) {
+                    ForEach(ModeOption.allCases) { option in
+                        let selected = option == currentOption
+                        Button {
+                            select(option)
+                        } label: {
+                            VStack(spacing: 10) {
+                                modeDiagram(option, selected: selected)
+                                    .frame(height: 112)
+                                    .frame(maxWidth: .infinity)
+                                    .background(
+                                        Color(.tertiarySystemGroupedBackground),
+                                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    )
+                                    .overlay(alignment: .topTrailing) {
+                                        if selected {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .font(.system(size: 18))
+                                                .foregroundStyle(Color.accentColor)
+                                                .padding(6)
+                                        }
+                                    }
+
+                                VStack(spacing: 3) {
+                                    Text(option.title)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    Text(option.subtitle)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.center)
+                                }
+                            }
+                            .padding(10)
+                            .background(
+                                selected ? Color.accentColor.opacity(0.12) : Color(.secondarySystemGroupedBackground),
+                                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .stroke(selected ? Color.accentColor : Color.primary.opacity(0.08),
+                                            lineWidth: selected ? 2 : 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                Spacer(minLength: 0)
+            }
+            .navigationTitle("选择翻译模式")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成", action: onDismiss)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func modeDiagram(_ option: ModeOption, selected: Bool) -> some View {
+        let accent = selected ? Color.accentColor : Color.accentColor.opacity(0.78)
+        let cardBg = Color.primary.opacity(0.10)
+        switch option {
+        case .listening:
+            // 通栏说话人卡片 + 底部单个麦克风
+            VStack(spacing: 6) {
+                VStack(spacing: 5) {
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.green.opacity(0.8)).frame(width: 6, height: 6)
+                        RoundedRectangle(cornerRadius: 3).fill(cardBg).frame(height: 11)
+                    }
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.orange.opacity(0.8)).frame(width: 6, height: 6)
+                        RoundedRectangle(cornerRadius: 3).fill(cardBg).frame(height: 11)
+                    }
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.purple.opacity(0.8)).frame(width: 6, height: 6)
+                        RoundedRectangle(cornerRadius: 3).fill(cardBg).frame(height: 11)
+                    }
+                }
+                .padding(.horizontal, 14)
+                Spacer(minLength: 2)
+                Circle()
+                    .fill(accent)
+                    .frame(width: 24, height: 24)
+                    .overlay(Image(systemName: "mic.fill").font(.system(size: 11)).foregroundStyle(.white))
+            }
+            .padding(.vertical, 10)
+
+        case .singleAuto:
+            // 左右对话气泡 + 底部单个自动麦克风
+            VStack(spacing: 6) {
+                VStack(spacing: 6) {
+                    HStack {
+                        RoundedRectangle(cornerRadius: 5).fill(cardBg).frame(width: 58, height: 14)
+                        Spacer()
+                    }
+                    HStack {
+                        Spacer()
+                        RoundedRectangle(cornerRadius: 5).fill(accent.opacity(0.28)).frame(width: 58, height: 14)
+                    }
+                    HStack {
+                        RoundedRectangle(cornerRadius: 5).fill(cardBg).frame(width: 48, height: 12)
+                        Spacer()
+                    }
+                }
+                .padding(.horizontal, 14)
+                Spacer(minLength: 2)
+                Circle()
+                    .fill(accent)
+                    .frame(width: 24, height: 24)
+                    .overlay(Image(systemName: "mic.fill").font(.system(size: 11)).foregroundStyle(.white))
+            }
+            .padding(.vertical, 10)
+
+        case .sideBySide:
+            // 左右对话气泡 + 底部左右两个语言麦克风
+            VStack(spacing: 6) {
+                VStack(spacing: 6) {
+                    HStack {
+                        RoundedRectangle(cornerRadius: 5).fill(cardBg).frame(width: 58, height: 14)
+                        Spacer()
+                    }
+                    HStack {
+                        Spacer()
+                        RoundedRectangle(cornerRadius: 5).fill(accent.opacity(0.28)).frame(width: 58, height: 14)
+                    }
+                }
+                .padding(.horizontal, 14)
+                Spacer(minLength: 2)
+                HStack(spacing: 24) {
+                    Circle()
+                        .fill(accent)
+                        .frame(width: 24, height: 24)
+                        .overlay(Text("中").font(.system(size: 10, weight: .bold)).foregroundStyle(.white))
+                    Circle()
+                        .fill(accent)
+                        .frame(width: 24, height: 24)
+                        .overlay(Text("En").font(.system(size: 9, weight: .bold)).foregroundStyle(.white))
+                }
+            }
+            .padding(.vertical, 10)
+
+        case .faceToFace:
+            // 顶部倒置麦克风 + 上半区 + 中间横线与翻转钮 + 下半区 + 底部正向麦克风
+            VStack(spacing: 4) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 20, height: 20)
+                    .overlay(Image(systemName: "mic.fill").font(.system(size: 9)).foregroundStyle(.white))
+                    .rotationEffect(.degrees(180))
+                HStack {
+                    RoundedRectangle(cornerRadius: 4).fill(cardBg).frame(width: 56, height: 11)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                ZStack {
+                    Rectangle().fill(Color.primary.opacity(0.18)).frame(height: 1)
+                    Circle()
+                        .fill(Color(.secondarySystemGroupedBackground))
+                        .frame(width: 16, height: 16)
+                        .overlay(Image(systemName: "arrow.up.arrow.down").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary))
+                }
+                .padding(.horizontal, 10)
+                HStack {
+                    Spacer()
+                    RoundedRectangle(cornerRadius: 4).fill(accent.opacity(0.28)).frame(width: 56, height: 11)
+                }
+                .padding(.horizontal, 14)
+                Circle()
+                    .fill(accent)
+                    .frame(width: 20, height: 20)
+                    .overlay(Image(systemName: "mic.fill").font(.system(size: 9)).foregroundStyle(.white))
+            }
+            .padding(.vertical, 8)
+        }
     }
 }
