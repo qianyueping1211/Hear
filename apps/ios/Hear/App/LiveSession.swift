@@ -2665,7 +2665,7 @@ final class LiveSession: ObservableObject {
             let meetingMode = !talkMode
             let meetingTarget = meetingTargetLang
             let fallback = forced?.id ?? (meetingMode ? a.id : ((lastLangID == b.id) ? b.id : a.id))
-            let cands = meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id]
+            let cands = forced.map { [$0.id] } ?? (meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id])
             // 只识别最近 10 秒，长句也跟得上
             let maxN = 16_000 * 10
             let clipped = job.samples.count > maxN
@@ -2941,12 +2941,10 @@ final class LiveSession: ObservableObject {
     // MARK: - 苹果自带模式（系统听写 + 系统翻译）
 
     /// 解析苹果系统听写当前应并行监听的候选语种列表（保证 startAppleASR / bestApple / appleUpdated / processApple 完全一致）
-    /// 注意：
-    /// 1) 聆听翻译模式下，`meetingTargetLang` 仅表示「译为」的目标语言（如泰语），与语音识别语种无关，
-    ///    因此仍使用当前引擎支持的主识别语种对 `[left, right]`（默认中/英），避免因目标语种不被系统听写支持导致识别失败；
-    /// 2) 并排双键/面对面模式下即使按住某一方按钮（forced != nil），仍同时开双方语种听写，
-    ///    这样无论说话人说母语、外语还是中英混说都能准确转写，翻译方向再由 forced 锁定为「译为对方语言」。
+    /// - 并排双键 / 面对面模式（forced != nil）：只开启当前按下按钮对应的单语种听写器，绝不启动另一侧语种听写器干扰转写；
+    /// - 单侧自动 / 聆听翻译模式（forced == nil）：开启主识别语种对 `[left, right]`（聆听模式的 `meetingTargetLang` 仅作翻译目标，不参与识别）。
     private func appleASRLanguages(left: Language, right: Language, forced: Language?) -> [Language] {
+        if let forced { return [forced] }
         return [left, right]
     }
 
@@ -3198,8 +3196,9 @@ final class LiveSession: ObservableObject {
         guard !Task.isCancelled, gen == runGen else { return }
         // 这一句已经被放弃/顶掉了：结果不要了
         guard isCurrentJob(itemID, token: token) else { return }
-        // 对话的三种模式下只识别选定的两种语言：若语种裁判明确检测到第三语种且双方听写均无高置信度匹配，则忽略不译并累计提醒
-        if talkMode, let rawLID, !lidCandidates.contains(rawLID) {
+        // 对话的三种模式下只识别选定的两种语言：若语种裁判明确检测到选定双语之外的第三语种且当前听写无高置信度匹配，则忽略不译并累计提醒
+        let pairIDs = [job.left.id, job.right.id]
+        if talkMode, let rawLID, !pairIDs.contains(rawLID) {
             let hasStrongInPair = appleEngines.contains { e in
                 guard let lid = e.languageID, lidCandidates.contains(lid) else { return false }
                 let r = e.segmentText(segID)
@@ -3544,9 +3543,7 @@ final class LiveSession: ObservableObject {
         activity = usingCloudASR ? "云端识别中…" : "SenseVoice 识别中…"
         let forced = job.forced
         let fallback = forced?.id ?? (meetingMode ? a.id : job.fallback.id)
-        // 并排双键/面对面模式下（forced != nil）仍传双语候选给识别引擎，确保混说或说对方语言也能准确转写，
-        // 最终翻译目标再由 forced 强制锁定为对方语言。
-        let cands = meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id]
+        let cands = forced.map { [$0.id] } ?? (meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id])
         let correctionAddress: String?
         let speakerAddress: String?
         let detected: String
