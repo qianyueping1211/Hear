@@ -459,6 +459,8 @@ final class LiveSession: ObservableObject {
     private let clonePipeline = SessionClonePipeline()
     private let cloudRecovery = SessionCloudRecovery()
     private var appleEngines: [LiveTextEngine] = []   // 苹果自带模式：每种语言一个系统听写
+    private var lastApplePieceRange: (langID: String, start: Double, end: Double)?
+    private let languageDetector = SpokenLanguageDetector() // 独立的 sherpa-onnx Whisper-Tiny 语种裁判（不依赖 SenseVoice）
 
     /// 排队等着处理的句子。
     /// token 是这一句"当前有效任务"的身份：
@@ -2783,6 +2785,11 @@ final class LiveSession: ObservableObject {
     private func startAppleASR() {
         stopAppleASR()
         guard appleAvailable else { return }
+        // 后台准备 sherpa-onnx Whisper-Tiny 语种裁判（不阻塞苹果流式听写启动；仅双语自动模式需要）
+        if forcedLang == nil {
+            let detector = languageDetector
+            Task.detached(priority: .utility) { await detector.ensureReady() }
+        }
         var engines: [LiveTextEngine] = []
         let gen = runGen
         // 对话翻译只听用户当前选择的语言。
@@ -2834,6 +2841,7 @@ final class LiveSession: ObservableObject {
     }
 
     private func stopAppleASR() {
+        lastApplePieceRange = nil
         guard !appleEngines.isEmpty else { return }
         capture.onSamples = nil
         let list = appleEngines
@@ -2845,9 +2853,10 @@ final class LiveSession: ObservableObject {
     /// 不再用 requireFinal 硬淘汰另一路——否则英文听写把中文胡乱听成低置信度 "We to the shoot" 且恰好先定稿时，
     /// 会把中文听写高置信度但尚未定稿的正确结果直接覆盖掉；改为仅给已定稿加小幅加分（+0.12），仍以置信度与字形匹配为主。
     private func bestApple(_ id: Int, requireFinal: Bool = false,
-                           languages: [Language]? = nil) -> (text: String, lang: Language)? {
+                           languages: [Language]? = nil,
+                           preferredLangID: String? = nil) -> (text: String, lang: Language, range: (start: Double, end: Double)?)? {
         let candidates = languages ?? [langA, langB]
-        var best: (text: String, lang: Language, conf: Double)?
+        var best: (text: String, lang: Language, conf: Double, range: (start: Double, end: Double)?)?
         for e in appleEngines {
             let isFinal = e.hasFinalText(id)
             if requireFinal, !isFinal { continue }
@@ -2855,20 +2864,29 @@ final class LiveSession: ObservableObject {
             guard !r.text.isEmpty, let lid = e.languageID,
                   let lang = candidates.first(where: { $0.id == lid }) else { continue }
             // 例如中文听写把英文也写成了英文字母：文字和语言对不上就降分，避免说英文却当成中文；
-            // 未定稿阶段 Apple 常不带置信度（回退 0.50），同分时按语义信息量（中日韩单字≈3拉丁字母）破平局，
-            // 避免英文把整句中文误听成 3~4 字母乱码却与中文同分反超。
+            // 未定稿阶段 Apple 常不带置信度（回退 0.50），同分时按语义信息量（中日韩单字≈3拉丁字母）破平局；
+            // 若 sherpa-onnx Whisper-Tiny 语种裁判已指认语种，给对应语种决定性加分（+2.0），直接压过另一路的幻听。
             let isCJK = ["zh", "ja", "ko"].contains(lang.id)
             let trimmedCount = r.text.filter { !$0.isWhitespace && !$0.isPunctuation }.count
             let infoUnits = Double(trimmedCount) * (isCJK ? 3.0 : 1.0)
             let lengthBonus = min(0.18, infoUnits * 0.006)
+            let lidBonus = (preferredLangID == lang.id) ? 2.0 : 0.0
             let score = r.confidence
                 + (SpeechTextFilter.matchesLanguage(r.text, lang.id) ? 1.0 : 0.0)
                 + (isFinal ? 0.12 : 0.0)
                 + lengthBonus
-            if best == nil || score > best!.conf { best = (r.text, lang, score) }
+                + lidBonus
+            if best == nil || score > best!.conf {
+                best = (r.text, lang, score, e.segmentPieceRange(id))
+            }
         }
         guard let best else { return nil }
-        return (best.text, best.lang)
+        return (best.text, best.lang, best.range)
+    }
+
+    private static func pieceRangesOverlap(_ a: (start: Double, end: Double),
+                                           _ b: (start: Double, end: Double)) -> Bool {
+        a.start < b.end - 0.05 && a.end > b.start + 0.05
     }
 
     /// 苹果连续流式听写常把上一句和下一句合在同一个累积 Piece 里；
@@ -2902,8 +2920,12 @@ final class LiveSession: ObservableObject {
         guard !appleEngines.isEmpty, isRunning, currentSeg > finishedSeg, partialSeg == currentSeg,
               let b = bestApple(currentSeg), SpeechTextFilter.isMeaningful(b.text) else { return }
         var displayText = b.text
-        // 连续流式听写未定稿时，volatilePiece 会带着上一句已提交气泡的前缀：实时预览里直接剥离，避免新气泡重复显示上一句
-        if let last = items.last, last.source.id == b.lang.id {
+        // 仅当当前实时片段的时间范围与上一条已提交片段确实重叠（苹果把两段合在同一个累积 Piece 里）时才剥离前缀；
+        // 若时间不重叠，说明用户真的连续说了两遍相同的话，不能误吞！
+        if let last = items.last, last.source.id == b.lang.id,
+           let prevRange = lastApplePieceRange, prevRange.langID == b.lang.id,
+           let currRange = b.range,
+           Self.pieceRangesOverlap(currRange, (prevRange.start, prevRange.end)) {
             let stripped = Self.stripCommittedPrefix(displayText, previous: last.sourceText)
             if stripped.matched {
                 if stripped.remainder.isEmpty || !SpeechTextFilter.isMeaningful(stripped.remainder) {
@@ -2931,8 +2953,25 @@ final class LiveSession: ObservableObject {
     private func waitAppleFinal(_ segID: Int) async {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .milliseconds(2500))
+        var lowConfFinalSeenAt: ContinuousClock.Instant?
         while !appleEngines.isEmpty, clock.now < deadline, !Task.isCancelled {
-            if appleEngines.contains(where: { $0.hasFinalText(segID) }) { return }
+            let allFinal = appleEngines.allSatisfy { $0.hasFinalText(segID) }
+            if allFinal { return }
+            let hasHighConfFinal = appleEngines.contains { e in
+                guard e.hasFinalText(segID), let lid = e.languageID else { return false }
+                let r = e.segmentText(segID)
+                return !r.text.isEmpty && r.confidence >= 0.75 && SpeechTextFilter.matchesLanguage(r.text, lid)
+            }
+            if hasHighConfFinal { return }
+            // 若某路只给出了低置信度定稿（例如英文把中文误听成 conf=0.51 的乱码），
+            // 再多等最多 1.2 秒让真正说话的那路语种完成定稿，避免 0ms 提前结束导致误选乱码。
+            if appleEngines.contains(where: { $0.hasFinalText(segID) }) {
+                if let firstAt = lowConfFinalSeenAt {
+                    if clock.now >= firstAt.advanced(by: .milliseconds(1200)) { return }
+                } else {
+                    lowConfFinalSeenAt = clock.now
+                }
+            }
             do { try await Task.sleep(for: .milliseconds(100)) }
             catch { return }
         }
@@ -2943,26 +2982,33 @@ final class LiveSession: ObservableObject {
         let languages = [job.left, job.right]
         activity = "识别中…"
         let started = PerformanceLog.isEnabled ? ContinuousClock.now : nil
-        // 等系统听写把这句话定稿（最多 2.5 秒）
+        // 并发跑两个任务（零额外延迟）：
+        // 1) 等苹果系统听写定稿（高置信度定稿立即返回，低置信度最多多等 1.2s 等另一路定稿）
+        // 2) sherpa-onnx Whisper-Tiny 语种裁判（~60ms）判定本句真实语种
+        let lidCandidates = languages.map(\.id)
+        let detector = languageDetector
+        async let lidResult: String? = job.forced?.id ?? (await detector.detectLanguage(samples: samples, candidates: lidCandidates))
         await waitAppleFinal(segID)
+        let detectedLID = await lidResult
         guard !Task.isCancelled, gen == runGen else { return }
         // 这一句已经被放弃/顶掉了：结果不要了
         guard isCurrentJob(itemID, token: token) else { return }
-        // 诊断日志：逐路打印各语种系统听写引擎的定稿状态、置信度、得分与字数，便于直接定位误选或空结果
+        // 诊断日志：逐路打印各语种系统听写引擎的定稿状态、置信度、得分、字数及语种裁判结论
         let diag = appleEngines.map { e -> String in
             let lid = e.languageID ?? "?"
             let fin = e.hasFinalText(segID)
             let r = e.segmentText(segID)
             let match = SpeechTextFilter.matchesLanguage(r.text, lid)
-            let sc = r.confidence + (match ? 1.0 : 0.0) + (fin ? 0.12 : 0.0)
+            let sc = r.confidence + (match ? 1.0 : 0.0) + (fin ? 0.12 : 0.0) + (detectedLID == lid ? 2.0 : 0.0)
             return String(format: "%@[final=%@ conf=%.2f match=%@ score=%.2f %d字]",
                           lid, fin ? "T" : "F", r.confidence, match ? "T" : "F", sc, r.text.count)
         }.joined(separator: " | ")
-        hearLog("系统听写评分(第\(segID)句)：\(diag.isEmpty ? "无活跃引擎" : diag)")
-        // 听写这一段有没有出字：综合比较所有语种引擎（定稿仅小幅加分，避免另一路低置信度乱码先定稿反超正确语种）
-        let dict = bestApple(segID, requireFinal: false, languages: languages)
+        hearLog("系统听写评分(第\(segID)句, 裁判=\(detectedLID ?? "无"))：\(diag.isEmpty ? "无活跃引擎" : diag)")
+        // 听写这一段有没有出字：综合比较所有语种引擎（优先听从语种裁判指认的那一路）
+        let dict = bestApple(segID, requireFinal: false, languages: languages, preferredLangID: detectedLID)
         var spoken = dict?.text ?? ""
         var src = job.forced ?? dict?.lang ?? job.fallback
+        var pieceRange = dict?.range
         if !SpeechTextFilter.isMeaningful(spoken) {
             // 听写最后那几百毫秒没出字：不能把这句话删掉！
             // 先用本地识别再认一遍这段声音；还是没有就标成"没听清"留着，
@@ -2970,9 +3016,14 @@ final class LiveSession: ObservableObject {
             guard isCurrentJob(itemID, token: token) else { return }
             let recovered = await localRecover(samples: samples, fallbackLang: src, languages: languages)
             guard !Task.isCancelled, gen == runGen, isCurrentJob(itemID, token: token) else { return }
-            if let r = recovered ?? bestApple(segID, languages: languages) {
+            if let r = recovered {
                 spoken = r.text
                 src = r.lang
+                pieceRange = nil
+            } else if let r = bestApple(segID, languages: languages) {
+                spoken = r.text
+                src = r.lang
+                pieceRange = r.range
             } else if let existing = items.first(where: { $0.id == itemID }),
                       Self.hasRealText(existing.sourceText),
                       SpeechTextFilter.isMeaningful(existing.sourceText) {
@@ -3001,10 +3052,14 @@ final class LiveSession: ObservableObject {
         hearLogText("系统听写（\(src.name)）：", String(spoken.prefix(40)))
 
         guard let idx = items.firstIndex(where: { $0.id == itemID }) else { return }
-        // 苹果 SpeechAnalyzer 在短停顿后常把前后两段 VAD 合并为同一个累积 Piece：
-        // 1) 若本句与上一条同语种气泡完全相同、或上一条已包含本句，直接丢弃重复气泡；
-        // 2) 若本句以「上一条原文」为前缀且后面有新增内容，剥离掉已展示前缀，仅保留新增那半句作为新气泡。
-        if idx > 0 {
+        // 仅当新旧两句命中的苹果 Piece 时间范围真正重叠时，才视为同一累积片段执行去重/剥离前缀；
+        // 时间不重叠说明用户真的连续说了两遍相同的话（如连续说三次 "I like dogs."），必须全部保留！
+        let prevRange = lastApplePieceRange
+        let isSameOverlappingPiece: Bool = {
+            guard let currRange = pieceRange, let prevRange, prevRange.langID == src.id else { return false }
+            return Self.pieceRangesOverlap(currRange, (prevRange.start, prevRange.end))
+        }()
+        if idx > 0, isSameOverlappingPiece {
             let prev = items[idx - 1]
             if prev.source.id == src.id {
                 let normPrev = prev.sourceText.filter { !$0.isWhitespace && !$0.isPunctuation }
@@ -3016,16 +3071,19 @@ final class LiveSession: ObservableObject {
                             if let endSec = items[idx].audioEndSec {
                                 items[idx - 1].audioEndSec = endSec
                             }
+                            if let currRange = pieceRange {
+                                lastApplePieceRange = (src.id, currRange.start, currRange.end)
+                            }
                             removeItem(itemID)
                             jobTokens[itemID] = nil
-                            hearLog("系统听写：与上一句完全重复，已自动去重", .info)
+                            hearLog("系统听写：同一语音片段完全重复，已自动去重", .info)
                             persist()
                             activity = isRunning ? "正在聆听" : ""
                             kickReader()
                             return
                         } else {
                             spoken = stripped.remainder
-                            hearLog("系统听写：已剥离上一句重复前缀，保留新增内容", .info)
+                            hearLog("系统听写：已剥离同一片段重复前缀，保留新增内容", .info)
                         }
                     } else if normPrev.hasPrefix(normCurr) {
                         if let endSec = items[idx].audioEndSec {
@@ -3033,7 +3091,7 @@ final class LiveSession: ObservableObject {
                         }
                         removeItem(itemID)
                         jobTokens[itemID] = nil
-                        hearLog("系统听写：本句内容已包含在上一句中，已自动去重", .info)
+                        hearLog("系统听写：同一语音片段已包含在上一句中，已自动去重", .info)
                         persist()
                         activity = isRunning ? "正在聆听" : ""
                         kickReader()
@@ -3041,6 +3099,11 @@ final class LiveSession: ObservableObject {
                     }
                 }
             }
+        }
+        if let currRange = pieceRange {
+            lastApplePieceRange = (src.id, currRange.start, currRange.end)
+        } else {
+            lastApplePieceRange = nil
         }
         items[idx].updateTranscript(spoken, source: src, target: tgt,
                                     side: leading ? .left : .right, recognizedLanguage: src.id)

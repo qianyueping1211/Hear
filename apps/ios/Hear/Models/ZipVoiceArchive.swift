@@ -50,7 +50,7 @@ enum ZipVoiceArchive {
         }
 
         let fm = FileManager.default
-        var remainingBytes = 300 * 1024 * 1024
+        var remainingBytes = 600 * 1024 * 1024
         for _ in 0..<4096 {
             let header = try read(512)
             if header.allSatisfy({ $0 == 0 }) { return }

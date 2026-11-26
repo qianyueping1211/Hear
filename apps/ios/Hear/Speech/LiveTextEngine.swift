@@ -25,9 +25,9 @@ protocol LiveTextEngine: AnyObject {
     /// 第 id 句目前识别到的文字，以及平均置信度（0~1）
     func segmentText(_ id: Int) -> (text: String, confidence: Double)
     func hasFinalText(_ id: Int) -> Bool
-    /// 第 id 句覆盖的时间范围（秒）
-    /// 用来判断两句话是不是同一段声音：
-    /// 范围不重叠 = 用户真的说了两遍，要分开记，不能合并
+    /// 第 id 句命中的识别片段时间范围（秒）：
+    /// 用来判断两句话是不是同一段声音（范围不重叠 = 用户真的说了两遍，要分开记，不能去重）
+    func segmentPieceRange(_ id: Int) -> (start: Double, end: Double)?
 }
 
 enum LiveTextEngineFactory {
@@ -127,7 +127,7 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         }
         let transcriber = SpeechTranscriber(locale: loc,
                                             transcriptionOptions: [],
-                                            reportingOptions: [.volatileResults, .fastResults],
+                                            reportingOptions: [.volatileResults],
                                             attributeOptions: [.transcriptionConfidence])
         // 第一次用这种语言：下载系统语言包（之后系统会一直保留）
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
@@ -287,6 +287,20 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         }
         // VAD marks the end after its silence window, which is not part of the transcribed range.
         return finals.contains { belongs($0, to: segment) && $0.end >= end - 0.8 }
+    }
+
+    func segmentPieceRange(_ id: Int) -> (start: Double, end: Double)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let seg = segs[id] else { return nil }
+        var pieces = finals.filter { belongs($0, to: seg) }
+        if let v = volatilePiece, belongs(v, to: seg) { pieces.append(v) }
+        guard let first = pieces.first else { return nil }
+        var lo = first.start, hi = first.end
+        for p in pieces.dropFirst() {
+            if p.start < lo { lo = p.start }
+            if p.end > hi { hi = p.end }
+        }
+        return (lo, hi)
     }
 
     func feed(_ block: AudioInputBlock) {
