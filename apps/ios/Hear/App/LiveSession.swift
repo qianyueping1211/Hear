@@ -2987,9 +2987,18 @@ final class LiveSession: ObservableObject {
         // 2) sherpa-onnx Whisper-Tiny 语种裁判（~60ms）判定本句真实语种
         let lidCandidates = languages.map(\.id)
         let detector = languageDetector
-        async let lidResult: String? = job.forced?.id ?? (await detector.detectLanguage(samples: samples, candidates: lidCandidates))
+        let forcedLangID = job.forced?.id
+        let lidTask: Task<String?, Never>? = forcedLangID == nil
+            ? Task.detached(priority: .userInitiated) {
+                await detector.detectLanguage(samples: samples, candidates: lidCandidates)
+            }
+            : nil
         await waitAppleFinal(segID)
-        let detectedLID = await lidResult
+        let detectedLID: String? = if let forcedLangID {
+            forcedLangID
+        } else {
+            await lidTask?.value
+        }
         guard !Task.isCancelled, gen == runGen else { return }
         // 这一句已经被放弃/顶掉了：结果不要了
         guard isCurrentJob(itemID, token: token) else { return }
