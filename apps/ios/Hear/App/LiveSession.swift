@@ -2907,6 +2907,13 @@ final class LiveSession: ObservableObject {
             if let r = recovered ?? bestApple(segID, languages: languages) {
                 spoken = r.text
                 src = r.lang
+            } else if let existing = items.first(where: { $0.id == itemID }),
+                      Self.hasRealText(existing.sourceText),
+                      SpeechTextFilter.isMeaningful(existing.sourceText) {
+                // 实时预览阶段已经识别出了有效原文，定稿阶段若未能再次取到，直接保留该原文并完成翻译，不要覆盖成“翻译失败”。
+                spoken = existing.sourceText
+                src = existing.source
+                hearLog("系统听写：定稿超时，沿用实时预览原文继续翻译", .info)
             } else {
                 PerformanceLog.record("整句识别", engine: "Apple 听写", since: started, outcome: "无结果")
                 hearLog("系统听写：这一段没听清，留着让用户改", .warning)

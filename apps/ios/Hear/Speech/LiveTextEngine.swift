@@ -138,7 +138,7 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         guard let fmt = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
             throw LiveTextError.noAudioFormat
         }
-        let (stream, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self, bufferingPolicy: .bufferingOldest(24))
+        let (stream, continuation) = AsyncStream.makeStream(of: AnalyzerInput.self, bufferingPolicy: .bufferingOldest(128))
         let analyzer = SpeechAnalyzer(modules: [transcriber], options: nil)
         try await analyzer.start(inputSequence: stream)
 
@@ -233,12 +233,18 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
         lock.unlock()
     }
 
-    // 放宽首尾边界容差（0.45s），避免系统听写把词时间戳稍微落在 VAD 预卷/尾音外时把整句丢弃。
+    // 按时间重叠归属：避免系统听写把词时间戳稍微落在 VAD 预卷/尾音外、或合并尾音静音时把整句丢弃。
     private func belongs(_ piece: Piece, to segment: (start: Double, end: Double?)) -> Bool {
+        guard let end = segment.end else {
+            return piece.end >= segment.start - 0.25
+        }
         let middle = (piece.start + piece.end) / 2
-        let end = segment.end ?? .infinity
-        return middle >= segment.start - 0.05 && middle < end + 0.05
-            && piece.start >= segment.start - 0.45 && piece.end <= end + 0.45
+        if middle >= segment.start - 0.15 && middle <= end + 0.35 {
+            return true
+        }
+        let overlap = min(piece.end, end + 0.25) - max(piece.start, segment.start - 0.25)
+        let dur = max(0.05, piece.end - piece.start)
+        return overlap >= min(0.3, dur * 0.5)
     }
 
     private func hasGap(_ segment: (start: Double, end: Double?)) -> Bool {
@@ -248,7 +254,7 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
 
     func segmentText(_ id: Int) -> (text: String, confidence: Double) {
         lock.lock(); defer { lock.unlock() }
-        guard let seg = segs[id], !hasGap(seg) else { return ("", 0) }
+        guard let seg = segs[id] else { return ("", 0) }
         var pieces = finals.filter { belongs($0, to: seg) }
         if let v = volatilePiece, belongs(v, to: seg) { pieces.append(v) }
         let cjk = ["zh", "ja", "ko"].contains(_languageID ?? "")
@@ -257,6 +263,12 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
             .joined(separator: cjk ? "" : " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let text = Fillers.clean(joined)          // 去掉单独的语气词（嗯、啊、um…）
+        if text.isEmpty, let segEnd = seg.end {
+            let lf = finals.last.map { String(format: "%.2f..%.2f(%d字)", $0.start, $0.end, $0.text.count) } ?? "nil"
+            let vp = volatilePiece.map { String(format: "%.2f..%.2f(%d字)", $0.start, $0.end, $0.text.count) } ?? "nil"
+            hearLog(String(format: "系统听写空结果(%@)：seg=%.2f..%.2f finals=%d lastFinal=%@ volatile=%@ gaps=%d",
+                           _languageID ?? "?", seg.start, segEnd, finals.count, lf, vp, gaps.count), .warning)
+        }
         var sum = 0.0, weight = 0.0
         for p in pieces {
             guard let c = p.conf else { continue }
@@ -269,7 +281,7 @@ final class AppleLiveTranscriber: LiveTextEngine, @unchecked Sendable {
 
     func hasFinalText(_ id: Int) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard let segment = segs[id], let end = segment.end, !hasGap(segment) else { return false }
+        guard let segment = segs[id], let end = segment.end else { return false }
         if let volatilePiece, belongs(volatilePiece, to: segment) {
             return false
         }
