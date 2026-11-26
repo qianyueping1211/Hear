@@ -3044,7 +3044,8 @@ final class LiveSession: ObservableObject {
     /// 会把中文听写高置信度但尚未定稿的正确结果直接覆盖掉；改为仅给已定稿加小幅加分（+0.12），仍以置信度与字形匹配为主。
     private func bestApple(_ id: Int, requireFinal: Bool = false,
                            languages: [Language]? = nil,
-                           preferredLangID: String? = nil) -> (text: String, lang: Language, range: (start: Double, end: Double)?)? {
+                           preferredLangID: String? = nil,
+                           forcedLangID: String? = nil) -> (text: String, lang: Language, range: (start: Double, end: Double)?)? {
         let candidates = languages ?? appleASRLanguages(left: langA, right: langB, forced: forcedLang)
         var best: (text: String, lang: Language, conf: Double, range: (start: Double, end: Double)?)?
         for e in appleEngines {
@@ -3055,17 +3056,22 @@ final class LiveSession: ObservableObject {
                   let lang = candidates.first(where: { $0.id == lid }) else { continue }
             // 例如中文听写把英文也写成了英文字母：文字和语言对不上就降分，避免说英文却当成中文；
             // 未定稿阶段 Apple 常不带置信度（回退 0.50），同分时按语义信息量（中日韩单字≈3拉丁字母）破平局；
-            // 若 sherpa-onnx Whisper-Tiny 语种裁判已指认语种，给对应语种决定性加分（+2.0），直接压过另一路的幻听。
+            // 若 sherpa-onnx Whisper-Tiny 语种裁判已指认语种，给对应语种决定性加分（+2.0），直接压过另一路的幻听；
+            // 日语假名加分（+0.35）与并排/面对面按下本侧按钮加分（+0.65），防止中文听写把日语「こんにちは」听成谐音「靠你去蛙」反客为主。
             let isCJK = ["zh", "ja", "ko"].contains(lang.id)
             let trimmedCount = r.text.filter { !$0.isWhitespace && !$0.isPunctuation }.count
             let infoUnits = Double(trimmedCount) * (isCJK ? 3.0 : 1.0)
             let lengthBonus = min(0.18, infoUnits * 0.006)
             let lidBonus = (preferredLangID == lang.id) ? 2.0 : 0.0
+            let forcedBonus = (forcedLangID == lang.id) ? 0.65 : 0.0
+            let kanaBonus = (lang.id == "ja" && SpeechTextFilter.containsKana(r.text)) ? 0.35 : 0.0
             let score = r.confidence
                 + (SpeechTextFilter.matchesLanguage(r.text, lang.id) ? 1.0 : 0.0)
                 + (isFinal ? 0.12 : 0.0)
                 + lengthBonus
                 + lidBonus
+                + forcedBonus
+                + kanaBonus
             if best == nil || score > best!.conf {
                 best = (r.text, lang, score, e.segmentPieceRange(id))
             }
@@ -3108,7 +3114,7 @@ final class LiveSession: ObservableObject {
 
     private func appleUpdated() {
         guard !appleEngines.isEmpty, isRunning, currentSeg > finishedSeg, partialSeg == currentSeg,
-              let b = bestApple(currentSeg), SpeechTextFilter.isMeaningful(b.text) else { return }
+              let b = bestApple(currentSeg, forcedLangID: forcedLang?.id), SpeechTextFilter.isMeaningful(b.text) else { return }
         var displayText = b.text
         // 仅当当前实时片段的时间范围与上一条已提交片段确实重叠（苹果把两段合在同一个累积 Piece 里）时才剥离前缀；
         // 若时间不重叠，说明用户真的连续说了两遍相同的话，不能误吞！
@@ -3219,8 +3225,9 @@ final class LiveSession: ObservableObject {
                           lid, fin ? "T" : "F", r.confidence, match ? "T" : "F", sc, r.text.count)
         }.joined(separator: " | ")
         hearLog("系统听写评分(第\(segID)句, 裁判=\(detectedLID ?? "无"))：\(diag.isEmpty ? "无活跃引擎" : diag)")
-        // 听写这一段有没有出字：综合比较所有语种引擎（优先听从语种裁判指认的那一路）
-        let dict = bestApple(segID, requireFinal: false, languages: languages, preferredLangID: detectedLID)
+        // 听写这一段有没有出字：综合比较所有语种引擎（优先听从语种裁判指认的那一路与当前按下按钮对应语种）
+        let dict = bestApple(segID, requireFinal: false, languages: languages,
+                             preferredLangID: detectedLID, forcedLangID: job.forced?.id)
         var spoken = dict?.text ?? ""
         var src = job.forced ?? dict?.lang ?? job.fallback
         var pieceRange = dict?.range
