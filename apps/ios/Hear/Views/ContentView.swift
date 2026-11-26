@@ -477,20 +477,50 @@ struct LanguageBar: View {
 
     var body: some View {
         if !session.talkMode {
-            // 实时翻译（会议）模式：自动识别多国语种，只需选择「译为」哪种目标语言（默认中文）
+            // 聆听翻译模式：左侧可选「自动识别」或指定单一识别语种，右侧选择「译为」目标语言（默认中文）
             HStack(spacing: 10) {
-                HStack(spacing: 6) {
-                    Image(systemName: "globe")
-                        .font(.subheadline)
-                        .foregroundStyle(Color.accentColor)
-                    Text("自动识别多国语种")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                Menu {
+                    Button { session.meetingSourceLang = nil } label: {
+                        if session.meetingSourceLang == nil {
+                            Label("🌐 自动识别", systemImage: "checkmark")
+                        } else {
+                            Text("🌐 自动识别")
+                        }
+                    }
+                    Divider()
+                    ForEach(session.supportedLanguages) { lang in
+                        Button { session.meetingSourceLang = lang } label: {
+                            if session.meetingSourceLang == lang {
+                                Label("\(lang.flag) \(lang.displayName)", systemImage: "checkmark")
+                            } else {
+                                Text("\(lang.flag) \(lang.displayName)")
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if let src = session.meetingSourceLang {
+                            Text(src.flag)
+                            Text(src.name).fontWeight(.semibold).lineLimit(1)
+                        } else {
+                            Image(systemName: "globe")
+                                .font(.subheadline)
+                                .foregroundStyle(Color.accentColor)
+                            Text("自动识别").fontWeight(.semibold).lineLimit(1)
+                        }
+                        Image(systemName: "chevron.down").font(.caption)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .padding(.horizontal, 10)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
                 }
+                .foregroundStyle(.primary)
+
                 Image(systemName: "arrow.right")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
+
                 Menu {
                     ForEach(Language.all) { lang in
                         Button { session.meetingTargetLang = lang } label: {
@@ -508,8 +538,9 @@ struct LanguageBar: View {
                         Text(session.meetingTargetLang.name).fontWeight(.semibold).lineLimit(1)
                         Image(systemName: "chevron.down").font(.caption)
                     }
-                    .padding(.horizontal, 14)
+                    .frame(maxWidth: .infinity)
                     .padding(.vertical, 9)
+                    .padding(.horizontal, 10)
                     .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
                 }
                 .foregroundStyle(.primary)
@@ -678,6 +709,9 @@ struct EmptyHint: View {
 
     private var emptySubtitle: String {
         if !session.talkMode {
+            if let src = session.meetingSourceLang {
+                return "专注识别\(src.name)，统一译为\(session.meetingTargetLang.name)"
+            }
             return "自动识别多国语种，统一译为\(session.meetingTargetLang.name)"
         }
         if session.usesDualConversationButtons {

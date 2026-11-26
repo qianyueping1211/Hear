@@ -419,6 +419,10 @@ final class LiveSession: ObservableObject {
         let ok = supportedLanguages
         let left = ok.contains(langA) ? langA : (ok.first { $0 != langB } ?? ok[0])
         let right = ok.contains(langB) && langB != left ? langB : (ok.first { $0 != left } ?? ok[0])
+        if let fixed = meetingSourceLang, !ok.contains(fixed) {
+            meetingSourceLang = nil
+            hearLog("当前识别引擎不支持聆听源语种 \(fixed.name)，已切回自动识别", .warning)
+        }
         if left != langA || right != langB {
             setLanguagePair(left: left, right: right)
             hearLog("当前识别引擎不支持原来的语言，改为 \(langA.name) ⇄ \(langB.name)", .warning)
@@ -637,6 +641,14 @@ final class LiveSession: ObservableObject {
             else if microphoneStartToken != nil { capture.stop() }
         }
     }
+    /// 聆听翻译模式的识别源语种：nil 表示「自动识别」（保留全部可识别语种）；指定语种时明确只识别该语种
+    @Published var meetingSourceLang: Language? {
+        didSet {
+            guard meetingSourceLang != oldValue else { return }
+            save("meetingSourceLang", meetingSourceLang?.id ?? "")
+            if !talkMode, isRunning, dualLive { startAppleASR() }
+        }
+    }
     /// 实时翻译（会议）模式的目标翻译语言（默认中文）：自动识别多国语言并统一翻译为该语言（仅影响翻译目标，不影响语音识别引擎）
     @Published var meetingTargetLang: Language {
         didSet {
@@ -763,6 +775,8 @@ final class LiveSession: ObservableObject {
         }
         let savedStyle = d.string(forKey: "conversationStyle") ?? ConversationDisplayStyle.sideBySide.rawValue
         conversationStyle = ConversationDisplayStyle(rawValue: savedStyle) ?? .sideBySide
+        let savedMeetingSource = d.string(forKey: "meetingSourceLang") ?? ""
+        meetingSourceLang = savedMeetingSource.isEmpty ? nil : Language.find(savedMeetingSource)
         let savedMeetingTarget = d.string(forKey: "meetingTargetLang") ?? "zh"
         meetingTargetLang = Language.find(savedMeetingTarget)
         hearLog("启动：\(talkMode ? "对话翻译模式（\(conversationStyle.title)）" : "实时翻译模式（译为\(meetingTargetLang.name)）")")
@@ -2214,7 +2228,7 @@ final class LiveSession: ObservableObject {
         var text = partial.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.hasPrefix("…") { text = String(text.dropFirst()).trimmingCharacters(in: .whitespaces) }
         guard !text.isEmpty, text != "…", SpeechTextFilter.isMeaningful(text) else { return }
-        let src = partialSource ?? (!talkMode ? langA : (lastLangID == langB.id ? langB : langA))
+        let src = forcedLang ?? partialSource ?? (!talkMode ? langA : (lastLangID == langB.id ? langB : langA))
         let tgt = !talkMode ? meetingTargetLang : (src == langA ? langB : langA)
         var item = TranslationItem(source: src, target: tgt, sourceText: text,
                                    sourceSide: (!talkMode || src == langA) ? .left : .right)
@@ -3456,8 +3470,11 @@ final class LiveSession: ObservableObject {
         }
     }
 
-    /// 采集结束前保留原来的语言，确保尾句按录制时的语言处理。
-    private var forcedLang: Language? { usesDualConversationButtons || finishingInput ? talkLang : nil }
+    /// 采集结束前保留原来的语言，确保尾句按录制时的语言处理；聆听模式下若指定了源语种则固定只识别该语种。
+    private var forcedLang: Language? {
+        if !talkMode { return meetingSourceLang }
+        return usesDualConversationButtons || finishingInput ? talkLang : nil
+    }
 
     var isLoadingPhase: Bool { if case .loading = phase { return true }; return false }
     var loadingText: String? { if case .loading(let m) = phase { return m }; return nil }
