@@ -94,10 +94,42 @@ struct HearLiveActivityWidget: Widget {
                 Text("\(speaker)：")
                     .fontWeight(.semibold)
             }
-            Text(state.translatedText.isEmpty ? "正在等待译文…" : state.translatedText)
+            translatedDisplayText(state)
                 .font(.title2.weight(.semibold))
                 .lineLimit(lineLimit)
         }
+    }
+
+    /// 译文修订对比高亮：未改动部分保持原色，被修正的部分以青色加粗突出（与主界面一致）
+    private func translatedDisplayText(_ state: HearLiveActivityAttributes.ContentState) -> Text {
+        let translated = state.translatedText
+        guard !translated.isEmpty else { return Text("正在等待译文…") }
+        guard let baseline = state.translationBaseline, !baseline.isEmpty, baseline != translated else {
+            return Text(translated)
+        }
+        let oldChars = Array(baseline)
+        let newChars = Array(translated)
+        var prefix = 0
+        while prefix < oldChars.count && prefix < newChars.count && oldChars[prefix] == newChars[prefix] {
+            prefix += 1
+        }
+        var suffix = 0
+        while suffix < (oldChars.count - prefix) && suffix < (newChars.count - prefix)
+                && oldChars[oldChars.count - 1 - suffix] == newChars[newChars.count - 1 - suffix] {
+            suffix += 1
+        }
+        let changedStart = prefix
+        let changedEnd = newChars.count - suffix
+        guard changedStart < changedEnd else { return Text(translated) }
+        var out = Text("")
+        if changedStart > 0 {
+            out = out + Text(String(newChars[0..<changedStart]))
+        }
+        out = out + Text(String(newChars[changedStart..<changedEnd])).bold().foregroundColor(.cyan)
+        if changedEnd < newChars.count {
+            out = out + Text(String(newChars[changedEnd..<newChars.count]))
+        }
+        return out
     }
 
     private func genderSymbol(_ gender: String?) -> String {

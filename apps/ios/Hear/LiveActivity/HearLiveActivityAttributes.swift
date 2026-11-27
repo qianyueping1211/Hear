@@ -5,6 +5,7 @@ struct HearLiveActivityAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
         var sourceText: String
         var translatedText: String
+        var translationBaseline: String? = nil
         var sourceLanguage: String
         var targetLanguage: String
         var speaker: String?

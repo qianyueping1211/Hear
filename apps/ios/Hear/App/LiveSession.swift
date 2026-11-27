@@ -4204,6 +4204,9 @@ final class LiveSession: ObservableObject {
                                 : item?.displayedSource(using: chineseDisplayLanguage) ?? "").prefix(320)),
             translatedText: String((hasLiveTranslation ? displayedPartialTranslation
                                     : item?.displayedTranslation(using: chineseDisplayLanguage) ?? "").prefix(320)),
+            translationBaseline: hasLiveTranslation ? nil : item?.translationBaseline.map {
+                String(chineseDisplayLanguage.display($0, languageID: item?.displayedTranslationTarget.id).prefix(320))
+            },
             sourceLanguage: (hasLiveTranslation ? partialSource : item?.source)?.name ?? langA.name,
             targetLanguage: (hasLiveTranslation ? partialTranslationTarget : item?.displayedTranslationTarget)?.name ?? langB.name,
             speaker: namedSpeaker,
