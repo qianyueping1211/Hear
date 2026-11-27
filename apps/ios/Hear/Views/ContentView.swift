@@ -20,6 +20,7 @@ struct ContentView: View {
     @State private var quickModeDismissTask: Task<Void, Never>?
     @State private var didShowInitialQuickMode = false
     @State private var wasBackgrounded = false
+    @State private var faceToFaceSuspendedForNav = false
     @State private var ipadSelectedConversationID: UUID?  // iPad 宽窄屏切换时保留当前选中的历史对话
 
     private var useIPadWorkbench: Bool {
@@ -118,10 +119,14 @@ struct ContentView: View {
     private var compactPhoneBody: some View {
         NavigationStack {
             Group {
-                if session.talkMode && session.conversationStyle == .faceToFace && (session.phase == .ready || session.isLoadingPhase) {
+                if isPhoneFaceToFace {
                     PhoneFaceToFaceView(
                         onOpenMenu: { showMenu = true },
-                        onExit: { session.switchTranslationMode(to: .sideBySide) }
+                        onExit: {
+                            faceToFaceSuspendedForNav = true
+                            showQuickModeBar = true
+                            scheduleQuickModeDismiss(after: 5.0)
+                        }
                     )
                 } else {
                     VStack(spacing: 0) {
@@ -136,7 +141,7 @@ struct ContentView: View {
                                     onSpeaker: { editingSpeaker = $0 }
                                 )
                                     .overlay(alignment: .top) {
-                                        if session.usingAppleTranslation, let note = session.appleNote {
+                                        if !showQuickModeBar, session.usingAppleTranslation, let note = session.appleNote {
                                             NotePill(text: note).padding(.top, 8)
                                         }
                                     }
@@ -145,48 +150,43 @@ struct ContentView: View {
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        Divider()
-                            .overlay {
-                                let loading = session.loadingHint
-                                if let hint = loading ?? session.modelReadyHint {
-                                    ModelStatusPill(text: hint, isLoading: loading != nil)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .allowsHitTesting(false)
-                                } else if !session.isRunning && session.conversationInputLanguage == nil {
-                                    Button {
-                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                        toggleQuickModeBar()
-                                    } label: {
-                                        HStack(spacing: 5) {
-                                            Image(systemName: "arrow.left.arrow.right")
-                                                .font(.caption2.weight(.semibold))
-                                            Text("切换模式")
-                                                .font(.footnote.weight(.medium))
+                        if !showQuickModeBar {
+                            Divider()
+                                .overlay {
+                                    let loading = session.loadingHint
+                                    if let hint = loading ?? session.modelReadyHint {
+                                        ModelStatusPill(text: hint, isLoading: loading != nil)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .allowsHitTesting(false)
+                                    } else if !session.isRunning && session.conversationInputLanguage == nil {
+                                        Button {
+                                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                            toggleQuickModeBar()
+                                        } label: {
+                                            HStack(spacing: 5) {
+                                                Image(systemName: "arrow.left.arrow.right")
+                                                    .font(.caption2.weight(.semibold))
+                                                Text("切换模式")
+                                                    .font(.footnote.weight(.medium))
+                                            }
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 7)
+                                            .background(.ultraThinMaterial, in: Capsule())
+                                            .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
                                         }
-                                        .foregroundStyle(.secondary)
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 7)
-                                        .background(.ultraThinMaterial, in: Capsule())
-                                        .overlay(Capsule().stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+                                        .buttonStyle(QuickPillPressStyle())
+                                        .accessibilityLabel("切换翻译模式")
                                     }
-                                    .buttonStyle(QuickPillPressStyle())
-                                    .accessibilityLabel("切换翻译模式")
                                 }
-                            }
-                            .zIndex(1)
-                        ControlBar()
-                            .blur(radius: showQuickModeBar ? 10 : 0)
-                            .opacity(showQuickModeBar ? 0.35 : 1)
-                            .overlay {
-                                if showQuickModeBar {
-                                    Rectangle()
-                                        .fill(.ultraThinMaterial)
-                                        .ignoresSafeArea(edges: .bottom)
-                                        .transition(.opacity)
-                                }
-                            }
-                            .allowsHitTesting(!showQuickModeBar)
-                            .animation(.easeInOut(duration: 0.24), value: showQuickModeBar)
+                                .zIndex(1)
+                            ControlBar()
+                                .transition(.opacity)
+                        } else {
+                            // 导航显示时：不显示底部分割线、不显示模型加载等任何提示、不显示按钮区域，仅留底部悬浮导航空间
+                            Color.clear
+                                .frame(height: 86)
+                        }
                     }
                     .overlay {
                         if showQuickModeBar {
@@ -200,6 +200,7 @@ struct ContentView: View {
                         if showQuickModeBar {
                             FloatingModeSwitcherBar(
                                 onSelect: { enteredFaceToFace in
+                                    faceToFaceSuspendedForNav = false
                                     if enteredFaceToFace {
                                         dismissQuickModeBar()
                                     } else {
@@ -245,7 +246,8 @@ struct ContentView: View {
                         }
                     }
                     .onDisappear {
-                        dismissQuickModeBar()
+                        quickModeDismissTask?.cancel()
+                        quickModeDismissTask = nil
                     }
                 }
             }
@@ -282,7 +284,10 @@ struct ContentView: View {
     }
 
     private var isPhoneFaceToFace: Bool {
-        session.talkMode && session.conversationStyle == .faceToFace && (session.phase == .ready || session.isLoadingPhase)
+        !faceToFaceSuspendedForNav
+            && session.talkMode
+            && session.conversationStyle == .faceToFace
+            && (session.phase == .ready || session.isLoadingPhase)
     }
 
     private func showQuickModeBarBrieflyOnOpen() {
@@ -305,7 +310,7 @@ struct ContentView: View {
         quickModeDismissTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            showQuickModeBar = false
+            dismissQuickModeBar()
         }
     }
 
@@ -313,6 +318,13 @@ struct ContentView: View {
         quickModeDismissTask?.cancel()
         quickModeDismissTask = nil
         showQuickModeBar = false
+        if faceToFaceSuspendedForNav {
+            faceToFaceSuspendedForNav = false
+            // 从面对面点 × 退出到导航后，若未点选其他模式而直接收起导航，切回并排双键并保留当前对话内容
+            if session.currentTranslationMode == .faceToFace {
+                session.switchTranslationMode(to: .sideBySide)
+            }
+        }
     }
 
     private func newTapped() {
@@ -1760,7 +1772,7 @@ private struct FloatingModeSwitcherBar: View {
     @Namespace private var pillNS
     @State private var draggingMode: AppTranslationMode?
     @State private var isPressing = false
-    @State private var showPreview = false
+    @State private var showPreview = true
 
     private struct ModeItem: Identifiable {
         let mode: AppTranslationMode
