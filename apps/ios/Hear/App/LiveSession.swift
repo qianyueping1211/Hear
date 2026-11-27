@@ -4776,32 +4776,42 @@ final class LiveSession: ObservableObject {
         // 合并同一句的在途请求，成功结果保存在音频缓存，失败允许重试。
         if let existing = clonePipeline.existing(id) { return existing }
         guard let item = items.first(where: { $0.id == id }),
-              let ref = cloneReference(for: item),
-              item.canReadAloud,
-              CloudVoiceReference.languageNames[item.target.id] != nil else { return nil }
-        let text = item.translated, lang = item.target.id
-        let refText = ref.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard Self.hasRealText(refText) else { return nil }
-        // 云端的参考音频沿用既有降噪。
-        // 克隆会把参考音频里的环境音一起学过去，
-        // 不降噪的话环境音就跟着念出来，听着是"有杂的声音"
-        let refSamples = usingCloudClone ? CloudVoiceReference.denoise(ref.samples) : ref.samples
-        if !usingCloudClone, (!ZipVoiceModel.supports(lang) || !ZipVoiceModel.supports(item.source.id)) { return nil }
+              item.canReadAloud else { return nil }
         let cloudModel = (cloudCloneModel == "edge_tts") ? "edge_tts" : "qwen3"
+        let isDirectEdgeTTS = usingCloudClone && cloudModel == "edge_tts"
+        let ref = cloneReference(for: item)
+        if !isDirectEdgeTTS {
+            guard ref != nil, CloudVoiceReference.languageNames[item.target.id] != nil else { return nil }
+        }
+        let text = item.translated, lang = item.target.id
+        let refText = (ref?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !isDirectEdgeTTS {
+            guard Self.hasRealText(refText) else { return nil }
+        }
+        // 云端的参考音频沿用既有降噪（直连 Edge-TTS 不需要参考音频）。
+        let rawSamples = ref?.samples ?? []
+        let refSamples = (usingCloudClone && !isDirectEdgeTTS) ? CloudVoiceReference.denoise(rawSamples) : rawSamples
+        if !usingCloudClone, (!ZipVoiceModel.supports(lang) || !ZipVoiceModel.supports(item.source.id)) { return nil }
         let genderHint: String = {
             if systemVoicePreference == "male" { return "male" }
             if systemVoicePreference == "female" { return "female" }
-            if let f0 = VoiceAnalyzer.estimateF0(ref.samples) {
+            if let g = item.speakerDetails?.gender {
+                return g == .male ? "male" : "female"
+            }
+            if !rawSamples.isEmpty, let f0 = VoiceAnalyzer.estimateF0(rawSamples) {
                 return f0 < 165 ? "male" : "female"
             }
             return ""
         }()
-        let backend = usingCloudClone ? "cloud-\(cloudModel)" : "zipvoice"
-        let key = backend + "-" + cloneCacheKey(lang: lang, text: text + "\n" + refText, ref: ref.samples)
+        let backend = isDirectEdgeTTS ? "direct-edge_tts" : (usingCloudClone ? "cloud-\(cloudModel)" : "zipvoice")
+        let key = isDirectEdgeTTS
+            ? "\(backend)|\(lang)|\(genderHint)|\(text)"
+            : backend + "-" + cloneCacheKey(lang: lang, text: text + "\n" + refText, ref: rawSamples)
         let itemKey = backend + "-" + itemCloneCacheKey(id: id, lang: lang, text: text)
         let cloner = self.cloner
         let cloud = self.cloud
         let useCloud = usingCloudClone
+        let hasCloudFallback = !cloudEffectiveAddress(.clone).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         return clonePipeline.start(id) { jobID in
             Task<CloneAudio?, Never>.detached(priority: .userInitiated) { [weak self] in
                 do {
@@ -4812,9 +4822,34 @@ final class LiveSession: ObservableObject {
                         cached = await CloneCache.shared.get(key)
                     }
                     if let cached {
-                        hearLog("声音克隆：命中缓存，直接播放")
+                        hearLog("声音合成：命中缓存，直接播放")
                         _ = await CloneCache.shared.put(itemKey, cached)
                         return cached
+                    }
+                    if isDirectEdgeTTS {
+                        let t0 = ContinuousClock.now
+                        hearLogNow("Edge-TTS（客户端直连）：开始合成（\(lang)，\(genderHint.isEmpty ? "默认" : genderHint)）")
+                        do {
+                            let out = try await EdgeTTSClient.synthesize(text: text, langID: lang, gender: genderHint)
+                            let ms = PerformanceLog.milliseconds(since: t0)
+                            hearLogNow("Edge-TTS（客户端直连）：完成 \(ms)ms，生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
+                            _ = await CloneCache.shared.put(itemKey, out)
+                            return await CloneCache.shared.put(key, out)
+                        } catch {
+                            guard !Task.isCancelled else { return nil }
+                            hearLog("Edge-TTS 客户端直连失败：\(error.localizedDescription)\(hasCloudFallback ? "，尝试云端兜底" : "，回退系统朗读")", .warning)
+                            if hasCloudFallback {
+                                let cloudLang = CloudVoiceReference.languageNames[lang] ?? lang
+                                if let out = try? await cloud.clone(text: text, lang: cloudLang,
+                                                                    reference: [], referenceText: "",
+                                                                    engine: "edge_tts", gender: genderHint) {
+                                    hearLogNow("Edge-TTS（云端兜底）：完成，生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
+                                    _ = await CloneCache.shared.put(itemKey, out)
+                                    return await CloneCache.shared.put(key, out)
+                                }
+                            }
+                            return nil
+                        }
                     }
                     if useCloud {
                         // 把可用内存一起记上：万一又被系统杀掉，日志里能看出来
@@ -4850,7 +4885,7 @@ final class LiveSession: ObservableObject {
                     guard await cloner.isLoaded else { return nil }
                     hearLogNow("声音克隆（本地）：开始生成")
                     let out = try await cloner.synthesize(text: text, language: lang,
-                                                          reference: ref.samples, referenceText: refText)
+                                                          reference: rawSamples, referenceText: refText)
                     hearLogNow("声音克隆（本地）：结束，生成 \(String(format: "%.1f", Double(out.samples.count) / Double(out.sampleRate))) 秒声音")
                     // 存进缓存，下次同一句话直接播放
                     _ = await CloneCache.shared.put(itemKey, out)

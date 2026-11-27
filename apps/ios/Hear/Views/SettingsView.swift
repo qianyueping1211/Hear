@@ -487,7 +487,7 @@ struct SettingsView: View {
     private var voiceCloneEngineRow: some View {
         Picker("声音克隆", selection: voiceCloneEngineBinding) {
             Text("云端：Qwen3-TTS（原声克隆）").tag("qwen3")
-            Text("云端：Edge-TTS（微软神经语音）").tag("edge_tts")
+            Text("直连：Edge-TTS（微软神经语音）").tag("edge_tts")
         }
     }
 
@@ -538,7 +538,8 @@ struct SettingsView: View {
         if session.cloudCloneModel != target {
             session.cloudCloneModel = target
         }
-        if !isCloudModelConfigured(.clone) {
+        // Edge-TTS 支持客户端直连微软，无需强制填写电脑端云服务地址
+        if target != "edge_tts", !isCloudModelConfigured(.clone) {
             openCloudModelConfiguration(.clone)
         }
     }
