@@ -123,9 +123,10 @@ struct ContentView: View {
                     PhoneFaceToFaceView(
                         onOpenMenu: { showMenu = true },
                         onExit: {
+                            quickModeDismissTask?.cancel()
+                            quickModeDismissTask = nil
                             faceToFaceSuspendedForNav = true
                             showQuickModeBar = true
-                            scheduleQuickModeDismiss(after: 5.0)
                         }
                     )
                 } else {
@@ -207,7 +208,10 @@ struct ContentView: View {
                                         scheduleQuickModeDismiss(after: 2.0)
                                     }
                                 },
-                                onInteract: { scheduleQuickModeDismiss(after: 5.0) }
+                                onInteract: {
+                                    quickModeDismissTask?.cancel()
+                                    quickModeDismissTask = nil
+                                }
                             )
                             .padding(.horizontal, 16)
                             .padding(.bottom, 2)
@@ -292,16 +296,18 @@ struct ContentView: View {
 
     private func showQuickModeBarBrieflyOnOpen() {
         guard !isPhoneFaceToFace, !session.isRunning, session.conversationInputLanguage == nil else { return }
+        quickModeDismissTask?.cancel()
+        quickModeDismissTask = nil
         showQuickModeBar = true
-        scheduleQuickModeDismiss(after: 3.0)
     }
 
     private func toggleQuickModeBar() {
         if showQuickModeBar {
             dismissQuickModeBar()
         } else {
+            quickModeDismissTask?.cancel()
+            quickModeDismissTask = nil
             showQuickModeBar = true
-            scheduleQuickModeDismiss(after: 5.0)
         }
     }
 
