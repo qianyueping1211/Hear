@@ -1794,6 +1794,18 @@ private struct FloatingModeSwitcherBar: View {
     @State private var dragX: CGFloat?
     @State private var isPressing = false
     @State private var showPreview = true
+    @State private var previewDismissTask: Task<Void, Never>?
+
+    private func schedulePreviewHide(after seconds: Double) {
+        previewDismissTask?.cancel()
+        previewDismissTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.80)) {
+                showPreview = false
+            }
+        }
+    }
 
     private struct ModeItem: Identifiable {
         let mode: AppTranslationMode
@@ -1970,6 +1982,8 @@ private struct FloatingModeSwitcherBar: View {
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .local)
                     .onChanged { value in
+                        previewDismissTask?.cancel()
+                        previewDismissTask = nil
                         dragX = value.location.x
                         let target = mode(at: value.location.x - 4, totalWidth: innerWidth)
                         if !isPressing {
@@ -1989,6 +2003,8 @@ private struct FloatingModeSwitcherBar: View {
                         onInteract()
                     }
                     .onEnded { value in
+                        previewDismissTask?.cancel()
+                        previewDismissTask = nil
                         let target = mode(at: value.location.x - 4, totalWidth: innerWidth)
                         let changed = target != committedMode
                         withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
@@ -2006,7 +2022,13 @@ private struct FloatingModeSwitcherBar: View {
             )
         }
         .frame(height: 60)
+        .onAppear {
+            showPreview = true
+            schedulePreviewHide(after: 5.0)
+        }
         .onDisappear {
+            previewDismissTask?.cancel()
+            previewDismissTask = nil
             draggingMode = nil
             dragX = nil
             isPressing = false
