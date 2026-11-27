@@ -14,7 +14,7 @@ final class HearLiveActivityController {
     private var latestState: HearLiveActivityAttributes.ContentState?
     private var latestAutoExpand = false
     private var lastSentAt = Date.distantPast
-    private var lastAlertKey = ""
+    private var lastAlertItemID = ""
     private var lastAlertAt = Date.distantPast
 
     private init() {
@@ -27,7 +27,7 @@ final class HearLiveActivityController {
         pendingTask = nil
         latestState = nil
         latestAutoExpand = false
-        lastAlertKey = ""
+        lastAlertItemID = ""
         current = nil
         let activities = Activity<HearLiveActivityAttributes>.activities
         guard !activities.isEmpty else { return }
@@ -46,7 +46,7 @@ final class HearLiveActivityController {
                 attributes: HearLiveActivityAttributes(conversationTitle: "听见实时翻译"),
                 content: content(state), pushType: nil)
             lastSentAt = Date()
-            lastAlertKey = ""
+            lastAlertItemID = ""
         } catch {
             hearLog("灵动岛启动失败：\(error)", .warning)
         }
@@ -57,6 +57,19 @@ final class HearLiveActivityController {
               activity.activityState != .dismissed else { return }
         latestState = state
         latestAutoExpand = autoExpand
+        let hasRevision = !(state.translationBaseline ?? "").isEmpty
+        if hasRevision {
+            // 译文修订定稿立即推送，避免 1 秒节流吞掉差异高亮
+            pendingTask?.cancel()
+            pendingTask = nil
+            lastSentAt = Date()
+            let alert = makeAlertIfNeeded(for: state, autoExpand: autoExpand)
+            Task { [weak self] in
+                guard let self, self.current?.id == activity.id else { return }
+                await activity.update(self.content(state), alertConfiguration: alert)
+            }
+            return
+        }
         guard pendingTask == nil else { return }
         let delay = max(0, 1 - Date().timeIntervalSince(lastSentAt))
         pendingTask = Task { [weak self] in
@@ -77,10 +90,11 @@ final class HearLiveActivityController {
         let sourceText = state.sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         let effective = bodyText.isEmpty ? sourceText : bodyText
         guard !effective.isEmpty, effective != "…" else { return nil }
-        let key = "\(sourceText)|\(bodyText)"
-        guard key != lastAlertKey else { return nil }
+        // 仅在「全新的一句话」出现时弹开灵动岛；同一句流式更新或译文修订时静默原地刷新，避免整岛反复抖动重弹
+        let sentenceKey = state.itemID ?? "live"
+        guard sentenceKey != lastAlertItemID else { return nil }
         guard Date().timeIntervalSince(lastAlertAt) >= 2.5 else { return nil }
-        lastAlertKey = key
+        lastAlertItemID = sentenceKey
         lastAlertAt = Date()
         let title = state.speaker ?? "\(state.sourceLanguage) → \(state.targetLanguage)"
         return AlertConfiguration(

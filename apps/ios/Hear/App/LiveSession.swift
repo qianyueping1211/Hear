@@ -4200,6 +4200,7 @@ final class LiveSession: ObservableObject {
             return raw
         }()
         return HearLiveActivityAttributes.ContentState(
+            itemID: hasLiveTranslation ? "seg-\(partialSeg)" : item?.id.uuidString,
             sourceText: String((hasLiveTranslation ? displayedPartial
                                 : item?.displayedSource(using: chineseDisplayLanguage) ?? "").prefix(320)),
             translatedText: String((hasLiveTranslation ? displayedPartialTranslation

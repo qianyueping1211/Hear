@@ -100,36 +100,45 @@ struct HearLiveActivityWidget: Widget {
         }
     }
 
-    /// 译文修订对比高亮：未改动部分保持原色，被修正的部分以青色加粗突出（与主界面一致）
+    /// 译文修订对比高亮：使用与主界面完全一致的词级 LCS 差异算法（TranslationRevision），
+    /// 仅高亮真正被修改的词，避免前后缀粗对比把整句都标成青色。
     private func translatedDisplayText(_ state: HearLiveActivityAttributes.ContentState) -> Text {
         let translated = state.translatedText
         guard !translated.isEmpty else { return Text("正在等待译文…") }
         guard let baseline = state.translationBaseline, !baseline.isEmpty, baseline != translated else {
             return Text(translated)
         }
-        let oldChars = Array(baseline)
-        let newChars = Array(translated)
-        var prefix = 0
-        while prefix < oldChars.count && prefix < newChars.count && oldChars[prefix] == newChars[prefix] {
-            prefix += 1
+        let updated = tokenize(translated)
+        let inserted = Set(updated.difference(from: tokenize(baseline)).insertions.compactMap { change -> Int? in
+            guard case .insert(let offset, _, _) = change else { return nil }
+            return offset
+        })
+        return updated.enumerated().reduce(Text("")) { rendered, pair in
+            let (index, token) = pair
+            let changed = inserted.contains(index) && !token.allSatisfy(\.isWhitespace)
+            return rendered + (changed ? Text(token).bold().foregroundColor(.cyan) : Text(token))
         }
-        var suffix = 0
-        while suffix < (oldChars.count - prefix) && suffix < (newChars.count - prefix)
-                && oldChars[oldChars.count - 1 - suffix] == newChars[newChars.count - 1 - suffix] {
-            suffix += 1
+    }
+
+    private func tokenize(_ text: String) -> [String] {
+        var result: [String] = []
+        var word = ""
+        for character in text {
+            let scalar = character.unicodeScalars.first?.value ?? 0
+            let canJoinWord = (character.isLetter || character.isNumber)
+                && !(0x3000...0x9FFF).contains(scalar) && !(0x20000...0x323AF).contains(scalar)
+            if canJoinWord {
+                word.append(character)
+            } else {
+                if !word.isEmpty {
+                    result.append(word)
+                    word = ""
+                }
+                result.append(String(character))
+            }
         }
-        let changedStart = prefix
-        let changedEnd = newChars.count - suffix
-        guard changedStart < changedEnd else { return Text(translated) }
-        var out = Text("")
-        if changedStart > 0 {
-            out = out + Text(String(newChars[0..<changedStart]))
-        }
-        out = out + Text(String(newChars[changedStart..<changedEnd])).bold().foregroundColor(.cyan)
-        if changedEnd < newChars.count {
-            out = out + Text(String(newChars[changedEnd..<newChars.count]))
-        }
-        return out
+        if !word.isEmpty { result.append(word) }
+        return result
     }
 
     private func genderSymbol(_ gender: String?) -> String {

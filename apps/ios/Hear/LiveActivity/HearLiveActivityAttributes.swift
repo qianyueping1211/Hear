@@ -3,6 +3,7 @@ import Foundation
 
 struct HearLiveActivityAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
+        var itemID: String? = nil
         var sourceText: String
         var translatedText: String
         var translationBaseline: String? = nil
