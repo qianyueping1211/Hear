@@ -616,6 +616,7 @@ struct LanguageMenu: View {
 struct TranscriptView: View {
     @EnvironmentObject var session: LiveSession
     @State private var followsLatest = true
+    @State private var userScrolling = false
     var onEdit: (TranslationItem) -> Void = { _ in }
     var onSpeaker: (TranslationItem) -> Void = { _ in }
 
@@ -648,10 +649,18 @@ struct TranscriptView: View {
                 .padding(.horizontal)
                 .padding(.top)
             }
+            .onScrollPhaseChange { _, newPhase in
+                userScrolling = (newPhase == .interacting || newPhase == .decelerating)
+            }
             .onScrollGeometryChange(for: Bool.self) { geometry in
-                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 140
+                geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize.height - 160
             } action: { _, atBottom in
-                followsLatest = atBottom
+                // 仅在用户主动上滑翻阅历史时暂停自动跟随；新句子/译文撑高内容高度绝不能误关自动跟随！
+                if atBottom {
+                    followsLatest = true
+                } else if userScrolling {
+                    followsLatest = false
+                }
             }
             .overlay {
                 if session.items.isEmpty && session.partial.isEmpty {
@@ -663,6 +672,7 @@ struct TranscriptView: View {
             .overlay(alignment: .bottomTrailing) {
                 if !followsLatest {
                     Button {
+                        followsLatest = true
                         withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
                     } label: {
                         Label("回到底部", systemImage: "arrow.down")
@@ -672,6 +682,12 @@ struct TranscriptView: View {
                             .background(.regularMaterial, in: Capsule())
                     }
                     .padding(20)
+                }
+            }
+            .onChange(of: session.isRunning) { _, running in
+                if running {
+                    followsLatest = true
+                    withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
             .onChange(of: session.items.last?.id) { _, _ in
