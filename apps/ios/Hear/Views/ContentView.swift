@@ -183,9 +183,9 @@ struct ContentView: View {
                             ControlBar()
                                 .transition(.opacity)
                         } else {
-                            // 导航显示时：不显示底部分割线、不显示模型加载等任何提示、不显示按钮区域，仅留底部悬浮导航空间
+                            // 导航显示时：不显示底部分割线、不显示模型加载等任何提示、不显示按钮区域，仅留贴底悬浮导航空间
                             Color.clear
-                                .frame(height: 86)
+                                .frame(height: 68)
                         }
                     }
                     .overlay {
@@ -210,7 +210,7 @@ struct ContentView: View {
                                 onInteract: { scheduleQuickModeDismiss(after: 5.0) }
                             )
                             .padding(.horizontal, 16)
-                            .padding(.bottom, 12)
+                            .padding(.bottom, 2)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                             .zIndex(5)
                         }
@@ -1763,14 +1763,29 @@ private struct QuickPillPressStyle: ButtonStyle {
     }
 }
 
+private extension View {
+    @ViewBuilder
+    func appleLiquidGlass<S: Shape>(in shape: S, interactive: Bool = false) -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            self.glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
+        } else {
+            self.background(.ultraThinMaterial, in: shape)
+        }
+        #else
+        self.background(.ultraThinMaterial, in: shape)
+        #endif
+    }
+}
+
 private struct FloatingModeSwitcherBar: View {
     @EnvironmentObject var session: LiveSession
     @Environment(\.colorScheme) private var colorScheme
     var onSelect: (_ enteredFaceToFace: Bool) -> Void
     var onInteract: () -> Void
 
-    @Namespace private var pillNS
     @State private var draggingMode: AppTranslationMode?
+    @State private var dragX: CGFloat?
     @State private var isPressing = false
     @State private var showPreview = true
 
@@ -1822,64 +1837,91 @@ private struct FloatingModeSwitcherBar: View {
             let innerWidth = max(geo.size.width - 8, 1)
             let cardWidth: CGFloat = 176
             let segWidth = innerWidth / CGFloat(items.count)
-            let rawCenter = 4 + segWidth * (CGFloat(highlightedIndex) + 0.5)
-            let clampedCenter = min(max(rawCenter, cardWidth / 2), max(cardWidth / 2, geo.size.width - cardWidth / 2))
-            let cardOffsetX = clampedCenter - geo.size.width / 2
+            let slotCenter = 4 + segWidth * (CGFloat(highlightedIndex) + 0.5)
+            // 按住滑动时，液态玻璃滑块连续紧贴手指滑动；松手后弹簧吸附到目标项中心
+            let minLensCenter = 4 + segWidth * 0.5
+            let maxLensCenter = max(minLensCenter, geo.size.width - 4 - segWidth * 0.5)
+            let lensCenter = (isPressing ? dragX : nil).map { min(max($0, minLensCenter), maxLensCenter) } ?? slotCenter
+            let lensOffsetX = lensCenter - geo.size.width / 2
 
-            HStack(spacing: 0) {
-                ForEach(items) { item in
-                    let isSelected = highlightedMode == item.mode
-                    let isPressedItem = isPressing && isSelected
-                    VStack(spacing: 3) {
-                        Image(systemName: item.icon)
-                            .font(.system(size: 19, weight: .semibold))
-                            .symbolRenderingMode(.hierarchical)
-                            .frame(height: 22)
-                        Text(item.title)
-                            .font(.system(size: 10.5, weight: isSelected ? .semibold : .medium))
-                            .lineLimit(1)
-                    }
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary.opacity(0.82))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background {
-                        if isSelected {
-                            Capsule()
-                                .fill(
-                                    colorScheme == .dark
-                                        ? Color.black.opacity(0.46)
-                                        : Color(.systemBackground).opacity(0.92)
-                                )
-                                .overlay(
-                                    Capsule()
-                                        .stroke(
-                                            Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.06),
-                                            lineWidth: 0.5
-                                        )
-                                )
-                                .shadow(
-                                    color: .black.opacity(colorScheme == .dark ? 0.25 : 0.08),
-                                    radius: 4, y: 1
-                                )
-                                .matchedGeometryEffect(id: "floatingModeActivePill", in: pillNS)
+            let clampedCardCenter = min(max(lensCenter, cardWidth / 2), max(cardWidth / 2, geo.size.width - cardWidth / 2))
+            let cardOffsetX = clampedCardCenter - geo.size.width / 2
+
+            ZStack {
+                // 苹果 iOS 26 原生液态玻璃滑动透镜：滑动时微微放大并透出高光折射边缘
+                Capsule()
+                    .fill(
+                        isPressing
+                            ? (colorScheme == .dark ? Color.white.opacity(0.14) : Color.white.opacity(0.45))
+                            : (colorScheme == .dark ? Color.black.opacity(0.42) : Color(.systemBackground).opacity(0.90))
+                    )
+                    .appleLiquidGlass(in: Capsule(), interactive: isPressing)
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: isPressing
+                                        ? [Color.white.opacity(colorScheme == .dark ? 0.55 : 0.85),
+                                           Color.white.opacity(colorScheme == .dark ? 0.12 : 0.25)]
+                                        : [Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.07),
+                                           Color.primary.opacity(0.03)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: isPressing ? 1.1 : 0.5
+                            )
+                    )
+                    .shadow(
+                        color: .black.opacity(isPressing ? (colorScheme == .dark ? 0.38 : 0.16) : (colorScheme == .dark ? 0.24 : 0.08)),
+                        radius: isPressing ? 10 : 4,
+                        y: isPressing ? 3 : 1
+                    )
+                    .frame(width: segWidth, height: max(geo.size.height - 8, 1))
+                    .scaleEffect(x: isPressing ? 1.10 : 1.0, y: isPressing ? 1.16 : 1.0)
+                    .offset(x: lensOffsetX)
+                    .animation(.interactiveSpring(response: 0.24, dampingFraction: 0.76), value: lensOffsetX)
+                    .animation(.spring(response: 0.24, dampingFraction: 0.70), value: isPressing)
+
+                HStack(spacing: 0) {
+                    ForEach(items) { item in
+                        let isSelected = highlightedMode == item.mode
+                        let isPressedItem = isPressing && isSelected
+                        VStack(spacing: 3) {
+                            Image(systemName: item.icon)
+                                .font(.system(size: 19, weight: .semibold))
+                                .symbolRenderingMode(.hierarchical)
+                                .frame(height: 22)
+                            Text(item.title)
+                                .font(.system(size: 10.5, weight: isSelected ? .semibold : .medium))
+                                .lineLimit(1)
                         }
+                        .foregroundStyle(isSelected ? Color.accentColor : Color.primary.opacity(0.84))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .scaleEffect(isPressedItem ? 1.06 : 1.0)
+                        .animation(.spring(response: 0.22, dampingFraction: 0.74), value: isPressedItem)
+                        .contentShape(Capsule())
                     }
-                    .scaleEffect(isPressedItem ? 0.94 : 1.0)
-                    .animation(.spring(response: 0.24, dampingFraction: 0.76), value: isPressedItem)
-                    .contentShape(Capsule())
                 }
+                .padding(4)
             }
-            .padding(4)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(.ultraThinMaterial, in: Capsule())
+            .appleLiquidGlass(in: Capsule())
             .overlay(
                 Capsule()
-                    .stroke(
-                        Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.10),
-                        lineWidth: 0.6
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(colorScheme == .dark ? 0.22 : 0.55),
+                                Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06),
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.7
                     )
             )
-            .shadow(color: .black.opacity(colorScheme == .dark ? 0.42 : 0.14), radius: 16, y: 6)
-            // 按住、滑动或点击选中模式后，在对应按钮正上方持续浮动展示该模式的线框效果图（随底部栏 2 秒后一同自动退出）
+            .shadow(color: .black.opacity(colorScheme == .dark ? 0.44 : 0.14), radius: 16, y: 6)
+            // 按住、滑动或点击选中模式后，在对应按钮正上方持续浮动展示该模式的线框效果图
             .overlay(alignment: .bottom) {
                 if showPreview {
                     let preview = highlightedItem
@@ -1888,7 +1930,7 @@ private struct FloatingModeSwitcherBar: View {
                             .frame(height: 98)
                             .frame(maxWidth: .infinity)
                             .background(
-                                Color(.tertiarySystemGroupedBackground).opacity(colorScheme == .dark ? 0.72 : 0.90),
+                                Color(.tertiarySystemGroupedBackground).opacity(colorScheme == .dark ? 0.68 : 0.88),
                                 in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                             )
                         VStack(spacing: 2) {
@@ -1905,7 +1947,7 @@ private struct FloatingModeSwitcherBar: View {
                     }
                     .padding(10)
                     .frame(width: cardWidth)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .appleLiquidGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
                             .stroke(Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.08), lineWidth: 0.6)
@@ -1917,14 +1959,15 @@ private struct FloatingModeSwitcherBar: View {
                 }
             }
             .animation(.spring(response: 0.28, dampingFraction: 0.80), value: showPreview)
-            .animation(.spring(response: 0.26, dampingFraction: 0.80), value: highlightedMode)
+            .animation(.interactiveSpring(response: 0.24, dampingFraction: 0.78), value: cardOffsetX)
             .contentShape(Capsule())
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .local)
                     .onChanged { value in
+                        dragX = value.location.x
                         let target = mode(at: value.location.x - 4, totalWidth: innerWidth)
                         if !isPressing {
-                            withAnimation(.spring(response: 0.26, dampingFraction: 0.78)) {
+                            withAnimation(.spring(response: 0.24, dampingFraction: 0.72)) {
                                 isPressing = true
                                 showPreview = true
                             }
@@ -1933,7 +1976,7 @@ private struct FloatingModeSwitcherBar: View {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         }
                         if draggingMode != target {
-                            withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                            withAnimation(.spring(response: 0.26, dampingFraction: 0.78)) {
                                 draggingMode = target
                             }
                         }
@@ -1942,9 +1985,10 @@ private struct FloatingModeSwitcherBar: View {
                     .onEnded { value in
                         let target = mode(at: value.location.x - 4, totalWidth: innerWidth)
                         let changed = target != committedMode
-                        withAnimation(.spring(response: 0.28, dampingFraction: 0.80)) {
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
                             session.switchTranslationMode(to: target)
                             draggingMode = nil
+                            dragX = nil
                             isPressing = false
                             showPreview = true
                         }
@@ -1955,11 +1999,11 @@ private struct FloatingModeSwitcherBar: View {
                     }
             )
         }
-        .frame(height: 62)
+        .frame(height: 60)
         .onDisappear {
             draggingMode = nil
+            dragX = nil
             isPressing = false
-            showPreview = false
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("快捷模式切换栏")
