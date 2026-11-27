@@ -151,9 +151,12 @@ struct ContentView: View {
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        if !showQuickModeBar {
-                            Divider()
-                                .overlay {
+                        // 底部区域始终保持与 ControlBar 等高占位，确保导航显隐时中间内容区纹丝不动、绝不上下跳动；
+                        // 导航显示期间仅将横线、提示与按钮区域设为完全不可见且不响应点击。
+                        Divider()
+                            .opacity(showQuickModeBar ? 0 : 1)
+                            .overlay {
+                                if !showQuickModeBar {
                                     let loading = session.loadingHint
                                     if let hint = loading ?? session.modelReadyHint {
                                         ModelStatusPill(text: hint, isLoading: loading != nil)
@@ -180,14 +183,11 @@ struct ContentView: View {
                                         .accessibilityLabel("切换翻译模式")
                                     }
                                 }
-                                .zIndex(1)
-                            ControlBar()
-                                .transition(.opacity)
-                        } else {
-                            // 导航显示时：不显示底部分割线、不显示模型加载等任何提示、不显示按钮区域，仅留贴底悬浮导航空间
-                            Color.clear
-                                .frame(height: 68)
-                        }
+                            }
+                            .zIndex(1)
+                        ControlBar()
+                            .opacity(showQuickModeBar ? 0 : 1)
+                            .allowsHitTesting(!showQuickModeBar)
                     }
                     .overlay {
                         if showQuickModeBar {
