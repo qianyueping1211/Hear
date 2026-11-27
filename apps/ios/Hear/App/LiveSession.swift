@@ -147,6 +147,12 @@ final class LiveSession: ObservableObject {
             if isRunning { publishLiveActivity() }
         }
     }
+    /// 有新说话/译文时自动静音弹开灵动岛（默认关闭）
+    @Published var liveActivityAutoExpand: Bool {
+        didSet {
+            save("liveActivityAutoExpand", liveActivityAutoExpand)
+        }
+    }
     @Published var useContext: Bool { didSet { save("useContext", useContext) } }
     @Published var sensitivity: Double { didSet { save("sensitivity", sensitivity); pushConfig() } }
     @Published var silenceMs: Double { didSet { save("silenceMs", silenceMs); pushConfig() } }
@@ -689,6 +695,8 @@ final class LiveSession: ObservableObject {
         showReadingIcon = d.object(forKey: "showReadingIcon") as? Bool ?? true
         liveActivityOnlyTranslation =
             d.object(forKey: "liveActivityOnlyTranslation") as? Bool ?? false
+        liveActivityAutoExpand =
+            d.object(forKey: "liveActivityAutoExpand") as? Bool ?? false
         useContext = d.object(forKey: "useContext") as? Bool ?? true
         sensitivity = d.object(forKey: "sensitivity") as? Double ?? 12
         silenceMs = d.object(forKey: "silenceMs") as? Double ?? 700
@@ -4207,7 +4215,7 @@ final class LiveSession: ObservableObject {
 
     private func publishLiveActivity() {
         guard isRunning, !talkMode else { return }
-        HearLiveActivityController.shared.update(liveActivityState())
+        HearLiveActivityController.shared.update(liveActivityState(), autoExpand: liveActivityAutoExpand)
     }
 
     private func endLiveActivity() {

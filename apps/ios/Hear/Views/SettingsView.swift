@@ -225,6 +225,7 @@ struct SettingsView: View {
                         Text("展示译文").tag(true)
                         Text("展示原文和译文").tag(false)
                     }
+                    Toggle("灵动岛自动展示", isOn: $session.liveActivityAutoExpand)
                     NavigationLink {
                         LLMSettingsView()
                     } label: {
