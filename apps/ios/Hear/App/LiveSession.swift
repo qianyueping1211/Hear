@@ -550,6 +550,7 @@ final class LiveSession: ObservableObject {
     private var currentSeg = 0
     private var currentSegStartFrame: Int64 = 0
     private var partialSeg = 0            // 实时气泡（partial）属于第几句
+    private var liveActivitySegByItem: [UUID: Int] = [:] // 保持同一句在预览→定稿→修正期间灵动岛标识一致，避免修正完成时二次震动
     /// 刚停下来时保留下来的那一条：断句的最后一段声音要挂到它身上（声音克隆用）
     private var stopFlushItemID: UUID?
     /// 停下来那一刻正在说的那句（断句器最后会把它的声音交出来）
@@ -2614,6 +2615,8 @@ final class LiveSession: ObservableObject {
             }
             if mine { carryPreview(into: &item) }
             items.append(item)
+            liveActivitySegByItem[item.id] = id
+            if liveActivitySegByItem.count > 64 { liveActivitySegByItem.removeAll(keepingCapacity: true); liveActivitySegByItem[item.id] = id }
             if mine { partial = ""; partialTranslation = ""; partialTranslationTarget = nil; partialSource = nil }
             previews.textBySegment[id] = nil
             // 声音样本先记下来（声音克隆要用）：
@@ -4199,8 +4202,11 @@ final class LiveSession: ObservableObject {
             }
             return raw
         }()
+        let sentenceKey: String? = hasLiveTranslation
+            ? "seg-\(partialSeg)"
+            : item.map { liveActivitySegByItem[$0.id].map { "seg-\($0)" } ?? $0.id.uuidString }
         return HearLiveActivityAttributes.ContentState(
-            itemID: hasLiveTranslation ? "seg-\(partialSeg)" : item?.id.uuidString,
+            itemID: sentenceKey,
             sourceText: String((hasLiveTranslation ? displayedPartial
                                 : item?.displayedSource(using: chineseDisplayLanguage) ?? "").prefix(320)),
             translatedText: String((hasLiveTranslation ? displayedPartialTranslation
