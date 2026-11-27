@@ -374,10 +374,10 @@ section.band{scroll-margin-top:62px}
       </p>
 
       <dl class="facts">
-        <div><dt>iPhone / iPad 客户端</dt><dd>iOS / iPadOS 18+ · 0.4.120</dd></div>
-        <div><dt>Windows 客户端</dt><dd>x64 · 0.1.74</dd></div>
-        <div><dt>独立模型服务端</dt><dd>Win-Server 1.0.3 · Apple-Server 1.0.4</dd></div>
-        <div><dt>核心模型</dt><dd>阿里 SenseVoice / CAM++ / Qwen3-TTS · OpenAI Whisper · 腾讯 Hy-MT2</dd></div>
+        <div><dt>iPhone / iPad 客户端</dt><dd>iOS / iPadOS 18+ · 0.4.156</dd></div>
+        <div><dt>Windows 客户端</dt><dd>x64 · 0.1.78</dd></div>
+        <div><dt>独立模型服务端</dt><dd>Win-Server 1.0.9 · Apple-Server 1.0.10</dd></div>
+        <div><dt>核心模型</dt><dd>阿里 SenseVoice / CAM++ / Qwen3-TTS · OpenAI Whisper（含 Tiny 语种裁判）· 腾讯 Hy-MT2 · 微软 Edge-TTS</dd></div>
         <div><dt>后续平台</dt><dd>Android · 鸿蒙 · macOS 客户端尚未发布</dd></div>
       </dl>
 
@@ -477,28 +477,30 @@ section.band{scroll-margin-top:62px}
     </div>
     <div class="fgroups">
       <div class="fgroup">
-        <h3>iPhone / iPad 客户端 <em>iOS / iPadOS 18+ · 0.4.120</em></h3>
+        <h3>iPhone / iPad 客户端 <em>iOS / iPadOS 18+ · 0.4.156</em></h3>
         <ul>
-          <li>支持本机离线识别（SenseVoice 统一 CPU/AMX 加速，2~3 秒就绪）与 Hy-MT2 翻译，或按需切换云端服务。</li>
+          <li><b>四大模式与 iOS 26 液态玻璃导航</b>：支持<b>聆听翻译</b>（自动识别或指定单一语种 → 译为目标语种）、<b>单侧自动</b>、<b>并排双键</b>与<b>面对面</b>（180° 上下分屏）；底部采用 iOS 26 原生 Liquid Glass 滑动透镜与浮动线框示意图预览。</li>
+          <li>支持本机离线识别（SenseVoice CPU/AMX 加速，2~3 秒就绪）、苹果系统听写（配独立 Whisper-Tiny 99 语种裁判）与 Hy-MT2 离线翻译，或按需切换云端服务。</li>
+          <li><b>直连微软 Edge-TTS 与原声克隆</b>：iPhone 客户端直连微软 13 国神经语音（免电脑端中转、毫秒级原生解码，自动带云端/系统兜底）；系统朗读支持人声基频（F0）自动匹配男女声；云端支持 Qwen3-TTS 原声克隆与说话人区分。</li>
           <li><b>iPad 专属工作台</b>：大屏双栏布局、面对面 180° 桌面分屏（<code>⌘1</code>）、高对比全屏字幕看板（<code>⌘2</code>）及快捷操作。</li>
-          <li>系统朗读支持人声基频（F0）自动匹配男女声；声音克隆统一走云端 Qwen3-TTS，支持 3~10 秒固定声纹与说话人区分。</li>
           <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases" target="_blank" rel="noopener">Releases · 听见 iOS</a>（IPA，iPhone 与 iPad 通用）。</li>
         </ul>
       </div>
       <div class="fgroup">
-        <h3>Windows 客户端 <em>x64 · 0.1.74</em></h3>
+        <h3>Windows 客户端 <em>x64 · 0.1.78</em></h3>
         <ul>
-          <li>Tauri + Rust + React 实时翻译与会议同传工作台，支持双路采集（系统内录 + 麦克风）、悬浮字幕、15 阶抗混叠重采样、NLMS AEC 防回声与 Win32 单实例防多开。</li>
+          <li>Tauri + Rust + React 实时翻译与会议同传工作台，支持 13 国语种模型感知自动过滤（含阿联酋阿语）、双路采集（系统内录 + 麦克风）、悬浮字幕、平滑自动跟随滚动、NLMS AEC 防回声与 Win32 单实例防多开。</li>
           <li><b>双路虚拟声卡固定锁定（CoreAudio COM）</b>：听对方固定 <code>CABLE Output (VB-Audio Hi-Fi Cable)</code>、给对方听固定 <code>CABLE Input (VB-Audio Virtual Cable)</code>；一键安装后自动改名、彻底屏蔽 <code>16ch</code> 与多余麦克风端并设为禁用待命，仅在会议同传录音期间按端点精准启停。</li>
-          <li><b>防串音与原生语音总结</b>：Rust 原生 WinRT OneCore 语音引擎（男女声自动匹配）+ 云端 Qwen3-TTS 克隆，配三重防回传拦截与双路隔离不断句；同步 iOS 全部 5 套一键总结模板（支持 <code>[mm:ss]</code> 时间锚点跳转）。</li>
+          <li><b>防串音、隐私日志与原生语音总结</b>：Rust 原生 WinRT OneCore 语音引擎（男女声自动匹配）+ 云端 Edge-TTS / Qwen3-TTS，配三重防回传拦截与隐私内容日志开关（默认关闭）；同步 iOS 全部 5 套一键总结模板（支持 <code>[mm:ss]</code> 时间锚点跳转）。</li>
           <li>安装包：<a href="https://github.com/qianyueping1211/Hear/releases" target="_blank" rel="noopener">Releases · 听见 Windows</a>（EXE）；<a href="https://github.com/qianyueping1211/Hear/blob/main/apps/desktop/README.md" target="_blank" rel="noopener">桌面端说明</a>。</li>
         </ul>
       </div>
       <div class="fgroup">
-        <h3>独立模型服务端 <em>Win-Server 1.0.3 · Apple-Server 1.0.4</em></h3>
+        <h3>独立模型服务端 <em>Win-Server 1.0.9 · Apple-Server 1.0.10</em></h3>
         <ul>
           <li><b>听见 Win-Server</b>：内置便携 Python 3.12 与全套依赖（免装 Python），含 <code>start-hear-cloud.bat</code> 与 <code>start-hear-token-admin.bat</code>，自动探测 NVIDIA CUDA 加速 Whisper。</li>
           <li><b>听见 Apple-Server</b>：针对 Apple Silicon（M1~M4 Max 统一内存）预编译 Metal GPU <code>llama-server</code>，64GB 自动推荐 Hy-MT2-30B-A3B + Qwen3-TTS-1.7B，含双击 <code>听见服务端.app</code>、开机自启与口令管理后台快捷入口。</li>
+          <li><b>混合语种路由与 Edge-TTS 后端</b>：支持 <code>zh ⇄ ar</code> 等混合语种智能分流（中文走 SenseVoice 极速首出、阿语等直通 Whisper）、13 国微软 Edge-TTS 神经语音（PyAV 内存解码 24kHz WAV）及隐私内容日志默认关闭（遵循 <code>X-Hear-Log-Content</code> 请求头）。</li>
           <li>两端模型端口（8081/8082）均默认仅监听 <code>127.0.0.1</code>，默认开启口令鉴权，支持多用户托管后台（<code>127.0.0.1:8443</code>）。</li>
         </ul>
       </div>
@@ -556,9 +558,9 @@ section.band{scroll-margin-top:62px}
 
     <div class="engine-rail">
       <span class="lab">引擎可选</span>
-      <span class="opt"><b>识别</b>　本机 SenseVoice / 苹果自带 / 云端</span>
+      <span class="opt"><b>识别</b>　本机 SenseVoice / 苹果自带（+ Whisper-Tiny 语种裁判）/ 云端</span>
       <span class="opt"><b>翻译</b>　本机 Hy-MT2 / 苹果自带 / 云端 Hy-MT2</span>
-      <span class="opt"><b>声音克隆</b>　云端 Qwen3-TTS</span>
+      <span class="opt"><b>语音合成</b>　直连微软 Edge-TTS / 云端 Qwen3-TTS / 系统朗读</span>
     </div>
 
     <div class="note">
@@ -572,12 +574,12 @@ section.band{scroll-margin-top:62px}
       <div class="fgroup">
         <h3><em>01</em>交互模式</h3>
         <ul>
-          <li><b>实时翻译模式</b>　轻点麦克风开始收音，App 会在选定的两种语言间判断方向。再点一次停止。</li>
-          <li><b>对话翻译模式</b>　轻点左侧或右侧的语言圆圈开始，再点同一个圆圈停止。点另一侧会先收完当前语段，再切换语言。</li>
-          <li><b>模式切换与 iPad 视图</b>　iPhone 底部横向滑动切换实时/对话模式；iPad 除双栏工作台外，还提供面对面 180° 桌面分屏（<code>⌘1</code>）与高对比全屏字幕看板（<code>⌘2</code>）。</li>
-          <li><b>翻译气泡</b>　先显示原文，再逐步显示译文。等待修正时保留已有译文，修正成功后标出变化。</li>
-          <li><b>编辑和重试</b>　长按气泡可修改原文并重译，也可选择复制译文。翻译失败且有原文时，可直接点「重试翻译」。</li>
-          <li><b>灵动岛和锁屏</b>　设置中可选「展示译文」或「展示原文和译文」。展开灵动岛或查看锁屏时可读译文，暂停收音后显示暂停状态。</li>
+          <li><b>聆听翻译模式</b>　面向会议/收听场景：顶部左侧支持「自动识别」或指定单一识别语种，右侧选择「译为」目标语言（默认中文），通栏左对齐展示发言人与原文+译文（支持中英混说同目标语种翻译）。</li>
+          <li><b>单侧自动模式</b>　单按钮自动识别选定的两种语言并互译；严格过滤非选定语种，连续检测到第三语种时在横线提醒「识别其他语言请调整设置」。</li>
+          <li><b>并排双键模式</b>　底部左右双语言按钮、同向看屏；按下哪侧仅开启对应单语种识别器，避免另一侧引擎干扰。</li>
+          <li><b>面对面模式</b>　上下 180° 分屏，对方画面倒置、中间带语种互换钮，底部配备快捷播报开关与关闭按钮；仅「并排 ↔ 面对面」之间共用屏幕内容，其余模式切换自动归档开启新页。</li>
+          <li><b>iOS 26 液态玻璃导航</b>　打开 App 或点击「切换模式」后底部浮现原生 Liquid Glass 4 模式胶囊，支持按住连续跟手滑动与浮动线框示意图预览（导航态下隐藏按钮区与干扰提示，5 秒无操作仅收起缩略图）；iPad 另配双栏桌面工作台（<code>⌘1</code> 分屏 / <code>⌘2</code> 字幕看板）。</li>
+          <li><b>编辑、重试与灵动岛</b>　长按气泡可修改原文并重译或复制译文；苹果翻译缺语言包时自动引导至苹果「翻译」App 下载；灵动岛/锁屏支持实时译文与暂停状态。</li>
         </ul>
       </div>
 
@@ -711,6 +713,22 @@ section.band{scroll-margin-top:62px}
             <td>服务端（Win / Mac）</td>
           </tr>
           <tr>
+            <td>在线神经语音</td>
+            <td class="mono">Edge-TTS</td>
+            <td>Microsoft</td>
+            <td class="mono">云端神经语音</td>
+            <td><strong>0 MB</strong>（在线按需合成 24 kHz 音频，覆盖 13 国男女声）</td>
+            <td>iPhone / iPad 客户端直连、服务端兜底</td>
+          </tr>
+          <tr>
+            <td>语种裁判（LID）</td>
+            <td class="mono">Whisper-Tiny LID</td>
+            <td>OpenAI / sherpa-onnx</td>
+            <td class="mono">~39M</td>
+            <td>约 <strong>98 MB</strong>（ONNX INT8，支持 99 语种，按需下载）</td>
+            <td>iPhone / iPad 本机（辅助苹果听写）</td>
+          </tr>
+          <tr>
             <td>说话人区分（声纹）</td>
             <td class="mono">CAM++<span class="sub">3D-Speaker</span></td>
             <td>阿里巴巴（通义实验室 / ModelScope）</td>
@@ -784,7 +802,8 @@ section.band{scroll-margin-top:62px}
         <div class="lname">能力层</div>
         <div class="lbody">
           <span class="chip cool">SenseVoiceRecognizer</span><span class="chip cool">LocalSpeakerEmbedder</span>
-          <span class="chip cool">LiveTextEngine</span><span class="chip cool">LlamaTranslator</span>
+          <span class="chip cool">LiveTextEngine</span><span class="chip cool">SpokenLanguageDetector</span>
+          <span class="chip cool">EdgeTTSClient</span><span class="chip cool">LlamaTranslator</span>
           <span class="chip cool">LocalVoiceCloner</span><span class="chip cool">Speaker</span>
           <span class="chip cool">SystemTranslator</span><span class="chip cool">CloudClient</span><span class="chip cool">LLMClient</span>
         </div>
@@ -1342,7 +1361,7 @@ section.band{scroll-margin-top:62px}
   <div class="foot-in">
     <div class="fcol">
       <h5>项目</h5>
-      <p>听见 Hear · iPhone / iPad 与 Windows 实时语音翻译<br>iOS / iPadOS 0.4.120 · Windows 0.1.74 · Win-Server 1.0.3 · Apple-Server 1.0.4</p>
+      <p>听见 Hear · iPhone / iPad 与 Windows 实时语音翻译<br>iOS / iPadOS 0.4.156 · Windows 0.1.78 · Win-Server 1.0.9 · Apple-Server 1.0.10</p>
     </div>
     <div class="fcol">
       <h5>仓库</h5>
