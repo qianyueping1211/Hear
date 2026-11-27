@@ -1843,6 +1843,7 @@ final class LiveSession: ObservableObject {
             guard intent == self.startToken, self.conversationInputLanguage == nil, !self.isRunning else { return }
             self.talkLang = nil
             self.stopAppleASR()
+            self.endLiveActivity()
             if clearActivity { self.activity = "" }
             self.kickReader()
         }
@@ -2019,16 +2020,14 @@ final class LiveSession: ObservableObject {
         }
         AudioRoute.apply(outputMode)
         isRunning = true
-        if !talkMode {
-            HearLiveActivityController.shared.start(liveActivityState())
-            liveActivityHeartbeat?.cancel()
-            liveActivityHeartbeat = Task { [weak self] in
-                while !Task.isCancelled {
-                    do { try await Task.sleep(for: .seconds(60)) }
-                    catch { return }
-                    guard let self, self.isRunning else { return }
-                    self.publishLiveActivity()
-                }
+        HearLiveActivityController.shared.start(liveActivityState())
+        liveActivityHeartbeat?.cancel()
+        liveActivityHeartbeat = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(60)) }
+                catch { return }
+                guard let self, self.isRunning else { return }
+                self.publishLiveActivity()
             }
         }
         if dualLive { startAppleASR() }
@@ -4224,7 +4223,7 @@ final class LiveSession: ObservableObject {
     }
 
     private func publishLiveActivity() {
-        guard isRunning, !talkMode else { return }
+        guard isRunning || finishingInput else { return }
         HearLiveActivityController.shared.update(liveActivityState(), autoExpand: liveActivityAutoExpand)
     }
 
