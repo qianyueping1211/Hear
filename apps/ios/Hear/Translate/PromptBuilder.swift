@@ -26,11 +26,11 @@ enum PromptBuilder {
         if src.id == "zh" || tgt.id == "zh" {
             let hints = terms.isEmpty ? "" : "参考下面的翻译：\n" +
                 terms.map { "\($0.0) 翻译成 \($0.1)" }.joined(separator: "\n") + "\n\n"
-            return hints + "将以下文本翻译为\(tgt.zhName)，注意只需要输出翻译后的结果，不要额外解释：\n\n\(text)"
+            return hints + "将以下文本完整翻译为\(tgt.zhName)（若句中夹杂多种语言，已是\(tgt.zhName)的部分保留，其余语言全部译为\(tgt.zhName)），注意只需要输出翻译后的结果，不要额外解释：\n\n\(text)"
         }
         let hints = terms.isEmpty ? "" : "Refer to the following translations:\n" +
             terms.map { "\($0.0) translates to \($0.1)" }.joined(separator: "\n") + "\n\n"
-        return hints + "Translate the following segment into \(tgt.enName), without additional explanation.\n\n\(text)"
+        return hints + "Translate the following segment completely into \(tgt.enName) (if it mixes languages, keep parts already in \(tgt.enName) and translate all other parts into \(tgt.enName)), without additional explanation.\n\n\(text)"
     }
 
     private static func matches(_ alias: String, in text: String) -> Bool {

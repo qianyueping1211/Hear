@@ -26,7 +26,13 @@ enum SpeechTextFilter {
             if han >= 2, latinRuns > 0, han >= latinRuns || detected == "zh" { return "zh" }
         }
 
-        if let detected, candidates.contains(detected), matchesLanguage(text, detected) { return detected }
+        if let detected, candidates.contains(detected), matchesLanguage(text, detected) {
+            // 纯汉字且不含任何日语假名时，优先判为中文，避免聆听自动模式下说中文被误判成日文
+            if detected == "ja", candidates.contains("zh"), !containsKana(text) {
+                return "zh"
+            }
+            return detected
+        }
         if candidates.contains(fallback), matchesLanguage(text, fallback) { return fallback }
         return candidates.first { matchesLanguage(text, $0) }
     }
@@ -66,6 +72,13 @@ enum SpeechTextFilter {
             // 一个字母都没有（纯数字、订单号、"2026"这种）：
             // 判断不了语言，但也不能因为这个把用户说的话丢掉
             return true
+        }
+        // 中英混说兼容（如「我喜欢狗，I like dogs」）：中文为主且其余均为拉丁字母时放行，避免误扣分
+        if lang == "zh", hit >= 2 {
+            let allHanOrLatin = text.unicodeScalars.allSatisfy { s in
+                !s.properties.isAlphabetic || inScript(s.value, "zh") || isLatin(s.value)
+            }
+            if allHanOrLatin { return true }
         }
         return Double(hit) / Double(total) >= 0.6
     }

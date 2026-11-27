@@ -2228,7 +2228,7 @@ final class LiveSession: ObservableObject {
         var text = partial.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.hasPrefix("…") { text = String(text.dropFirst()).trimmingCharacters(in: .whitespaces) }
         guard !text.isEmpty, text != "…", SpeechTextFilter.isMeaningful(text) else { return }
-        let src = forcedLang ?? partialSource ?? (!talkMode ? langA : (lastLangID == langB.id ? langB : langA))
+        let src = forcedLang ?? partialSource ?? (!talkMode ? Language.find("zh") : (lastLangID == langB.id ? langB : langA))
         let tgt = !talkMode ? meetingTargetLang : (src == langA ? langB : langA)
         var item = TranslationItem(source: src, target: tgt, sourceText: text,
                                    sourceSide: (!talkMode || src == langA) ? .left : .right)
@@ -2567,7 +2567,7 @@ final class LiveSession: ObservableObject {
             let forced = forcedLang
             let meetingMode = !talkMode
             let src = forced ?? (mine ? partialSource : nil)
-                ?? (meetingMode ? langA : ((lastLangID == langB.id) ? langB : langA))
+                ?? (meetingMode ? Language.find("zh") : ((lastLangID == langB.id) ? langB : langA))
             let tgt = meetingMode ? meetingTargetLang : (src == langA ? langB : langA)
             // 已经停下来了：这一句不会再走整句识别，
             // 但这段声音要留下来（声音克隆的样本），译文等下接着补。
@@ -2678,7 +2678,7 @@ final class LiveSession: ObservableObject {
             let forced = forcedLang
             let meetingMode = !talkMode
             let meetingTarget = meetingTargetLang
-            let fallback = forced?.id ?? (meetingMode ? a.id : ((lastLangID == b.id) ? b.id : a.id))
+            let fallback = forced?.id ?? (meetingMode ? "zh" : ((lastLangID == b.id) ? b.id : a.id))
             let cands = forced.map { [$0.id] } ?? (meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id])
             // 只识别最近 10 秒，长句也跟得上
             let maxN = 16_000 * 10
@@ -2955,10 +2955,14 @@ final class LiveSession: ObservableObject {
     // MARK: - 苹果自带模式（系统听写 + 系统翻译）
 
     /// 解析苹果系统听写当前应并行监听的候选语种列表（保证 startAppleASR / bestApple / appleUpdated / processApple 完全一致）
-    /// - 并排双键 / 面对面模式（forced != nil）：只开启当前按下按钮对应的单语种听写器，绝不启动另一侧语种听写器干扰转写；
-    /// - 单侧自动 / 聆听翻译模式（forced == nil）：开启主识别语种对 `[left, right]`（聆听模式的 `meetingTargetLang` 仅作翻译目标，不参与识别）。
+    /// - 明确指定单语种（并排双键/面对面按下某侧按钮，或聆听模式指定了源语种）：只开启该单语种听写器；
+    /// - 聆听模式「自动识别」（!talkMode && forced == nil）：固定优先监听「中文 + 英文」，不受对话模式上次所选语种（如日语）影响；
+    /// - 单侧自动对话模式（talkMode && forced == nil）：严格监听对话双方选定的 `[left, right]`。
     private func appleASRLanguages(left: Language, right: Language, forced: Language?) -> [Language] {
         if let forced { return [forced] }
+        if !talkMode {
+            return [Language.find("zh"), Language.find("en")]
+        }
         return [left, right]
     }
 
@@ -3559,7 +3563,7 @@ final class LiveSession: ObservableObject {
         let meetingTarget = meetingTargetLang
         activity = usingCloudASR ? "云端识别中…" : "SenseVoice 识别中…"
         let forced = job.forced
-        let fallback = forced?.id ?? (meetingMode ? a.id : job.fallback.id)
+        let fallback = forced?.id ?? (meetingMode ? "zh" : job.fallback.id)
         let cands = forced.map { [$0.id] } ?? (meetingMode ? supportedLanguages.map(\.id) : [a.id, b.id])
         let correctionAddress: String?
         let speakerAddress: String?
