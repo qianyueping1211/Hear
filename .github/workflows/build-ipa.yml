@@ -189,6 +189,55 @@ jobs:
               --title "听见 iOS ${VER}" --notes-file notes.md --latest
           fi
 
+      - name: Update SideStore source
+        if: env.PUBLISH_RELEASE == 'true'
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          IPA_SIZE=$(stat -f%z "Hear-iOS-${VER}.ipa")
+          NOW_UTC=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          export VER IPA_SIZE NOW_UTC BUNDLE_ID
+          python3 - <<'PY'
+          import json, os, pathlib
+
+          p = pathlib.Path("docs/sidestore.json")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          ver = os.environ["VER"]
+          size = int(os.environ["IPA_SIZE"])
+          now = os.environ["NOW_UTC"]
+          bundle_id = os.environ["BUNDLE_ID"]
+          msg = (os.environ.get("COMMIT_MSG") or f"听见 iOS {ver}").splitlines()[0].strip()
+          dl = f"https://github.com/qianyueping1211/Hear/releases/download/v{ver}/Hear-iOS-{ver}.ipa"
+
+          app = data["apps"][0]
+          app["bundleIdentifier"] = bundle_id
+          app["version"] = ver
+          app["versionDate"] = now
+          app["versionDescription"] = msg
+          app["downloadURL"] = dl
+          app["size"] = size
+
+          versions = [v for v in app.get("versions", []) if v.get("version") != ver]
+          versions.insert(0, {
+              "version": ver,
+              "date": now,
+              "localizedDescription": msg,
+              "downloadURL": dl,
+              "size": size,
+              "minOSVersion": "18.0",
+          })
+          app["versions"] = versions[:10]
+          p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/sidestore.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(sidestore): update source for v${VER} [no release]"
+            git pull --rebase origin main || true
+            git push origin HEAD:main
+          fi
+
       # 只在失败时上传编译日志，方便排查；安装包只发布到 Releases
       - uses: actions/upload-artifact@v6
         if: failure()

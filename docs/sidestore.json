@@ -1,0 +1,42 @@
+{
+  "name": "听见 Hear 官方源",
+  "subtitle": "听见 Hear iOS 实时语音翻译官方发布源",
+  "description": "由 GitHub Actions 自动同步发布的听见 Hear 官方 SideStore / AltStore 软件源。",
+  "iconURL": "https://raw.githubusercontent.com/qianyueping1211/Hear/main/docs/icon.png",
+  "website": "https://github.com/qianyueping1211/Hear",
+  "tintColor": "#0F766E",
+  "apps": [
+    {
+      "name": "听见",
+      "bundleIdentifier": "hear.yueping1211.asia.app",
+      "developerName": "qianyueping1211",
+      "subtitle": "离线优先的实时语音翻译与会议记录",
+      "localizedDescription": "听见 (Hear) 是一款离线优先的实时语音识别、多语言翻译、灵动岛/锁屏实时字幕与会议总结工具。",
+      "iconURL": "https://raw.githubusercontent.com/qianyueping1211/Hear/main/docs/icon.png",
+      "tintColor": "#0F766E",
+      "category": "utilities",
+      "version": "0.4.164",
+      "versionDate": "2026-11-27T12:14:07Z",
+      "versionDescription": "全模式支持灵动岛与锁屏实时字幕，支持离线语音识别、多语言翻译、实时修订高亮与会议总结。",
+      "downloadURL": "https://github.com/qianyueping1211/Hear/releases/download/v0.4.164/Hear-iOS-0.4.164.ipa",
+      "size": 28380520,
+      "versions": [
+        {
+          "version": "0.4.164",
+          "date": "2026-11-27T12:14:07Z",
+          "localizedDescription": "全模式支持灵动岛与锁屏实时字幕，支持离线语音识别、多语言翻译、实时修订高亮与会议总结。",
+          "downloadURL": "https://github.com/qianyueping1211/Hear/releases/download/v0.4.164/Hear-iOS-0.4.164.ipa",
+          "size": 28380520,
+          "minOSVersion": "18.0"
+        }
+      ],
+      "appPermissions": {
+        "entitlements": [],
+        "privacy": {
+          "NSMicrophoneUsageDescription": "用于实时语音识别与翻译",
+          "NSSpeechRecognitionUsageDescription": "用于离线语音识别"
+        }
+      }
+    }
+  ]
+}
