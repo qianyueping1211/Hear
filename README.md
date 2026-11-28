@@ -4,7 +4,7 @@
 
 | 平台 / 产物 | 版本 | 下载与文档 |
 | --- | --- | --- |
-| iPhone / iPad（iOS / iPadOS 18+） | `0.4.156` | [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) |
+| iPhone / iPad（iOS / iPadOS 18+） | `0.4.164` | [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) · [SideStore 官方源](https://raw.githubusercontent.com/qianyueping1211/Hear/main/docs/sidestore.json) |
 | Windows x64 客户端 | `0.1.78` | [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) · [桌面端说明](apps/desktop/README.md) |
 | Windows x64 模型服务端 | `Win-Server 1.0.9` | [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) · [服务端说明](server/README.md) |
 | macOS (Apple Silicon) 模型服务端 | `Apple-Server 1.0.10` | [GitHub Releases](https://github.com/qianyueping1211/Hear/releases) · [服务端说明](server/README.md) |
@@ -36,7 +36,16 @@
 ## 快速开始
 
 - **Windows 客户端**：从 [Releases](https://github.com/qianyueping1211/Hear/releases) 下载 `Hear-Win-*.exe` 安装。开启会议同传时，在「设置」中按提示一键安装缺失的虚拟声卡即可。
-- **iPhone / iPad 客户端**：从 [Releases](https://github.com/qianyueping1211/Hear/releases) 下载 `Hear-iOS-*.ipa`，通过 [Sideloadly](https://sideloadly.io) 使用免费 Apple ID 签名安装（每 7 天覆盖安装一次，模型和历史均保留）；有 Mac 也可在仓库根目录运行 `bash setup.sh` 后用 Xcode 安装。首次使用可直接在 App 内下载离线模型（国内可在设置中切换 `hf-mirror` 源）。
+- **iPhone / iPad 客户端**：
+  - **方式一：SideStore / AltStore 官方源安装（推荐，免电脑无线更新）**
+    1. 打开 **SideStore**（或 AltStore）→ 进入 **Sources（源）** → 点击右上角 **`+`**。
+    2. 粘贴官方源地址并添加（每次发布新版本会自动同步更新）：
+       ```text
+       https://raw.githubusercontent.com/qianyueping1211/Hear/main/docs/sidestore.json
+       ```
+    3. 进入「听见 Hear 官方源」即可直接安装或覆盖更新（模型与历史记录均保留；如国内访问较慢可先开启代理）。
+  - **方式二：手动下载 IPA / Xcode 安装**
+    - 从 [Releases](https://github.com/qianyueping1211/Hear/releases) 下载 `Hear-iOS-*.ipa`，通过 [Sideloadly](https://sideloadly.io) 使用免费 Apple ID 签名安装（每 7 天覆盖安装一次，模型和历史均保留）；有 Mac 也可在仓库根目录运行 `bash setup.sh` 后用 Xcode 安装。首次使用可直接在 App 内下载离线模型（国内可在设置中切换 `hf-mirror` 源）。
 - **自建模型服务端**：从 [Releases](https://github.com/qianyueping1211/Hear/releases) 下载对应平台整合包，Windows 双击 `start-hear-cloud.bat`、macOS 双击 `听见服务端.app`，将控制台输出的地址填入客户端即可。详细参数与防火墙说明见 [server/README.md](server/README.md)。
 
 ---
@@ -48,5 +57,6 @@ apps/ios/            iPhone / iPad App 与灵动岛扩展（Swift / SwiftUI）
 apps/desktop/        Windows 桌面端（Tauri v2 / Rust / React）
 server/              跨端共用模型服务端（Python / llama.cpp）
 docs/index.html      完整产品与技术架构文档
+docs/sidestore.json  SideStore / AltStore 官方软件源（CI 自动更新）
 .github/workflows/   各端自动构建与 Release 发布工作流
 ```
